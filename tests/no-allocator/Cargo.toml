@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "azure-get-no-allocator"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+borink-object-storage = { path = "../.." }
+
+[profile.dev]
+panic = "abort"

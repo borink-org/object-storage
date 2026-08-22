@@ -20,4 +20,5 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - run: cargo build --locked --manifest-path tests/no-allocator/Cargo.toml
       - run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
