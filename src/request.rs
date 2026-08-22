@@ -61,30 +61,48 @@ impl<'a> RequestWorkspace<'a> {
 /// it. No `'static` storage is required.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
+    method: &'static str,
     url: &'a str,
-    headers: [(&'static str, &'a str); 3],
+    headers: [(&'static str, &'a str); 5],
+    header_count: usize,
 }
 
 impl<'a> Request<'a> {
     pub(crate) fn new(
+        method: &'static str,
         url: &'a str,
         authorization: &'a str,
         date: &'a str,
         version: &'static str,
+        range: Option<&'a str>,
+        condition: Option<(&'static str, &'a str)>,
     ) -> Self {
+        let mut headers = [("", ""); 5];
+        headers[..3].copy_from_slice(&[
+            ("authorization", authorization),
+            ("x-ms-date", date),
+            ("x-ms-version", version),
+        ]);
+        let mut header_count = 3;
+        if let Some(value) = range {
+            headers[header_count] = ("range", value);
+            header_count += 1;
+        }
+        if let Some(value) = condition {
+            headers[header_count] = value;
+            header_count += 1;
+        }
         Self {
+            method,
             url,
-            headers: [
-                ("authorization", authorization),
-                ("x-ms-date", date),
-                ("x-ms-version", version),
-            ],
+            headers,
+            header_count,
         }
     }
 
     /// Returns the HTTP method.
     pub fn method(&self) -> &'static str {
-        "GET"
+        self.method
     }
 
     /// Returns the complete object URL.
@@ -94,7 +112,7 @@ impl<'a> Request<'a> {
 
     /// Iterates over the request headers in wire-independent order.
     pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
-        self.headers.iter().copied()
+        self.headers[..self.header_count].iter().copied()
     }
 }
 
@@ -152,9 +170,34 @@ pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
 }
 
+pub(crate) struct Digits {
+    bytes: [u8; 20],
+    start: usize,
+}
+
+impl Digits {
+    pub(crate) fn new(mut value: u64) -> Self {
+        let mut bytes = [0; 20];
+        let mut start = bytes.len();
+        loop {
+            start -= 1;
+            bytes[start] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        Self { bytes, start }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        text(&self.bytes[self.start..])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Writer;
+    use super::{Digits, Writer};
 
     #[test]
     fn counting_and_storing_measure_the_same_writes() {
@@ -180,5 +223,11 @@ mod tests {
 
         assert_eq!(storing.position(), 9);
         assert!(storing.finish().is_none());
+    }
+
+    #[test]
+    fn formats_the_full_u64_range() {
+        assert_eq!(Digits::new(0).as_str(), "0");
+        assert_eq!(Digits::new(u64::MAX).as_str(), "18446744073709551615");
     }
 }

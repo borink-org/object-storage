@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use borink_object_storage::{Blobs, Container, RequestWorkspace, Response, Timestamps};
+use borink_object_storage::{Blobs, Container, GetOptions, RequestWorkspace, Response, Timestamps};
 
 // Required to link this no_std artifact; the exported check does not panic.
 #[cfg(all(feature = "link-check", not(feature = "std")))]
@@ -25,11 +25,13 @@ pub extern "C" fn azure_get_without_an_allocator() -> usize {
     let mut storage = [0; 256];
     let mut workspace = RequestWorkspace::new(&mut storage);
     let now = Timestamps::from_unix(1_787_400_000);
-    let Ok(request) = blobs.get_request(&mut workspace, "object", &now) else {
+    let options = GetOptions::default();
+    let Ok(request) = blobs.get_request(&mut workspace, "object", &options, &now) else {
         return 3;
     };
-    let Ok(()) = blobs.interpret_get(Response::new(200)) else {
+    let headers = [("content-length", "4")];
+    let Ok(meta) = blobs.interpret_get(Response::new(200, &headers), &options) else {
         return 4;
     };
-    request.url().len()
+    request.url().len() + meta.size as usize
 }

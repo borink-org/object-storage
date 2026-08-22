@@ -2,16 +2,17 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{Blobs, RequestWorkspace, Response, Timestamps};
+use borink_object_storage::{Blobs, GetOptions, RequestWorkspace, Response, Timestamps};
 
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
-    let required = blobs.get_request_requirements(key)?;
+    let options = GetOptions::default();
+    let required = blobs.get_request_requirements(key, &options)?;
     let mut storage = vec![0; required.packed];
     let mut workspace = RequestWorkspace::new(&mut storage);
-    let request = blobs.get_request(&mut workspace, key, &now)?;
+    let request = blobs.get_request(&mut workspace, key, &options, &now)?;
 
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
@@ -23,6 +24,12 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         .build()
         .call()?;
     let status = incoming.status().as_u16();
-    blobs.interpret_get(Response::new(status))?;
+    let headers = incoming
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
+        .collect::<Vec<_>>();
+    blobs.interpret_get(Response::new(status, &headers), &options)?;
+    drop(headers);
     incoming.body_mut().read_to_vec().map_err(Into::into)
 }
