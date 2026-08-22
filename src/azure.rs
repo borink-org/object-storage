@@ -1,7 +1,8 @@
 use crate::request::{Digits, Writer, text};
 use crate::{
-    CapacityError, Error, GetCondition, GetOptions, GetRange, ObjectMeta, Request,
-    RequestRequirements, RequestWorkspace, Response, Result, Timestamps, WorkspaceExtent,
+    AzureError, AzureErrorKind, CapacityError, Error, GetCondition, GetOptions, GetRange,
+    ObjectMeta, Request, RequestRequirements, RequestWorkspace, Response, Result, Timestamps,
+    WorkspaceExtent,
 };
 
 /// Latest Azure Storage version fully deployed in every region.
@@ -171,16 +172,62 @@ impl<'a> Blobs<'a> {
         match response.status() {
             200..=299 => Ok(ObjectMeta {
                 size: response_size(&response, options)?,
+                last_modified_ms: response
+                    .header("last-modified")
+                    .and_then(crate::time::http_date_ms),
                 e_tag: response.header("etag"),
                 version: response.header("x-ms-version-id"),
             }),
-            404 => Err(Error::NotFound),
-            401 | 403 => Err(Error::Unauthorized),
-            304 => Err(Error::NotModified),
-            412 => Err(Error::Precondition),
-            416 => Err(Error::RangeNotSatisfiable),
-            status => Err(Error::Status(status)),
+            _ => Err(classify(&response)),
         }
+    }
+}
+
+fn classify(response: &Response<'_>) -> Error {
+    let status = response.status();
+    let code = response
+        .header("x-ms-error-code")
+        .map(str::trim)
+        .or_else(|| crate::xml::error_code(response.body()));
+    let kind = match code {
+        Some("BlobNotFound" | "ResourceNotFound") => AzureErrorKind::NotFound,
+        Some("ContainerNotFound") => AzureErrorKind::NoSuchContainer,
+        Some("BlobAlreadyExists" | "ContainerAlreadyExists") => AzureErrorKind::AlreadyExists,
+        Some("ConditionNotMet" | "TargetConditionNotMet") => AzureErrorKind::Precondition,
+        Some("ServerBusy") => AzureErrorKind::Throttled,
+        Some("OperationTimedOut") => AzureErrorKind::Timeout,
+        Some(
+            "AuthenticationFailed"
+            | "AuthorizationFailure"
+            | "InvalidAuthenticationInfo"
+            | "AuthorizationPermissionMismatch"
+            | "InsufficientAccountPermissions",
+        ) => AzureErrorKind::Unauthorized,
+        Some("InternalError" | "ServiceUnavailable") => AzureErrorKind::Service,
+        Some(_) => match kind_for_status(status) {
+            AzureErrorKind::NotFound => AzureErrorKind::Unrecognized,
+            other => other,
+        },
+        None => kind_for_status(status),
+    };
+    Error::Azure(AzureError::new(
+        kind,
+        status,
+        response.header("x-ms-request-id").unwrap_or("").trim(),
+    ))
+}
+
+fn kind_for_status(status: u16) -> AzureErrorKind {
+    match status {
+        304 => AzureErrorKind::NotModified,
+        401 | 403 => AzureErrorKind::Unauthorized,
+        404 => AzureErrorKind::NotFound,
+        408 => AzureErrorKind::Timeout,
+        412 => AzureErrorKind::Precondition,
+        416 => AzureErrorKind::RangeNotSatisfiable,
+        429 => AzureErrorKind::Throttled,
+        500..=599 => AzureErrorKind::Service,
+        _ => AzureErrorKind::Unrecognized,
     }
 }
 

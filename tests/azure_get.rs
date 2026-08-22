@@ -1,8 +1,8 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, Container, Error, GetCondition, GetOptions, GetRange, RequestWorkspace, Response,
-    Timestamps, VERSION, WorkspaceExtent,
+    AzureErrorKind, Blobs, Container, Error, GetCondition, GetOptions, GetRange, RequestWorkspace,
+    Response, Timestamps, VERSION, WorkspaceExtent,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -78,22 +78,22 @@ fn classifies_response_metadata_and_errors() {
     let options = GetOptions::default();
     let headers = [("Content-Length", "8"), ("ETag", "\"etag\"")];
     let meta = blobs
-        .interpret_get(Response::new(200, &headers), &options)
+        .interpret_get(Response::new(200, &headers, b""), &options)
         .unwrap();
     assert_eq!(meta.size, 8);
     assert_eq!(meta.e_tag, Some("\"etag\""));
-    assert_eq!(
-        blobs.interpret_get(Response::new(404, &[]), &options),
-        Err(Error::NotFound)
-    );
-    assert_eq!(
-        blobs.interpret_get(Response::new(403, &[]), &options),
-        Err(Error::Unauthorized)
-    );
-    assert_eq!(
-        blobs.interpret_get(Response::new(304, &[]), &options),
-        Err(Error::NotModified)
-    );
+    for (status, expected) in [
+        (404, AzureErrorKind::NotFound),
+        (403, AzureErrorKind::Unauthorized),
+        (304, AzureErrorKind::NotModified),
+    ] {
+        let Err(Error::Azure(error)) =
+            blobs.interpret_get(Response::new(status, &[], b""), &options)
+        else {
+            panic!("expected an Azure error");
+        };
+        assert_eq!(error.kind(), expected);
+    }
 }
 
 #[test]
@@ -126,13 +126,15 @@ fn adds_ranges_conditions_and_head() {
         ("Content-Range", "bytes 2-5/10"),
         ("ETag", "\"etag\""),
         ("x-ms-version-id", "version-1"),
+        ("Last-Modified", "Fri, 24 May 2013 00:00:00 GMT"),
     ];
     let meta = blobs
-        .interpret_get(Response::new(206, &headers), &options)
+        .interpret_get(Response::new(206, &headers, b""), &options)
         .unwrap();
     assert_eq!(meta.size, 10);
     assert_eq!(meta.e_tag, Some("\"etag\""));
     assert_eq!(meta.version, Some("version-1"));
+    assert_eq!(meta.last_modified_ms, Some(1_369_353_600_000));
 }
 
 #[test]

@@ -17,9 +17,10 @@ mod request;
 mod response;
 mod time;
 mod types;
+mod xml;
 
 pub use azure::{Blobs, Container, VERSION};
-pub use error::{Error, Result};
+pub use error::{AzureError, AzureErrorKind, Error, RequestId, Result};
 #[cfg(feature = "alloc")]
 pub use memory::VecExtent;
 pub use memory::{CapacityError, Extent, RequestRequirements, WorkspaceExtent};

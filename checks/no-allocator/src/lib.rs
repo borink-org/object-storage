@@ -30,7 +30,7 @@ pub extern "C" fn azure_get_without_an_allocator() -> usize {
         return 3;
     };
     let headers = [("content-length", "4")];
-    let Ok(meta) = blobs.interpret_get(Response::new(200, &headers), &options) else {
+    let Ok(meta) = blobs.interpret_get(Response::new(200, &headers, b""), &options) else {
         return 4;
     };
     request.url().len() + meta.size as usize

@@ -3,12 +3,20 @@
 pub struct Response<'a> {
     status: u16,
     headers: &'a [(&'a str, &'a str)],
+    body: &'a [u8],
 }
 
 impl<'a> Response<'a> {
-    /// Borrows a status code and response headers supplied by the host.
-    pub fn new(status: u16, headers: &'a [(&'a str, &'a str)]) -> Self {
-        Self { status, headers }
+    /// Borrows response metadata and any body bytes already read by the host.
+    ///
+    /// A successful GET does not require body bytes during interpretation, so
+    /// the host may pass an empty slice and read the body afterward.
+    pub fn new(status: u16, headers: &'a [(&'a str, &'a str)], body: &'a [u8]) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+        }
     }
 
     /// Returns the HTTP status code.
@@ -22,5 +30,9 @@ impl<'a> Response<'a> {
             .iter()
             .find(|(header, _)| header.eq_ignore_ascii_case(name))
             .map(|(_, value)| *value)
+    }
+
+    pub(crate) fn body(&self) -> &'a [u8] {
+        self.body
     }
 }

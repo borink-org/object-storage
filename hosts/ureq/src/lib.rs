@@ -24,12 +24,21 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         .build()
         .call()?;
     let status = incoming.status().as_u16();
+    let error_body = if (200..=299).contains(&status) {
+        Vec::new()
+    } else {
+        incoming.body_mut().read_to_vec()?
+    };
     let headers = incoming
         .headers()
         .iter()
         .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
         .collect::<Vec<_>>();
-    blobs.interpret_get(Response::new(status, &headers), &options)?;
-    drop(headers);
-    incoming.body_mut().read_to_vec().map_err(Into::into)
+    match blobs.interpret_get(Response::new(status, &headers, &error_body), &options) {
+        Ok(_) => {
+            drop(headers);
+            incoming.body_mut().read_to_vec().map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
 }

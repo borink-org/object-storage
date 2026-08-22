@@ -77,9 +77,59 @@ fn write_digits(output: &mut [u8], mut value: u64) {
     }
 }
 
+fn number(bytes: &[u8]) -> Option<u64> {
+    bytes.iter().try_fold(0, |value, byte| {
+        byte.checked_sub(b'0')
+            .filter(|digit| *digit <= 9)
+            .map(|digit| value * 10 + digit as u64)
+    })
+}
+
+fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+pub(crate) fn http_date_ms(value: &str) -> Option<u64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 29
+        || bytes[3] != b','
+        || bytes[4] != b' '
+        || bytes[7] != b' '
+        || bytes[11] != b' '
+        || bytes[16] != b' '
+        || bytes[19] != b':'
+        || bytes[22] != b':'
+        || &bytes[25..] != b" GMT"
+    {
+        return None;
+    }
+    let day = number(&bytes[5..7])?;
+    let month = MONTHS
+        .iter()
+        .position(|name| name.as_slice() == &bytes[8..11])? as u64
+        + 1;
+    let year = number(&bytes[12..16])? as i64;
+    let hour = number(&bytes[17..19])?;
+    let minute = number(&bytes[20..22])?;
+    let second = number(&bytes[23..25])?;
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add((hour * 3600 + minute * 60 + second) as i64)?;
+    u64::try_from(seconds).ok()?.checked_mul(1000)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS};
+    use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS, http_date_ms};
 
     #[test]
     fn civil_conversion_matches_a_simple_calendar_for_every_day() {
@@ -132,6 +182,15 @@ mod tests {
             Timestamps::from_unix(u64::MAX),
             Timestamps::from_unix(MAX_UNIX_SECONDS)
         );
+    }
+
+    #[test]
+    fn parses_an_azure_last_modified_header() {
+        assert_eq!(
+            http_date_ms("Fri, 24 May 2013 00:00:00 GMT"),
+            Some(1_369_353_600_000)
+        );
+        assert_eq!(http_date_ms("not an HTTP date"), None);
     }
 
     fn decimal(bytes: &[u8]) -> u32 {

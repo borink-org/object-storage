@@ -39,6 +39,8 @@ pub struct GetOptions<'a> {
 pub struct ObjectMeta<'a> {
     /// Total object size, not merely the returned range length.
     pub size: u64,
+    /// Last-modified time as Unix milliseconds when the header was valid.
+    pub last_modified_ms: Option<u64>,
     /// Entity tag when Azure returned one.
     pub e_tag: Option<&'a str>,
     /// Azure blob version identifier when returned.
