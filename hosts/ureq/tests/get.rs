@@ -1,7 +1,3 @@
-#[path = "../examples/ureq_get.rs"]
-#[allow(dead_code)]
-mod example;
-
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -9,7 +5,7 @@ use std::thread;
 use borink_object_storage::{Blobs, Container};
 
 #[test]
-fn example_executes_the_generated_request() {
+fn executes_the_generated_request() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -34,6 +30,9 @@ fn example_executes_the_generated_request() {
     });
 
     let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
-    assert_eq!(example::get(&blobs, "a key").unwrap(), b"body");
+    assert_eq!(
+        borink_azure_get_ureq::get(&blobs, "a key").unwrap(),
+        b"body"
+    );
     server.join().unwrap();
 }

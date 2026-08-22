@@ -18,7 +18,14 @@ jobs:
           components: clippy, rustfmt
 
       - run: cargo fmt --check
+      - run: cargo fmt --check --manifest-path checks/no-allocator/Cargo.toml
+      - run: cargo fmt --check --manifest-path hosts/ureq/Cargo.toml
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --locked --manifest-path tests/no-allocator/Cargo.toml
+      - name: Link without a global allocator
+        run: cargo build --locked --manifest-path checks/no-allocator/Cargo.toml
+      - name: Test the ureq host
+        run: cargo test --locked --manifest-path hosts/ureq/Cargo.toml
+      - name: Lint the ureq host
+        run: cargo clippy --locked --manifest-path hosts/ureq/Cargo.toml --all-targets -- -D warnings
       - run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps

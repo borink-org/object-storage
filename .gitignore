@@ -1,2 +1,3 @@
 /target
-/tests/no-allocator/target
+/checks/no-allocator/target
+/hosts/ureq/target

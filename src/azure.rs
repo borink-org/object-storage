@@ -1,39 +1,14 @@
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-
 use crate::request::{Writer, text};
-use crate::{Error, Request, RequestWorkspace, Response, Result};
+use crate::{
+    CapacityError, Error, Request, RequestRequirements, RequestWorkspace, Response, Result,
+    Timestamps, WorkspaceExtent,
+};
 
-pub const VERSION: &str = "2023-11-03";
+/// Latest Azure Storage version fully deployed in every region.
+pub const VERSION: &str = "2026-04-06";
 
-const PATH_ESCAPE: &AsciiSet = &CONTROLS
-    .add(b':')
-    .add(b'?')
-    .add(b'#')
-    .add(b'[')
-    .add(b']')
-    .add(b'@')
-    .add(b'!')
-    .add(b'$')
-    .add(b'&')
-    .add(b'\'')
-    .add(b'(')
-    .add(b')')
-    .add(b'*')
-    .add(b'+')
-    .add(b',')
-    .add(b';')
-    .add(b'=')
-    .add(b'"')
-    .add(b' ')
-    .add(b'<')
-    .add(b'>')
-    .add(b'%')
-    .add(b'{')
-    .add(b'}')
-    .add(b'|')
-    .add(b'\\')
-    .add(b'^')
-    .add(b'`');
+// Azure limits blob names to 1,024 characters.
+const MAX_BLOB_NAME_CHARS: usize = 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Container<'a> {
@@ -43,15 +18,7 @@ pub struct Container<'a> {
 
 impl<'a> Container<'a> {
     pub fn new(endpoint: &'a str, name: &'a str) -> Result<Self> {
-        let Some((scheme, authority)) = endpoint.split_once("://") else {
-            return Err(Error::InvalidEndpoint);
-        };
-        if !matches!(scheme, "http" | "https")
-            || authority.is_empty()
-            || authority
-                .bytes()
-                .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@'))
-        {
+        if !crate::http::valid_http_origin(endpoint) {
             return Err(Error::InvalidEndpoint);
         }
         if name.is_empty()
@@ -92,47 +59,51 @@ impl<'a> Blobs<'a> {
         &self,
         workspace: &'request mut RequestWorkspace<'_>,
         key: &str,
-        date: &'request str,
+        now: &'request Timestamps,
     ) -> Result<Request<'request>> {
-        if key.is_empty() || key.chars().count() > 1024 {
-            return Err(Error::InvalidKey);
-        }
-        if !valid_header(date) {
-            return Err(Error::InvalidDate);
-        }
-
-        let encoded_key_len = utf8_percent_encode(key, PATH_ESCAPE)
-            .map(str::len)
-            .sum::<usize>();
-        let url_len =
-            self.container.endpoint.len() + 1 + self.container.name.len() + 1 + encoded_key_len;
-        let required = url_len + "Bearer ".len() + self.token.len();
+        validate_key(key)?;
         let available = workspace.capacity();
+        let mut out = Writer::storing(workspace.bytes());
+        let url_end = self.build(&mut out, key);
+        let required = out.position();
         if required > available {
-            return Err(Error::BufferTooSmall {
+            return Err(CapacityError {
+                extent: WorkspaceExtent::Packed,
                 required,
                 available,
-            });
+            }
+            .into());
         }
+        let bytes = out.finish().expect("capacity was checked");
+        Ok(Request::new(
+            text(&bytes[..url_end]),
+            text(&bytes[url_end..]),
+            now.rfc1123(),
+            VERSION,
+        ))
+    }
 
-        let mut out = Writer::new(&mut workspace.bytes()[..required]);
+    pub fn get_request_requirements(&self, key: &str) -> Result<RequestRequirements> {
+        validate_key(key)?;
+        let mut out = Writer::counting();
+        self.build(&mut out, key);
+        Ok(RequestRequirements {
+            packed: out.position(),
+        })
+    }
+
+    fn build(&self, out: &mut Writer<'_>, key: &str) -> usize {
         out.push(self.container.endpoint);
         out.push("/");
         out.push(self.container.name);
         out.push("/");
-        for part in utf8_percent_encode(key, PATH_ESCAPE) {
+        for part in crate::path::encode_object_key(key) {
             out.push(part);
         }
         let url_end = out.position();
         out.push("Bearer ");
         out.push(self.token);
-        let bytes = out.finish();
-        Ok(Request::new(
-            text(&bytes[..url_end]),
-            text(&bytes[url_end..]),
-            date,
-            VERSION,
-        ))
+        url_end
     }
 
     pub fn interpret_get<'response>(
@@ -146,6 +117,13 @@ impl<'a> Blobs<'a> {
             status => Err(Error::Status(status)),
         }
     }
+}
+
+fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.chars().count() > MAX_BLOB_NAME_CHARS {
+        return Err(Error::InvalidKey);
+    }
+    Ok(())
 }
 
 fn valid_header(value: &str) -> bool {

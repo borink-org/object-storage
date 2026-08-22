@@ -1,2 +1,3 @@
 Cargo.lock linguist-generated=true
-tests/**/Cargo.lock linguist-generated=true
+checks/**/Cargo.lock linguist-generated=true
+hosts/**/Cargo.lock linguist-generated=true
