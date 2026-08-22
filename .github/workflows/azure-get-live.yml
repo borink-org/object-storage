@@ -1,33 +1,50 @@
 name: azure-get-live
+
 on:
   workflow_dispatch:
+
 permissions:
   contents: read
   id-token: write
+
 env:
   AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-  AZURE_STORAGE_ENDPOINT: https://borinkstoragetest.blob.core.windows.net
-  AZURE_STORAGE_CONTAINER: borink-object-test
-  AZURE_BLOB_KEY: borink-object-storage/azure-get-reference/a key+é.txt
+  BORINK_AZURE_ACCOUNT: borinkstoragetest
+  BORINK_AZURE_CONTAINER: borink-object-test
+
 jobs:
-  get:
+  test:
     runs-on: ubuntu-latest
     environment: azure-live
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch
+
       - name: Log in to Azure
         run: |
-          OIDC_TOKEN="$(curl --fail --silent --show-error -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api%3A%2F%2FAzureADTokenExchange" | jq -er .value)"
-          az login --service-principal --username "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$OIDC_TOKEN"
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-      - name: GET known blob
-        run: |
-          TOKEN="$(az account get-access-token --resource https://storage.azure.com/ --query accessToken --output tsv)"
+          TOKEN=$(curl -sS --fail \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api%3A%2F%2FAzureADTokenExchange" \
+            | jq -er '.value')
           echo "::add-mask::$TOKEN"
-          export AZURE_STORAGE_ACCESS_TOKEN="$TOKEN"
-          BODY="$(cargo run --locked --manifest-path hosts/ureq/Cargo.toml --example get -- "$AZURE_BLOB_KEY")"
-          test "$BODY" = "0123456789-azure-get-reference"
+          az login --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --tenant "$AZURE_TENANT_ID" \
+            --federated-token "$TOKEN"
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+      - name: Get a Storage access token
+        run: |
+          TOKEN=$(az account get-access-token \
+            --resource https://storage.azure.com/ \
+            --query accessToken -o tsv)
+          test -n "$TOKEN"
+          echo "::add-mask::$TOKEN"
+          echo "BORINK_AZURE_BEARER=$TOKEN" >> "$GITHUB_ENV"
+
+      - run: >-
+          cargo test
+          --manifest-path tests/azure-get-live/Cargo.toml
+          -- --ignored --test-threads=1

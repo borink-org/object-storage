@@ -1,1 +1,3 @@
 /target
+/tests/azure-get-live/Cargo.lock
+/tests/azure-get-live/target

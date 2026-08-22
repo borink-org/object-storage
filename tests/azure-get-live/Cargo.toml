@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "azure-get-live"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+borink-object-storage = { path = "../.." }
+object_store = { version = "=0.14.1", default-features = false, features = ["azure"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
