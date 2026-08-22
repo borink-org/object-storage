@@ -1,20 +1,50 @@
 use core::str;
 
+use crate::{CapacityError, Extent, WorkspaceExtent};
+
 pub struct RequestWorkspace<'a> {
-    bytes: &'a mut [u8],
+    packed: Backing<'a>,
+}
+
+enum Backing<'a> {
+    Slice(&'a mut [u8]),
+    Extent(&'a mut dyn Extent),
 }
 
 impl<'a> RequestWorkspace<'a> {
     pub fn new(bytes: &'a mut [u8]) -> Self {
-        Self { bytes }
+        Self {
+            packed: Backing::Slice(bytes),
+        }
+    }
+
+    pub fn with_extent(packed: &'a mut dyn Extent) -> Self {
+        Self {
+            packed: Backing::Extent(packed),
+        }
     }
 
     pub fn capacity(&self) -> usize {
-        self.bytes.len()
+        match &self.packed {
+            Backing::Slice(bytes) => bytes.len(),
+            Backing::Extent(extent) => extent.as_slice().len(),
+        }
     }
 
     pub(crate) fn bytes(&mut self) -> &mut [u8] {
-        self.bytes
+        match &mut self.packed {
+            Backing::Slice(bytes) => bytes,
+            Backing::Extent(extent) => extent.as_mut_slice(),
+        }
+    }
+
+    pub fn try_reserve(&mut self, error: CapacityError) -> bool {
+        match error.extent {
+            WorkspaceExtent::Packed => match &mut self.packed {
+                Backing::Slice(bytes) => error.required <= bytes.len(),
+                Backing::Extent(extent) => extent.try_reserve(error.required),
+            },
+        }
     }
 }
 
@@ -54,28 +84,45 @@ impl<'a> Request<'a> {
     }
 }
 
-pub(crate) struct Writer<'a> {
-    bytes: &'a mut [u8],
-    position: usize,
+pub(crate) enum Writer<'a> {
+    Counting(usize),
+    Storing {
+        bytes: &'a mut [u8],
+        position: usize,
+    },
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn new(bytes: &'a mut [u8]) -> Self {
-        Self { bytes, position: 0 }
+    pub(crate) fn counting() -> Self {
+        Self::Counting(0)
+    }
+
+    pub(crate) fn storing(bytes: &'a mut [u8]) -> Self {
+        Self::Storing { bytes, position: 0 }
     }
 
     pub(crate) fn push(&mut self, value: &str) {
-        let end = self.position + value.len();
-        self.bytes[self.position..end].copy_from_slice(value.as_bytes());
-        self.position = end;
+        match self {
+            Self::Counting(position) => *position += value.len(),
+            Self::Storing { bytes, position } => {
+                let end = *position + value.len();
+                bytes[*position..end].copy_from_slice(value.as_bytes());
+                *position = end;
+            }
+        }
     }
 
     pub(crate) fn position(&self) -> usize {
-        self.position
+        match self {
+            Self::Counting(position) | Self::Storing { position, .. } => *position,
+        }
     }
 
-    pub(crate) fn finish(self) -> &'a [u8] {
-        &self.bytes[..self.position]
+    pub(crate) fn finish(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Counting(_) => None,
+            Self::Storing { bytes, position } => Some(&bytes[..position]),
+        }
     }
 }
 

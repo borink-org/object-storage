@@ -6,7 +6,8 @@ use borink_object_storage::{Blobs, Container, RequestWorkspace, Response};
 
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let date = httpdate::fmt_http_date(SystemTime::now());
-    let mut storage = [0; 4096];
+    let required = blobs.get_request_requirements(key, &date)?;
+    let mut storage = vec![0; required.packed];
     let mut workspace = RequestWorkspace::new(&mut storage);
     let request = blobs.get_request(&mut workspace, key, &date)?;
 

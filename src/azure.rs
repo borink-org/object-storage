@@ -1,7 +1,10 @@
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 use crate::request::{Writer, text};
-use crate::{Error, Request, RequestWorkspace, Response, Result};
+use crate::{
+    CapacityError, Error, Request, RequestRequirements, RequestWorkspace, Response, Result,
+    WorkspaceExtent,
+};
 
 pub const VERSION: &str = "2023-11-03";
 
@@ -94,28 +97,39 @@ impl<'a> Blobs<'a> {
         key: &str,
         date: &'request str,
     ) -> Result<Request<'request>> {
-        if key.is_empty() || key.chars().count() > 1024 {
-            return Err(Error::InvalidKey);
-        }
-        if !valid_header(date) {
-            return Err(Error::InvalidDate);
-        }
-
-        let encoded_key_len = utf8_percent_encode(key, PATH_ESCAPE)
-            .map(str::len)
-            .sum::<usize>();
-        let url_len =
-            self.container.endpoint.len() + 1 + self.container.name.len() + 1 + encoded_key_len;
-        let required = url_len + "Bearer ".len() + self.token.len();
+        validate_get(key, date)?;
+        let required = self.get_request_requirements(key, date)?.packed;
         let available = workspace.capacity();
         if required > available {
-            return Err(Error::BufferTooSmall {
+            return Err(CapacityError {
+                extent: WorkspaceExtent::Packed,
                 required,
                 available,
-            });
+            }
+            .into());
         }
 
-        let mut out = Writer::new(&mut workspace.bytes()[..required]);
+        let mut out = Writer::storing(&mut workspace.bytes()[..required]);
+        let url_end = self.build(&mut out, key);
+        let bytes = out.finish().expect("storing writer");
+        Ok(Request::new(
+            text(&bytes[..url_end]),
+            text(&bytes[url_end..]),
+            date,
+            VERSION,
+        ))
+    }
+
+    pub fn get_request_requirements(&self, key: &str, date: &str) -> Result<RequestRequirements> {
+        validate_get(key, date)?;
+        let mut out = Writer::counting();
+        self.build(&mut out, key);
+        Ok(RequestRequirements {
+            packed: out.position(),
+        })
+    }
+
+    fn build(&self, out: &mut Writer<'_>, key: &str) -> usize {
         out.push(self.container.endpoint);
         out.push("/");
         out.push(self.container.name);
@@ -126,13 +140,7 @@ impl<'a> Blobs<'a> {
         let url_end = out.position();
         out.push("Bearer ");
         out.push(self.token);
-        let bytes = out.finish();
-        Ok(Request::new(
-            text(&bytes[..url_end]),
-            text(&bytes[url_end..]),
-            date,
-            VERSION,
-        ))
+        url_end
     }
 
     pub fn interpret_get<'response>(
@@ -146,6 +154,16 @@ impl<'a> Blobs<'a> {
             status => Err(Error::Status(status)),
         }
     }
+}
+
+fn validate_get(key: &str, date: &str) -> Result<()> {
+    if key.is_empty() || key.chars().count() > 1024 {
+        return Err(Error::InvalidKey);
+    }
+    if !valid_header(date) {
+        return Err(Error::InvalidDate);
+    }
+    Ok(())
 }
 
 fn valid_header(value: &str) -> bool {

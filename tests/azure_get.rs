@@ -47,11 +47,11 @@ fn reports_the_exact_required_capacity() {
             "Sat, 22 Aug 2026 12:00:00 GMT",
         )
         .unwrap_err();
-    let Error::BufferTooSmall { required, .. } = error else {
+    let Error::Capacity(capacity) = error else {
         panic!("unexpected error: {error}");
     };
 
-    let mut exact = vec![0; required];
+    let mut exact = vec![0; capacity.required];
     blobs
         .get_request(
             &mut RequestWorkspace::new(&mut exact),

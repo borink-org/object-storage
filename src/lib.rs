@@ -7,10 +7,12 @@
 
 mod azure;
 mod error;
+mod memory;
 mod request;
 mod response;
 
 pub use azure::{Blobs, Container, VERSION};
 pub use error::{Error, Result};
+pub use memory::{CapacityError, Extent, RequestRequirements, WorkspaceExtent};
 pub use request::{Request, RequestWorkspace};
 pub use response::Response;
