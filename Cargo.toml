@@ -1,5 +1,5 @@
 [workspace]
-members = ["checks/no-allocator", "hosts/ureq"]
+members = ["checks/no-allocator", "hosts/ureq", "tests/azure-get-live"]
 default-members = ["."]
 
 [package]

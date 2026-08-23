@@ -47,12 +47,12 @@ impl Timestamps {
         let mut rfc1123 = *b"Xxx, 00 Xxx 0000 00:00:00 GMT";
         // 1970-01-01 was Thursday, index 4 in `WEEKDAYS`.
         rfc1123[..3].copy_from_slice(WEEKDAYS[((days + 4) % 7) as usize]);
-        write_digits(&mut rfc1123[5..7], day as u64);
+        write_fixed_digits(&mut rfc1123[5..7], day as u64);
         rfc1123[8..11].copy_from_slice(MONTHS[(month - 1) as usize]);
-        write_digits(&mut rfc1123[12..16], year as u64);
-        write_digits(&mut rfc1123[17..19], hour);
-        write_digits(&mut rfc1123[20..22], minute);
-        write_digits(&mut rfc1123[23..25], second);
+        write_fixed_digits(&mut rfc1123[12..16], year as u64);
+        write_fixed_digits(&mut rfc1123[17..19], hour);
+        write_fixed_digits(&mut rfc1123[20..22], minute);
+        write_fixed_digits(&mut rfc1123[23..25], second);
         Self {
             rfc1123,
             unix: seconds,
@@ -70,7 +70,8 @@ impl Timestamps {
     }
 }
 
-fn write_digits(output: &mut [u8], mut value: u64) {
+// Date fields have a width fixed by RFC 1123, so leading zeroes are retained.
+fn write_fixed_digits(output: &mut [u8], mut value: u64) {
     for byte in output.iter_mut().rev() {
         *byte = b'0' + (value % 10) as u8;
         value /= 10;

@@ -61,30 +61,48 @@ impl<'a> RequestWorkspace<'a> {
 /// it. No `'static` storage is required.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
+    method: &'static str,
     url: &'a str,
-    headers: [(&'static str, &'a str); 3],
+    headers: [(&'static str, &'a str); 6],
+    header_count: usize,
 }
 
 impl<'a> Request<'a> {
     pub(crate) fn new(
+        method: &'static str,
         url: &'a str,
         authorization: &'a str,
         date: &'a str,
         version: &'static str,
+        range: Option<&'a str>,
+        conditions: [Option<(&'static str, &'a str)>; 2],
     ) -> Self {
+        let mut headers = [("", ""); 6];
+        headers[..3].copy_from_slice(&[
+            ("authorization", authorization),
+            ("x-ms-date", date),
+            ("x-ms-version", version),
+        ]);
+        let mut header_count = 3;
+        if let Some(value) = range {
+            headers[header_count] = ("range", value);
+            header_count += 1;
+        }
+        for value in conditions.into_iter().flatten() {
+            headers[header_count] = value;
+            header_count += 1;
+        }
         Self {
+            method,
             url,
-            headers: [
-                ("authorization", authorization),
-                ("x-ms-date", date),
-                ("x-ms-version", version),
-            ],
+            headers,
+            header_count,
         }
     }
 
     /// Returns the HTTP method.
     pub fn method(&self) -> &'static str {
-        "GET"
+        self.method
     }
 
     /// Returns the complete object URL.
@@ -94,7 +112,7 @@ impl<'a> Request<'a> {
 
     /// Iterates over the request headers in wire-independent order.
     pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
-        self.headers.iter().copied()
+        self.headers[..self.header_count].iter().copied()
     }
 }
 
@@ -152,9 +170,36 @@ pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
 }
 
+// Unlike the fixed-width date fields in `time`, range offsets need the shortest
+// decimal representation. This buffer owns that representation without allocating.
+pub(crate) struct U64Decimal {
+    bytes: [u8; 20],
+    start: usize,
+}
+
+impl U64Decimal {
+    pub(crate) fn new(mut value: u64) -> Self {
+        let mut bytes = [0; 20];
+        let mut start = bytes.len();
+        loop {
+            start -= 1;
+            bytes[start] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        Self { bytes, start }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        text(&self.bytes[self.start..])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Writer;
+    use super::{U64Decimal, Writer};
 
     #[test]
     fn counting_and_storing_measure_the_same_writes() {
@@ -180,5 +225,11 @@ mod tests {
 
         assert_eq!(storing.position(), 9);
         assert!(storing.finish().is_none());
+    }
+
+    #[test]
+    fn formats_the_full_u64_range() {
+        assert_eq!(U64Decimal::new(0).as_str(), "0");
+        assert_eq!(U64Decimal::new(u64::MAX).as_str(), "18446744073709551615");
     }
 }

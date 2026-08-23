@@ -1,7 +1,9 @@
 //! Caller-defined extent integration tests.
 
 #[cfg(feature = "alloc")]
-use borink_object_storage::{Blobs, Container, RequestWorkspace, Timestamps, VecExtent};
+use borink_object_storage::{
+    Blobs, Container, GetOptions, RequestWorkspace, Timestamps, VecExtent,
+};
 
 #[cfg(feature = "alloc")]
 #[test]
@@ -12,12 +14,15 @@ fn host_can_grow_the_request_extent() {
     )
     .unwrap();
     let now = Timestamps::from_unix(1_787_400_000);
+    let options = GetOptions::default();
     let mut extent = VecExtent::new();
     let mut workspace = RequestWorkspace::with_extent(&mut extent);
 
     let error = blobs
-        .get_request(&mut workspace, "object", &now)
+        .get_request(&mut workspace, "object", &options, &now)
         .unwrap_err();
     assert!(workspace.try_reserve(error.capacity().unwrap()));
-    blobs.get_request(&mut workspace, "object", &now).unwrap();
+    blobs
+        .get_request(&mut workspace, "object", &options, &now)
+        .unwrap();
 }
