@@ -1,7 +1,6 @@
 //! Object storage in a sans-I/O, externally buffered style.
 //!
-//! // review: this would show up in docs.rs for the crate but hosts/ureq wouldn't be uploaded to crates.io so we would probably have to provide a github link or similar instead?
-//! See `hosts/ureq` for a complete synchronous host.
+//! See the synchronous [ureq host](https://github.com/borink-org/object-storage/tree/master/hosts/ureq).
 
 #![no_std]
 #![forbid(unsafe_code)]
