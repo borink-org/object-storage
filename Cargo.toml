@@ -1,4 +1,6 @@
 [workspace]
+members = ["checks/no-allocator", "hosts/ureq"]
+default-members = ["."]
 
 [package]
 name = "borink-object-storage"
@@ -8,3 +10,15 @@ license = "Apache-2.0"
 description = "Object storage operations with a sans-IO core and externally buffered API"
 repository = "https://github.com/borink-org/object-storage"
 readme = "README.md"
+
+[features]
+alloc = []
+[dependencies]
+percent-encoding = { version = "2.3", default-features = false }
+
+[lints.rust]
+missing_docs = "deny"
+
+[profile.no-allocator]
+inherits = "dev"
+panic = "abort"
