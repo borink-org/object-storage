@@ -11,25 +11,15 @@ pub enum GetRange {
     Suffix(u64),
 }
 
-/// Optional ETag precondition for a read.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum GetCondition<'a> {
-    /// No precondition.
-    #[default]
-    None,
-    /// Read only when the current ETag matches.
-    IfMatch(&'a str),
-    /// Read only when the current ETag differs.
-    IfNoneMatch(&'a str),
-}
-
 /// Options applied to a GET or HEAD request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GetOptions<'a> {
+    /// Request succeeds only when the current ETag matches.
+    pub if_match: Option<&'a str>,
+    /// Request succeeds only when the current ETag differs.
+    pub if_none_match: Option<&'a str>,
     /// Optional byte range.
     pub range: Option<GetRange>,
-    /// Optional ETag precondition.
-    pub condition: GetCondition<'a>,
     /// Uses HEAD instead of GET when true.
     pub head: bool,
 }

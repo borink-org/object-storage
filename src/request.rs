@@ -63,7 +63,7 @@ impl<'a> RequestWorkspace<'a> {
 pub struct Request<'a> {
     method: &'static str,
     url: &'a str,
-    headers: [(&'static str, &'a str); 5],
+    headers: [(&'static str, &'a str); 6],
     header_count: usize,
 }
 
@@ -75,9 +75,9 @@ impl<'a> Request<'a> {
         date: &'a str,
         version: &'static str,
         range: Option<&'a str>,
-        condition: Option<(&'static str, &'a str)>,
+        conditions: [Option<(&'static str, &'a str)>; 2],
     ) -> Self {
-        let mut headers = [("", ""); 5];
+        let mut headers = [("", ""); 6];
         headers[..3].copy_from_slice(&[
             ("authorization", authorization),
             ("x-ms-date", date),
@@ -88,7 +88,7 @@ impl<'a> Request<'a> {
             headers[header_count] = ("range", value);
             header_count += 1;
         }
-        if let Some(value) = condition {
+        for value in conditions.into_iter().flatten() {
             headers[header_count] = value;
             header_count += 1;
         }

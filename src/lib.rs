@@ -26,4 +26,4 @@ pub use memory::{CapacityError, Extent, RequestRequirements, WorkspaceExtent};
 pub use request::{Request, RequestWorkspace};
 pub use response::Response;
 pub use time::Timestamps;
-pub use types::{GetCondition, GetOptions, GetRange, ObjectMeta};
+pub use types::{GetOptions, GetRange, ObjectMeta};

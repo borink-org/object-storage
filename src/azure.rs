@@ -1,7 +1,7 @@
 use crate::request::{Digits, Writer, text};
 use crate::{
-    CapacityError, Error, GetCondition, GetOptions, GetRange, ObjectMeta, Request,
-    RequestRequirements, RequestWorkspace, Response, Result, Timestamps, WorkspaceExtent,
+    CapacityError, Error, GetOptions, GetRange, ObjectMeta, Request, RequestRequirements,
+    RequestWorkspace, Response, Result, Timestamps, WorkspaceExtent,
 };
 
 /// Latest Azure Storage version fully deployed in every region.
@@ -95,9 +95,12 @@ impl<'a> Blobs<'a> {
             now.rfc1123(),
             VERSION,
             layout.range.map(|span| text(&bytes[span])),
-            layout
-                .condition
-                .map(|(name, span)| (name, text(&bytes[span]))),
+            [
+                layout.if_match.map(|span| ("if-match", text(&bytes[span]))),
+                layout
+                    .if_none_match
+                    .map(|span| ("if-none-match", text(&bytes[span]))),
+            ],
         ))
     }
 
@@ -144,21 +147,22 @@ impl<'a> Blobs<'a> {
             }
             start..out.position()
         });
-        let condition = match options.condition {
-            GetCondition::None => None,
-            GetCondition::IfMatch(value) => Some(("if-match", value)),
-            GetCondition::IfNoneMatch(value) => Some(("if-none-match", value)),
-        }
-        .map(|(name, value)| {
+        let if_match = options.if_match.map(|value| {
             let start = out.position();
             out.push(value);
-            (name, start..out.position())
+            start..out.position()
+        });
+        let if_none_match = options.if_none_match.map(|value| {
+            let start = out.position();
+            out.push(value);
+            start..out.position()
         });
         Layout {
             url_end,
             authorization_end,
             range,
-            condition,
+            if_match,
+            if_none_match,
         }
     }
 
@@ -188,7 +192,8 @@ struct Layout {
     url_end: usize,
     authorization_end: usize,
     range: Option<core::ops::Range<usize>>,
-    condition: Option<(&'static str, core::ops::Range<usize>)>,
+    if_match: Option<core::ops::Range<usize>>,
+    if_none_match: Option<core::ops::Range<usize>>,
 }
 
 fn validate_get(key: &str, options: &GetOptions<'_>) -> Result<()> {
@@ -202,11 +207,11 @@ fn validate_get(key: &str, options: &GetOptions<'_>) -> Result<()> {
         Some(GetRange::Suffix(_)) => return Err(Error::Unsupported("Azure suffix ranges")),
         _ => {}
     }
-    let condition = match options.condition {
-        GetCondition::None => None,
-        GetCondition::IfMatch(value) | GetCondition::IfNoneMatch(value) => Some(value),
-    };
-    if condition.is_some_and(|value| !valid_header(value)) {
+    if options.if_match.is_some_and(|value| !valid_header(value))
+        || options
+            .if_none_match
+            .is_some_and(|value| !valid_header(value))
+    {
         return Err(Error::InvalidCondition);
     }
     Ok(())

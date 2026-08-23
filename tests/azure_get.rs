@@ -1,8 +1,8 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, Container, Error, GetCondition, GetOptions, GetRange, RequestWorkspace, Response,
-    Timestamps, VERSION, WorkspaceExtent,
+    Blobs, Container, Error, GetOptions, GetRange, RequestWorkspace, Response, Timestamps, VERSION,
+    WorkspaceExtent,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -101,8 +101,9 @@ fn adds_ranges_conditions_and_head() {
     let blobs = blobs();
     let mut storage = [0; 256];
     let options = GetOptions {
+        if_match: Some("\"etag\""),
+        if_none_match: Some("\"other\""),
         range: Some(GetRange::Bounded(2..6)),
-        condition: GetCondition::IfMatch("\"etag\""),
         head: true,
     };
     let mut workspace = RequestWorkspace::new(&mut storage);
@@ -120,6 +121,11 @@ fn adds_ranges_conditions_and_head() {
         request
             .headers()
             .any(|header| header == ("if-match", "\"etag\""))
+    );
+    assert!(
+        request
+            .headers()
+            .any(|header| header == ("if-none-match", "\"other\""))
     );
 
     let headers = [
@@ -160,7 +166,7 @@ fn rejects_values_that_could_change_the_http_request() {
     ));
 
     let options = GetOptions {
-        condition: GetCondition::IfMatch("etag\r\nheader"),
+        if_match: Some("etag\r\nheader"),
         ..GetOptions::default()
     };
     assert_eq!(
