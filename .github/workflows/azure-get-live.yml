@@ -1,4 +1,4 @@
-name: azure-get-live
+name: azure-live
 on:
   workflow_dispatch:
 permissions:
@@ -24,9 +24,9 @@ jobs:
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api%3A%2F%2FAzureADTokenExchange" | jq -er .value)"
           az login --service-principal --username "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$OIDC_TOKEN"
           az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-      - name: Test Azure GET options
+      - name: Test Azure live
         run: |
           TOKEN="$(az account get-access-token --resource https://storage.azure.com/ --query accessToken --output tsv)"
           echo "::add-mask::$TOKEN"
           export AZURE_STORAGE_ACCESS_TOKEN="$TOKEN"
-          cargo test --manifest-path tests/azure-get-live/Cargo.toml -- --ignored --test-threads=1
+          cargo test --locked -p azure-get-live -- --ignored --test-threads=1

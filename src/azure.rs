@@ -1,4 +1,6 @@
-use crate::request::{Digits, Writer, text};
+use core::ops::Range;
+
+use crate::request::{U64Decimal, Writer, text};
 use crate::{
     CapacityError, Error, GetOptions, GetRange, ObjectMeta, Request, RequestRequirements,
     RequestWorkspace, Response, Result, Timestamps, WorkspaceExtent,
@@ -135,12 +137,12 @@ impl<'a> Blobs<'a> {
             out.push("bytes=");
             match range {
                 GetRange::Bounded(range) => {
-                    out.push(Digits::new(range.start).as_str());
+                    out.push(U64Decimal::new(range.start).as_str());
                     out.push("-");
-                    out.push(Digits::new(range.end - 1).as_str());
+                    out.push(U64Decimal::new(range.end - 1).as_str());
                 }
                 GetRange::Offset(start) => {
-                    out.push(Digits::new(*start).as_str());
+                    out.push(U64Decimal::new(*start).as_str());
                     out.push("-");
                 }
                 GetRange::Suffix(_) => unreachable!("range was validated"),
@@ -191,9 +193,9 @@ impl<'a> Blobs<'a> {
 struct Layout {
     url_end: usize,
     authorization_end: usize,
-    range: Option<core::ops::Range<usize>>,
-    if_match: Option<core::ops::Range<usize>>,
-    if_none_match: Option<core::ops::Range<usize>>,
+    range: Option<Range<usize>>,
+    if_match: Option<Range<usize>>,
+    if_none_match: Option<Range<usize>>,
 }
 
 fn validate_get(key: &str, options: &GetOptions<'_>) -> Result<()> {
@@ -204,7 +206,11 @@ fn validate_get(key: &str, options: &GetOptions<'_>) -> Result<()> {
         Some(GetRange::Bounded(range)) if range.start >= range.end => {
             return Err(Error::InvalidRange);
         }
-        Some(GetRange::Suffix(_)) => return Err(Error::Unsupported("Azure suffix ranges")),
+        Some(GetRange::Suffix(_)) => {
+            return Err(Error::Unsupported(
+                "Azure does not support Range: bytes=-N suffix requests",
+            ));
+        }
         _ => {}
     }
     if options.if_match.is_some_and(|value| !valid_header(value))

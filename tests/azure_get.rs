@@ -78,20 +78,29 @@ fn classifies_response_metadata_and_errors() {
     let options = GetOptions::default();
     let headers = [("Content-Length", "8"), ("ETag", "\"etag\"")];
     let meta = blobs
-        .interpret_get(Response::new(200, &headers), &options)
+        .interpret_get(Response::new(200, headers), &options)
         .unwrap();
     assert_eq!(meta.size, 8);
     assert_eq!(meta.e_tag, Some("\"etag\""));
     assert_eq!(
-        blobs.interpret_get(Response::new(404, &[]), &options),
+        blobs.interpret_get(
+            Response::new(404, core::iter::empty::<(&str, &str)>()),
+            &options,
+        ),
         Err(Error::NotFound)
     );
     assert_eq!(
-        blobs.interpret_get(Response::new(403, &[]), &options),
+        blobs.interpret_get(
+            Response::new(403, core::iter::empty::<(&str, &str)>()),
+            &options,
+        ),
         Err(Error::Unauthorized)
     );
     assert_eq!(
-        blobs.interpret_get(Response::new(304, &[]), &options),
+        blobs.interpret_get(
+            Response::new(304, core::iter::empty::<(&str, &str)>()),
+            &options,
+        ),
         Err(Error::NotModified)
     );
 }
@@ -134,7 +143,7 @@ fn adds_ranges_conditions_and_head() {
         ("x-ms-version-id", "version-1"),
     ];
     let meta = blobs
-        .interpret_get(Response::new(206, &headers), &options)
+        .interpret_get(Response::new(206, headers), &options)
         .unwrap();
     assert_eq!(meta.size, 10);
     assert_eq!(meta.e_tag, Some("\"etag\""));

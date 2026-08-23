@@ -24,12 +24,14 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         .build()
         .call()?;
     let status = incoming.status().as_u16();
-    let headers = incoming
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)))
-        .collect::<Vec<_>>();
-    blobs.interpret_get(Response::new(status, &headers), &options)?;
-    drop(headers);
+    blobs.interpret_get(
+        Response::new(
+            status,
+            incoming.headers().iter().filter_map(|(name, value)| {
+                value.to_str().ok().map(|value| (name.as_str(), value))
+            }),
+        ),
+        &options,
+    )?;
     incoming.body_mut().read_to_vec().map_err(Into::into)
 }

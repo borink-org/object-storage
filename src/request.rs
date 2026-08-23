@@ -170,12 +170,14 @@ pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
 }
 
-pub(crate) struct Digits {
+// Unlike the fixed-width date fields in `time`, range offsets need the shortest
+// decimal representation. This buffer owns that representation without allocating.
+pub(crate) struct U64Decimal {
     bytes: [u8; 20],
     start: usize,
 }
 
-impl Digits {
+impl U64Decimal {
     pub(crate) fn new(mut value: u64) -> Self {
         let mut bytes = [0; 20];
         let mut start = bytes.len();
@@ -197,7 +199,7 @@ impl Digits {
 
 #[cfg(test)]
 mod tests {
-    use super::{Digits, Writer};
+    use super::{U64Decimal, Writer};
 
     #[test]
     fn counting_and_storing_measure_the_same_writes() {
@@ -227,7 +229,7 @@ mod tests {
 
     #[test]
     fn formats_the_full_u64_range() {
-        assert_eq!(Digits::new(0).as_str(), "0");
-        assert_eq!(Digits::new(u64::MAX).as_str(), "18446744073709551615");
+        assert_eq!(U64Decimal::new(0).as_str(), "0");
+        assert_eq!(U64Decimal::new(u64::MAX).as_str(), "18446744073709551615");
     }
 }

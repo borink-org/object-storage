@@ -7,7 +7,7 @@ pub enum GetRange {
     Bounded(Range<u64>),
     /// All bytes beginning at this offset.
     Offset(u64),
-    /// A suffix length, which Azure does not support.
+    /// The final number of bytes (`Range: bytes=-N`), which Azure does not support.
     Suffix(u64),
 }
 

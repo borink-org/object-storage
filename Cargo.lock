@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "azure-get-live"
+version = "0.0.0"
+dependencies = [
+ "borink-object-storage",
+ "ureq",
+]
+
+[[package]]
 name = "azure-get-no-allocator"
 version = "0.0.0"
 dependencies = [
