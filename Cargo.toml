@@ -9,6 +9,8 @@ description = "Object storage operations with a sans-IO core and externally buff
 repository = "https://github.com/borink-org/object-storage"
 readme = "README.md"
 
+[features]
+alloc = []
 [dependencies]
 percent-encoding = { version = "2.3", default-features = false }
 

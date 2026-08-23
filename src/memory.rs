@@ -28,6 +28,30 @@ impl Extent for [u8] {
     }
 }
 
+/// A growable extent backed by [`alloc::vec::Vec`].
+#[cfg(feature = "alloc")]
+pub type VecExtent = alloc::vec::Vec<u8>;
+
+#[cfg(feature = "alloc")]
+impl Extent for VecExtent {
+    fn as_slice(&self) -> &[u8] {
+        self.as_slice()
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+
+    fn try_reserve(&mut self, required: usize) -> bool {
+        let additional = required.saturating_sub(self.len());
+        if alloc::vec::Vec::try_reserve(self, additional).is_err() {
+            return false;
+        }
+        self.resize(required, 0);
+        true
+    }
+}
+
 /// Identifies the caller-provided extent that was too small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
