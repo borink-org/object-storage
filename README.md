@@ -24,7 +24,10 @@ Currently we only provide the sans-I/O core as a library; you must provide the h
 
 ### Azure Blob Storage only
 
-- Get objects
+- Object get (GET request)
+  - Conditional object get (If-Match, If-None-Match)
+  - Byte ranges
+- Object metadata (HEAD request)
 
 ## Limitations
 
