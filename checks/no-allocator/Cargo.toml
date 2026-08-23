@@ -14,3 +14,6 @@ borink-object-storage = { path = "../.." }
 
 [profile.dev]
 panic = "abort"
+
+[lints.rust]
+missing_docs = "deny"

@@ -1,3 +1,5 @@
+//! Caller-defined extent integration tests.
+
 use borink_object_storage::{Blobs, Container, Extent, RequestWorkspace, Timestamps};
 
 struct VecExtent(Vec<u8>);

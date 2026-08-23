@@ -1,7 +1,12 @@
+//! A synchronous `ureq` host for `borink-object-storage` Azure GET requests.
+
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{Blobs, RequestWorkspace, Response, Timestamps};
 
+/// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);

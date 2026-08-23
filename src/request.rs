@@ -2,6 +2,9 @@ use core::str;
 
 use crate::{CapacityError, Extent, WorkspaceExtent};
 
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
+
+/// Caller-provided storage used while constructing a request.
 pub struct RequestWorkspace<'a> {
     packed: Backing<'a>,
 }
@@ -12,18 +15,21 @@ enum Backing<'a> {
 }
 
 impl<'a> RequestWorkspace<'a> {
+    /// Uses a fixed mutable slice as packed request storage.
     pub fn new(bytes: &'a mut [u8]) -> Self {
         Self {
             packed: Backing::Slice(bytes),
         }
     }
 
+    /// Uses a host-defined extent as packed request storage.
     pub fn with_extent(packed: &'a mut dyn Extent) -> Self {
         Self {
             packed: Backing::Extent(packed),
         }
     }
 
+    /// Returns the current packed extent capacity.
     pub fn capacity(&self) -> usize {
         match &self.packed {
             Backing::Slice(bytes) => bytes.len(),
@@ -38,6 +44,9 @@ impl<'a> RequestWorkspace<'a> {
         }
     }
 
+    /// Asks the host extent to satisfy a capacity error.
+    ///
+    /// Fixed slices refuse requirements larger than their existing length.
     pub fn try_reserve(&mut self, error: CapacityError) -> bool {
         match error.extent {
             WorkspaceExtent::Packed => match &mut self.packed {
@@ -48,6 +57,10 @@ impl<'a> RequestWorkspace<'a> {
     }
 }
 
+/// A GET request borrowing its URL and header values from caller-owned memory.
+///
+/// The request cannot outlive either the workspace or timestamp used to build
+/// it. No `'static` storage is required.
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     url: &'a str,
@@ -71,19 +84,24 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// Returns the HTTP method.
     pub fn method(&self) -> &'static str {
         "GET"
     }
 
+    /// Returns the complete object URL.
     pub fn url(&self) -> &'a str {
         self.url
     }
 
+    /// Iterates over the request headers in wire-independent order.
     pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.headers.iter().copied()
     }
 }
 
+// Counting and storing use the same `push` calls so requirement measurement
+// cannot drift from request construction.
 pub(crate) enum Writer<'a> {
     Counting(usize),
     Storing {
@@ -106,6 +124,8 @@ impl<'a> Writer<'a> {
             Self::Counting(position) => *position += value.len(),
             Self::Storing { bytes, position } => {
                 let end = *position + value.len();
+                // Continue advancing after overflow to report the exact size.
+                // Partial request bytes are never returned to the host.
                 if end <= bytes.len() {
                     bytes[*position..end].copy_from_slice(value.as_bytes());
                 }
@@ -132,4 +152,35 @@ impl<'a> Writer<'a> {
 
 pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Writer;
+
+    #[test]
+    fn counting_and_storing_measure_the_same_writes() {
+        let mut counting = Writer::counting();
+        counting.push("one");
+        counting.push("é");
+
+        let mut bytes = [0; 5];
+        let mut storing = Writer::storing(&mut bytes);
+        storing.push("one");
+        storing.push("é");
+
+        assert_eq!(counting.position(), storing.position());
+        assert_eq!(storing.finish().unwrap(), "oneé".as_bytes());
+    }
+
+    #[test]
+    fn an_undersized_writer_still_reports_the_exact_requirement() {
+        let mut bytes = [0; 3];
+        let mut storing = Writer::storing(&mut bytes);
+        storing.push("four");
+        storing.push(" more");
+
+        assert_eq!(storing.position(), 9);
+        assert!(storing.finish().is_none());
+    }
 }

@@ -1,3 +1,5 @@
+//! Runs one Azure GET and writes the object body to standard output.
+
 use std::env;
 use std::io::Write;
 

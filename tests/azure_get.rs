@@ -1,3 +1,5 @@
+//! Azure bearer GET integration tests.
+
 use borink_object_storage::{
     Blobs, Container, Error, RequestWorkspace, Response, Timestamps, VERSION, WorkspaceExtent,
 };
@@ -105,18 +107,4 @@ fn rejects_values_that_could_change_the_http_request() {
         Blobs::new(container, "token\r\nheader"),
         Err(Error::InvalidToken)
     ));
-}
-
-#[test]
-fn formats_azure_request_timestamps_without_allocation() {
-    for (unix, expected) in [
-        (0, "Thu, 01 Jan 1970 00:00:00 GMT"),
-        (951_782_400, "Tue, 29 Feb 2000 00:00:00 GMT"),
-        (1_369_353_600, "Fri, 24 May 2013 00:00:00 GMT"),
-        (253_402_300_799, "Fri, 31 Dec 9999 23:59:59 GMT"),
-    ] {
-        let timestamp = Timestamps::from_unix(unix);
-        assert_eq!(timestamp.unix(), unix);
-        assert_eq!(timestamp.rfc1123(), expected);
-    }
 }

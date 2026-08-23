@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --check --manifest-path hosts/ureq/Cargo.toml
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # The Rust test harness links std and its allocator. This separate no_std
+      # static library keeps the complete GET path reachable during linking.
       - name: Link without a global allocator
         run: cargo build --locked --manifest-path checks/no-allocator/Cargo.toml
       - name: Test the ureq host

@@ -2,6 +2,8 @@
 //!
 //! See `hosts/ureq` for a complete synchronous host.
 
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
+
 #![no_std]
 #![forbid(unsafe_code)]
 

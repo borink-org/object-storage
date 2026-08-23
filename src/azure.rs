@@ -4,12 +4,15 @@ use crate::{
     Timestamps, WorkspaceExtent,
 };
 
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
+
 /// Latest Azure Storage version fully deployed in every region.
 pub const VERSION: &str = "2026-04-06";
 
 // Azure limits blob names to 1,024 characters.
 const MAX_BLOB_NAME_CHARS: usize = 1024;
 
+/// Borrowed Azure Blob endpoint and container configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct Container<'a> {
     endpoint: &'a str,
@@ -17,6 +20,7 @@ pub struct Container<'a> {
 }
 
 impl<'a> Container<'a> {
+    /// Validates and borrows an HTTP(S) origin and container name.
     pub fn new(endpoint: &'a str, name: &'a str) -> Result<Self> {
         if !crate::http::valid_http_origin(endpoint) {
             return Err(Error::InvalidEndpoint);
@@ -32,6 +36,7 @@ impl<'a> Container<'a> {
     }
 }
 
+/// Azure Blob operations authorized by a borrowed bearer token.
 #[derive(Clone, Copy)]
 pub struct Blobs<'a> {
     container: Container<'a>,
@@ -48,6 +53,7 @@ impl core::fmt::Debug for Blobs<'_> {
 }
 
 impl<'a> Blobs<'a> {
+    /// Validates and borrows a container and bearer token.
     pub fn new(container: Container<'a>, token: &'a str) -> Result<Self> {
         if !valid_header(token) {
             return Err(Error::InvalidToken);
@@ -55,6 +61,10 @@ impl<'a> Blobs<'a> {
         Ok(Self { container, token })
     }
 
+    /// Builds a whole-object GET request in `workspace`.
+    ///
+    /// A capacity error reports the exact packed extent size; the host may grow
+    /// that extent and retry the same call.
     pub fn get_request<'request>(
         &self,
         workspace: &'request mut RequestWorkspace<'_>,
@@ -63,6 +73,8 @@ impl<'a> Blobs<'a> {
     ) -> Result<Request<'request>> {
         validate_key(key)?;
         let available = workspace.capacity();
+        // The storing writer keeps counting after capacity is exhausted. One
+        // pass therefore produces either the request or its exact requirement.
         let mut out = Writer::storing(workspace.bytes());
         let url_end = self.build(&mut out, key);
         let required = out.position();
@@ -83,6 +95,7 @@ impl<'a> Blobs<'a> {
         ))
     }
 
+    /// Measures the packed extent required by [`Self::get_request`].
     pub fn get_request_requirements(&self, key: &str) -> Result<RequestRequirements> {
         validate_key(key)?;
         let mut out = Writer::counting();
@@ -93,6 +106,8 @@ impl<'a> Blobs<'a> {
     }
 
     fn build(&self, out: &mut Writer<'_>, key: &str) -> usize {
+        // URL and authorization text share one packed extent. `url_end` splits
+        // the two borrowed strings after construction without another buffer.
         out.push(self.container.endpoint);
         out.push("/");
         out.push(self.container.name);
@@ -106,6 +121,7 @@ impl<'a> Blobs<'a> {
         url_end
     }
 
+    /// Interprets a GET response and borrows its successful body.
     pub fn interpret_get<'response>(
         &self,
         response: Response<'response>,

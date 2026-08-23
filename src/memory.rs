@@ -1,8 +1,16 @@
 use core::fmt;
 
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
+
+/// A contiguous byte extent owned, and optionally grown, by the host.
 pub trait Extent: Send + Sync {
+    /// Returns the currently available bytes.
     fn as_slice(&self) -> &[u8];
+    /// Returns the currently available mutable bytes.
     fn as_mut_slice(&mut self) -> &mut [u8];
+    /// Attempts contents-preserving growth to at least `required` bytes.
+    ///
+    /// Refusing growth by returning `false` is always valid.
     fn try_reserve(&mut self, required: usize) -> bool;
 }
 
@@ -20,9 +28,11 @@ impl Extent for [u8] {
     }
 }
 
+/// Identifies the caller-provided extent that was too small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WorkspaceExtent {
+    /// Storage containing the URL and header values of a request.
     Packed,
 }
 
@@ -34,10 +44,14 @@ impl fmt::Display for WorkspaceExtent {
     }
 }
 
+/// The exact capacity needed from one caller-provided extent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
+    /// The extent that was too small.
     pub extent: WorkspaceExtent,
+    /// The minimum capacity required by the attempted operation.
     pub required: usize,
+    /// The capacity available during the attempted operation.
     pub available: usize,
 }
 
@@ -53,7 +67,9 @@ impl fmt::Display for CapacityError {
 
 impl core::error::Error for CapacityError {}
 
+/// Extent sizes required to construct a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestRequirements {
+    /// Bytes required for the packed request extent.
     pub packed: usize,
 }

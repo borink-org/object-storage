@@ -1,6 +1,10 @@
+//! Link-time proof that the Azure GET path does not require a global allocator.
+
 #![no_std]
 
 use borink_object_storage::{Blobs, Container, RequestWorkspace, Response, Timestamps};
+
+// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
 
 // Required to link this no_std artifact; the exported check does not panic.
 #[panic_handler]
@@ -11,6 +15,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 // Keeping the complete GET path reachable makes any reachable allocation fail to link.
+/// Exercises request construction and response interpretation in a reachable symbol.
 #[unsafe(no_mangle)]
 pub extern "C" fn azure_get_without_an_allocator() -> usize {
     let Ok(container) = Container::new("https://account", "container") else {

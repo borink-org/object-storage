@@ -1,3 +1,5 @@
+//! Loopback integration test for the synchronous `ureq` host.
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
