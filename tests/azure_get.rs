@@ -60,22 +60,15 @@ fn reports_the_exact_required_capacity() {
 }
 
 #[test]
-fn returns_borrowed_response_bytes() {
-    let blobs = blobs();
-    let body = b"contents";
-    let result = blobs.interpret_get(Response::new(200, body)).unwrap();
-    assert!(core::ptr::eq(result.as_ptr(), body.as_ptr()));
-}
-
-#[test]
 fn classifies_basic_response_errors() {
     let blobs = blobs();
+    assert_eq!(blobs.interpret_get(Response::new(200)), Ok(()));
     assert_eq!(
-        blobs.interpret_get(Response::new(404, b"")),
+        blobs.interpret_get(Response::new(404)),
         Err(Error::NotFound)
     );
     assert_eq!(
-        blobs.interpret_get(Response::new(403, b"")),
+        blobs.interpret_get(Response::new(403)),
         Err(Error::Unauthorized)
     );
 }

@@ -4,9 +4,9 @@ use crate::{
     Timestamps, WorkspaceExtent,
 };
 
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
 /// Latest Azure Storage version fully deployed in every region.
+///
+/// See the [Azure Storage service version lifecycle](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services).
 pub const VERSION: &str = "2026-04-06";
 
 // Azure limits blob names to 1,024 characters.
@@ -121,13 +121,10 @@ impl<'a> Blobs<'a> {
         url_end
     }
 
-    /// Interprets a GET response and borrows its successful body.
-    pub fn interpret_get<'response>(
-        &self,
-        response: Response<'response>,
-    ) -> Result<&'response [u8]> {
+    /// Interprets GET response metadata before the host reads the body.
+    pub fn interpret_get(&self, response: Response) -> Result<()> {
         match response.status() {
-            200..=299 => Ok(response.body()),
+            200..=299 => Ok(()),
             404 => Err(Error::NotFound),
             401 | 403 => Err(Error::Unauthorized),
             status => Err(Error::Status(status)),

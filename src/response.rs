@@ -1,25 +1,17 @@
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
-/// HTTP response metadata and body borrowed from the host.
+/// HTTP response metadata supplied by the host before it reads the body.
 #[derive(Debug, Clone, Copy)]
-pub struct Response<'a> {
+pub struct Response {
     status: u16,
-    body: &'a [u8],
 }
 
-impl<'a> Response<'a> {
-    /// Borrows a status code and response body supplied by the host.
-    pub fn new(status: u16, body: &'a [u8]) -> Self {
-        Self { status, body }
+impl Response {
+    /// Wraps the HTTP status code supplied by the host.
+    pub fn new(status: u16) -> Self {
+        Self { status }
     }
 
     /// Returns the HTTP status code.
     pub fn status(&self) -> u16 {
         self.status
-    }
-
-    /// Returns the response body without copying it.
-    pub fn body(&self) -> &'a [u8] {
-        self.body
     }
 }

@@ -2,8 +2,6 @@ use core::str;
 
 use crate::{CapacityError, Extent, WorkspaceExtent};
 
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
 /// Caller-provided storage used while constructing a request.
 pub struct RequestWorkspace<'a> {
     packed: Backing<'a>,

@@ -1,5 +1,3 @@
-[workspace]
-
 [package]
 name = "borink-azure-get-ureq"
 version = "0.0.0"

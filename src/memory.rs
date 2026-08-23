@@ -1,7 +1,5 @@
 use core::fmt;
 
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
 /// A contiguous byte extent owned, and optionally grown, by the host.
 pub trait Extent: Send + Sync {
     /// Returns the currently available bytes.
@@ -10,7 +8,8 @@ pub trait Extent: Send + Sync {
     fn as_mut_slice(&mut self) -> &mut [u8];
     /// Attempts contents-preserving growth to at least `required` bytes.
     ///
-    /// Refusing growth by returning `false` is always valid.
+    /// Returns whether that capacity is now available. Refusal is always valid;
+    /// the operation's original [`CapacityError`] remains the reported error.
     fn try_reserve(&mut self, required: usize) -> bool;
 }
 
@@ -53,6 +52,9 @@ impl Extent for VecExtent {
 }
 
 /// Identifies the caller-provided extent that was too small.
+///
+/// Only packed request storage is needed for Azure bearer GET. Other operations
+/// can add independently sized signing, decoding, listing, or multipart extents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WorkspaceExtent {

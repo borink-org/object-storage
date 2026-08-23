@@ -1,4 +1,6 @@
 [workspace]
+members = ["checks/no-allocator", "hosts/ureq"]
+default-members = ["."]
 
 [package]
 name = "borink-object-storage"
@@ -16,3 +18,7 @@ percent-encoding = { version = "2.3", default-features = false }
 
 [lints.rust]
 missing_docs = "deny"
+
+[profile.no-allocator]
+inherits = "dev"
+panic = "abort"

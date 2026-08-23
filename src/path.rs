@@ -1,8 +1,9 @@
 use percent_encoding::{AsciiSet, CONTROLS, PercentEncode, utf8_percent_encode};
 
 // Encode bytes that are structural or ambiguous inside a URL path, including
-// `%` so caller text cannot smuggle in a pre-encoded separator. Slash remains
-// literal because Azure blob names use it for virtual directory segments.
+// `%` so caller text cannot smuggle in a pre-encoded separator. Flat accounts
+// may list with another delimiter, but that is ordinary blob-name text here.
+// Slash remains literal because HNS paths use it between directory segments.
 const OBJECT_KEY_ESCAPE: &AsciiSet = &CONTROLS
     .add(b':')
     .add(b'?')

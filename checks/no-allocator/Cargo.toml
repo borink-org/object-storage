@@ -1,19 +1,21 @@
-[workspace]
-
 [package]
 name = "azure-get-no-allocator"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["std"]
+link-check = []
+std = []
+
 [lib]
 crate-type = ["staticlib"]
+test = false
+doctest = false
 
 [dependencies]
 borink-object-storage = { path = "../.." }
-
-[profile.dev]
-panic = "abort"
 
 [lints.rust]
 missing_docs = "deny"

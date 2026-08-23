@@ -1,5 +1,3 @@
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
 /// A host-supplied instant preformatted for Azure request headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamps {

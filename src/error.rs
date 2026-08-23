@@ -2,8 +2,6 @@ use core::fmt;
 
 use crate::CapacityError;
 
-// TODO(doc-review): Public API rustdoc is an initial scaffold for manual review.
-
 /// Result type returned by this crate.
 pub type Result<T> = core::result::Result<T, Error>;
 

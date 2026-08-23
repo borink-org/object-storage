@@ -5,6 +5,9 @@ pub(crate) fn valid_http_origin(value: &str) -> bool {
     let Some((scheme, authority)) = value.split_once("://") else {
         return false;
     };
+    // `/`, `?`, and `#` end the authority; `@` introduces userinfo. Space and
+    // controls delimit HTTP syntax, while clients disagree on normalizing `\\`.
+    // Reject them before appending the container and key to this origin.
     matches!(scheme, "http" | "https")
         && !authority.is_empty()
         && value.is_ascii()
