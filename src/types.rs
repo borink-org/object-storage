@@ -46,7 +46,7 @@ pub enum ConditionKind {
 ///
 /// A scheduler stores this beside its own state and hands it back both to
 /// [`Blobs::encode_get`](crate::Blobs::encode_get) and to
-/// [`Blobs::interpret_get`](crate::Blobs::interpret_get), which is what binds a
+/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head), which is what binds a
 /// response to the request that produced it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetShape {
@@ -82,15 +82,4 @@ impl<'h> PhysicalGet<'h> {
             shape: GetShape::default(),
         }
     }
-}
-
-/// Metadata borrowed from a successful Azure response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ObjectMeta<'a> {
-    /// Total object size, not merely the returned range length.
-    pub size: u64,
-    /// Entity tag when Azure returned one.
-    pub e_tag: Option<&'a str>,
-    /// Azure blob version identifier when returned.
-    pub version: Option<&'a str>,
 }

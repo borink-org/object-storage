@@ -1,8 +1,8 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, Error, GetKind, GetShape, InvalidPlan, ObjectMeta,
-    PhysicalGet, RequestedRange, Response, Timestamps, VERSION, layered,
+    Blobs, BodyWindow, ConditionKind, Container, Error, GetHead, GetHeadOutcome, GetKind, GetShape,
+    InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -101,34 +101,6 @@ fn reports_the_exact_required_capacity() {
 }
 
 #[test]
-fn classifies_response_metadata_and_errors() {
-    let blobs = blobs();
-    let shape = GetShape::default();
-    let headers = [("Content-Length", "8"), ("ETag", "\"etag\"")];
-    assert_eq!(
-        blobs.interpret_get(Response::new(200, headers), shape),
-        Ok(ObjectMeta {
-            size: 8,
-            e_tag: Some("\"etag\""),
-            version: None,
-        })
-    );
-    for (status, expected) in [
-        (404, Error::NotFound),
-        (403, Error::Unauthorized),
-        (304, Error::NotModified),
-    ] {
-        assert_eq!(
-            blobs.interpret_get(
-                Response::new(status, core::iter::empty::<(&str, &str)>()),
-                shape,
-            ),
-            Err(expected)
-        );
-    }
-}
-
-#[test]
 fn encodes_ranges_conditions_and_metadata_plans() {
     let blobs = blobs();
     let mut buf = [0; 256];
@@ -175,17 +147,28 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .unwrap();
     assert_eq!(metadata.method(), "HEAD");
 
-    let headers = [
-        ("Content-Range", "bytes 2-5/10"),
-        ("ETag", "\"etag\""),
-        ("x-ms-version-id", "version-1"),
-    ];
+    let head = GetHead::from_headers(
+        206,
+        [
+            ("Content-Range", b"bytes 2-5/10".as_slice()),
+            ("ETag", b"\"etag\""),
+            ("x-ms-version-id", b"version-1"),
+        ],
+    );
     assert_eq!(
-        blobs.interpret_get(Response::new(206, headers), shape),
-        Ok(ObjectMeta {
-            size: 10,
-            e_tag: Some("\"etag\""),
-            version: Some("version-1"),
+        blobs.accept_get_head(shape, head),
+        Ok(GetHeadOutcome::Body {
+            meta: ObjectMeta {
+                size: Some(10),
+                e_tag: Some(b"\"etag\""),
+                version: Some(b"version-1"),
+                ..ObjectMeta::default()
+            },
+            body: BodyWindow {
+                object_offset: 2,
+                expected_len: Some(4),
+                object_size: Some(10),
+            },
         })
     );
 }

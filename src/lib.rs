@@ -7,17 +7,19 @@
 
 mod azure;
 mod error;
+mod head;
 mod http;
 pub mod layered;
+mod outcome;
 mod path;
 mod request;
-mod response;
 mod time;
 mod types;
 
 pub use azure::{Blobs, Container, VERSION};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
+pub use head::GetHead;
+pub use outcome::{BodyWindow, FailureClass, GetHeadOutcome, ObjectMeta};
 pub use request::WireRequest;
-pub use response::Response;
 pub use time::Timestamps;
-pub use types::{ConditionKind, GetKind, GetShape, ObjectMeta, PhysicalGet, RequestedRange};
+pub use types::{ConditionKind, GetKind, GetShape, PhysicalGet, RequestedRange};

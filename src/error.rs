@@ -62,6 +62,10 @@ impl fmt::Display for InvalidPlan {
 }
 
 /// Failure while validating, encoding, or interpreting an Azure GET request.
+///
+/// Responses Azure legitimately sends — not found, throttled, a failed
+/// precondition — are not errors: they are
+/// [`GetHeadOutcome`](crate::GetHeadOutcome) variants a scheduler branches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -75,20 +79,10 @@ pub enum Error {
     InvalidPlan(InvalidPlan),
     /// The caller's request buffer is too small.
     Capacity(CapacityError),
-    /// Azure reported that the object does not exist.
-    NotFound,
-    /// Azure rejected the bearer token.
-    Unauthorized,
-    /// An `If-Match` condition did not hold.
-    Precondition,
-    /// An `If-None-Match` condition did not hold.
-    NotModified,
-    /// Azure could not satisfy the requested byte range.
-    RangeNotSatisfiable,
-    /// A successful response omitted or malformed required metadata.
+    /// The response head is unparseable or self-contradictory.
     Protocol(&'static str),
-    /// Azure returned another non-success status.
-    Status(u16),
+    /// The response head contradicts the plan it answers.
+    ResponseMismatch(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -99,13 +93,10 @@ impl fmt::Display for Error {
             Self::InvalidToken => f.write_str("invalid bearer token"),
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
-            Self::NotFound => f.write_str("object not found"),
-            Self::Unauthorized => f.write_str("Azure rejected the bearer token"),
-            Self::Precondition => f.write_str("precondition failed"),
-            Self::NotModified => f.write_str("not modified"),
-            Self::RangeNotSatisfiable => f.write_str("range not satisfiable"),
             Self::Protocol(detail) => write!(f, "invalid Azure response: {detail}"),
-            Self::Status(status) => write!(f, "Azure returned HTTP {status}"),
+            Self::ResponseMismatch(detail) => {
+                write!(f, "the Azure response does not answer the plan: {detail}")
+            }
         }
     }
 }

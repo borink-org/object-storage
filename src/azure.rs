@@ -2,8 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    CapacityError, ConditionKind, Error, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet,
-    RequestedRange, Response, Result, Timestamps, WireRequest,
+    BodyWindow, CapacityError, ConditionKind, Error, FailureClass, GetHead, GetHeadOutcome,
+    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Result, Timestamps,
+    WireRequest,
 };
 
 /// Latest Azure Storage version fully deployed in every region.
@@ -154,28 +155,191 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Validates successful response metadata before the host reads the body.
+    /// Interprets a response head against the plan it answers.
     ///
-    /// The plan the response answers is passed back in, so the interpretation
-    /// cannot disagree with the request: the host re-states nothing.
-    pub fn interpret_get<'response>(
+    /// The plan is passed back in, so the interpretation cannot disagree with
+    /// the request: the host re-states nothing the library already knows.
+    ///
+    /// Every head Azure actually sends maps to a [`GetHeadOutcome`]. `Err` is
+    /// reserved for heads that are unparseable, self-contradictory, or that
+    /// contradict `shape`. Azure names its errors in `x-ms-error-code`, so the
+    /// head is always decisive here and no body continuation is needed.
+    pub fn accept_get_head<'h>(
         &self,
-        response: Response<'response>,
         shape: GetShape,
-    ) -> Result<ObjectMeta<'response>> {
-        match response.status() {
-            200..=299 => Ok(ObjectMeta {
-                size: response_size(&response, shape)?,
-                e_tag: response.header("etag"),
-                version: response.header("x-ms-version-id"),
+        head: GetHead<'h>,
+    ) -> Result<GetHeadOutcome<'h>> {
+        let ranged = shape.range != RequestedRange::Whole;
+        match head.status {
+            206 if !ranged => Err(Error::ResponseMismatch(
+                "an unranged plan was answered with 206",
+            )),
+            200 if ranged => Err(Error::ResponseMismatch(
+                "a ranged plan was answered without 206",
+            )),
+            200 | 206 => accept_success(shape, head),
+            // A conditional status the plan did not ask for is a contradiction,
+            // not an outcome: nothing in the plan explains it.
+            304 if shape.condition_kind != ConditionKind::IfNoneMatch => Err(Error::Protocol(
+                "304 answered a plan without an If-None-Match condition",
+            )),
+            304 => Ok(GetHeadOutcome::NotModified { etag: head.etag }),
+            412 if shape.condition_kind != ConditionKind::IfMatch => Err(Error::Protocol(
+                "412 answered a plan without an If-Match condition",
+            )),
+            412 => Ok(GetHeadOutcome::PreconditionFailed),
+            404 => Ok(GetHeadOutcome::NotFound),
+            416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
+                object_size: match head.content_range.map(parse_content_range) {
+                    None => None,
+                    // `bytes */N` is the only form 416 may carry.
+                    Some(Some(ContentRange::Unsatisfied { total })) => total,
+                    Some(_) => return Err(Error::Protocol("invalid 416 content-range")),
+                },
             }),
-            404 => Err(Error::NotFound),
-            401 | 403 => Err(Error::Unauthorized),
-            304 => Err(Error::NotModified),
-            412 => Err(Error::Precondition),
-            416 => Err(Error::RangeNotSatisfiable),
-            status => Err(Error::Status(status)),
+            200..=299 => Err(Error::Protocol("unexpected success status")),
+            status => Ok(GetHeadOutcome::ServiceFailure {
+                status,
+                class: failure_class(status),
+                request_id: head.request_id,
+            }),
         }
+    }
+}
+
+fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutcome<'h>> {
+    let content_length = decimal_header(head.content_length)?;
+    let meta = |size| ObjectMeta {
+        size,
+        e_tag: head.etag,
+        last_modified: head.last_modified,
+        version: head.version,
+        content_encoding: head.content_encoding,
+    };
+    if head.status == 200 {
+        // An unranged plan reads from byte zero, and Azure states the whole
+        // object length, so `Content-Length` is both the window and the size.
+        return Ok(match shape.kind {
+            GetKind::Metadata => GetHeadOutcome::Complete(meta(content_length)),
+            GetKind::Bytes => GetHeadOutcome::Body {
+                meta: meta(content_length),
+                body: BodyWindow {
+                    object_offset: 0,
+                    expected_len: content_length,
+                    object_size: content_length,
+                },
+            },
+        });
+    }
+    let value = head
+        .content_range
+        .ok_or(Error::ResponseMismatch("206 without a content-range"))?;
+    let ContentRange::Satisfied { start, end, total } =
+        parse_content_range(value).ok_or(Error::Protocol("invalid content-range"))?
+    else {
+        return Err(Error::Protocol("bytes */N is valid only in a 416"));
+    };
+    let served = end - start + 1;
+    if content_length.is_some_and(|length| length != served) {
+        return Err(Error::Protocol(
+            "content-length disagrees with content-range",
+        ));
+    }
+    // Azure serves the whole satisfiable range, so a short serve is a
+    // mismatch: silently accepting it would hand consumers a partial read.
+    let requested_start = match shape.range {
+        RequestedRange::Bounded { start, .. } | RequestedRange::Offset(start) => start,
+        RequestedRange::Whole | RequestedRange::Suffix(_) => {
+            unreachable!("an unranged plan cannot reach a 206")
+        }
+    };
+    if start != requested_start {
+        return Err(Error::ResponseMismatch("the served range starts elsewhere"));
+    }
+    if let Some(total) = total {
+        let satisfiable = match shape.range {
+            RequestedRange::Bounded { end, .. } => end.min(total),
+            _ => total,
+        };
+        if end + 1 != satisfiable {
+            return Err(Error::ResponseMismatch(
+                "Azure served less than the satisfiable range",
+            ));
+        }
+    }
+    Ok(GetHeadOutcome::Body {
+        meta: meta(total),
+        body: BodyWindow {
+            object_offset: start,
+            expected_len: Some(served),
+            object_size: total,
+        },
+    })
+}
+
+enum ContentRange {
+    Satisfied {
+        start: u64,
+        end: u64,
+        total: Option<u64>,
+    },
+    Unsatisfied {
+        total: Option<u64>,
+    },
+}
+
+// `bytes S-E/T`, with `*` allowed for either the range or the total. All
+// arithmetic on the parsed values is checked by construction: S <= E < T.
+fn parse_content_range(value: &[u8]) -> Option<ContentRange> {
+    let rest = trim_ascii(value).strip_prefix(b"bytes ")?;
+    let slash = rest.iter().rposition(|byte| *byte == b'/')?;
+    let (spec, total) = (trim_ascii(&rest[..slash]), trim_ascii(&rest[slash + 1..]));
+    let total = match total {
+        b"*" => None,
+        digits => Some(decimal(digits)?),
+    };
+    if spec == b"*" {
+        return Some(ContentRange::Unsatisfied { total });
+    }
+    let dash = spec.iter().position(|byte| *byte == b'-')?;
+    let start = decimal(&spec[..dash])?;
+    let end = decimal(&spec[dash + 1..])?;
+    if start > end || total.is_some_and(|total| end >= total) {
+        return None;
+    }
+    Some(ContentRange::Satisfied { start, end, total })
+}
+
+fn decimal_header(value: Option<&[u8]>) -> Result<Option<u64>> {
+    match value {
+        None => Ok(None),
+        Some(value) => decimal(trim_ascii(value))
+            .map(Some)
+            .ok_or(Error::Protocol("invalid content-length")),
+    }
+}
+
+pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    bytes.iter().try_fold(0u64, |value, byte| {
+        let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+        value.checked_mul(10)?.checked_add(digit as u64)
+    })
+}
+
+fn trim_ascii(value: &[u8]) -> &[u8] {
+    value.trim_ascii()
+}
+
+fn failure_class(status: u16) -> FailureClass {
+    match status {
+        300..=399 => FailureClass::Redirect,
+        401 | 403 => FailureClass::Auth,
+        408 | 429 => FailureClass::Throttled,
+        500..=599 => FailureClass::Server,
+        _ => FailureClass::Other,
     }
 }
 
@@ -221,21 +385,6 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
         }
         _ => Err(InvalidPlan::Condition.into()),
     }
-}
-
-fn response_size(response: &Response<'_>, shape: GetShape) -> Result<u64> {
-    if shape.range != RequestedRange::Whole {
-        return response
-            .header("content-range")
-            .and_then(|value| value.rsplit_once('/'))
-            .and_then(|(_, total)| total.parse().ok())
-            .ok_or(Error::Protocol("invalid or missing content-range"));
-    }
-    response
-        .header("content-length")
-        .ok_or(Error::Protocol("response has no object size"))?
-        .parse()
-        .map_err(|_| Error::Protocol("invalid content-length"))
 }
 
 fn valid_header(value: &[u8]) -> bool {
