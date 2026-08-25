@@ -1,5 +1,7 @@
 use core::str;
 
+use crate::Payload;
+
 /// A request that borrows its URL and header values from your buffer.
 ///
 /// Send this with the HTTP client of your choice. Read the method, the URL,
@@ -7,8 +9,8 @@ use core::str;
 ///
 /// The encoding methods copy every byte of the head into your buffer. The head
 /// therefore borrows nothing that you passed to them, and each of those
-/// arguments can be a temporary. The body is the one exception: it stays where
-/// you put it and this request borrows it.
+/// arguments can be a temporary. The content is the one exception: it stays
+/// where you put it, and this request borrows it or leaves it to you.
 ///
 /// # Lifetime
 ///
@@ -21,7 +23,7 @@ pub struct WireRequest<'r> {
     url: &'r str,
     headers: [(&'static str, &'r str); MAX_HEADERS],
     header_count: usize,
-    body: &'r [u8],
+    payload: Payload<'r>,
 }
 
 // authorization, x-ms-date, x-ms-version, x-ms-blob-type, content-length and
@@ -29,13 +31,13 @@ pub struct WireRequest<'r> {
 const MAX_HEADERS: usize = 6;
 
 impl<'r> WireRequest<'r> {
-    pub(crate) fn new(method: &'static str, url: &'r str, body: &'r [u8]) -> Self {
+    pub(crate) fn new(method: &'static str, url: &'r str, payload: Payload<'r>) -> Self {
         Self {
             method,
             url,
             headers: [("", ""); MAX_HEADERS],
             header_count: 0,
-            body,
+            payload,
         }
     }
 
@@ -61,11 +63,13 @@ impl<'r> WireRequest<'r> {
         self.headers[..self.header_count].iter().copied()
     }
 
-    /// Returns the request body.
+    /// Returns the content of the request.
     ///
-    /// A read has no body, so this is empty for a read.
-    pub fn body(&self) -> &'r [u8] {
-        self.body
+    /// A read has no content, so this is an empty [`Payload::Slice`] for a
+    /// read. For a write of streamed content this states the length that you
+    /// must send, and carries no bytes.
+    pub fn payload(&self) -> Payload<'r> {
+        self.payload
     }
 }
 

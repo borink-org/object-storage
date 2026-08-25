@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, GetHeadOutcome, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps,
-    layered,
+    Blobs, GetHeadOutcome, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead,
+    Timestamps, layered,
 };
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
@@ -70,6 +70,7 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let put = PhysicalPut::new(key);
+    let content = Payload::Slice(content);
     let mut buf = vec![0; layered::put_requirements(blobs, &put, content, &now)?];
     let request = blobs.encode_put(&mut buf, &put, content, &now)?;
 
@@ -81,7 +82,8 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
         .config()
         .http_status_as_error(false)
         .build()
-        .send(request.body())?;
+        // This host writes from memory, so it always has the bytes to send.
+        .send(request.payload().bytes().unwrap_or_default())?;
     let status = incoming.status().as_u16();
     let headers = incoming.headers().clone();
     let head = ResponseHead::from_headers(

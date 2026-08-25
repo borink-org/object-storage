@@ -3,8 +3,8 @@ use core::ops::Range;
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
+    GetKind, GetShape, InvalidPlan, ObjectMeta, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome,
+    PutShape, RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -118,7 +118,8 @@ impl<'a> Blobs<'a> {
             GetKind::Bytes => "GET",
             GetKind::Metadata => "HEAD",
         };
-        let mut request = WireRequest::new(method, text(&bytes[..layout.url_end]), &[]);
+        let mut request =
+            WireRequest::new(method, text(&bytes[..layout.url_end]), Payload::Slice(&[]));
         self.push_common(&mut request, bytes, &layout);
         if let Some(span) = layout.range {
             request.push("range", text(&bytes[span]));
@@ -131,9 +132,10 @@ impl<'a> Blobs<'a> {
 
     /// Writes the request head for `put` into `buf`.
     ///
-    /// The head states the length of `content`, and the returned request
-    /// borrows those bytes. This method never copies them, so `content` may be
-    /// as long as Azure accepts in one write.
+    /// The head states the length of `content`. If you pass
+    /// [`Payload::Slice`], the returned request borrows those bytes and copies
+    /// none of them. If you pass [`Payload::Streamed`], the request carries no
+    /// content and you send the stated number of bytes yourself.
     ///
     /// This crate performs no I/O and cannot read the clock, so pass the
     /// current time in `now`. This method copies the date into `buf` with the
@@ -154,7 +156,7 @@ impl<'a> Blobs<'a> {
         &self,
         buf: &'r mut [u8],
         put: &PhysicalPut<'_>,
-        content: &'r [u8],
+        content: Payload<'r>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content.len())?;
@@ -174,7 +176,7 @@ impl<'a> Blobs<'a> {
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
         let length_start = out.position();
-        out.push(U64Decimal::new(content.len() as u64).as_bytes());
+        out.push(U64Decimal::new(content.len()).as_bytes());
         let length_end = out.position();
         let required = out.position();
         let bytes = out.finish().ok_or(CapacityError {
@@ -697,11 +699,11 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 // `u64` because it does not fit a 32-bit `usize`.
 const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
-fn validate_put(put: &PhysicalPut<'_>, len: usize) -> Result<()> {
+fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
     if put.key.is_empty() || put.key.chars().count() > MAX_BLOB_NAME_CHARS {
         return Err(InvalidPlan::Key.into());
     }
-    if len as u64 > MAX_PUT_LEN {
+    if len > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
     validate_condition(put.condition, put.condition_value)

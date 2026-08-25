@@ -3,7 +3,7 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
-use crate::{Blobs, Error, PhysicalGet, PhysicalPut, Result, Timestamps};
+use crate::{Blobs, Error, Payload, PhysicalGet, PhysicalPut, Result, Timestamps};
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
@@ -29,9 +29,8 @@ pub fn get_requirements(
 /// Returns the number of bytes that [`Blobs::encode_put`] needs for this plan.
 ///
 /// Call this to size a buffer before you encode. The answer covers the request
-/// head only, and never the content, which the request borrows where it lies.
-/// Pass the content that you are about to write: its length reaches the head,
-/// its bytes do not.
+/// head only, and never the content. Only the length of `content` reaches the
+/// head, so a [`Payload::Streamed`] sizes a buffer without the bytes.
 ///
 /// # Errors
 ///
@@ -40,7 +39,7 @@ pub fn get_requirements(
 pub fn put_requirements(
     blobs: &Blobs<'_>,
     put: &PhysicalPut<'_>,
-    content: &[u8],
+    content: Payload<'_>,
     now: &Timestamps,
 ) -> Result<usize> {
     // The head states how long the content is, so the requirement depends on

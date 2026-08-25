@@ -189,3 +189,55 @@ impl<'h> PhysicalPut<'h> {
         }
     }
 }
+
+/// The content of a write, and where it comes from.
+///
+/// A write states how long its content is, so this always names a length. The
+/// service requires that length in the request head and refuses a write
+/// without it, so content of an unknown length cannot be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Payload<'b> {
+    /// Content that you hold. The request lends these bytes and copies none.
+    Slice(&'b [u8]),
+    /// Content that you send yourself, of the length that you state.
+    ///
+    /// Use this to write from a file, a socket, or anything else that you do
+    /// not hold in memory. The request then carries no content, and you give
+    /// your HTTP client the same number of bytes that you state here.
+    Streamed {
+        /// The number of bytes that you will send.
+        len: u64,
+    },
+}
+
+impl<'b> Payload<'b> {
+    /// Returns the number of bytes of content.
+    pub fn len(&self) -> u64 {
+        match *self {
+            Self::Slice(bytes) => bytes.len() as u64,
+            Self::Streamed { len } => len,
+        }
+    }
+
+    /// Returns `true` if the content is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the content, if you passed it as [`Self::Slice`].
+    ///
+    /// Returns [`None`] for [`Self::Streamed`], where you hold the content.
+    pub fn bytes(&self) -> Option<&'b [u8]> {
+        match *self {
+            Self::Slice(bytes) => Some(bytes),
+            Self::Streamed { .. } => None,
+        }
+    }
+}
+
+impl<'b> From<&'b [u8]> for Payload<'b> {
+    fn from(bytes: &'b [u8]) -> Self {
+        Self::Slice(bytes)
+    }
+}

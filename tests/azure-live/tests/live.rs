@@ -2,8 +2,9 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, GetHeadOutcome, GetKind, GetShape, PhysicalGet, PhysicalPut,
-    PutHeadOutcome, PutShape, RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, GetHeadOutcome, GetKind, GetShape, Payload, PhysicalGet,
+    PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead, ServiceErrorKind,
+    Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -229,11 +230,31 @@ fn write(
     condition_value: Option<&[u8]>,
     content: &[u8],
 ) -> Result<WriteResult, Box<dyn std::error::Error>> {
+    write_as(fixture, shape, condition_value, content, false)
+}
+
+// `stream` describes the same content as `Payload::Streamed`, which states the
+// length without lending the bytes. The request head must be identical either
+// way, and the host sends the same bytes.
+fn write_as(
+    fixture: &Fixture,
+    shape: PutShape,
+    condition_value: Option<&[u8]>,
+    content: &[u8],
+    stream: bool,
+) -> Result<WriteResult, Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     let put = PhysicalPut::from_shape(shape, &fixture.put_key, condition_value);
-    let mut buf = vec![0; layered::put_requirements(&blobs, &put, content, &now)?];
-    let request = blobs.encode_put(&mut buf, &put, content, &now)?;
+    let described = if stream {
+        Payload::Streamed {
+            len: content.len() as u64,
+        }
+    } else {
+        Payload::Slice(content)
+    };
+    let mut buf = vec![0; layered::put_requirements(&blobs, &put, described, &now)?];
+    let request = blobs.encode_put(&mut buf, &put, described, &now)?;
     let mut outgoing = ureq::put(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
@@ -242,7 +263,8 @@ fn write(
         .config()
         .http_status_as_error(false)
         .build()
-        .send(request.body())?;
+        // A streamed payload carries no bytes, so the host sends its own.
+        .send(request.payload().bytes().unwrap_or(content))?;
     let headers = incoming.headers().clone();
     let head = ResponseHead::from_headers(
         incoming.status().as_u16(),
@@ -392,4 +414,25 @@ fn a_stale_entity_tag_refuses_the_write_as_a_precondition() {
         read_put_key(&fixture, GetShape::default()).body,
         b"the write that must win"
     );
+}
+
+/// A streamed payload states a length without lending the bytes, so a host can
+/// write from a file or a socket. The object it stores must be identical.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn writes_streamed_content_the_same_as_borrowed_content() {
+    let fixture = Fixture::from_env();
+    let content = b"0123456789-azure-put-streamed";
+
+    seed(&fixture, b"something else entirely");
+    assert_eq!(
+        write_as(&fixture, PutShape::default(), None, content, true)
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+
+    let result = read_put_key(&fixture, GetShape::default());
+    assert_eq!(result.body, content);
+    assert_eq!(result.size, Some(content.len() as u64));
 }
