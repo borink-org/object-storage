@@ -16,11 +16,17 @@ Currently we only provide the sans-I/O core as a library; you must provide the h
 ### Azure Blob Storage only
 
 - Object get (GET request)
-  - Conditional object get (If-Match, If-None-Match)
-  - Byte ranges
+  - Conditional (If-Match, If-None-Match)
+  - Byte ranges: offset and bounded; suffix ranges are refused, Azure does not accept them
 - Object metadata (HEAD request)
-- Response classification: object metadata, byte-range windows, and Azure error
-  codes and request IDs, all borrowed from the caller's response headers
+- Object put (PUT request, whole object)
+  - Conditional (If-None-Match: * writes only if the object is absent)
+  - Content is borrowed or streamed: the head states its length, so a write can come
+    from a file or a socket without holding the object in memory
+- Object delete (DELETE request)
+  - Conditional (If-Match, If-None-Match)
+  - Takes the object alone, the object and its snapshots, or the snapshots alone
+- Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 
 ## Compressed objects
 
