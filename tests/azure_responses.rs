@@ -24,9 +24,9 @@ fn ranged(range: RequestedRange) -> GetShape {
     }
 }
 
-fn conditional(condition_kind: ConditionKind) -> GetShape {
+fn conditional(condition: ConditionKind) -> GetShape {
     GetShape {
-        condition_kind,
+        condition,
         ..GetShape::default()
     }
 }

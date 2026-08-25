@@ -115,7 +115,7 @@ impl<'a> Blobs<'a> {
             available,
         })?;
         Ok(WireRequest::new(
-            match get.shape.kind {
+            match get.kind {
                 GetKind::Bytes => "GET",
                 GetKind::Metadata => "HEAD",
             },
@@ -144,7 +144,7 @@ impl<'a> Blobs<'a> {
         let authorization_end = out.position();
         out.push(now.rfc1123().as_bytes());
         let date_end = out.position();
-        let range = match get.shape.range {
+        let range = match get.range {
             RequestedRange::Whole => None,
             range => {
                 let start = out.position();
@@ -166,7 +166,7 @@ impl<'a> Blobs<'a> {
                 Some(start..out.position())
             }
         };
-        let condition = condition_header(get.shape.condition_kind).map(|name| {
+        let condition = condition_header(get.condition).map(|name| {
             let start = out.position();
             out.push(get.condition_value.expect("the plan was validated"));
             (name, start..out.position())
@@ -215,11 +215,11 @@ impl<'a> Blobs<'a> {
             200 | 206 => accept_success(shape, head),
             // A conditional status the plan did not ask for is a contradiction,
             // not an outcome: nothing in the plan explains it.
-            304 if shape.condition_kind != ConditionKind::IfNoneMatch => Err(Error::Protocol(
+            304 if shape.condition != ConditionKind::IfNoneMatch => Err(Error::Protocol(
                 "304 answered a plan without an If-None-Match condition",
             )),
             304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            412 if shape.condition_kind != ConditionKind::IfMatch => Err(Error::Protocol(
+            412 if shape.condition != ConditionKind::IfMatch => Err(Error::Protocol(
                 "412 answered a plan without an If-Match condition",
             )),
             412 => Ok(GetHeadOutcome::PreconditionFailed),
@@ -398,20 +398,20 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
     if get.key.is_empty() || get.key.chars().count() > MAX_BLOB_NAME_CHARS {
         return Err(InvalidPlan::Key.into());
     }
-    match get.shape.range {
+    match get.range {
         RequestedRange::Bounded { start, end } if start >= end => {
             return Err(InvalidPlan::Range.into());
         }
         RequestedRange::Suffix(_) => return Err(InvalidPlan::UnsupportedRange.into()),
         RequestedRange::Whole => {}
-        _ if get.shape.kind == GetKind::Metadata => {
+        _ if get.kind == GetKind::Metadata => {
             return Err(InvalidPlan::RangedMetadata.into());
         }
         _ => {}
     }
     // The kind and the value must agree in both directions: a kind without a
     // value cannot be encoded, and a value without a kind would be dropped.
-    match (get.shape.condition_kind, get.condition_value) {
+    match (get.condition, get.condition_value) {
         (ConditionKind::None, None) => Ok(()),
         (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
             if valid_header(value) =>

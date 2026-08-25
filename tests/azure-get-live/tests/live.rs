@@ -65,11 +65,8 @@ fn read(
 ) -> Result<ReadResult, Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
-    let get = PhysicalGet {
-        key: &fixture.key,
-        condition_value,
-        shape,
-    };
+    // The scheduler path: a stored shape plus the bytes it needs.
+    let get = PhysicalGet::from_shape(shape, &fixture.key, condition_value);
     let mut buf = vec![0; layered::requirements(&blobs, &get, &now)?];
     let request = blobs.encode_get(&mut buf, &get, &now)?;
     let mut outgoing = match request.method() {
@@ -121,12 +118,12 @@ fn read(
 const METADATA: GetShape = GetShape {
     kind: GetKind::Metadata,
     range: RequestedRange::Whole,
-    condition_kind: ConditionKind::None,
+    condition: ConditionKind::None,
 };
 
-fn conditional(kind: ConditionKind) -> GetShape {
+fn conditional(condition: ConditionKind) -> GetShape {
     GetShape {
-        condition_kind: kind,
+        condition,
         ..GetShape::default()
     }
 }

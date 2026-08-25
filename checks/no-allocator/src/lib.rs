@@ -30,7 +30,7 @@ pub extern "C" fn azure_get_without_an_allocator() -> usize {
     };
     let headers = [("content-length", b"4".as_slice())];
     let Ok(GetHeadOutcome::Body { body, .. }) =
-        blobs.accept_get_head(get.shape, GetHead::from_headers(200, headers))
+        blobs.accept_get_head(get.shape(), GetHead::from_headers(200, headers))
     else {
         return 4;
     };

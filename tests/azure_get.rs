@@ -1,7 +1,7 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, BodyWindow, ConditionKind, Container, Error, GetHead, GetHeadOutcome, GetKind, GetShape,
+    Blobs, BodyWindow, ConditionKind, Container, Error, GetHead, GetHeadOutcome, GetKind,
     InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Timestamps, VERSION, layered,
 };
 
@@ -50,11 +50,9 @@ fn the_head_borrows_nothing_the_caller_passed_in() {
             &mut buf,
             &PhysicalGet {
                 key: &String::from("object"),
+                condition: ConditionKind::IfMatch,
                 condition_value: Some(String::from("\"etag\"").as_bytes()),
-                shape: GetShape {
-                    condition_kind: ConditionKind::IfMatch,
-                    ..GetShape::default()
-                },
+                ..PhysicalGet::new("")
             },
             &Timestamps::from_unix(1_787_400_000),
         )
@@ -104,22 +102,14 @@ fn reports_the_exact_required_capacity() {
 fn encodes_ranges_conditions_and_metadata_plans() {
     let blobs = blobs();
     let mut buf = [0; 256];
-    let shape = GetShape {
+    let get = PhysicalGet {
+        key: "object",
         kind: GetKind::Bytes,
         range: RequestedRange::Bounded { start: 2, end: 6 },
-        condition_kind: ConditionKind::IfNoneMatch,
+        condition: ConditionKind::IfNoneMatch,
+        condition_value: Some(b"\"etag\""),
     };
-    let request = blobs
-        .encode_get(
-            &mut buf,
-            &PhysicalGet {
-                key: "object",
-                condition_value: Some(b"\"etag\""),
-                shape,
-            },
-            &now(),
-        )
-        .unwrap();
+    let request = blobs.encode_get(&mut buf, &get, &now()).unwrap();
     assert_eq!(request.method(), "GET");
     assert!(
         request
@@ -136,10 +126,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .encode_get(
             &mut buf,
             &PhysicalGet {
-                shape: GetShape {
-                    kind: GetKind::Metadata,
-                    ..GetShape::default()
-                },
+                kind: GetKind::Metadata,
                 ..PhysicalGet::new("object")
             },
             &now(),
@@ -156,7 +143,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         ],
     );
     assert_eq!(
-        blobs.accept_get_head(shape, head),
+        blobs.accept_get_head(get.shape(), head),
         Ok(GetHeadOutcome::Body {
             meta: ObjectMeta {
                 size: Some(10),
@@ -200,19 +187,13 @@ fn rejects_values_that_could_change_the_http_request() {
 
 #[test]
 fn refuses_invalid_plans_before_writing_anything() {
-    let condition = |kind, value| PhysicalGet {
-        key: "object",
-        condition_value: value,
-        shape: GetShape {
-            condition_kind: kind,
-            ..GetShape::default()
-        },
+    let condition = |condition, condition_value| PhysicalGet {
+        condition,
+        condition_value,
+        ..PhysicalGet::new("object")
     };
     let ranged = |range| PhysicalGet {
-        shape: GetShape {
-            range,
-            ..GetShape::default()
-        },
+        range,
         ..PhysicalGet::new("object")
     };
     let cases = [
@@ -227,11 +208,8 @@ fn refuses_invalid_plans_before_writing_anything() {
         ),
         (
             PhysicalGet {
-                shape: GetShape {
-                    kind: GetKind::Metadata,
-                    range: RequestedRange::Offset(2),
-                    ..GetShape::default()
-                },
+                kind: GetKind::Metadata,
+                range: RequestedRange::Offset(2),
                 ..PhysicalGet::new("object")
             },
             InvalidPlan::RangedMetadata,

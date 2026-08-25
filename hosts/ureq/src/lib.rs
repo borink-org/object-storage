@@ -32,7 +32,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_bytes())),
     );
-    match blobs.accept_get_head(get.shape, head)? {
+    match blobs.accept_get_head(get.shape(), head)? {
         GetHeadOutcome::Body { .. } => incoming.body_mut().read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete(_) => Ok(Vec::new()),
         outcome => Err(format!("Azure GET failed: {outcome:?}").into()),

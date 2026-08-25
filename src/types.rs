@@ -48,12 +48,14 @@ pub enum ConditionKind {
     IfNoneMatch,
 }
 
-/// The part of a plan that is copyable and holds no borrows.
+/// The part of a plan that holds no borrows.
 ///
-/// Store this next to your own request state. Pass it back to
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) and to
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head). The second call
-/// uses it to check that the response answers the request you sent.
+/// [`PhysicalGet::shape`] returns this, and [`PhysicalGet::from_shape`] takes
+/// it back. Between those two calls you can store it: it is [`Copy`] and has
+/// no lifetime, so it outlives the key and ETag bytes that the plan borrows.
+///
+/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) needs only this
+/// part, so you can read a response without rebuilding the whole plan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetShape {
     /// Whether the plan asks for bytes or for metadata.
@@ -61,22 +63,33 @@ pub struct GetShape {
     /// The byte range that the plan requests.
     pub range: RequestedRange,
     /// The precondition that the plan carries.
-    pub condition_kind: ConditionKind,
+    pub condition: ConditionKind,
 }
 
-/// A complete plan: a [`GetShape`] and the borrowed bytes that go with it.
+/// A complete plan for one read.
 ///
-/// Build this immediately before each call and let it go afterwards. Because
-/// the fields are public and unchecked,
+/// Build this immediately before each call and let it go afterwards. It
+/// borrows the key and the ETag, so it cannot be stored across a request. To
+/// keep a plan while a request is in flight, store [`PhysicalGet::shape`] and
+/// your own copy of the bytes.
+///
+/// Because the fields are public and unchecked,
 /// [`Blobs::encode_get`](crate::Blobs::encode_get) validates the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalGet<'h> {
     /// The object key, before percent-encoding.
     pub key: &'h str,
+    /// Whether the plan asks for bytes or for metadata.
+    pub kind: GetKind,
+    /// The byte range that the plan requests.
+    pub range: RequestedRange,
+    /// The precondition that the plan carries.
+    pub condition: ConditionKind,
     /// The ETag that the precondition compares against.
+    ///
+    /// This must be present if `condition` is not [`ConditionKind::None`], and
+    /// absent if it is.
     pub condition_value: Option<&'h [u8]>,
-    /// The copyable part of the same plan.
-    pub shape: GetShape,
 }
 
 impl<'h> PhysicalGet<'h> {
@@ -84,8 +97,34 @@ impl<'h> PhysicalGet<'h> {
     pub fn new(key: &'h str) -> Self {
         Self {
             key,
+            kind: GetKind::default(),
+            range: RequestedRange::default(),
+            condition: ConditionKind::default(),
             condition_value: None,
-            shape: GetShape::default(),
+        }
+    }
+
+    /// Rebuilds a plan from a stored [`GetShape`] and the bytes it needs.
+    pub fn from_shape(shape: GetShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+        Self {
+            key,
+            kind: shape.kind,
+            range: shape.range,
+            condition: shape.condition,
+            condition_value,
+        }
+    }
+
+    /// Returns the part of this plan that you can store.
+    ///
+    /// Pass the result to
+    /// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) when the
+    /// response arrives.
+    pub fn shape(&self) -> GetShape {
+        GetShape {
+            kind: self.kind,
+            range: self.range,
+            condition: self.condition,
         }
     }
 }
