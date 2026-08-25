@@ -31,6 +31,19 @@ Currently we only provide the sans-I/O core as a library; you must provide the h
 - Response interpretation: object metadata, byte-range windows and service
   failures, all borrowed from the caller's response headers
 
+## Compressed objects
+
+Azure stores a blob as opaque bytes and never compresses it for you. If you
+uploaded compressed bytes and set `Content-Encoding`, then those bytes are what
+Azure stores and serves, and every byte range, length and offset counts them.
+
+This crate passes such objects through: it reports the encoding in
+`ObjectMeta::content_encoding` and leaves the bytes alone, so you can decompress
+them yourself. Your HTTP client must do the same. Turn off its automatic
+decompression, such as the `gzip` feature of `reqwest` or of `ureq`: those
+decode the body and remove the headers that record it, so the offsets and
+lengths this crate reports would no longer describe the bytes you receive.
+
 ## Limitations
 
 Currently only ASCII endpoints are supported. Object keys may contain Unicode and are percent-encoded for the request. If you have a use case for internationalized endpoints, please let us know and we'll enable them as an optional feature.

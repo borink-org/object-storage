@@ -16,9 +16,12 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
     }
-    // Automatic decompression must stay off: ranges and lengths are defined
-    // over the stored representation, and a decoding client strips the very
-    // headers that would reveal it changed the bytes.
+    // This host returns the stored bytes of the blob, encoded as Azure holds
+    // them. It never decompresses: `Content-Length`, `Content-Range` and so
+    // the returned `BodyWindow` all count stored bytes, and a client that
+    // decodes the body would return different bytes under those numbers. See
+    // the `ureq` dependency in Cargo.toml, which turns the decoding off.
+    // Read `ObjectMeta::content_encoding` to learn how the bytes are encoded.
     let mut incoming = outgoing
         .config()
         .http_status_as_error(false)
