@@ -19,11 +19,17 @@
 //! response against the plan, so you never restate what the plan already
 //! holds.
 //!
+//! A write has the same three steps, with [`PhysicalPut`],
+//! [`Blobs::encode_put`] and [`Blobs::accept_put_head`]. The content stays
+//! where you put it: [`Blobs::encode_put`] states its length in the head and
+//! the [`WireRequest`] borrows the bytes.
+//!
 //! # Example
 //!
 //! ```
 //! use borink_object_storage::{
-//!     Blobs, Container, ResponseHead, GetHeadOutcome, PhysicalGet, Timestamps, layered,
+//!     Blobs, Container, GetHeadOutcome, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead,
+//!     Timestamps, layered,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,15 +57,32 @@
 //!     }
 //!     other => panic!("unexpected outcome: {other:?}"),
 //! }
+//!
+//! // A write follows the same three steps.
+//! let put = PhysicalPut::new("directory/object.txt");
+//! let content = b"contents";
+//! let mut buffer = vec![0; layered::put_requirements(&blobs, &put, content, &now)?];
+//! let request = blobs.encode_put(&mut buffer, &put, content, &now)?;
+//! assert_eq!(request.method(), "PUT");
+//! assert_eq!(request.body(), content);
+//!
+//! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
+//! match blobs.accept_put_head(put.shape(), head)? {
+//!     PutHeadOutcome::Created { meta, .. } => {
+//!         assert_eq!(meta.e_tag, Some(b"\"tag\"".as_slice()))
+//!     }
+//!     other => panic!("unexpected outcome: {other:?}"),
+//! }
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # Sizing the buffer
 //!
-//! [`Blobs::encode_get`] refuses a buffer that is too small and states the
-//! exact number of bytes that it needs. You can grow the buffer and call
-//! again, or call [`layered::requirements`] first, as the example does.
+//! The encoding methods refuse a buffer that is too small and state the exact
+//! number of bytes that they need. You can grow the buffer and call again, or
+//! call [`layered::get_requirements`] or [`layered::put_requirements`] first,
+//! as the example does.
 //!
 //! # Host requirements
 //!
@@ -88,8 +111,11 @@ pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, ServiceErrorKind,
+    BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, PutHeadOutcome,
+    ServiceErrorKind,
 };
 pub use request::WireRequest;
 pub use time::Timestamps;
-pub use types::{ConditionKind, GetKind, GetShape, PhysicalGet, RequestedRange};
+pub use types::{
+    ConditionKind, GetKind, GetShape, PhysicalGet, PhysicalPut, PutShape, RequestedRange,
+};

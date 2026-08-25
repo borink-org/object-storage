@@ -3,8 +3,8 @@ use core::ops::Range;
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Result,
-    ServiceErrorKind, Timestamps, WireRequest,
+    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -114,20 +114,93 @@ impl<'a> Blobs<'a> {
             required,
             available,
         })?;
-        Ok(WireRequest::new(
-            match get.kind {
-                GetKind::Bytes => "GET",
-                GetKind::Metadata => "HEAD",
+        let method = match get.kind {
+            GetKind::Bytes => "GET",
+            GetKind::Metadata => "HEAD",
+        };
+        let mut request = WireRequest::new(method, text(&bytes[..layout.url_end]), &[]);
+        self.push_common(&mut request, bytes, &layout);
+        if let Some(span) = layout.range {
+            request.push("range", text(&bytes[span]));
+        }
+        if let Some((name, span)) = layout.condition {
+            request.push(name, text(&bytes[span]));
+        }
+        Ok(request)
+    }
+
+    /// Writes the request head for `put` into `buf`.
+    ///
+    /// The head states the length of `content`, and the returned request
+    /// borrows those bytes. This method never copies them, so `content` may be
+    /// as long as Azure accepts in one write.
+    ///
+    /// This crate performs no I/O and cannot read the clock, so pass the
+    /// current time in `now`. This method copies the date into `buf` with the
+    /// rest of the head, so `now` can be a temporary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `put` cannot become an Azure request,
+    /// or if `content` is longer than Azure writes in one request. This method
+    /// validates the plan before it writes any byte, so it never reports an
+    /// invalid plan as a capacity error.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
+    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// method again, or call
+    /// [`layered::put_requirements`](crate::layered::put_requirements) first.
+    pub fn encode_put<'r>(
+        &self,
+        buf: &'r mut [u8],
+        put: &PhysicalPut<'_>,
+        content: &'r [u8],
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_put(put, content.len())?;
+        let available = buf.len();
+        let mut out = Writer::new(buf);
+        let layout = self.build(
+            &mut out,
+            &PhysicalGet {
+                key: put.key,
+                kind: GetKind::Bytes,
+                range: RequestedRange::Whole,
+                condition: put.condition,
+                condition_value: put.condition_value,
             },
-            text(&bytes[..layout.url_end]),
+            now,
+        );
+        // The content length is head bytes like any other, so it is written
+        // into the caller's buffer rather than formatted at send time.
+        let length_start = out.position();
+        out.push(U64Decimal::new(content.len() as u64).as_bytes());
+        let length_end = out.position();
+        let required = out.position();
+        let bytes = out.finish().ok_or(CapacityError {
+            required,
+            available,
+        })?;
+        let mut request = WireRequest::new("PUT", text(&bytes[..layout.url_end]), content);
+        self.push_common(&mut request, bytes, &layout);
+        request.push("x-ms-blob-type", "BlockBlob");
+        request.push("content-length", text(&bytes[length_start..length_end]));
+        if let Some((name, span)) = layout.condition {
+            request.push(name, text(&bytes[span]));
+        }
+        Ok(request)
+    }
+
+    fn push_common<'r>(&self, request: &mut WireRequest<'r>, bytes: &'r [u8], layout: &Layout) {
+        request.push(
+            "authorization",
             text(&bytes[layout.url_end..layout.authorization_end]),
+        );
+        request.push(
+            "x-ms-date",
             text(&bytes[layout.authorization_end..layout.date_end]),
-            VERSION,
-            layout.range.map(|span| text(&bytes[span])),
-            layout
-                .condition
-                .map(|(name, span)| (name, text(&bytes[span]))),
-        ))
+        );
+        request.push("x-ms-version", VERSION);
     }
 
     fn build(&self, out: &mut Writer<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Layout {
@@ -288,6 +361,95 @@ impl<'a> Blobs<'a> {
                 request_id,
             },
         }
+    }
+
+    /// Reads the response head of a write and reports what Azure did.
+    ///
+    /// Pass the same `shape` that you passed to [`Self::encode_put`]. This
+    /// method checks the head against that plan, so you never restate what the
+    /// plan already holds.
+    ///
+    /// Every head that Azure sends becomes a [`PutHeadOutcome`], including the
+    /// heads that report a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] if the head is invalid, such as a success
+    /// status that a write never returns.
+    ///
+    /// Returns [`Error::ResponseMismatch`] if the head does not answer
+    /// `shape`, such as a failed condition on a write that carried none.
+    pub fn accept_put_head<'h>(
+        &self,
+        shape: PutShape,
+        head: ResponseHead<'h>,
+    ) -> Result<PutHeadOutcome<'h>> {
+        match head.status {
+            201 => Ok(PutHeadOutcome::Created {
+                meta: ObjectMeta {
+                    size: None,
+                    e_tag: head.e_tag,
+                    last_modified: head.last_modified,
+                    version: head.version,
+                    content_encoding: head.content_encoding,
+                },
+            }),
+            // Nothing in an unconditional write explains a failed condition.
+            412 if shape.condition == ConditionKind::None => Err(Error::ResponseMismatch(
+                "412 answered a write without a condition",
+            )),
+            412 => Ok(PutHeadOutcome::PreconditionFailed),
+            404 if head.error_code.is_none() => Ok(put_need_error_body(404, head)),
+            404 => Ok(PutHeadOutcome::NotFound {
+                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
+            }),
+            200..=299 => Err(Error::Protocol("a write returns 201, not another success")),
+            status if head.error_code.is_none() => Ok(put_need_error_body(status, head)),
+            status => {
+                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
+                Ok(PutHeadOutcome::ServiceFailure {
+                    status,
+                    class: failure_class(status, kind),
+                    kind,
+                    request_id: head.request_id,
+                })
+            }
+        }
+    }
+
+    /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_error_body`] for a write, and reads the body the
+    /// same way.
+    pub fn accept_put_error_body<'h>(
+        &self,
+        outcome: PutHeadOutcome<'h>,
+        body: &[u8],
+    ) -> PutHeadOutcome<'h> {
+        let PutHeadOutcome::NeedErrorBody {
+            status, request_id, ..
+        } = outcome
+        else {
+            return outcome;
+        };
+        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        match status {
+            404 => PutHeadOutcome::NotFound { kind },
+            status => PutHeadOutcome::ServiceFailure {
+                status,
+                class: failure_class(status, kind),
+                kind,
+                request_id,
+            },
+        }
+    }
+}
+
+fn put_need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> PutHeadOutcome<'h> {
+    PutHeadOutcome::NeedErrorBody {
+        status,
+        class: failure_class(status, None),
+        request_id: head.request_id,
     }
 }
 
@@ -514,9 +676,13 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
         }
         _ => {}
     }
-    // The kind and the value must agree in both directions: a kind without a
-    // value cannot be encoded, and a value without a kind would be dropped.
-    match (get.condition, get.condition_value) {
+    validate_condition(get.condition, get.condition_value)
+}
+
+// The kind and the value must agree in both directions: a kind without a value
+// cannot be encoded, and a value without a kind would be dropped.
+fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<()> {
+    match (condition, value) {
         (ConditionKind::None, None) => Ok(()),
         (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
             if valid_header(value) =>
@@ -525,6 +691,20 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
         }
         _ => Err(InvalidPlan::Condition.into()),
     }
+}
+
+// Azure writes at most 5000 MiB of content in one Put Blob request. This is a
+// `u64` because it does not fit a 32-bit `usize`.
+const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
+
+fn validate_put(put: &PhysicalPut<'_>, len: usize) -> Result<()> {
+    if put.key.is_empty() || put.key.chars().count() > MAX_BLOB_NAME_CHARS {
+        return Err(InvalidPlan::Key.into());
+    }
+    if len as u64 > MAX_PUT_LEN {
+        return Err(InvalidPlan::PayloadTooLarge.into());
+    }
+    validate_condition(put.condition, put.condition_value)
 }
 
 fn valid_header(value: &[u8]) -> bool {

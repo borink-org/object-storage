@@ -1,8 +1,9 @@
 /// The response header values that this crate reads.
 ///
-/// One head describes any response. Each field holds the value of one header.
-/// Fill the fields with [`ResponseHead::from_headers`], or set them directly
-/// from a streaming parser.
+/// One head describes any response, from a read or from a write. Each field
+/// holds the value of one header. Fill the fields with
+/// [`ResponseHead::from_headers`], or set them directly from a streaming
+/// parser.
 ///
 /// The values are byte slices, not strings. A server can send a header value
 /// that is not UTF-8, and this crate carries such a value instead of
@@ -37,9 +38,8 @@ pub struct ResponseHead<'h> {
     pub version: Option<&'h [u8]>,
     /// The value of the `x-ms-error-code` header.
     ///
-    /// Azure names the error here.
-    /// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) reads it and
-    /// returns the error with the outcome.
+    /// Azure names the error here. The methods that read a head return the
+    /// named error with the outcome.
     pub error_code: Option<&'h [u8]>,
     /// The value of the `x-ms-request-id` header.
     ///

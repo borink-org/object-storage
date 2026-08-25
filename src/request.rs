@@ -1,58 +1,47 @@
 use core::str;
 
-/// A request head that borrows its URL and header values from your buffer.
+/// A request that borrows its URL and header values from your buffer.
 ///
-/// Send this with the HTTP client of your choice. Read the method, the URL and
-/// the headers, and give them to the client.
+/// Send this with the HTTP client of your choice. Read the method, the URL,
+/// the headers and the body, and give them to the client.
 ///
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) copies every byte of the
-/// head into your buffer. The head therefore borrows nothing that you passed
-/// to that method, and each of those arguments can be a temporary.
+/// The encoding methods copy every byte of the head into your buffer. The head
+/// therefore borrows nothing that you passed to them, and each of those
+/// arguments can be a temporary. The body is the one exception: it stays where
+/// you put it and this request borrows it.
 ///
 /// # Lifetime
 ///
-/// The head borrows the buffer, so the buffer stays locked until you drop the
-/// head. Encode, send, then drop the head to use the buffer again. The
-/// compiler enforces this order.
+/// The request borrows the buffer, so the buffer stays locked until you drop
+/// the request. Encode, send, then drop the request to use the buffer again.
+/// The compiler enforces this order.
 #[derive(Debug, Clone, Copy)]
 pub struct WireRequest<'r> {
     method: &'static str,
     url: &'r str,
-    headers: [(&'static str, &'r str); 5],
+    headers: [(&'static str, &'r str); MAX_HEADERS],
     header_count: usize,
+    body: &'r [u8],
 }
 
+// authorization, x-ms-date, x-ms-version, x-ms-blob-type, content-length and
+// one condition: the longest head this crate writes.
+const MAX_HEADERS: usize = 6;
+
 impl<'r> WireRequest<'r> {
-    pub(crate) fn new(
-        method: &'static str,
-        url: &'r str,
-        authorization: &'r str,
-        date: &'r str,
-        version: &'static str,
-        range: Option<&'r str>,
-        condition: Option<(&'static str, &'r str)>,
-    ) -> Self {
-        let mut headers = [("", ""); 5];
-        headers[..3].copy_from_slice(&[
-            ("authorization", authorization),
-            ("x-ms-date", date),
-            ("x-ms-version", version),
-        ]);
-        let mut header_count = 3;
-        if let Some(value) = range {
-            headers[header_count] = ("range", value);
-            header_count += 1;
-        }
-        if let Some(value) = condition {
-            headers[header_count] = value;
-            header_count += 1;
-        }
+    pub(crate) fn new(method: &'static str, url: &'r str, body: &'r [u8]) -> Self {
         Self {
             method,
             url,
-            headers,
-            header_count,
+            headers: [("", ""); MAX_HEADERS],
+            header_count: 0,
+            body,
         }
+    }
+
+    pub(crate) fn push(&mut self, name: &'static str, value: &'r str) {
+        self.headers[self.header_count] = (name, value);
+        self.header_count += 1;
     }
 
     /// Returns the HTTP method.
@@ -70,6 +59,13 @@ impl<'r> WireRequest<'r> {
     /// The order of the headers does not matter to Azure.
     pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.headers[..self.header_count].iter().copied()
+    }
+
+    /// Returns the request body.
+    ///
+    /// A read has no body, so this is empty for a read.
+    pub fn body(&self) -> &'r [u8] {
+        self.body
     }
 }
 

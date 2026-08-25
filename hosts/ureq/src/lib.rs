@@ -1,9 +1,10 @@
-//! A synchronous `ureq` host for `borink-object-storage` Azure GET requests.
+//! A synchronous `ureq` host for `borink-object-storage` Azure requests.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, GetHeadOutcome, PhysicalGet, ResponseHead, Timestamps, layered,
+    Blobs, GetHeadOutcome, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps,
+    layered,
 };
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
@@ -62,4 +63,48 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
 
 fn no_object(outcome: GetHeadOutcome<'_>) -> Box<dyn std::error::Error> {
     format!("Azure returned no object: {outcome}").into()
+}
+
+/// Builds and executes one PUT request, storing `content` as the whole object.
+pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let now = Timestamps::from_unix(unix);
+    let put = PhysicalPut::new(key);
+    let mut buf = vec![0; layered::put_requirements(blobs, &put, content, &now)?];
+    let request = blobs.encode_put(&mut buf, &put, content, &now)?;
+
+    let mut outgoing = ureq::put(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(request.body())?;
+    let status = incoming.status().as_u16();
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    match blobs.accept_put_head(put.shape(), head)? {
+        PutHeadOutcome::Created { .. } => Ok(()),
+        outcome @ PutHeadOutcome::NeedErrorBody { .. } => {
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(not_stored(blobs.accept_put_error_body(outcome, &body)))
+        }
+        outcome => Err(not_stored(outcome)),
+    }
+}
+
+fn not_stored(outcome: PutHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("Azure stored no object: {outcome}").into()
 }
