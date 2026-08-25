@@ -111,6 +111,24 @@ pub enum GetHeadOutcome<'h> {
         /// The size of the object, if `Content-Range: bytes */N` states it.
         object_size: Option<u64>,
     },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Read the response body and pass it to
+    /// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body), which
+    /// returns the final outcome. If you cannot read the body, pass an empty
+    /// one and the error stays unnamed.
+    ///
+    /// Cap what you read. An error body is a diagnostic, and the service
+    /// decides how long it is.
+    #[non_exhaustive]
+    NeedErrorBody {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure, from the status alone.
+        class: FailureClass,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
     /// The service refused the request, or it failed to serve it.
     #[non_exhaustive]
     ServiceFailure {
@@ -223,27 +241,39 @@ impl fmt::Display for GetHeadOutcome<'_> {
                     None => Ok(()),
                 }
             }
+            Self::NeedErrorBody {
+                status,
+                class,
+                request_id,
+            } => write_failure(f, class, *status, *request_id),
             Self::ServiceFailure {
                 status,
                 class,
                 kind,
                 request_id,
-            } => {
-                // The kind is the finer parse, so it wins when the head named
-                // one. The class is the fallback and is always present.
-                match kind {
-                    Some(kind) => write!(f, "{kind} (HTTP {status}")?,
-                    None => write!(f, "{class} (HTTP {status}")?,
-                }
-                // Azure sends an ASCII identifier, but a header value carries
-                // no such guarantee. Name it only when it is printable.
-                if let Some(id) = request_id.and_then(|id| core::str::from_utf8(id).ok()) {
-                    write!(f, ", request {id}")?;
-                }
-                f.write_str(")")
-            }
+            } => match kind {
+                // The kind is the finer parse, so it wins when one was made.
+                // The class is the fallback and is always present.
+                Some(kind) => write_failure(f, kind, *status, *request_id),
+                None => write_failure(f, class, *status, *request_id),
+            },
         }
     }
+}
+
+fn write_failure(
+    f: &mut fmt::Formatter<'_>,
+    reason: &dyn fmt::Display,
+    status: u16,
+    request_id: Option<&[u8]>,
+) -> fmt::Result {
+    write!(f, "{reason} (HTTP {status}")?;
+    // Azure sends an ASCII identifier, but a header value carries no such
+    // guarantee. Name it only when it is printable.
+    if let Some(id) = request_id.and_then(|id| core::str::from_utf8(id).ok()) {
+        write!(f, ", request {id}")?;
+    }
+    f.write_str(")")
 }
 
 #[cfg(test)]

@@ -220,10 +220,6 @@ fn a_416_carries_the_object_size_when_azure_states_it() {
 
 #[test]
 fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
-    assert_eq!(
-        accept(GetShape::default(), GetHead::new(404)),
-        Ok(GetHeadOutcome::NotFound { kind: None })
-    );
     // A 404 that names the container separates it from a missing object.
     let mut missing = GetHead::new(404);
     missing.error_code = Some(b"ContainerNotFound");
@@ -233,24 +229,40 @@ fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         })
     );
+    // A code this crate does not know is still decisive: Azure repeats the
+    // header in the body, so there is nothing more to read.
+    missing.error_code = Some(b"FutureAzureCode");
+    assert_eq!(
+        accept(GetShape::default(), missing),
+        Ok(GetHeadOutcome::NotFound { kind: None })
+    );
     for (status, code, class, kind) in [
-        (403, None, FailureClass::Auth, None),
-        (429, None, FailureClass::Throttled, None),
-        (500, None, FailureClass::Server, None),
-        (302, None, FailureClass::Redirect, None),
-        (400, None, FailureClass::Other, None),
+        (
+            403,
+            b"AuthenticationFailed".as_slice(),
+            FailureClass::Auth,
+            Some(ServiceErrorKind::Unauthorized),
+        ),
+        (
+            500,
+            b"InternalError",
+            FailureClass::Server,
+            Some(ServiceErrorKind::Service),
+        ),
+        (302, b"FutureAzureCode", FailureClass::Redirect, None),
+        (400, b"FutureAzureCode", FailureClass::Other, None),
         // Azure's own code refines an otherwise unhelpful status, and the
         // outcome keeps it so that no caller classifies the response twice.
         (
             400,
-            Some(b"ServerBusy".as_slice()),
+            b"ServerBusy",
             FailureClass::Throttled,
             Some(ServiceErrorKind::Throttled),
         ),
     ] {
         let mut head =
             GetHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
-        head.error_code = code;
+        head.error_code = Some(code);
         assert!(
             matches!(
                 accept(GetShape::default(), head),
@@ -314,5 +326,77 @@ fn falls_back_to_the_xml_error_body() {
     assert_eq!(
         classify_error(&head, b"<Error><Cod", true),
         Classification::Incomplete
+    );
+}
+
+#[test]
+fn a_head_without_a_code_asks_for_the_error_body() {
+    let blobs = blobs();
+    for status in [404u16, 403, 500] {
+        let head = GetHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
+        let expected = match status {
+            404 => FailureClass::Other,
+            403 => FailureClass::Auth,
+            _ => FailureClass::Server,
+        };
+        assert!(
+            matches!(
+                blobs.accept_get_head(GetShape::default(), head),
+                Ok(GetHeadOutcome::NeedErrorBody {
+                    status: got_status,
+                    class,
+                    request_id: Some(b"request-123"),
+                    ..
+                }) if got_status == status && class == expected
+            ),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn the_error_body_names_an_error_the_head_left_out() {
+    let blobs = blobs();
+    let missing = blobs
+        .accept_get_head(GetShape::default(), GetHead::new(404))
+        .unwrap();
+    assert_eq!(
+        blobs.accept_error_body(missing, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        GetHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NoSuchContainer)
+        }
+    );
+
+    // A code that arrives in the body refines the category, as a code in the
+    // header would have.
+    let refused = blobs
+        .accept_get_head(GetShape::default(), GetHead::new(400))
+        .unwrap();
+    assert!(matches!(
+        blobs.accept_error_body(refused, b"<Error><Code>ServerBusy</Code></Error>"),
+        GetHeadOutcome::ServiceFailure {
+            class: FailureClass::Throttled,
+            kind: Some(ServiceErrorKind::Throttled),
+            ..
+        }
+    ));
+
+    // A host that could read no body still gets a final outcome, with the
+    // error unnamed.
+    assert_eq!(
+        blobs.accept_error_body(missing, b""),
+        GetHeadOutcome::NotFound { kind: None }
+    );
+
+    // Every other outcome is already final.
+    let named = blobs
+        .accept_get_head(
+            GetShape::default(),
+            GetHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
+        )
+        .unwrap();
+    assert_eq!(
+        blobs.accept_error_body(named, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        named
     );
 }

@@ -99,6 +99,8 @@ fn read(
         GetHeadOutcome::ServiceFailure { status, .. } => {
             (Outcome::ServiceFailure(status), None, None)
         }
+        // Azure sends `x-ms-error-code` on every failure, so a live response
+        // never asks for the body. This asserts that.
         outcome => panic!("unexpected outcome {outcome:?}"),
     };
     let e_tag = e_tag.map(|value| String::from_utf8(value.to_vec()).unwrap());

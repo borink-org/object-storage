@@ -2,10 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{
-    Blobs, Classification, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, classify_error,
-    layered,
-};
+use borink_object_storage::{Blobs, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered};
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
 const MAX_ERROR_BODY: u64 = 8 * 1024;
@@ -44,37 +41,23 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     match blobs.accept_get_head(get.shape(), head)? {
         GetHeadOutcome::Body { .. } => incoming.body_mut().read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
-        outcome => Err(failure(incoming.body_mut(), &head, outcome)),
+        // Azure named no error in the head, so the body names it. This is the
+        // only response whose body this host reads for a diagnostic, and it
+        // caps the read: an error body that does not arrive costs the name of
+        // the error, not the outcome.
+        outcome @ GetHeadOutcome::NeedErrorBody { .. } => {
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(no_object(blobs.accept_error_body(outcome, &body)))
+        }
+        outcome => Err(no_object(outcome)),
     }
 }
 
-/// Describes a read that returned no object.
-///
-/// The outcome already names the error, because Azure sends it in a header.
-/// This host reads the body only for the rare response that carries no such
-/// header, so a body it cannot read costs a detail rather than the message.
-fn failure(
-    body: &mut ureq::Body,
-    head: &GetHead<'_>,
-    outcome: GetHeadOutcome<'_>,
-) -> Box<dyn std::error::Error> {
-    let unnamed = matches!(
-        outcome,
-        GetHeadOutcome::NotFound { kind: None } | GetHeadOutcome::ServiceFailure { kind: None, .. }
-    );
-    if !unnamed {
-        return format!("Azure returned no object: {outcome}").into();
-    }
-    let body = body
-        .with_config()
-        .limit(MAX_ERROR_BODY)
-        .read_to_vec()
-        .unwrap_or_default();
-    match classify_error(head, &body, body.len() as u64 >= MAX_ERROR_BODY) {
-        Classification::Classified(kind) => {
-            format!("Azure returned no object: {outcome} ({kind})")
-        }
-        _ => format!("Azure returned no object: {outcome}"),
-    }
-    .into()
+fn no_object(outcome: GetHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("Azure returned no object: {outcome}").into()
 }

@@ -225,8 +225,12 @@ impl<'a> Blobs<'a> {
                 "412 answered a plan without an If-Match condition",
             )),
             412 => Ok(GetHeadOutcome::PreconditionFailed),
+            // Azure repeats the header's code in the body, so only a
+            // missing header is worth a body read. A header naming a code
+            // this crate does not know is already decisive.
+            404 if head.error_code.is_none() => Ok(need_error_body(404, head)),
             404 => Ok(GetHeadOutcome::NotFound {
-                kind: head.error_code.map(trim_ascii).and_then(kind_for_code),
+                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
             }),
             416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
                 object_size: match head.content_range.map(parse_content_range) {
@@ -237,8 +241,9 @@ impl<'a> Blobs<'a> {
                 },
             }),
             200..=299 => Err(Error::Protocol("unexpected success status")),
+            status if head.error_code.is_none() => Ok(need_error_body(status, head)),
             status => {
-                let kind = head.error_code.map(trim_ascii).and_then(kind_for_code);
+                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
                 Ok(GetHeadOutcome::ServiceFailure {
                     status,
                     class: failure_class(status, kind),
@@ -247,6 +252,50 @@ impl<'a> Blobs<'a> {
                 })
             }
         }
+    }
+
+    /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// The body names the error, exactly as the `x-ms-error-code` header would
+    /// have. Pass an empty body if you could not read one: the outcome is then
+    /// final with the error unnamed.
+    ///
+    /// Every other outcome is already final, and this method returns it
+    /// unchanged.
+    ///
+    /// To tell a body that your read limit cut short from a body that names an
+    /// error this crate does not recognize, call [`classify_error`] instead.
+    pub fn accept_error_body<'h>(
+        &self,
+        outcome: GetHeadOutcome<'h>,
+        body: &[u8],
+    ) -> GetHeadOutcome<'h> {
+        let GetHeadOutcome::NeedErrorBody {
+            status, request_id, ..
+        } = outcome
+        else {
+            return outcome;
+        };
+        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        match status {
+            404 => GetHeadOutcome::NotFound { kind },
+            // The body's code refines the category too, exactly as the
+            // header's would have.
+            status => GetHeadOutcome::ServiceFailure {
+                status,
+                class: failure_class(status, kind),
+                kind,
+                request_id,
+            },
+        }
+    }
+}
+
+fn need_error_body<'h>(status: u16, head: GetHead<'h>) -> GetHeadOutcome<'h> {
+    GetHeadOutcome::NeedErrorBody {
+        status,
+        class: failure_class(status, None),
+        request_id: head.request_id,
     }
 }
 
