@@ -3,7 +3,7 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
-use crate::{Blobs, Error, Payload, PhysicalGet, PhysicalPut, Result, Timestamps};
+use crate::{Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, Result, Timestamps};
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
@@ -45,6 +45,24 @@ pub fn put_requirements(
     // The head states how long the content is, so the requirement depends on
     // the length of `content`. Its bytes are never read.
     required(blobs.encode_put(&mut [], put, content, now).map(drop))
+}
+
+/// Returns the number of bytes that [`Blobs::encode_delete`] needs for this
+/// plan.
+///
+/// Call this to size a buffer before you encode. This function encodes into an
+/// empty buffer and reads the capacity error, so the answer is exact.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure request,
+/// unchanged from [`Blobs::encode_delete`].
+pub fn delete_requirements(
+    blobs: &Blobs<'_>,
+    delete: &PhysicalDelete<'_>,
+    now: &Timestamps,
+) -> Result<usize> {
+    required(blobs.encode_delete(&mut [], delete, now).map(drop))
 }
 
 fn required(result: Result<()>) -> Result<usize> {

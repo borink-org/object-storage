@@ -241,3 +241,81 @@ impl<'b> From<&'b [u8]> for Payload<'b> {
         Self::Slice(bytes)
     }
 }
+
+/// What a removal takes with it.
+///
+/// Azure keeps an object's snapshots separately from the object, and refuses
+/// to remove an object whose snapshots would be left behind. Say here what you
+/// mean, so a removal never takes more than you asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeleteKind {
+    /// Remove the object alone.
+    ///
+    /// Azure refuses this if the object has snapshots.
+    #[default]
+    Object,
+    /// Remove the object and its snapshots.
+    ObjectAndSnapshots,
+    /// Remove the snapshots and keep the object.
+    SnapshotsOnly,
+}
+
+/// The part of a removal plan that holds no borrows.
+///
+/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
+/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) to read the
+/// response that answers the removal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteShape {
+    /// What the removal takes with it.
+    pub kind: DeleteKind,
+    /// The condition that the removal carries.
+    pub condition: ConditionKind,
+}
+
+/// One removal of one object.
+///
+/// A removal takes only what [`DeleteKind`] names. The default takes the
+/// object alone, and Azure refuses it if that would leave snapshots behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalDelete<'h> {
+    /// The object key, within the container.
+    pub key: &'h str,
+    /// What the removal takes with it.
+    pub kind: DeleteKind,
+    /// The condition that the removal carries.
+    pub condition: ConditionKind,
+    /// The entity tag that `condition` compares against.
+    pub condition_value: Option<&'h [u8]>,
+}
+
+impl<'h> PhysicalDelete<'h> {
+    /// Creates a plan that removes this object alone, with no condition.
+    pub fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            kind: DeleteKind::Object,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+
+    /// Creates a plan from a stored shape and the bytes that it needs.
+    pub fn from_shape(shape: DeleteShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+        Self {
+            key,
+            kind: shape.kind,
+            condition: shape.condition,
+            condition_value,
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub fn shape(&self) -> DeleteShape {
+        DeleteShape {
+            kind: self.kind,
+            condition: self.condition,
+        }
+    }
+}

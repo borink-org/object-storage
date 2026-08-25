@@ -2,9 +2,9 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, GetHeadOutcome, GetKind, GetShape, Payload, PhysicalGet,
-    PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead, ServiceErrorKind,
-    Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, GetHeadOutcome,
+    GetKind, GetShape, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -435,4 +435,218 @@ fn writes_streamed_content_the_same_as_borrowed_content() {
     let result = read_put_key(&fixture, GetShape::default());
     assert_eq!(result.body, content);
     assert_eq!(result.size, Some(content.len() as u64));
+}
+
+// The removal half of the suite, on the same key the write tests own.
+
+#[derive(Debug, PartialEq, Eq)]
+enum RemoveOutcome {
+    Accepted,
+    PreconditionFailed,
+    NotFound(Option<ServiceErrorKind>),
+    ServiceFailure(u16, Option<ServiceErrorKind>),
+}
+
+// This crate does not implement Snapshot Blob, so the test issues that one
+// request itself. The URL comes from an encoded plan, so the key is escaped
+// exactly as the crate escapes it rather than by a second implementation.
+fn snapshot(fixture: &Fixture) -> Result<(), Box<dyn std::error::Error>> {
+    let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+    let blobs = fixture.blobs();
+    let plan = PhysicalDelete::new(&fixture.put_key);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now)?];
+    let request = blobs.encode_delete(&mut buf, &plan, &now)?;
+    let url = format!("{}?comp=snapshot", request.url());
+    let mut outgoing = ureq::put(&url);
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let response = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(b"".as_slice())?;
+    assert_eq!(response.status().as_u16(), 201, "Snapshot Blob");
+    Ok(())
+}
+
+fn remove(
+    fixture: &Fixture,
+    shape: DeleteShape,
+    condition_value: Option<&[u8]>,
+) -> Result<RemoveOutcome, Box<dyn std::error::Error>> {
+    let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+    let blobs = fixture.blobs();
+    let delete = PhysicalDelete::from_shape(shape, &fixture.put_key, condition_value);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &delete, &now)?];
+    let request = blobs.encode_delete(&mut buf, &delete, &now)?;
+    let mut outgoing = ureq::delete(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()?;
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        incoming.status().as_u16(),
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    let outcome = blobs.accept_delete_head(shape, head)?;
+    let body = incoming.body_mut().read_to_vec().unwrap_or_default();
+    Ok(match blobs.accept_delete_error_body(outcome, &body) {
+        DeleteHeadOutcome::Accepted => RemoveOutcome::Accepted,
+        DeleteHeadOutcome::PreconditionFailed => RemoveOutcome::PreconditionFailed,
+        DeleteHeadOutcome::NotFound { kind } => RemoveOutcome::NotFound(kind),
+        DeleteHeadOutcome::ServiceFailure { status, kind, .. } => {
+            RemoveOutcome::ServiceFailure(status, kind)
+        }
+        outcome => panic!("unresolved outcome {outcome:?}"),
+    })
+}
+
+#[test]
+#[ignore = "requires Azure credentials"]
+fn removes_an_object_and_then_cannot_find_it() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object to remove");
+
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).outcome,
+        Outcome::NotFound
+    );
+}
+
+/// Removing what is already gone is an outcome, not an error. Only the caller
+/// knows whether it meant to.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn removing_an_absent_object_reports_that_it_is_absent() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object to remove twice");
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::NotFound(Some(ServiceErrorKind::NotFound))
+    );
+}
+
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_stale_entity_tag_refuses_the_removal() {
+    let fixture = Fixture::from_env();
+    let e_tag = seed(&fixture, b"the object to remove conditionally");
+
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                condition: ConditionKind::IfMatch,
+                ..DeleteShape::default()
+            },
+            Some(b"\"stale\"")
+        )
+        .unwrap(),
+        RemoveOutcome::PreconditionFailed
+    );
+    // Still there, so the refusal removed nothing.
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).body,
+        b"the object to remove conditionally"
+    );
+
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                condition: ConditionKind::IfMatch,
+                ..DeleteShape::default()
+            },
+            Some(e_tag.as_bytes())
+        )
+        .unwrap(),
+        RemoveOutcome::Accepted
+    );
+}
+
+/// Settles what Azure does with a removal that would leave snapshots behind,
+/// and proves the plan can ask for them.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object with a snapshot");
+    snapshot(&fixture).unwrap();
+
+    // Naming the object alone leaves its snapshot behind, so Azure refuses.
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::ServiceFailure(409, None)
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).outcome,
+        Outcome::Body
+    );
+
+    // Asking for them removes both.
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                kind: DeleteKind::ObjectAndSnapshots,
+                ..DeleteShape::default()
+            },
+            None
+        )
+        .unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).outcome,
+        Outcome::NotFound
+    );
+}
+
+/// `SnapshotsOnly` keeps the object, which is the one accepted removal that
+/// leaves the key readable afterwards.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn removing_only_the_snapshots_keeps_the_object() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object that outlives its snapshot");
+    snapshot(&fixture).unwrap();
+
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                kind: DeleteKind::SnapshotsOnly,
+                ..DeleteShape::default()
+            },
+            None
+        )
+        .unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).body,
+        b"the object that outlives its snapshot"
+    );
+
+    // With the snapshots gone, naming the object alone now succeeds.
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::Accepted
+    );
 }

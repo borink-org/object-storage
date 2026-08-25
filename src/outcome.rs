@@ -208,6 +208,64 @@ pub enum PutHeadOutcome<'h> {
     },
 }
 
+/// The result of reading the response head of a removal.
+///
+/// Every head that Azure sends becomes one of these values, including the
+/// heads that report a failure.
+///
+/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) returns an
+/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeleteHeadOutcome<'h> {
+    /// Azure accepted the removal.
+    ///
+    /// The object is gone unless the plan asked only for its snapshots: see
+    /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).
+    Accepted,
+    /// The entity tag in the condition did not match, so Azure removed
+    /// nothing.
+    PreconditionFailed,
+    /// The object does not exist, so there was nothing to remove.
+    ///
+    /// A caller that removes an object it does not need can treat this as
+    /// success. This crate does not decide that for you.
+    NotFound {
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Read the response body and pass it to
+    /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body),
+    /// which returns the final outcome. If you cannot read the body, pass an
+    /// empty one and the error stays unnamed.
+    #[non_exhaustive]
+    NeedErrorBody {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure, from the status alone.
+        class: FailureClass,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
+    /// The service refused the removal, or it failed to carry it out.
+    ///
+    /// An object that has snapshots is refused here, unless the plan asked to
+    /// remove them too: see [`DeleteKind`](crate::DeleteKind).
+    #[non_exhaustive]
+    ServiceFailure {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure. Use it to decide whether to retry.
+        class: FailureClass,
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
+}
+
 /// The result of [`classify_error`](crate::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -329,6 +387,30 @@ impl fmt::Display for PutHeadOutcome<'_> {
             Self::Created { .. } => f.write_str("the service stored the object"),
             Self::PreconditionFailed => f.write_str("the condition on the write did not hold"),
             Self::NotFound { .. } => f.write_str("the container does not exist"),
+            Self::NeedErrorBody {
+                status,
+                class,
+                request_id,
+            } => write_failure(f, class, *status, *request_id),
+            Self::ServiceFailure {
+                status,
+                class,
+                kind,
+                request_id,
+            } => match kind {
+                Some(kind) => write_failure(f, kind, *status, *request_id),
+                None => write_failure(f, class, *status, *request_id),
+            },
+        }
+    }
+}
+
+impl fmt::Display for DeleteHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted => f.write_str("the service accepted the removal"),
+            Self::PreconditionFailed => f.write_str("the condition on the removal did not hold"),
+            Self::NotFound { .. } => f.write_str("the object does not exist"),
             Self::NeedErrorBody {
                 status,
                 class,
