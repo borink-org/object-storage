@@ -1,18 +1,18 @@
 use core::fmt;
 
-/// Result type returned by this crate.
+/// The result type that this crate returns.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The exact capacity the caller's request buffer needs.
+/// The exact capacity that your request buffer needs.
 ///
-/// This refusal is the crate's entire storage contract: the host grows its own
-/// storage to `required` bytes and calls again, or asks for the requirement up
-/// front with [`layered::requirements`](crate::layered::requirements).
+/// Grow the buffer to `required` bytes and call the same method again. To
+/// learn the requirement before the first call, use
+/// [`layered::requirements`](crate::layered::requirements).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
-    /// The minimum capacity required by the attempted operation.
+    /// The smallest buffer that the call accepts, in bytes.
     pub required: usize,
-    /// The capacity available during the attempted operation.
+    /// The size of the buffer that you supplied, in bytes.
     pub available: usize,
 }
 
@@ -28,22 +28,25 @@ impl fmt::Display for CapacityError {
 
 impl core::error::Error for CapacityError {}
 
-/// A plan that no Azure request can express.
+/// The reason that a plan cannot become an Azure request.
 ///
-/// Invalid use is never conflated with capacity: these are reported before the
-/// encoder writes any byte.
+/// [`Blobs::encode_get`](crate::Blobs::encode_get) reports these before it
+/// writes any byte, and never confuses them with a capacity error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidPlan {
-    /// The object key is empty or exceeds Azure's character limit.
+    /// The object key is empty, or it is longer than Azure allows.
     Key,
-    /// A bounded range is empty or reversed.
+    /// A bounded range is empty, or its end is before its start.
     Range,
-    /// Azure cannot express this range form.
+    /// Azure does not accept this form of range.
     UnsupportedRange,
-    /// A metadata plan carries a byte range.
+    /// A metadata plan carries a byte range, which Azure cannot answer.
     RangedMetadata,
-    /// The condition kind and value disagree, or the value is not a header value.
+    /// The condition kind and the condition value do not agree.
+    ///
+    /// A kind without a value, and a value without a kind, are both invalid.
+    /// The value must also be usable as one HTTP header value.
     Condition,
 }
 
@@ -61,27 +64,29 @@ impl fmt::Display for InvalidPlan {
     }
 }
 
-/// Failure while validating, encoding, or interpreting an Azure GET request.
+/// A failure to validate, to encode, or to read an Azure GET request.
 ///
-/// Responses Azure legitimately sends — not found, throttled, a failed
-/// precondition — are not errors: they are
-/// [`GetHeadOutcome`](crate::GetHeadOutcome) variants a scheduler branches on.
+/// This type reports only your own mistakes and invalid responses. A response
+/// that Azure sends in normal operation, such as a missing object or a failed
+/// precondition, is not an error here. It is a
+/// [`GetHeadOutcome`](crate::GetHeadOutcome) instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The endpoint is not an ASCII HTTP(S) origin.
+    /// The endpoint is not an ASCII HTTP or HTTPS origin.
     InvalidEndpoint,
-    /// The container is empty or contains request-structural bytes.
+    /// The container name is empty, or it contains bytes that would change the
+    /// structure of the request.
     InvalidContainer,
-    /// The bearer token cannot be represented as one HTTP header value.
+    /// The bearer token is not usable as one HTTP header value.
     InvalidToken,
-    /// The plan cannot be expressed as an Azure request.
+    /// The plan cannot become an Azure request.
     InvalidPlan(InvalidPlan),
-    /// The caller's request buffer is too small.
+    /// Your request buffer is too small.
     Capacity(CapacityError),
-    /// The response head is unparseable or self-contradictory.
+    /// The response head is invalid, or it contradicts itself.
     Protocol(&'static str),
-    /// The response head contradicts the plan it answers.
+    /// The response head does not answer the plan that you passed in.
     ResponseMismatch(&'static str),
 }
 
@@ -116,7 +121,7 @@ impl From<InvalidPlan> for Error {
 }
 
 impl Error {
-    /// Returns structured capacity information when this is a capacity error.
+    /// Returns the capacity details, if this is a capacity error.
     pub fn capacity(&self) -> Option<CapacityError> {
         match *self {
             Self::Capacity(error) => Some(error),

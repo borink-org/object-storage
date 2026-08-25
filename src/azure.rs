@@ -7,7 +7,7 @@ use crate::{
     WireRequest,
 };
 
-/// Latest Azure Storage version fully deployed in every region.
+/// The most recent Azure Storage version that every region supports.
 ///
 /// See the [Azure Storage service version lifecycle](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services).
 pub const VERSION: &str = "2026-04-06";
@@ -15,7 +15,7 @@ pub const VERSION: &str = "2026-04-06";
 // Azure limits blob names to 1,024 characters.
 const MAX_BLOB_NAME_CHARS: usize = 1024;
 
-/// Borrowed Azure Blob endpoint and container configuration.
+/// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct Container<'a> {
     endpoint: &'a str,
@@ -23,7 +23,15 @@ pub struct Container<'a> {
 }
 
 impl<'a> Container<'a> {
-    /// Validates and borrows an HTTP(S) origin and container name.
+    /// Creates a container reference from an origin and a container name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTP
+    /// or HTTPS origin.
+    ///
+    /// Returns [`Error::InvalidContainer`] if `name` is empty, or if it
+    /// contains bytes that would change the structure of the request.
     pub fn new(endpoint: &'a str, name: &'a str) -> Result<Self> {
         if !crate::http::valid_http_origin(endpoint) {
             return Err(Error::InvalidEndpoint);
@@ -39,7 +47,10 @@ impl<'a> Container<'a> {
     }
 }
 
-/// Azure Blob operations authorized by a borrowed bearer token.
+/// The Azure Blob operations that one bearer token authorizes.
+///
+/// This is a small borrowed value. Create it again whenever the token
+/// changes.
 #[derive(Clone, Copy)]
 pub struct Blobs<'a> {
     container: Container<'a>,
@@ -56,7 +67,12 @@ impl core::fmt::Debug for Blobs<'_> {
 }
 
 impl<'a> Blobs<'a> {
-    /// Validates and borrows a container and bearer token.
+    /// Creates a client from a container and a bearer token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
+    /// header value.
     pub fn new(container: Container<'a>, token: &'a str) -> Result<Self> {
         if !valid_header(token.as_bytes()) {
             return Err(Error::InvalidToken);
@@ -64,16 +80,25 @@ impl<'a> Blobs<'a> {
         Ok(Self { container, token })
     }
 
-    /// Lowers a plan into a request head written into `buf`.
+    /// Writes the request head for `get` into `buf`.
     ///
-    /// The plan is validated exhaustively before any byte is written, so
-    /// [`Error::InvalidPlan`] is never confused with [`Error::Capacity`]. A
-    /// capacity refusal reports the exact requirement; the host may grow its
-    /// storage and call again, or measure first with
-    /// [`layered::requirements`](crate::layered::requirements).
+    /// This method allocates nothing. It writes the URL and the header values
+    /// into `buf`, and returns a [`WireRequest`] that borrows them.
     ///
-    /// A sans-I/O core cannot read the clock, so `now` is explicit. It is
-    /// copied into `buf` like every other head byte and may be a temporary.
+    /// This crate performs no I/O and cannot read the clock, so pass the
+    /// current time in `now`. This method copies the date into `buf` with the
+    /// rest of the head, so `now` can be a temporary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure
+    /// request. This method validates the plan before it writes any byte, so
+    /// it never reports an invalid plan as a capacity error.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
+    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// method again, or call
+    /// [`layered::requirements`](crate::layered::requirements) first.
     pub fn encode_get<'r>(
         &self,
         buf: &'r mut [u8],
@@ -155,15 +180,25 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Interprets a response head against the plan it answers.
+    /// Reads a response head and reports what to do next.
     ///
-    /// The plan is passed back in, so the interpretation cannot disagree with
-    /// the request: the host re-states nothing the library already knows.
+    /// Pass the same `shape` that you passed to [`Self::encode_get`]. This
+    /// method checks the head against that plan, so you never restate what the
+    /// plan already holds.
     ///
-    /// Every head Azure actually sends maps to a [`GetHeadOutcome`]. `Err` is
-    /// reserved for heads that are unparseable, self-contradictory, or that
-    /// contradict `shape`. Azure names its errors in `x-ms-error-code`, so the
-    /// head is always decisive here and no body continuation is needed.
+    /// Every head that Azure sends becomes a [`GetHeadOutcome`], including the
+    /// heads that report a failure. Azure names its errors in the
+    /// `x-ms-error-code` header, so this method needs no part of the response
+    /// body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] if the head is invalid or contradicts
+    /// itself, such as a `Content-Range` whose end is before its start.
+    ///
+    /// Returns [`Error::ResponseMismatch`] if the head does not answer
+    /// `shape`, such as a ranged plan that Azure answers with status 200, or a
+    /// range that Azure serves only in part.
     pub fn accept_get_head<'h>(
         &self,
         shape: GetShape,
@@ -183,7 +218,7 @@ impl<'a> Blobs<'a> {
             304 if shape.condition_kind != ConditionKind::IfNoneMatch => Err(Error::Protocol(
                 "304 answered a plan without an If-None-Match condition",
             )),
-            304 => Ok(GetHeadOutcome::NotModified { etag: head.etag }),
+            304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
             412 if shape.condition_kind != ConditionKind::IfMatch => Err(Error::Protocol(
                 "412 answered a plan without an If-Match condition",
             )),
@@ -211,7 +246,7 @@ fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutco
     let content_length = decimal_header(head.content_length)?;
     let meta = |size| ObjectMeta {
         size,
-        e_tag: head.etag,
+        e_tag: head.e_tag,
         last_modified: head.last_modified,
         version: head.version,
         content_encoding: head.content_encoding,

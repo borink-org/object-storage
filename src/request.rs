@@ -1,12 +1,19 @@
 use core::str;
 
-/// A request head borrowing its URL and header values from the caller's buffer.
+/// A request head that borrows its URL and header values from your buffer.
 ///
-/// Every head byte — the URL, the authorization value and the date — was copied
-/// into that buffer, so no input the host passed to
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) is borrowed here and all of
-/// them may be temporaries. The head is valid until the buffer is reset or
-/// reused, which the borrow checker enforces: encode, send, reuse.
+/// Send this with the HTTP client of your choice. Read the method, the URL and
+/// the headers, and give them to the client.
+///
+/// [`Blobs::encode_get`](crate::Blobs::encode_get) copies every byte of the
+/// head into your buffer. The head therefore borrows nothing that you passed
+/// to that method, and each of those arguments can be a temporary.
+///
+/// # Lifetime
+///
+/// The head borrows the buffer, so the buffer stays locked until you drop the
+/// head. Encode, send, then drop the head to use the buffer again. The
+/// compiler enforces this order.
 #[derive(Debug, Clone, Copy)]
 pub struct WireRequest<'r> {
     method: &'static str,
@@ -58,7 +65,9 @@ impl<'r> WireRequest<'r> {
         self.url
     }
 
-    /// Iterates over the request headers in wire-independent order.
+    /// Returns an iterator over the request headers.
+    ///
+    /// The order of the headers does not matter to Azure.
     pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.headers[..self.header_count].iter().copied()
     }

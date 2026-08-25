@@ -1,80 +1,86 @@
-/// What a GET plan asks Azure to return.
+/// What a plan asks Azure to return.
 ///
-/// Stable scheduler intent: the provider decides the lowering, which is a HEAD
-/// request for [`GetKind::Metadata`] on Azure Blob Storage.
+/// The provider chooses the request that delivers it. Azure Blob Storage sends
+/// a HEAD request for [`GetKind::Metadata`] and a GET request for
+/// [`GetKind::Bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GetKind {
-    /// Object bytes.
+    /// The bytes of the object.
     #[default]
     Bytes,
-    /// Object metadata without a body.
+    /// The metadata of the object, without its bytes.
     Metadata,
 }
 
-/// The byte range a plan requests, in stored bytes.
+/// The byte range that a plan requests.
+///
+/// The offsets count the stored bytes of the object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RequestedRange {
-    /// Every stored byte.
+    /// Every byte of the object.
     #[default]
     Whole,
-    /// A half-open interval whose end is excluded.
+    /// A half-open interval that excludes its end.
     Bounded {
-        /// First requested byte.
+        /// The first byte that the plan requests.
         start: u64,
-        /// One past the last requested byte.
+        /// The byte after the last byte that the plan requests.
         end: u64,
     },
-    /// All bytes beginning at this offset.
+    /// Every byte from this offset to the end of the object.
     Offset(u64),
-    /// The final number of bytes (`Range: bytes=-N`), which Azure does not support.
+    /// The last `n` bytes, written `Range: bytes=-N`.
+    ///
+    /// Azure Blob Storage does not accept this form.
+    /// [`Blobs::encode_get`](crate::Blobs::encode_get) refuses it.
     Suffix(u64),
 }
 
-/// Which ETag precondition a plan carries.
+/// The ETag precondition that a plan carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConditionKind {
-    /// The request is unconditional.
+    /// The request carries no precondition.
     #[default]
     None,
-    /// The request succeeds only when the current ETag matches.
+    /// The request succeeds only if the current ETag matches.
     IfMatch,
-    /// The request succeeds only when the current ETag differs.
+    /// The request succeeds only if the current ETag differs.
     IfNoneMatch,
 }
 
-/// The scalar fetch plan: protocol facts only, no policy and no borrows.
+/// The part of a plan that is copyable and holds no borrows.
 ///
-/// A scheduler stores this beside its own state and hands it back both to
+/// Store this next to your own request state. Pass it back to
 /// [`Blobs::encode_get`](crate::Blobs::encode_get) and to
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head), which is what binds a
-/// response to the request that produced it.
+/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head). The second call
+/// uses it to check that the response answers the request you sent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetShape {
-    /// Whether the plan wants bytes or metadata.
+    /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
-    /// The requested byte range.
+    /// The byte range that the plan requests.
     pub range: RequestedRange,
-    /// Which precondition the plan carries, if any.
+    /// The precondition that the plan carries.
     pub condition_kind: ConditionKind,
 }
 
-/// The byte-bearing plan view, reconstructed by the host and never stored.
+/// A complete plan: a [`GetShape`] and the borrowed bytes that go with it.
 ///
-/// The fields are public because schedulers build these from their own tables;
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) is therefore the point where
-/// a plan is validated.
+/// Build this immediately before each call and let it go afterwards. Because
+/// the fields are public and unchecked,
+/// [`Blobs::encode_get`](crate::Blobs::encode_get) validates the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalGet<'h> {
-    /// The object key, unencoded.
+    /// The object key, before percent-encoding.
     pub key: &'h str,
-    /// The ETag the precondition compares against.
+    /// The ETag that the precondition compares against.
     pub condition_value: Option<&'h [u8]>,
-    /// The scalar part of the same plan.
+    /// The copyable part of the same plan.
     pub shape: GetShape,
 }
 
 impl<'h> PhysicalGet<'h> {
-    /// Plans an unconditional read of every byte of `key`.
+    /// Creates a plan that reads every byte of `key` with no precondition.
     pub fn new(key: &'h str) -> Self {
         Self {
             key,

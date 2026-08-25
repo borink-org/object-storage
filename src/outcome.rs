@@ -1,90 +1,109 @@
-/// Metadata borrowed from an Azure response head.
+/// Object metadata borrowed from a response head.
 ///
-/// Values are the bytes Azure sent. Turning `last_modified` into an instant is
-/// arithmetic over a public value, so it lives in
-/// [`layered::http_date_ms`](crate::layered::http_date_ms) rather than here.
+/// Each field holds the bytes that Azure sent. To read `last_modified` as an
+/// instant, use [`layered::http_date_ms`](crate::layered::http_date_ms).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectMeta<'h> {
-    /// Total object size when the head stated one, not the returned length.
+    /// The size of the whole object, if the head states it.
+    ///
+    /// This is not the length of the returned range. For that length, read
+    /// [`BodyWindow::expected_len`].
     pub size: Option<u64>,
-    /// Entity tag when Azure returned one.
+    /// The entity tag, if Azure returned one.
     pub e_tag: Option<&'h [u8]>,
-    /// `Last-Modified` as Azure spelled it.
+    /// The value of the `Last-Modified` header, if Azure returned one.
     pub last_modified: Option<&'h [u8]>,
-    /// Azure blob version identifier when returned.
+    /// The Azure blob version identifier, if Azure returned one.
     pub version: Option<&'h [u8]>,
-    /// `Content-Encoding` when present: passthrough metadata, not a transform.
+    /// The value of the `Content-Encoding` header, if Azure returned one.
+    ///
+    /// This crate does not decode the body. It returns this value so that you
+    /// know how the bytes are encoded.
     pub content_encoding: Option<&'h [u8]>,
 }
 
-/// Where the incoming body bytes belong.
+/// Where the bytes of the response body belong in the object.
 ///
-/// Offsets are defined over the *stored* bytes of the object, which is also
-/// HTTP's selected representation for Azure Blob Storage. The transport must
-/// therefore deliver the body transfer-decoded but not content-decoded.
+/// The offsets count the stored bytes of the object.
+///
+/// # Transport contract
+///
+/// Your HTTP client must remove the transfer encoding but keep the content
+/// encoding. Turn off automatic decompression: a client that decompresses the
+/// body changes the bytes and usually removes the headers that record it. The
+/// offsets here are then wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodyWindow {
-    /// Stored-byte offset of the first wire-body byte.
+    /// The offset in the object of the first byte of the response body.
     pub object_offset: u64,
-    /// Exact wire length when the head states one.
+    /// The exact length of the response body, if the head states it.
     pub expected_len: Option<u64>,
-    /// Total object size when known.
+    /// The size of the whole object, if the head states it.
     pub object_size: Option<u64>,
 }
 
-/// The retry-relevant taxonomy of a service failure.
+/// The category of a service failure.
+///
+/// Use this to decide whether to retry a request, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FailureClass {
-    /// Credentials or authorization were rejected.
+    /// Azure rejected the credentials or the authorization.
     Auth,
-    /// The request was throttled and may be retried later.
+    /// Azure throttled the request. You can retry it later.
     Throttled,
-    /// Azure failed or was unavailable.
+    /// Azure failed, or the service was unavailable.
     Server,
-    /// Azure answered with a redirect, which is surfaced, not followed.
+    /// Azure answered with a redirect.
+    ///
+    /// This crate does not follow redirects. It reports them to you.
     Redirect,
-    /// Anything else, including malformed requests.
+    /// Any other failure, such as a malformed request.
     Other,
 }
 
-/// Every response Azure actually sends maps to one of these.
+/// The result of reading a response head.
 ///
-/// A scheduler branches on this; `Err` is reserved for heads that are
-/// unparseable, self-contradictory, or disagree with the plan they answer.
+/// Every head that Azure sends becomes one of these values, including the
+/// heads that report a failure. Branch on this value to drive the request.
+///
+/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns an
+/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GetHeadOutcome<'h> {
-    /// A body follows and belongs at this window.
+    /// A body follows. Read it and put the bytes at `body`.
     Body {
-        /// Metadata from the head.
+        /// The metadata from the head.
         meta: ObjectMeta<'h>,
-        /// Where the body bytes belong.
+        /// Where the bytes of the body belong.
         body: BodyWindow,
     },
-    /// The exchange is complete without a body, as for a metadata plan.
+    /// No body follows and the request is complete.
+    ///
+    /// A metadata plan ends here.
     Complete(ObjectMeta<'h>),
-    /// The `If-None-Match` condition held.
+    /// The `If-None-Match` condition held, so Azure sent no body.
     NotModified {
-        /// The entity tag, when Azure repeated it.
-        etag: Option<&'h [u8]>,
+        /// The entity tag, if Azure repeated it.
+        e_tag: Option<&'h [u8]>,
     },
-    /// The `If-Match` condition did not hold.
+    /// The `If-Match` condition did not hold, so Azure sent no body.
     PreconditionFailed,
     /// The object does not exist.
     NotFound,
-    /// Azure could not satisfy the requested range.
+    /// Azure cannot serve the requested range.
     RangeNotSatisfiable {
-        /// The object size, when `Content-Range: bytes */N` carried it.
+        /// The size of the object, if `Content-Range: bytes */N` states it.
         object_size: Option<u64>,
     },
-    /// Azure refused or failed to serve the request.
+    /// Azure refused the request, or failed to serve it.
     ServiceFailure {
         /// The HTTP status code.
         status: u16,
-        /// What a scheduler needs to decide about retrying.
+        /// The category of the failure. Use it to decide whether to retry.
         class: FailureClass,
-        /// Azure's request identifier, for support and correlation.
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
         request_id: Option<&'h [u8]>,
     },
 }

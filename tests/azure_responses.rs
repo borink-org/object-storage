@@ -93,7 +93,7 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
     assert_eq!(
         accept(conditional(ConditionKind::IfNoneMatch), not_modified),
         Ok(GetHeadOutcome::NotModified {
-            etag: Some(b"\"etag\"")
+            e_tag: Some(b"\"etag\"")
         })
     );
     assert_eq!(

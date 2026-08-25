@@ -1,7 +1,7 @@
-//! Helpers written over the crate's public surface.
+//! Helpers built on the public API.
 //!
-//! Nothing here needs private access. They are provided because every host
-//! wants them, not because the core cannot be used without them.
+//! Each function here uses only the public types, so you can write your own
+//! version if you need different behaviour.
 
 use crate::{Blobs, Error, PhysicalGet, Result, Timestamps};
 
@@ -9,11 +9,15 @@ const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
 
-/// Measures the buffer [`Blobs::encode_get`] needs for this plan.
+/// Returns the number of bytes that [`Blobs::encode_get`] needs for this plan.
 ///
-/// Encoding into an empty buffer turns the capacity refusal into the
-/// requirement, so requirements-first and grow-on-refusal hosts share one core
-/// entry point. An invalid plan propagates unchanged.
+/// Call this to size a buffer before you encode. This function encodes into an
+/// empty buffer and reads the capacity error, so the answer is exact.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure request,
+/// unchanged from [`Blobs::encode_get`].
 pub fn requirements(blobs: &Blobs<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Result<usize> {
     match blobs.encode_get(&mut [], get, now) {
         Ok(_) => Ok(0),
@@ -22,10 +26,10 @@ pub fn requirements(blobs: &Blobs<'_>, get: &PhysicalGet<'_>, now: &Timestamps) 
     }
 }
 
-/// Reads an HTTP date, such as [`ObjectMeta::last_modified`], as Unix millis.
+/// Reads an HTTP date as milliseconds since the Unix epoch.
 ///
-/// The core carries the bytes Azure sent; turning them into an instant is
-/// arithmetic over a public value, so it is a layer rather than core.
+/// Use this on [`ObjectMeta::last_modified`], which holds the bytes that Azure
+/// sent. Returns [`None`] if `value` is not an RFC 1123 date.
 ///
 /// [`ObjectMeta::last_modified`]: crate::ObjectMeta::last_modified
 pub fn http_date_ms(value: &[u8]) -> Option<u64> {
