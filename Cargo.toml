@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 percent-encoding = { version = "2.3", default-features = false }
+xmlparser = { version = "0.13", default-features = false }
 
 [lints.rust]
 missing_docs = "deny"

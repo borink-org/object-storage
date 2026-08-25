@@ -4,6 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{Blobs, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered};
 
+// Error bodies are diagnostics, so this host caps what it will read for one.
+const MAX_ERROR_BODY: u64 = 8 * 1024;
+
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -37,7 +40,24 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     );
     match blobs.accept_get_head(get.shape(), head)? {
         GetHeadOutcome::Body { .. } => incoming.body_mut().read_to_vec().map_err(Into::into),
-        GetHeadOutcome::Complete(_) => Ok(Vec::new()),
-        outcome => Err(format!("Azure GET failed: {outcome:?}").into()),
+        GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
+        // Azure named no error in the head, so the body names it. This is the
+        // only response whose body this host reads for a diagnostic, and it
+        // caps the read: an error body that does not arrive costs the name of
+        // the error, not the outcome.
+        outcome @ GetHeadOutcome::NeedErrorBody { .. } => {
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(no_object(blobs.accept_error_body(outcome, &body)))
+        }
+        outcome => Err(no_object(outcome)),
     }
+}
+
+fn no_object(outcome: GetHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("Azure returned no object: {outcome}").into()
 }

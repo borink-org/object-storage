@@ -1,9 +1,10 @@
-/// What a plan asks Azure to return.
+/// What a plan asks the service to return.
 ///
 /// The provider chooses the request that delivers it. Azure Blob Storage sends
 /// a HEAD request for [`GetKind::Metadata`] and a GET request for
 /// [`GetKind::Bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GetKind {
     /// The bytes of the object.
     #[default]
@@ -16,6 +17,7 @@ pub enum GetKind {
 ///
 /// The offsets count the stored bytes of the object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestedRange {
     /// Every byte of the object.
     #[default]
@@ -38,6 +40,7 @@ pub enum RequestedRange {
 
 /// The ETag precondition that a plan carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConditionKind {
     /// The request carries no precondition.
     #[default]

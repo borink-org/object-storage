@@ -28,8 +28,8 @@ Currently we only provide the sans-I/O core as a library; you must provide the h
   - Conditional object get (If-Match, If-None-Match)
   - Byte ranges
 - Object metadata (HEAD request)
-- Response interpretation: object metadata, byte-range windows and service
-  failures, all borrowed from the caller's response headers
+- Response classification: object metadata, byte-range windows, and Azure error
+  codes and request IDs, all borrowed from the caller's response headers
 
 ## Compressed objects
 

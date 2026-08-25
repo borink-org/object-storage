@@ -91,14 +91,16 @@ fn read(
     );
     let (outcome, size, e_tag) = match blobs.accept_get_head(shape, head)? {
         GetHeadOutcome::Body { meta, .. } => (Outcome::Body, meta.size, meta.e_tag),
-        GetHeadOutcome::Complete(meta) => (Outcome::Complete, meta.size, meta.e_tag),
+        GetHeadOutcome::Complete { meta } => (Outcome::Complete, meta.size, meta.e_tag),
         GetHeadOutcome::NotModified { .. } => (Outcome::NotModified, None, None),
         GetHeadOutcome::PreconditionFailed => (Outcome::PreconditionFailed, None, None),
-        GetHeadOutcome::NotFound => (Outcome::NotFound, None, None),
+        GetHeadOutcome::NotFound { .. } => (Outcome::NotFound, None, None),
         GetHeadOutcome::RangeNotSatisfiable { .. } => (Outcome::RangeNotSatisfiable, None, None),
         GetHeadOutcome::ServiceFailure { status, .. } => {
             (Outcome::ServiceFailure(status), None, None)
         }
+        // Azure sends `x-ms-error-code` on every failure, so a live response
+        // never asks for the body. This asserts that.
         outcome => panic!("unexpected outcome {outcome:?}"),
     };
     let e_tag = e_tag.map(|value| String::from_utf8(value.to_vec()).unwrap());

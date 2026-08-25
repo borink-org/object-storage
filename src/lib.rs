@@ -45,7 +45,7 @@
 //! // 3. Read the response head that your client returned.
 //! let head = GetHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
 //! match blobs.accept_get_head(get.shape(), head)? {
-//!     GetHeadOutcome::Body { meta, body } => {
+//!     GetHeadOutcome::Body { meta, body, .. } => {
 //!         assert_eq!(meta.size, Some(8));
 //!         assert_eq!(body.object_offset, 0);
 //!     }
@@ -82,11 +82,14 @@ mod path;
 mod request;
 mod time;
 mod types;
+mod xml;
 
-pub use azure::{Blobs, Container, VERSION};
+pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
 pub use head::GetHead;
-pub use outcome::{BodyWindow, FailureClass, GetHeadOutcome, ObjectMeta};
+pub use outcome::{
+    BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, ServiceErrorKind,
+};
 pub use request::WireRequest;
 pub use time::Timestamps;
 pub use types::{ConditionKind, GetKind, GetShape, PhysicalGet, RequestedRange};

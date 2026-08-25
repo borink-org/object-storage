@@ -28,20 +28,20 @@ impl fmt::Display for CapacityError {
 
 impl core::error::Error for CapacityError {}
 
-/// The reason that a plan cannot become an Azure request.
+/// The reason that a plan cannot become a request.
 ///
 /// [`Blobs::encode_get`](crate::Blobs::encode_get) reports these before it
 /// writes any byte, and never confuses them with a capacity error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidPlan {
-    /// The object key is empty, or it is longer than Azure allows.
+    /// The object key is empty, or it is longer than the service allows.
     Key,
     /// A bounded range is empty, or its end is before its start.
     Range,
-    /// Azure does not accept this form of range.
+    /// The service does not accept this form of range.
     UnsupportedRange,
-    /// A metadata plan carries a byte range, which Azure cannot answer.
+    /// A metadata plan carries a byte range, which the service cannot answer.
     RangedMetadata,
     /// The condition kind and the condition value do not agree.
     ///
@@ -56,7 +56,7 @@ impl fmt::Display for InvalidPlan {
             Self::Key => f.write_str("invalid object key"),
             Self::Range => f.write_str("invalid byte range"),
             Self::UnsupportedRange => {
-                f.write_str("Azure does not support Range: bytes=-N suffix requests")
+                f.write_str("the service does not support Range: bytes=-N suffix requests")
             }
             Self::RangedMetadata => f.write_str("a metadata plan cannot carry a byte range"),
             Self::Condition => f.write_str("invalid GET condition"),
@@ -64,10 +64,10 @@ impl fmt::Display for InvalidPlan {
     }
 }
 
-/// A failure to validate, to encode, or to read an Azure GET request.
+/// A failure to validate, to encode, or to read a GET request.
 ///
 /// This type reports only your own mistakes and invalid responses. A response
-/// that Azure sends in normal operation, such as a missing object or a failed
+/// that the service sends in normal operation, such as a missing object or a failed
 /// precondition, is not an error here. It is a
 /// [`GetHeadOutcome`](crate::GetHeadOutcome) instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,7 @@ pub enum Error {
     InvalidContainer,
     /// The bearer token is not usable as one HTTP header value.
     InvalidToken,
-    /// The plan cannot become an Azure request.
+    /// The plan cannot become a request.
     InvalidPlan(InvalidPlan),
     /// Your request buffer is too small.
     Capacity(CapacityError),
@@ -93,14 +93,14 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidEndpoint => f.write_str("invalid Azure Blob endpoint"),
-            Self::InvalidContainer => f.write_str("invalid Azure container name"),
+            Self::InvalidEndpoint => f.write_str("invalid endpoint"),
+            Self::InvalidContainer => f.write_str("invalid container name"),
             Self::InvalidToken => f.write_str("invalid bearer token"),
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
-            Self::Protocol(detail) => write!(f, "invalid Azure response: {detail}"),
+            Self::Protocol(detail) => write!(f, "invalid response: {detail}"),
             Self::ResponseMismatch(detail) => {
-                write!(f, "the Azure response does not answer the plan: {detail}")
+                write!(f, "the response does not answer the plan: {detail}")
             }
         }
     }
@@ -127,5 +127,17 @@ impl Error {
             Self::Capacity(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    // Every fallible call in this crate pays for this size. Clippy warns at
+    // 128 bytes; a field added later that crosses the line shows up here.
+    #[test]
+    fn a_result_stays_small() {
+        assert!(size_of::<Result<(), Error>>() <= 128);
     }
 }

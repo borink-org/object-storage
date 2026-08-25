@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    BodyWindow, CapacityError, ConditionKind, Error, FailureClass, GetHead, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Result, Timestamps,
-    WireRequest,
+    BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHead,
+    GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange,
+    Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -189,7 +189,9 @@ impl<'a> Blobs<'a> {
     /// Every head that Azure sends becomes a [`GetHeadOutcome`], including the
     /// heads that report a failure. Azure names its errors in the
     /// `x-ms-error-code` header, so this method needs no part of the response
-    /// body.
+    /// body and returns the named error with the outcome. If Azure sent no
+    /// such header, the outcome names no error: call [`classify_error`] with
+    /// the response body to read the error code from there.
     ///
     /// # Errors
     ///
@@ -223,7 +225,13 @@ impl<'a> Blobs<'a> {
                 "412 answered a plan without an If-Match condition",
             )),
             412 => Ok(GetHeadOutcome::PreconditionFailed),
-            404 => Ok(GetHeadOutcome::NotFound),
+            // Azure repeats the header's code in the body, so only a
+            // missing header is worth a body read. A header naming a code
+            // this crate does not know is already decisive.
+            404 if head.error_code.is_none() => Ok(need_error_body(404, head)),
+            404 => Ok(GetHeadOutcome::NotFound {
+                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
+            }),
             416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
                 object_size: match head.content_range.map(parse_content_range) {
                     None => None,
@@ -233,12 +241,83 @@ impl<'a> Blobs<'a> {
                 },
             }),
             200..=299 => Err(Error::Protocol("unexpected success status")),
-            status => Ok(GetHeadOutcome::ServiceFailure {
-                status,
-                class: failure_class(status),
-                request_id: head.request_id,
-            }),
+            status if head.error_code.is_none() => Ok(need_error_body(status, head)),
+            status => {
+                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
+                Ok(GetHeadOutcome::ServiceFailure {
+                    status,
+                    class: failure_class(status, kind),
+                    kind,
+                    request_id: head.request_id,
+                })
+            }
         }
+    }
+
+    /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// The body names the error, exactly as the `x-ms-error-code` header would
+    /// have. Pass an empty body if you could not read one: the outcome is then
+    /// final with the error unnamed.
+    ///
+    /// Every other outcome is already final, and this method returns it
+    /// unchanged.
+    ///
+    /// To tell a body that your read limit cut short from a body that names an
+    /// error this crate does not recognize, call [`classify_error`] instead.
+    pub fn accept_error_body<'h>(
+        &self,
+        outcome: GetHeadOutcome<'h>,
+        body: &[u8],
+    ) -> GetHeadOutcome<'h> {
+        let GetHeadOutcome::NeedErrorBody {
+            status, request_id, ..
+        } = outcome
+        else {
+            return outcome;
+        };
+        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        match status {
+            404 => GetHeadOutcome::NotFound { kind },
+            // The body's code refines the category too, exactly as the
+            // header's would have.
+            status => GetHeadOutcome::ServiceFailure {
+                status,
+                class: failure_class(status, kind),
+                kind,
+                request_id,
+            },
+        }
+    }
+}
+
+fn need_error_body<'h>(status: u16, head: GetHead<'h>) -> GetHeadOutcome<'h> {
+    GetHeadOutcome::NeedErrorBody {
+        status,
+        class: failure_class(status, None),
+        request_id: head.request_id,
+    }
+}
+
+/// Reads the Azure error code from a failed response body.
+///
+/// Azure names the error in the `x-ms-error-code` header, and repeats it in an
+/// XML body. [`Blobs::accept_get_head`] already reads the header, so call this
+/// only when the outcome names no error. This function reads the header first
+/// and falls back to the body. It allocates nothing and keeps nothing.
+///
+/// Set `truncated` if your read limit cut `body` short. The result then
+/// separates a body that stopped early from a complete body that names a code
+/// this crate does not recognize.
+pub fn classify_error(head: &GetHead<'_>, body: &[u8], truncated: bool) -> Classification {
+    let code = head
+        .error_code
+        .map(trim_ascii)
+        .or_else(|| crate::xml::error_code(body).map(|code| code.as_bytes()));
+    match code.and_then(kind_for_code) {
+        Some(kind) => Classification::Classified(kind),
+        None if truncated => Classification::Incomplete,
+        None => Classification::Unknown,
     }
 }
 
@@ -255,7 +334,9 @@ fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutco
         // An unranged plan reads from byte zero, and Azure states the whole
         // object length, so `Content-Length` is both the window and the size.
         return Ok(match shape.kind {
-            GetKind::Metadata => GetHeadOutcome::Complete(meta(content_length)),
+            GetKind::Metadata => GetHeadOutcome::Complete {
+                meta: meta(content_length),
+            },
             GetKind::Bytes => GetHeadOutcome::Body {
                 meta: meta(content_length),
                 body: BodyWindow {
@@ -298,7 +379,7 @@ fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutco
         };
         if end + 1 != satisfiable {
             return Err(Error::ResponseMismatch(
-                "Azure served less than the satisfiable range",
+                "the service served less than the satisfiable range",
             ));
         }
     }
@@ -368,13 +449,37 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
 
-fn failure_class(status: u16) -> FailureClass {
-    match status {
-        300..=399 => FailureClass::Redirect,
-        401 | 403 => FailureClass::Auth,
-        408 | 429 => FailureClass::Throttled,
-        500..=599 => FailureClass::Server,
-        _ => FailureClass::Other,
+fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
+    Some(match code {
+        b"BlobNotFound" | b"ResourceNotFound" => ServiceErrorKind::NotFound,
+        b"ContainerNotFound" => ServiceErrorKind::NoSuchContainer,
+        b"BlobAlreadyExists" | b"ContainerAlreadyExists" => ServiceErrorKind::AlreadyExists,
+        b"ConditionNotMet" | b"TargetConditionNotMet" => ServiceErrorKind::Precondition,
+        b"InvalidRange" => ServiceErrorKind::RangeNotSatisfiable,
+        b"ServerBusy" => ServiceErrorKind::Throttled,
+        b"OperationTimedOut" => ServiceErrorKind::Timeout,
+        b"AuthenticationFailed"
+        | b"AuthorizationFailure"
+        | b"InvalidAuthenticationInfo"
+        | b"AuthorizationPermissionMismatch"
+        | b"InsufficientAccountPermissions" => ServiceErrorKind::Unauthorized,
+        b"InternalError" | b"ServiceUnavailable" => ServiceErrorKind::Service,
+        _ => return None,
+    })
+}
+
+fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
+    match kind {
+        Some(ServiceErrorKind::Unauthorized) => FailureClass::Auth,
+        Some(ServiceErrorKind::Throttled) => FailureClass::Throttled,
+        Some(ServiceErrorKind::Service | ServiceErrorKind::Timeout) => FailureClass::Server,
+        _ => match status {
+            300..=399 => FailureClass::Redirect,
+            401 | 403 => FailureClass::Auth,
+            408 | 429 => FailureClass::Throttled,
+            500..=599 => FailureClass::Server,
+            _ => FailureClass::Other,
+        },
     }
 }
 
