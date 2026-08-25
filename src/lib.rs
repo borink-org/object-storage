@@ -45,7 +45,7 @@
 //! // 3. Read the response head that your client returned.
 //! let head = GetHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
 //! match blobs.accept_get_head(get.shape(), head)? {
-//!     GetHeadOutcome::Body { meta, body } => {
+//!     GetHeadOutcome::Body { meta, body, .. } => {
 //!         assert_eq!(meta.size, Some(8));
 //!         assert_eq!(body.object_offset, 0);
 //!     }

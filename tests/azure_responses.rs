@@ -43,7 +43,7 @@ fn accepts_a_whole_object_read() {
             ("Content-Encoding", b"gzip"),
         ],
     );
-    let GetHeadOutcome::Body { meta, body } = accept(GetShape::default(), head).unwrap() else {
+    let GetHeadOutcome::Body { meta, body, .. } = accept(GetShape::default(), head).unwrap() else {
         panic!("expected a body");
     };
     assert_eq!(

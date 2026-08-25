@@ -77,6 +77,7 @@ pub enum FailureClass {
 #[non_exhaustive]
 pub enum GetHeadOutcome<'h> {
     /// A body follows. Read it and put the bytes at `body`.
+    #[non_exhaustive]
     Body {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,

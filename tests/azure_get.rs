@@ -142,21 +142,26 @@ fn encodes_ranges_conditions_and_metadata_plans() {
             ("x-ms-version-id", b"version-1"),
         ],
     );
+    let Ok(GetHeadOutcome::Body { meta, body, .. }) = blobs.accept_get_head(get.shape(), head)
+    else {
+        panic!("a ranged read returns a body");
+    };
     assert_eq!(
-        blobs.accept_get_head(get.shape(), head),
-        Ok(GetHeadOutcome::Body {
-            meta: ObjectMeta {
-                size: Some(10),
-                e_tag: Some(b"\"etag\""),
-                version: Some(b"version-1"),
-                ..ObjectMeta::default()
-            },
-            body: BodyWindow {
-                object_offset: 2,
-                expected_len: Some(4),
-                object_size: Some(10),
-            },
-        })
+        meta,
+        ObjectMeta {
+            size: Some(10),
+            e_tag: Some(b"\"etag\""),
+            version: Some(b"version-1"),
+            ..ObjectMeta::default()
+        }
+    );
+    assert_eq!(
+        body,
+        BodyWindow {
+            object_offset: 2,
+            expected_len: Some(4),
+            object_size: Some(10),
+        }
     );
 }
 
