@@ -44,23 +44,28 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     match blobs.accept_get_head(get.shape(), head)? {
         GetHeadOutcome::Body { .. } => incoming.body_mut().read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete(_) => Ok(Vec::new()),
-        outcome => {
-            // The head already decided the outcome; the body only refines the
-            // message with Azure's own error code.
-            let body = incoming
-                .body_mut()
-                .with_config()
-                .limit(MAX_ERROR_BODY)
-                .read_to_vec()
-                .unwrap_or_default();
-            let truncated = body.len() as u64 >= MAX_ERROR_BODY;
-            Err(match classify_error(&head, &body, truncated) {
-                Classification::Classified(kind) => {
-                    format!("Azure GET failed: {outcome:?} ({kind:?})")
-                }
-                _ => format!("Azure GET failed: {outcome:?}"),
-            }
-            .into())
-        }
+        outcome => Err(failure(incoming.body_mut(), &head, outcome)),
     }
+}
+
+/// Describes a failed read, naming Azure's own error code when it sent one.
+///
+/// The head already decided the outcome. The body only adds the error code, so
+/// a body this host cannot read costs a detail rather than the whole message.
+fn failure(
+    body: &mut ureq::Body,
+    head: &GetHead<'_>,
+    outcome: GetHeadOutcome<'_>,
+) -> Box<dyn std::error::Error> {
+    let body = body
+        .with_config()
+        .limit(MAX_ERROR_BODY)
+        .read_to_vec()
+        .unwrap_or_default();
+    let truncated = body.len() as u64 >= MAX_ERROR_BODY;
+    match classify_error(head, &body, truncated) {
+        Classification::Classified(kind) => format!("Azure GET failed: {outcome:?} ({kind:?})"),
+        _ => format!("Azure GET failed: {outcome:?}"),
+    }
+    .into()
 }
