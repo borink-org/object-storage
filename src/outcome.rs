@@ -1,0 +1,109 @@
+/// Object metadata borrowed from a response head.
+///
+/// Each field holds the bytes that Azure sent. To read `last_modified` as an
+/// instant, use [`layered::http_date_ms`](crate::layered::http_date_ms).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObjectMeta<'h> {
+    /// The size of the whole object, if the head states it.
+    ///
+    /// This is not the length of the returned range. For that length, read
+    /// [`BodyWindow::expected_len`].
+    pub size: Option<u64>,
+    /// The entity tag, if Azure returned one.
+    pub e_tag: Option<&'h [u8]>,
+    /// The value of the `Last-Modified` header, if Azure returned one.
+    pub last_modified: Option<&'h [u8]>,
+    /// The Azure blob version identifier, if Azure returned one.
+    pub version: Option<&'h [u8]>,
+    /// The value of the `Content-Encoding` header, if Azure returned one.
+    ///
+    /// This crate does not decode the body. It returns this value so that you
+    /// know how the bytes are encoded.
+    pub content_encoding: Option<&'h [u8]>,
+}
+
+/// Where the bytes of the response body belong in the object.
+///
+/// The offsets count the stored bytes of the object.
+///
+/// # Transport contract
+///
+/// Your HTTP client must remove the transfer encoding but keep the content
+/// encoding. Turn off automatic decompression: a client that decompresses the
+/// body changes the bytes and usually removes the headers that record it. The
+/// offsets here are then wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyWindow {
+    /// The offset in the object of the first byte of the response body.
+    pub object_offset: u64,
+    /// The exact length of the response body, if the head states it.
+    pub expected_len: Option<u64>,
+    /// The size of the whole object, if the head states it.
+    pub object_size: Option<u64>,
+}
+
+/// The category of a service failure.
+///
+/// Use this to decide whether to retry a request, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureClass {
+    /// Azure rejected the credentials or the authorization.
+    Auth,
+    /// Azure throttled the request. You can retry it later.
+    Throttled,
+    /// Azure failed, or the service was unavailable.
+    Server,
+    /// Azure answered with a redirect.
+    ///
+    /// This crate does not follow redirects. It reports them to you.
+    Redirect,
+    /// Any other failure, such as a malformed request.
+    Other,
+}
+
+/// The result of reading a response head.
+///
+/// Every head that Azure sends becomes one of these values, including the
+/// heads that report a failure. Branch on this value to drive the request.
+///
+/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns an
+/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GetHeadOutcome<'h> {
+    /// A body follows. Read it and put the bytes at `body`.
+    Body {
+        /// The metadata from the head.
+        meta: ObjectMeta<'h>,
+        /// Where the bytes of the body belong.
+        body: BodyWindow,
+    },
+    /// No body follows and the request is complete.
+    ///
+    /// A metadata plan ends here.
+    Complete(ObjectMeta<'h>),
+    /// The `If-None-Match` condition held, so Azure sent no body.
+    NotModified {
+        /// The entity tag, if Azure repeated it.
+        e_tag: Option<&'h [u8]>,
+    },
+    /// The `If-Match` condition did not hold, so Azure sent no body.
+    PreconditionFailed,
+    /// The object does not exist.
+    NotFound,
+    /// Azure cannot serve the requested range.
+    RangeNotSatisfiable {
+        /// The size of the object, if `Content-Range: bytes */N` states it.
+        object_size: Option<u64>,
+    },
+    /// Azure refused the request, or failed to serve it.
+    ServiceFailure {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure. Use it to decide whether to retry.
+        class: FailureClass,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
+}

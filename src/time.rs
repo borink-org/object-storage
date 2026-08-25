@@ -1,4 +1,7 @@
-/// A host-supplied instant preformatted for Azure request headers.
+/// An instant that you supply, formatted for Azure request headers.
+///
+/// This crate performs no I/O and cannot read the clock, so pass one of these
+/// to [`Blobs::encode_get`](crate::Blobs::encode_get).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamps {
     rfc1123: [u8; 29],
@@ -12,10 +15,10 @@ const MONTHS: [&[u8; 3]; 12] = [
 const MAX_UNIX_SECONDS: u64 = 253_402_300_799;
 
 impl Timestamps {
-    /// Formats non-negative Unix seconds as an RFC 1123 timestamp.
+    /// Creates a timestamp from seconds since the Unix epoch.
     ///
-    /// Values after `9999-12-31 23:59:59 UTC` saturate because the HTTP date
-    /// format has a four-digit year.
+    /// The HTTP date format has a four-digit year, so a value after
+    /// `9999-12-31 23:59:59 UTC` becomes that instant.
     pub fn from_unix(seconds: u64) -> Self {
         let seconds = seconds.min(MAX_UNIX_SECONDS);
         let days = (seconds / 86_400) as i64;
@@ -59,12 +62,12 @@ impl Timestamps {
         }
     }
 
-    /// Returns the represented Unix timestamp in seconds.
+    /// Returns the time in seconds since the Unix epoch.
     pub fn unix(&self) -> u64 {
         self.unix
     }
 
-    /// Returns `Www, DD Mon YYYY HH:MM:SS GMT` for `x-ms-date`.
+    /// Returns the time as `Www, DD Mon YYYY HH:MM:SS GMT`, for `x-ms-date`.
     pub fn rfc1123(&self) -> &str {
         core::str::from_utf8(&self.rfc1123).expect("HTTP dates are ASCII")
     }

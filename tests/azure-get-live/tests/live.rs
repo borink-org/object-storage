@@ -2,7 +2,8 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, Container, Error, GetOptions, GetRange, RequestWorkspace, Response, Timestamps,
+    Blobs, ConditionKind, Container, GetHead, GetHeadOutcome, GetKind, GetShape, PhysicalGet,
+    RequestedRange, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -38,21 +39,36 @@ impl Fixture {
 
 #[derive(Debug)]
 struct ReadResult {
+    outcome: Outcome,
     body: Vec<u8>,
-    size: u64,
+    size: Option<u64>,
     e_tag: Option<String>,
+}
+
+// The live suite asserts on the outcome algebra, so every response Azure
+// actually sends has to be a value here rather than an error.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Body,
+    Complete,
+    NotModified,
+    PreconditionFailed,
+    NotFound,
+    RangeNotSatisfiable,
+    ServiceFailure(u16),
 }
 
 fn read(
     fixture: &Fixture,
-    options: &GetOptions<'_>,
+    shape: GetShape,
+    condition_value: Option<&[u8]>,
 ) -> Result<ReadResult, Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
-    let required = blobs.get_request_requirements(&fixture.key, options)?;
-    let mut storage = vec![0; required.packed];
-    let mut workspace = RequestWorkspace::new(&mut storage);
-    let request = blobs.get_request(&mut workspace, &fixture.key, options, &now)?;
+    // The scheduler path: a stored shape plus the bytes it needs.
+    let get = PhysicalGet::from_shape(shape, &fixture.key, condition_value);
+    let mut buf = vec![0; layered::requirements(&blobs, &get, &now)?];
+    let request = blobs.encode_get(&mut buf, &get, &now)?;
     let mut outgoing = match request.method() {
         "GET" => ureq::get(request.url()),
         "HEAD" => ureq::head(request.url()),
@@ -66,57 +82,85 @@ fn read(
         .http_status_as_error(false)
         .build()
         .call()?;
-    let status = incoming.status().as_u16();
-    let (size, e_tag) = {
-        let meta = blobs.interpret_get(
-            Response::new(
-                status,
-                incoming.headers().iter().filter_map(|(name, value)| {
-                    value.to_str().ok().map(|value| (name.as_str(), value))
-                }),
-            ),
-            options,
-        )?;
-        (meta.size, meta.e_tag.map(str::to_owned))
+    let headers = incoming.headers().clone();
+    let head = GetHead::from_headers(
+        incoming.status().as_u16(),
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    let (outcome, size, e_tag) = match blobs.accept_get_head(shape, head)? {
+        GetHeadOutcome::Body { meta, .. } => (Outcome::Body, meta.size, meta.e_tag),
+        GetHeadOutcome::Complete(meta) => (Outcome::Complete, meta.size, meta.e_tag),
+        GetHeadOutcome::NotModified { .. } => (Outcome::NotModified, None, None),
+        GetHeadOutcome::PreconditionFailed => (Outcome::PreconditionFailed, None, None),
+        GetHeadOutcome::NotFound => (Outcome::NotFound, None, None),
+        GetHeadOutcome::RangeNotSatisfiable { .. } => (Outcome::RangeNotSatisfiable, None, None),
+        GetHeadOutcome::ServiceFailure { status, .. } => {
+            (Outcome::ServiceFailure(status), None, None)
+        }
+        outcome => panic!("unexpected outcome {outcome:?}"),
     };
-    let body = incoming.body_mut().read_to_vec()?;
-    Ok(ReadResult { body, size, e_tag })
+    let e_tag = e_tag.map(|value| String::from_utf8(value.to_vec()).unwrap());
+    let body = if outcome == Outcome::Body {
+        incoming.body_mut().read_to_vec()?
+    } else {
+        Vec::new()
+    };
+    Ok(ReadResult {
+        outcome,
+        body,
+        size,
+        e_tag,
+    })
 }
 
-fn error(result: Result<ReadResult, Box<dyn std::error::Error>>) -> Error {
-    *result.unwrap_err().downcast::<Error>().expect("core error")
+const METADATA: GetShape = GetShape {
+    kind: GetKind::Metadata,
+    range: RequestedRange::Whole,
+    condition: ConditionKind::None,
+};
+
+fn conditional(condition: ConditionKind) -> GetShape {
+    GetShape {
+        condition,
+        ..GetShape::default()
+    }
+}
+
+fn e_tag(fixture: &Fixture) -> String {
+    read(fixture, METADATA, None).unwrap().e_tag.unwrap()
 }
 
 #[test]
 #[ignore = "requires Azure credentials"]
 fn gets_the_complete_blob() {
-    let result = read(&Fixture::from_env(), &GetOptions::default()).unwrap();
+    let result = read(&Fixture::from_env(), GetShape::default(), None).unwrap();
+    assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, CONTENTS);
-    assert_eq!(result.size, CONTENTS.len() as u64);
+    assert_eq!(result.size, Some(CONTENTS.len() as u64));
 }
 
 #[test]
 #[ignore = "requires Azure credentials"]
 fn gets_a_bounded_range() {
-    let options = GetOptions {
-        range: Some(GetRange::Bounded(2..11)),
-        ..GetOptions::default()
+    let shape = GetShape {
+        range: RequestedRange::Bounded { start: 2, end: 11 },
+        ..GetShape::default()
     };
-    let result = read(&Fixture::from_env(), &options).unwrap();
+    let result = read(&Fixture::from_env(), shape, None).unwrap();
+    assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, &CONTENTS[2..11]);
-    assert_eq!(result.size, CONTENTS.len() as u64);
+    assert_eq!(result.size, Some(CONTENTS.len() as u64));
 }
 
 #[test]
 #[ignore = "requires Azure credentials"]
 fn heads_the_blob() {
-    let options = GetOptions {
-        head: true,
-        ..GetOptions::default()
-    };
-    let result = read(&Fixture::from_env(), &options).unwrap();
+    let result = read(&Fixture::from_env(), METADATA, None).unwrap();
+    assert_eq!(result.outcome, Outcome::Complete);
     assert!(result.body.is_empty());
-    assert_eq!(result.size, CONTENTS.len() as u64);
+    assert_eq!(result.size, Some(CONTENTS.len() as u64));
     assert!(result.e_tag.is_some());
 }
 
@@ -124,52 +168,32 @@ fn heads_the_blob() {
 #[ignore = "requires Azure credentials"]
 fn applies_if_match() {
     let fixture = Fixture::from_env();
-    let e_tag = read(
-        &fixture,
-        &GetOptions {
-            head: true,
-            ..GetOptions::default()
-        },
-    )
-    .unwrap()
-    .e_tag
-    .unwrap();
-    let matching = GetOptions {
-        if_match: Some(&e_tag),
-        ..GetOptions::default()
-    };
-    assert_eq!(read(&fixture, &matching).unwrap().body, CONTENTS);
-
-    let stale = GetOptions {
-        if_match: Some("\"stale\""),
-        ..GetOptions::default()
-    };
-    assert_eq!(error(read(&fixture, &stale)), Error::Precondition);
+    let e_tag = e_tag(&fixture);
+    let shape = conditional(ConditionKind::IfMatch);
+    assert_eq!(
+        read(&fixture, shape, Some(e_tag.as_bytes())).unwrap().body,
+        CONTENTS
+    );
+    assert_eq!(
+        read(&fixture, shape, Some(b"\"stale\"")).unwrap().outcome,
+        Outcome::PreconditionFailed
+    );
 }
 
 #[test]
 #[ignore = "requires Azure credentials"]
 fn applies_if_none_match() {
     let fixture = Fixture::from_env();
-    let e_tag = read(
-        &fixture,
-        &GetOptions {
-            head: true,
-            ..GetOptions::default()
-        },
-    )
-    .unwrap()
-    .e_tag
-    .unwrap();
-    let matching = GetOptions {
-        if_none_match: Some(&e_tag),
-        ..GetOptions::default()
-    };
-    assert_eq!(error(read(&fixture, &matching)), Error::NotModified);
-
-    let stale = GetOptions {
-        if_none_match: Some("\"stale\""),
-        ..GetOptions::default()
-    };
-    assert_eq!(read(&fixture, &stale).unwrap().body, CONTENTS);
+    let e_tag = e_tag(&fixture);
+    let shape = conditional(ConditionKind::IfNoneMatch);
+    assert_eq!(
+        read(&fixture, shape, Some(e_tag.as_bytes()))
+            .unwrap()
+            .outcome,
+        Outcome::NotModified
+    );
+    assert_eq!(
+        read(&fixture, shape, Some(b"\"stale\"")).unwrap().body,
+        CONTENTS
+    );
 }
