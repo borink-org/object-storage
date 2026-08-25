@@ -1,83 +1,31 @@
 use core::str;
 
-use crate::{CapacityError, Extent, WorkspaceExtent};
-
-/// Caller-provided storage used while constructing a request.
-pub struct RequestWorkspace<'a> {
-    packed: Backing<'a>,
-}
-
-enum Backing<'a> {
-    Slice(&'a mut [u8]),
-    Extent(&'a mut dyn Extent),
-}
-
-impl<'a> RequestWorkspace<'a> {
-    /// Uses a fixed mutable slice as packed request storage.
-    pub fn new(bytes: &'a mut [u8]) -> Self {
-        Self {
-            packed: Backing::Slice(bytes),
-        }
-    }
-
-    /// Uses a host-defined extent as packed request storage.
-    pub fn with_extent(packed: &'a mut dyn Extent) -> Self {
-        Self {
-            packed: Backing::Extent(packed),
-        }
-    }
-
-    /// Returns the current packed extent capacity.
-    pub fn capacity(&self) -> usize {
-        match &self.packed {
-            Backing::Slice(bytes) => bytes.len(),
-            Backing::Extent(extent) => extent.as_slice().len(),
-        }
-    }
-
-    pub(crate) fn bytes(&mut self) -> &mut [u8] {
-        match &mut self.packed {
-            Backing::Slice(bytes) => bytes,
-            Backing::Extent(extent) => extent.as_mut_slice(),
-        }
-    }
-
-    /// Asks the host extent to satisfy a capacity error.
-    ///
-    /// Fixed slices refuse requirements larger than their existing length.
-    pub fn try_reserve(&mut self, error: CapacityError) -> bool {
-        match error.extent {
-            WorkspaceExtent::Packed => match &mut self.packed {
-                Backing::Slice(bytes) => error.required <= bytes.len(),
-                Backing::Extent(extent) => extent.try_reserve(error.required),
-            },
-        }
-    }
-}
-
-/// A GET request borrowing its URL and header values from caller-owned memory.
+/// A request head borrowing its URL and header values from the caller's buffer.
 ///
-/// The request cannot outlive either the workspace or timestamp used to build
-/// it. No `'static` storage is required.
+/// Every head byte — the URL, the authorization value and the date — was copied
+/// into that buffer, so no input the host passed to
+/// [`Blobs::encode_get`](crate::Blobs::encode_get) is borrowed here and all of
+/// them may be temporaries. The head is valid until the buffer is reset or
+/// reused, which the borrow checker enforces: encode, send, reuse.
 #[derive(Debug, Clone, Copy)]
-pub struct Request<'a> {
+pub struct WireRequest<'r> {
     method: &'static str,
-    url: &'a str,
-    headers: [(&'static str, &'a str); 6],
+    url: &'r str,
+    headers: [(&'static str, &'r str); 5],
     header_count: usize,
 }
 
-impl<'a> Request<'a> {
+impl<'r> WireRequest<'r> {
     pub(crate) fn new(
         method: &'static str,
-        url: &'a str,
-        authorization: &'a str,
-        date: &'a str,
+        url: &'r str,
+        authorization: &'r str,
+        date: &'r str,
         version: &'static str,
-        range: Option<&'a str>,
-        conditions: [Option<(&'static str, &'a str)>; 2],
+        range: Option<&'r str>,
+        condition: Option<(&'static str, &'r str)>,
     ) -> Self {
-        let mut headers = [("", ""); 6];
+        let mut headers = [("", ""); 5];
         headers[..3].copy_from_slice(&[
             ("authorization", authorization),
             ("x-ms-date", date),
@@ -88,7 +36,7 @@ impl<'a> Request<'a> {
             headers[header_count] = ("range", value);
             header_count += 1;
         }
-        for value in conditions.into_iter().flatten() {
+        if let Some(value) = condition {
             headers[header_count] = value;
             header_count += 1;
         }
@@ -106,7 +54,7 @@ impl<'a> Request<'a> {
     }
 
     /// Returns the complete object URL.
-    pub fn url(&self) -> &'a str {
+    pub fn url(&self) -> &'r str {
         self.url
     }
 
@@ -116,53 +64,32 @@ impl<'a> Request<'a> {
     }
 }
 
-// Counting and storing use the same `push` calls so requirement measurement
-// cannot drift from request construction.
-pub(crate) enum Writer<'a> {
-    Counting(usize),
-    Storing {
-        bytes: &'a mut [u8],
-        position: usize,
-    },
+// The writer keeps counting after capacity is exhausted, so one pass produces
+// either the request or its exact requirement. Partial bytes are never returned.
+pub(crate) struct Writer<'a> {
+    bytes: &'a mut [u8],
+    position: usize,
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn counting() -> Self {
-        Self::Counting(0)
+    pub(crate) fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes, position: 0 }
     }
 
-    pub(crate) fn storing(bytes: &'a mut [u8]) -> Self {
-        Self::Storing { bytes, position: 0 }
-    }
-
-    pub(crate) fn push(&mut self, value: &str) {
-        match self {
-            Self::Counting(position) => *position += value.len(),
-            Self::Storing { bytes, position } => {
-                let end = *position + value.len();
-                // Continue advancing after overflow to report the exact size.
-                // Partial request bytes are never returned to the host.
-                if end <= bytes.len() {
-                    bytes[*position..end].copy_from_slice(value.as_bytes());
-                }
-                *position = end;
-            }
+    pub(crate) fn push(&mut self, value: &[u8]) {
+        let end = self.position + value.len();
+        if end <= self.bytes.len() {
+            self.bytes[self.position..end].copy_from_slice(value);
         }
+        self.position = end;
     }
 
     pub(crate) fn position(&self) -> usize {
-        match self {
-            Self::Counting(position) | Self::Storing { position, .. } => *position,
-        }
+        self.position
     }
 
     pub(crate) fn finish(self) -> Option<&'a [u8]> {
-        match self {
-            Self::Storing { bytes, position } if position <= bytes.len() => {
-                Some(&bytes[..position])
-            }
-            Self::Counting(_) | Self::Storing { .. } => None,
-        }
+        (self.position <= self.bytes.len()).then(|| &self.bytes[..self.position])
     }
 }
 
@@ -192,8 +119,8 @@ impl U64Decimal {
         Self { bytes, start }
     }
 
-    pub(crate) fn as_str(&self) -> &str {
-        text(&self.bytes[self.start..])
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[self.start..]
     }
 }
 
@@ -202,34 +129,42 @@ mod tests {
     use super::{U64Decimal, Writer};
 
     #[test]
-    fn counting_and_storing_measure_the_same_writes() {
-        let mut counting = Writer::counting();
-        counting.push("one");
-        counting.push("é");
-
+    fn an_exactly_sized_writer_returns_the_written_bytes() {
         let mut bytes = [0; 5];
-        let mut storing = Writer::storing(&mut bytes);
-        storing.push("one");
-        storing.push("é");
+        let mut writer = Writer::new(&mut bytes);
+        writer.push(b"one");
+        writer.push("\u{e9}".as_bytes());
 
-        assert_eq!(counting.position(), storing.position());
-        assert_eq!(storing.finish().unwrap(), "oneé".as_bytes());
+        assert_eq!(writer.position(), 5);
+        assert_eq!(writer.finish().unwrap(), "one\u{e9}".as_bytes());
     }
 
     #[test]
     fn an_undersized_writer_still_reports_the_exact_requirement() {
         let mut bytes = [0; 3];
-        let mut storing = Writer::storing(&mut bytes);
-        storing.push("four");
-        storing.push(" more");
+        let mut writer = Writer::new(&mut bytes);
+        writer.push(b"four");
+        writer.push(b" more");
 
-        assert_eq!(storing.position(), 9);
-        assert!(storing.finish().is_none());
+        assert_eq!(writer.position(), 9);
+        assert!(writer.finish().is_none());
+    }
+
+    #[test]
+    fn an_empty_writer_reports_the_whole_requirement() {
+        let mut writer = Writer::new(&mut []);
+        writer.push(b"measured");
+
+        assert_eq!(writer.position(), 8);
+        assert!(writer.finish().is_none());
     }
 
     #[test]
     fn formats_the_full_u64_range() {
-        assert_eq!(U64Decimal::new(0).as_str(), "0");
-        assert_eq!(U64Decimal::new(u64::MAX).as_str(), "18446744073709551615");
+        assert_eq!(U64Decimal::new(0).as_bytes(), b"0");
+        assert_eq!(
+            U64Decimal::new(u64::MAX).as_bytes(),
+            b"18446744073709551615"
+        );
     }
 }

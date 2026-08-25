@@ -5,13 +5,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
 mod azure;
 mod error;
 mod http;
-mod memory;
+pub mod layered;
 mod path;
 mod request;
 mod response;
@@ -19,11 +16,8 @@ mod time;
 mod types;
 
 pub use azure::{Blobs, Container, VERSION};
-pub use error::{Error, Result};
-#[cfg(feature = "alloc")]
-pub use memory::VecExtent;
-pub use memory::{CapacityError, Extent, RequestRequirements, WorkspaceExtent};
-pub use request::{Request, RequestWorkspace};
+pub use error::{CapacityError, Error, InvalidPlan, Result};
+pub use request::WireRequest;
 pub use response::Response;
 pub use time::Timestamps;
-pub use types::{GetOptions, GetRange, ObjectMeta};
+pub use types::{ConditionKind, GetKind, GetShape, ObjectMeta, PhysicalGet, RequestedRange};

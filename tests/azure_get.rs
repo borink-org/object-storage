@@ -1,8 +1,8 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, Container, Error, GetOptions, GetRange, RequestWorkspace, Response, Timestamps, VERSION,
-    WorkspaceExtent,
+    Blobs, ConditionKind, Container, Error, GetKind, GetShape, InvalidPlan, ObjectMeta,
+    PhysicalGet, RequestedRange, Response, Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -18,14 +18,11 @@ fn now() -> Timestamps {
 }
 
 #[test]
-fn builds_a_bearer_get_in_caller_memory() {
+fn encodes_a_bearer_get_in_caller_memory() {
     let blobs = blobs();
-    let mut storage = [0; 256];
-    let mut workspace = RequestWorkspace::new(&mut storage);
-    let options = GetOptions::default();
-    let now = now();
+    let mut buf = [0; 256];
     let request = blobs
-        .get_request(&mut workspace, "directory/a key+é", &options, &now)
+        .encode_get(&mut buf, &PhysicalGet::new("directory/a key+é"), &now())
         .unwrap();
 
     assert_eq!(request.method(), "GET");
@@ -44,83 +41,114 @@ fn builds_a_bearer_get_in_caller_memory() {
 }
 
 #[test]
+fn the_head_borrows_nothing_the_caller_passed_in() {
+    let blobs = blobs();
+    let mut buf = [0; 256];
+    // The key, the condition value and the timestamp are all temporaries.
+    let request = blobs
+        .encode_get(
+            &mut buf,
+            &PhysicalGet {
+                key: &String::from("object"),
+                condition_value: Some(String::from("\"etag\"").as_bytes()),
+                shape: GetShape {
+                    condition_kind: ConditionKind::IfMatch,
+                    ..GetShape::default()
+                },
+            },
+            &Timestamps::from_unix(1_787_400_000),
+        )
+        .unwrap();
+
+    assert!(
+        request
+            .headers()
+            .any(|header| header == ("x-ms-date", "Sat, 22 Aug 2026 12:00:00 GMT"))
+    );
+    assert!(
+        request
+            .headers()
+            .any(|header| header == ("if-match", "\"etag\""))
+    );
+}
+
+#[test]
 fn reports_the_exact_required_capacity() {
     let blobs = blobs();
-    let options = GetOptions::default();
-    let mut none = [];
-    let error = blobs
-        .get_request(
-            &mut RequestWorkspace::new(&mut none),
-            "object",
-            &options,
-            &now(),
-        )
-        .unwrap_err();
+    let get = PhysicalGet::new("object");
+    let error = blobs.encode_get(&mut [], &get, &now()).unwrap_err();
     let Error::Capacity(capacity) = error else {
         panic!("unexpected error: {error}");
     };
-    assert_eq!(capacity.extent, WorkspaceExtent::Packed);
+    assert_eq!(capacity.available, 0);
+    assert_eq!(
+        layered::requirements(&blobs, &get, &now()),
+        Ok(capacity.required)
+    );
+
+    let mut short = vec![0; capacity.required - 1];
+    assert_eq!(
+        blobs
+            .encode_get(&mut short, &get, &now())
+            .unwrap_err()
+            .capacity()
+            .map(|capacity| capacity.required),
+        Some(capacity.required)
+    );
 
     let mut exact = vec![0; capacity.required];
-    blobs
-        .get_request(
-            &mut RequestWorkspace::new(&mut exact),
-            "object",
-            &options,
-            &now(),
-        )
-        .unwrap();
+    blobs.encode_get(&mut exact, &get, &now()).unwrap();
 }
 
 #[test]
 fn classifies_response_metadata_and_errors() {
     let blobs = blobs();
-    let options = GetOptions::default();
+    let shape = GetShape::default();
     let headers = [("Content-Length", "8"), ("ETag", "\"etag\"")];
-    let meta = blobs
-        .interpret_get(Response::new(200, headers), &options)
-        .unwrap();
-    assert_eq!(meta.size, 8);
-    assert_eq!(meta.e_tag, Some("\"etag\""));
     assert_eq!(
-        blobs.interpret_get(
-            Response::new(404, core::iter::empty::<(&str, &str)>()),
-            &options,
-        ),
-        Err(Error::NotFound)
+        blobs.interpret_get(Response::new(200, headers), shape),
+        Ok(ObjectMeta {
+            size: 8,
+            e_tag: Some("\"etag\""),
+            version: None,
+        })
     );
-    assert_eq!(
-        blobs.interpret_get(
-            Response::new(403, core::iter::empty::<(&str, &str)>()),
-            &options,
-        ),
-        Err(Error::Unauthorized)
-    );
-    assert_eq!(
-        blobs.interpret_get(
-            Response::new(304, core::iter::empty::<(&str, &str)>()),
-            &options,
-        ),
-        Err(Error::NotModified)
-    );
+    for (status, expected) in [
+        (404, Error::NotFound),
+        (403, Error::Unauthorized),
+        (304, Error::NotModified),
+    ] {
+        assert_eq!(
+            blobs.interpret_get(
+                Response::new(status, core::iter::empty::<(&str, &str)>()),
+                shape,
+            ),
+            Err(expected)
+        );
+    }
 }
 
 #[test]
-fn adds_ranges_conditions_and_head() {
+fn encodes_ranges_conditions_and_metadata_plans() {
     let blobs = blobs();
-    let mut storage = [0; 256];
-    let options = GetOptions {
-        if_match: Some("\"etag\""),
-        if_none_match: Some("\"other\""),
-        range: Some(GetRange::Bounded(2..6)),
-        head: true,
+    let mut buf = [0; 256];
+    let shape = GetShape {
+        kind: GetKind::Bytes,
+        range: RequestedRange::Bounded { start: 2, end: 6 },
+        condition_kind: ConditionKind::IfNoneMatch,
     };
-    let mut workspace = RequestWorkspace::new(&mut storage);
-    let now = now();
     let request = blobs
-        .get_request(&mut workspace, "object", &options, &now)
+        .encode_get(
+            &mut buf,
+            &PhysicalGet {
+                key: "object",
+                condition_value: Some(b"\"etag\""),
+                shape,
+            },
+            &now(),
+        )
         .unwrap();
-    assert_eq!(request.method(), "HEAD");
+    assert_eq!(request.method(), "GET");
     assert!(
         request
             .headers()
@@ -129,25 +157,37 @@ fn adds_ranges_conditions_and_head() {
     assert!(
         request
             .headers()
-            .any(|header| header == ("if-match", "\"etag\""))
+            .any(|header| header == ("if-none-match", "\"etag\""))
     );
-    assert!(
-        request
-            .headers()
-            .any(|header| header == ("if-none-match", "\"other\""))
-    );
+
+    let metadata = blobs
+        .encode_get(
+            &mut buf,
+            &PhysicalGet {
+                shape: GetShape {
+                    kind: GetKind::Metadata,
+                    ..GetShape::default()
+                },
+                ..PhysicalGet::new("object")
+            },
+            &now(),
+        )
+        .unwrap();
+    assert_eq!(metadata.method(), "HEAD");
 
     let headers = [
         ("Content-Range", "bytes 2-5/10"),
         ("ETag", "\"etag\""),
         ("x-ms-version-id", "version-1"),
     ];
-    let meta = blobs
-        .interpret_get(Response::new(206, headers), &options)
-        .unwrap();
-    assert_eq!(meta.size, 10);
-    assert_eq!(meta.e_tag, Some("\"etag\""));
-    assert_eq!(meta.version, Some("version-1"));
+    assert_eq!(
+        blobs.interpret_get(Response::new(206, headers), shape),
+        Ok(ObjectMeta {
+            size: 10,
+            e_tag: Some("\"etag\""),
+            version: Some("version-1"),
+        })
+    );
 }
 
 #[test]
@@ -173,31 +213,73 @@ fn rejects_values_that_could_change_the_http_request() {
         Blobs::new(container, "token\r\nheader"),
         Err(Error::InvalidToken)
     ));
+}
 
-    let options = GetOptions {
-        if_match: Some("etag\r\nheader"),
-        ..GetOptions::default()
+#[test]
+fn refuses_invalid_plans_before_writing_anything() {
+    let condition = |kind, value| PhysicalGet {
+        key: "object",
+        condition_value: value,
+        shape: GetShape {
+            condition_kind: kind,
+            ..GetShape::default()
+        },
     };
-    assert_eq!(
-        blobs().get_request_requirements("object", &options),
-        Err(Error::InvalidCondition)
-    );
-    let range_start = 6;
-    let range_end = 2;
-    let options = GetOptions {
-        range: Some(GetRange::Bounded(range_start..range_end)),
-        ..GetOptions::default()
+    let ranged = |range| PhysicalGet {
+        shape: GetShape {
+            range,
+            ..GetShape::default()
+        },
+        ..PhysicalGet::new("object")
     };
-    assert_eq!(
-        blobs().get_request_requirements("object", &options),
-        Err(Error::InvalidRange)
-    );
-    let options = GetOptions {
-        range: Some(GetRange::Suffix(4)),
-        ..GetOptions::default()
-    };
-    assert!(matches!(
-        blobs().get_request_requirements("object", &options),
-        Err(Error::Unsupported(_))
-    ));
+    let cases = [
+        (PhysicalGet::new(""), InvalidPlan::Key),
+        (
+            ranged(RequestedRange::Bounded { start: 6, end: 2 }),
+            InvalidPlan::Range,
+        ),
+        (
+            ranged(RequestedRange::Suffix(4)),
+            InvalidPlan::UnsupportedRange,
+        ),
+        (
+            PhysicalGet {
+                shape: GetShape {
+                    kind: GetKind::Metadata,
+                    range: RequestedRange::Offset(2),
+                    ..GetShape::default()
+                },
+                ..PhysicalGet::new("object")
+            },
+            InvalidPlan::RangedMetadata,
+        ),
+        // A kind without a value and a value without a kind are both invalid.
+        (
+            condition(ConditionKind::IfMatch, None),
+            InvalidPlan::Condition,
+        ),
+        (
+            condition(ConditionKind::None, Some(b"\"etag\"")),
+            InvalidPlan::Condition,
+        ),
+        (
+            condition(ConditionKind::IfMatch, Some(b"etag\r\nheader")),
+            InvalidPlan::Condition,
+        ),
+    ];
+
+    let blobs = blobs();
+    let mut buf = [0; 256];
+    for (get, expected) in cases {
+        assert_eq!(
+            blobs.encode_get(&mut buf, &get, &now()).err(),
+            Some(Error::InvalidPlan(expected)),
+            "{get:?}"
+        );
+        // The layered requirement path reports the same refusal unchanged.
+        assert_eq!(
+            layered::requirements(&blobs, &get, &now()),
+            Err(Error::InvalidPlan(expected))
+        );
+    }
 }

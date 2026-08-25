@@ -2,17 +2,15 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{Blobs, GetOptions, RequestWorkspace, Response, Timestamps};
+use borink_object_storage::{Blobs, PhysicalGet, Response, Timestamps, layered};
 
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
-    let options = GetOptions::default();
-    let required = blobs.get_request_requirements(key, &options)?;
-    let mut storage = vec![0; required.packed];
-    let mut workspace = RequestWorkspace::new(&mut storage);
-    let request = blobs.get_request(&mut workspace, key, &options, &now)?;
+    let get = PhysicalGet::new(key);
+    let mut buf = vec![0; layered::requirements(blobs, &get, &now)?];
+    let request = blobs.encode_get(&mut buf, &get, &now)?;
 
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
@@ -31,7 +29,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
                 value.to_str().ok().map(|value| (name.as_str(), value))
             }),
         ),
-        &options,
+        get.shape,
     )?;
     incoming.body_mut().read_to_vec().map_err(Into::into)
 }

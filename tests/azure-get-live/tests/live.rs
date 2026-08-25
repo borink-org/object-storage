@@ -2,7 +2,8 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, Container, Error, GetOptions, GetRange, RequestWorkspace, Response, Timestamps,
+    Blobs, ConditionKind, Container, Error, GetKind, GetShape, PhysicalGet, RequestedRange,
+    Response, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -45,14 +46,18 @@ struct ReadResult {
 
 fn read(
     fixture: &Fixture,
-    options: &GetOptions<'_>,
+    shape: GetShape,
+    condition_value: Option<&[u8]>,
 ) -> Result<ReadResult, Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
-    let required = blobs.get_request_requirements(&fixture.key, options)?;
-    let mut storage = vec![0; required.packed];
-    let mut workspace = RequestWorkspace::new(&mut storage);
-    let request = blobs.get_request(&mut workspace, &fixture.key, options, &now)?;
+    let get = PhysicalGet {
+        key: &fixture.key,
+        condition_value,
+        shape,
+    };
+    let mut buf = vec![0; layered::requirements(&blobs, &get, &now)?];
+    let request = blobs.encode_get(&mut buf, &get, &now)?;
     let mut outgoing = match request.method() {
         "GET" => ureq::get(request.url()),
         "HEAD" => ureq::head(request.url()),
@@ -75,7 +80,7 @@ fn read(
                     value.to_str().ok().map(|value| (name.as_str(), value))
                 }),
             ),
-            options,
+            shape,
         )?;
         (meta.size, meta.e_tag.map(str::to_owned))
     };
@@ -87,10 +92,27 @@ fn error(result: Result<ReadResult, Box<dyn std::error::Error>>) -> Error {
     *result.unwrap_err().downcast::<Error>().expect("core error")
 }
 
+const METADATA: GetShape = GetShape {
+    kind: GetKind::Metadata,
+    range: RequestedRange::Whole,
+    condition_kind: ConditionKind::None,
+};
+
+fn conditional(kind: ConditionKind) -> GetShape {
+    GetShape {
+        condition_kind: kind,
+        ..GetShape::default()
+    }
+}
+
+fn e_tag(fixture: &Fixture) -> String {
+    read(fixture, METADATA, None).unwrap().e_tag.unwrap()
+}
+
 #[test]
 #[ignore = "requires Azure credentials"]
 fn gets_the_complete_blob() {
-    let result = read(&Fixture::from_env(), &GetOptions::default()).unwrap();
+    let result = read(&Fixture::from_env(), GetShape::default(), None).unwrap();
     assert_eq!(result.body, CONTENTS);
     assert_eq!(result.size, CONTENTS.len() as u64);
 }
@@ -98,11 +120,11 @@ fn gets_the_complete_blob() {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn gets_a_bounded_range() {
-    let options = GetOptions {
-        range: Some(GetRange::Bounded(2..11)),
-        ..GetOptions::default()
+    let shape = GetShape {
+        range: RequestedRange::Bounded { start: 2, end: 11 },
+        ..GetShape::default()
     };
-    let result = read(&Fixture::from_env(), &options).unwrap();
+    let result = read(&Fixture::from_env(), shape, None).unwrap();
     assert_eq!(result.body, &CONTENTS[2..11]);
     assert_eq!(result.size, CONTENTS.len() as u64);
 }
@@ -110,11 +132,7 @@ fn gets_a_bounded_range() {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn heads_the_blob() {
-    let options = GetOptions {
-        head: true,
-        ..GetOptions::default()
-    };
-    let result = read(&Fixture::from_env(), &options).unwrap();
+    let result = read(&Fixture::from_env(), METADATA, None).unwrap();
     assert!(result.body.is_empty());
     assert_eq!(result.size, CONTENTS.len() as u64);
     assert!(result.e_tag.is_some());
@@ -124,52 +142,30 @@ fn heads_the_blob() {
 #[ignore = "requires Azure credentials"]
 fn applies_if_match() {
     let fixture = Fixture::from_env();
-    let e_tag = read(
-        &fixture,
-        &GetOptions {
-            head: true,
-            ..GetOptions::default()
-        },
-    )
-    .unwrap()
-    .e_tag
-    .unwrap();
-    let matching = GetOptions {
-        if_match: Some(&e_tag),
-        ..GetOptions::default()
-    };
-    assert_eq!(read(&fixture, &matching).unwrap().body, CONTENTS);
-
-    let stale = GetOptions {
-        if_match: Some("\"stale\""),
-        ..GetOptions::default()
-    };
-    assert_eq!(error(read(&fixture, &stale)), Error::Precondition);
+    let e_tag = e_tag(&fixture);
+    let shape = conditional(ConditionKind::IfMatch);
+    assert_eq!(
+        read(&fixture, shape, Some(e_tag.as_bytes())).unwrap().body,
+        CONTENTS
+    );
+    assert_eq!(
+        error(read(&fixture, shape, Some(b"\"stale\""))),
+        Error::Precondition
+    );
 }
 
 #[test]
 #[ignore = "requires Azure credentials"]
 fn applies_if_none_match() {
     let fixture = Fixture::from_env();
-    let e_tag = read(
-        &fixture,
-        &GetOptions {
-            head: true,
-            ..GetOptions::default()
-        },
-    )
-    .unwrap()
-    .e_tag
-    .unwrap();
-    let matching = GetOptions {
-        if_none_match: Some(&e_tag),
-        ..GetOptions::default()
-    };
-    assert_eq!(error(read(&fixture, &matching)), Error::NotModified);
-
-    let stale = GetOptions {
-        if_none_match: Some("\"stale\""),
-        ..GetOptions::default()
-    };
-    assert_eq!(read(&fixture, &stale).unwrap().body, CONTENTS);
+    let e_tag = e_tag(&fixture);
+    let shape = conditional(ConditionKind::IfNoneMatch);
+    assert_eq!(
+        error(read(&fixture, shape, Some(e_tag.as_bytes()))),
+        Error::NotModified
+    );
+    assert_eq!(
+        read(&fixture, shape, Some(b"\"stale\"")).unwrap().body,
+        CONTENTS
+    );
 }

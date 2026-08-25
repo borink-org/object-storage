@@ -2,8 +2,8 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    CapacityError, Error, GetOptions, GetRange, ObjectMeta, Request, RequestRequirements,
-    RequestWorkspace, Response, Result, Timestamps, WorkspaceExtent,
+    CapacityError, ConditionKind, Error, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet,
+    RequestedRange, Response, Result, Timestamps, WireRequest,
 };
 
 /// Latest Azure Storage version fully deployed in every region.
@@ -57,126 +57,115 @@ impl core::fmt::Debug for Blobs<'_> {
 impl<'a> Blobs<'a> {
     /// Validates and borrows a container and bearer token.
     pub fn new(container: Container<'a>, token: &'a str) -> Result<Self> {
-        if !valid_header(token) {
+        if !valid_header(token.as_bytes()) {
             return Err(Error::InvalidToken);
         }
         Ok(Self { container, token })
     }
 
-    /// Builds a GET or HEAD request in `workspace`.
+    /// Lowers a plan into a request head written into `buf`.
     ///
-    /// A capacity error reports the exact packed extent size; the host may grow
-    /// that extent and retry the same call.
-    pub fn get_request<'request>(
+    /// The plan is validated exhaustively before any byte is written, so
+    /// [`Error::InvalidPlan`] is never confused with [`Error::Capacity`]. A
+    /// capacity refusal reports the exact requirement; the host may grow its
+    /// storage and call again, or measure first with
+    /// [`layered::requirements`](crate::layered::requirements).
+    ///
+    /// A sans-I/O core cannot read the clock, so `now` is explicit. It is
+    /// copied into `buf` like every other head byte and may be a temporary.
+    pub fn encode_get<'r>(
         &self,
-        workspace: &'request mut RequestWorkspace<'_>,
-        key: &str,
-        options: &GetOptions<'_>,
-        now: &'request Timestamps,
-    ) -> Result<Request<'request>> {
-        validate_get(key, options)?;
-        let available = workspace.capacity();
-        // The storing writer keeps counting after capacity is exhausted. One
-        // pass therefore produces either the request or its exact requirement.
-        let mut out = Writer::storing(workspace.bytes());
-        let layout = self.build(&mut out, key, options);
+        buf: &'r mut [u8],
+        get: &PhysicalGet<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_get(get)?;
+        let available = buf.len();
+        let mut out = Writer::new(buf);
+        let layout = self.build(&mut out, get, now);
         let required = out.position();
-        if required > available {
-            return Err(CapacityError {
-                extent: WorkspaceExtent::Packed,
-                required,
-                available,
-            }
-            .into());
-        }
-        let bytes = out.finish().expect("capacity was checked");
-        Ok(Request::new(
-            if options.head { "HEAD" } else { "GET" },
+        let bytes = out.finish().ok_or(CapacityError {
+            required,
+            available,
+        })?;
+        Ok(WireRequest::new(
+            match get.shape.kind {
+                GetKind::Bytes => "GET",
+                GetKind::Metadata => "HEAD",
+            },
             text(&bytes[..layout.url_end]),
             text(&bytes[layout.url_end..layout.authorization_end]),
-            now.rfc1123(),
+            text(&bytes[layout.authorization_end..layout.date_end]),
             VERSION,
             layout.range.map(|span| text(&bytes[span])),
-            [
-                layout.if_match.map(|span| ("if-match", text(&bytes[span]))),
-                layout
-                    .if_none_match
-                    .map(|span| ("if-none-match", text(&bytes[span]))),
-            ],
+            layout
+                .condition
+                .map(|(name, span)| (name, text(&bytes[span]))),
         ))
     }
 
-    /// Measures the packed extent required by [`Self::get_request`].
-    pub fn get_request_requirements(
-        &self,
-        key: &str,
-        options: &GetOptions<'_>,
-    ) -> Result<RequestRequirements> {
-        validate_get(key, options)?;
-        let mut out = Writer::counting();
-        self.build(&mut out, key, options);
-        Ok(RequestRequirements {
-            packed: out.position(),
-        })
-    }
-
-    fn build(&self, out: &mut Writer<'_>, key: &str, options: &GetOptions<'_>) -> Layout {
-        out.push(self.container.endpoint);
-        out.push("/");
-        out.push(self.container.name);
-        out.push("/");
-        for part in crate::path::encode_object_key(key) {
-            out.push(part);
+    fn build(&self, out: &mut Writer<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Layout {
+        out.push(self.container.endpoint.as_bytes());
+        out.push(b"/");
+        out.push(self.container.name.as_bytes());
+        out.push(b"/");
+        for part in crate::path::encode_object_key(get.key) {
+            out.push(part.as_bytes());
         }
         let url_end = out.position();
-        out.push("Bearer ");
-        out.push(self.token);
+        out.push(b"Bearer ");
+        out.push(self.token.as_bytes());
         let authorization_end = out.position();
-        let range = options.range.as_ref().map(|range| {
-            let start = out.position();
-            out.push("bytes=");
-            match range {
-                GetRange::Bounded(range) => {
-                    out.push(U64Decimal::new(range.start).as_str());
-                    out.push("-");
-                    out.push(U64Decimal::new(range.end - 1).as_str());
+        out.push(now.rfc1123().as_bytes());
+        let date_end = out.position();
+        let range = match get.shape.range {
+            RequestedRange::Whole => None,
+            range => {
+                let start = out.position();
+                out.push(b"bytes=");
+                match range {
+                    RequestedRange::Bounded { start, end } => {
+                        out.push(U64Decimal::new(start).as_bytes());
+                        out.push(b"-");
+                        out.push(U64Decimal::new(end - 1).as_bytes());
+                    }
+                    RequestedRange::Offset(first) => {
+                        out.push(U64Decimal::new(first).as_bytes());
+                        out.push(b"-");
+                    }
+                    RequestedRange::Whole | RequestedRange::Suffix(_) => {
+                        unreachable!("the plan was validated")
+                    }
                 }
-                GetRange::Offset(start) => {
-                    out.push(U64Decimal::new(*start).as_str());
-                    out.push("-");
-                }
-                GetRange::Suffix(_) => unreachable!("range was validated"),
+                Some(start..out.position())
             }
-            start..out.position()
-        });
-        let if_match = options.if_match.map(|value| {
+        };
+        let condition = condition_header(get.shape.condition_kind).map(|name| {
             let start = out.position();
-            out.push(value);
-            start..out.position()
-        });
-        let if_none_match = options.if_none_match.map(|value| {
-            let start = out.position();
-            out.push(value);
-            start..out.position()
+            out.push(get.condition_value.expect("the plan was validated"));
+            (name, start..out.position())
         });
         Layout {
             url_end,
             authorization_end,
+            date_end,
             range,
-            if_match,
-            if_none_match,
+            condition,
         }
     }
 
     /// Validates successful response metadata before the host reads the body.
+    ///
+    /// The plan the response answers is passed back in, so the interpretation
+    /// cannot disagree with the request: the host re-states nothing.
     pub fn interpret_get<'response>(
         &self,
         response: Response<'response>,
-        options: &GetOptions<'_>,
+        shape: GetShape,
     ) -> Result<ObjectMeta<'response>> {
         match response.status() {
             200..=299 => Ok(ObjectMeta {
-                size: response_size(&response, options)?,
+                size: response_size(&response, shape)?,
                 e_tag: response.header("etag"),
                 version: response.header("x-ms-version-id"),
             }),
@@ -193,38 +182,49 @@ impl<'a> Blobs<'a> {
 struct Layout {
     url_end: usize,
     authorization_end: usize,
+    date_end: usize,
     range: Option<Range<usize>>,
-    if_match: Option<Range<usize>>,
-    if_none_match: Option<Range<usize>>,
+    condition: Option<(&'static str, Range<usize>)>,
 }
 
-fn validate_get(key: &str, options: &GetOptions<'_>) -> Result<()> {
-    if key.is_empty() || key.chars().count() > MAX_BLOB_NAME_CHARS {
-        return Err(Error::InvalidKey);
+fn condition_header(kind: ConditionKind) -> Option<&'static str> {
+    match kind {
+        ConditionKind::None => None,
+        ConditionKind::IfMatch => Some("if-match"),
+        ConditionKind::IfNoneMatch => Some("if-none-match"),
     }
-    match &options.range {
-        Some(GetRange::Bounded(range)) if range.start >= range.end => {
-            return Err(Error::InvalidRange);
+}
+
+fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
+    if get.key.is_empty() || get.key.chars().count() > MAX_BLOB_NAME_CHARS {
+        return Err(InvalidPlan::Key.into());
+    }
+    match get.shape.range {
+        RequestedRange::Bounded { start, end } if start >= end => {
+            return Err(InvalidPlan::Range.into());
         }
-        Some(GetRange::Suffix(_)) => {
-            return Err(Error::Unsupported(
-                "Azure does not support Range: bytes=-N suffix requests",
-            ));
+        RequestedRange::Suffix(_) => return Err(InvalidPlan::UnsupportedRange.into()),
+        RequestedRange::Whole => {}
+        _ if get.shape.kind == GetKind::Metadata => {
+            return Err(InvalidPlan::RangedMetadata.into());
         }
         _ => {}
     }
-    if options.if_match.is_some_and(|value| !valid_header(value))
-        || options
-            .if_none_match
-            .is_some_and(|value| !valid_header(value))
-    {
-        return Err(Error::InvalidCondition);
+    // The kind and the value must agree in both directions: a kind without a
+    // value cannot be encoded, and a value without a kind would be dropped.
+    match (get.shape.condition_kind, get.condition_value) {
+        (ConditionKind::None, None) => Ok(()),
+        (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
+            if valid_header(value) =>
+        {
+            Ok(())
+        }
+        _ => Err(InvalidPlan::Condition.into()),
     }
-    Ok(())
 }
 
-fn response_size(response: &Response<'_>, options: &GetOptions<'_>) -> Result<u64> {
-    if options.range.is_some() {
+fn response_size(response: &Response<'_>, shape: GetShape) -> Result<u64> {
+    if shape.range != RequestedRange::Whole {
         return response
             .header("content-range")
             .and_then(|value| value.rsplit_once('/'))
@@ -238,6 +238,6 @@ fn response_size(response: &Response<'_>, options: &GetOptions<'_>) -> Result<u6
         .map_err(|_| Error::Protocol("invalid content-length"))
 }
 
-fn valid_header(value: &str) -> bool {
-    !value.is_empty() && value.is_ascii() && !value.bytes().any(|byte| byte.is_ascii_control())
+fn valid_header(value: &[u8]) -> bool {
+    !value.is_empty() && value.is_ascii() && !value.iter().any(u8::is_ascii_control)
 }
