@@ -11,6 +11,8 @@ This library uses a style of programming inspired by Zig, but still provides Rus
 
 Currently we only provide the sans-I/O core as a library; you must provide the host yourself. [`hosts/ureq`](hosts/ureq) contains an example host.
 
+For C++, [`hosts/cxx`](hosts/cxx) is a bridge and a libcurl host built on it. The bridge allocates once per client and never per request, and returns no `Result`, so an application built without exceptions can use it. Your application keeps its HTTP client, its buffers and its memory budget.
+
 ## Supported features
 
 ### Azure Blob Storage only

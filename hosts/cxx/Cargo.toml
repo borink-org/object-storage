@@ -1,0 +1,20 @@
+[package]
+name = "borink-azure-cxx"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The C++ hosts link this. `cargo build` writes the archive, and the generated
+# header that declares the bridge, into `target/`.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+borink-object-storage = { path = "../.." }
+cxx = "1.0"
+
+[build-dependencies]
+cxx-build = "1.0"
+
+[lints.rust]
+missing_docs = "deny"
