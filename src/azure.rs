@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    BodyWindow, CapacityError, ConditionKind, Error, FailureClass, GetHead, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Result, Timestamps,
-    WireRequest,
+    AzureErrorKind, BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass,
+    GetHead, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet,
+    RequestedRange, Result, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -189,7 +189,7 @@ impl<'a> Blobs<'a> {
     /// Every head that Azure sends becomes a [`GetHeadOutcome`], including the
     /// heads that report a failure. Azure names its errors in the
     /// `x-ms-error-code` header, so this method needs no part of the response
-    /// body.
+    /// body. To read the specific Azure error code, call [`classify_error`].
     ///
     /// # Errors
     ///
@@ -235,10 +235,31 @@ impl<'a> Blobs<'a> {
             200..=299 => Err(Error::Protocol("unexpected success status")),
             status => Ok(GetHeadOutcome::ServiceFailure {
                 status,
-                class: failure_class(status),
+                class: failure_class(status, head.error_code),
                 request_id: head.request_id,
             }),
         }
+    }
+}
+
+/// Reads the Azure error code from a failed response.
+///
+/// Azure names the error in the `x-ms-error-code` header, and repeats it in an
+/// XML body. This function reads the header first, and falls back to the body.
+/// It allocates nothing and keeps nothing.
+///
+/// Set `truncated` if your read limit cut `body` short. The result then
+/// separates a body that stopped early from a complete body that names a code
+/// this crate does not recognize.
+pub fn classify_error(head: &GetHead<'_>, body: &[u8], truncated: bool) -> Classification {
+    let code = head
+        .error_code
+        .map(trim_ascii)
+        .or_else(|| crate::xml::error_code(body).map(|code| code.as_bytes()));
+    match code.and_then(kind_for_code) {
+        Some(kind) => Classification::Classified(kind),
+        None if truncated => Classification::Incomplete,
+        None => Classification::Unknown,
     }
 }
 
@@ -368,13 +389,37 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
 
-fn failure_class(status: u16) -> FailureClass {
-    match status {
-        300..=399 => FailureClass::Redirect,
-        401 | 403 => FailureClass::Auth,
-        408 | 429 => FailureClass::Throttled,
-        500..=599 => FailureClass::Server,
-        _ => FailureClass::Other,
+fn kind_for_code(code: &[u8]) -> Option<AzureErrorKind> {
+    Some(match code {
+        b"BlobNotFound" | b"ResourceNotFound" => AzureErrorKind::NotFound,
+        b"ContainerNotFound" => AzureErrorKind::NoSuchContainer,
+        b"BlobAlreadyExists" | b"ContainerAlreadyExists" => AzureErrorKind::AlreadyExists,
+        b"ConditionNotMet" | b"TargetConditionNotMet" => AzureErrorKind::Precondition,
+        b"InvalidRange" => AzureErrorKind::RangeNotSatisfiable,
+        b"ServerBusy" => AzureErrorKind::Throttled,
+        b"OperationTimedOut" => AzureErrorKind::Timeout,
+        b"AuthenticationFailed"
+        | b"AuthorizationFailure"
+        | b"InvalidAuthenticationInfo"
+        | b"AuthorizationPermissionMismatch"
+        | b"InsufficientAccountPermissions" => AzureErrorKind::Unauthorized,
+        b"InternalError" | b"ServiceUnavailable" => AzureErrorKind::Service,
+        _ => return None,
+    })
+}
+
+fn failure_class(status: u16, code: Option<&[u8]>) -> FailureClass {
+    match code.map(trim_ascii).and_then(kind_for_code) {
+        Some(AzureErrorKind::Unauthorized) => FailureClass::Auth,
+        Some(AzureErrorKind::Throttled) => FailureClass::Throttled,
+        Some(AzureErrorKind::Service | AzureErrorKind::Timeout) => FailureClass::Server,
+        _ => match status {
+            300..=399 => FailureClass::Redirect,
+            401 | 403 => FailureClass::Auth,
+            408 | 429 => FailureClass::Throttled,
+            500..=599 => FailureClass::Server,
+            _ => FailureClass::Other,
+        },
     }
 }
 

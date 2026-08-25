@@ -82,11 +82,14 @@ mod path;
 mod request;
 mod time;
 mod types;
+mod xml;
 
-pub use azure::{Blobs, Container, VERSION};
+pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
 pub use head::GetHead;
-pub use outcome::{BodyWindow, FailureClass, GetHeadOutcome, ObjectMeta};
+pub use outcome::{
+    AzureErrorKind, BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta,
+};
 pub use request::WireRequest;
 pub use time::Timestamps;
 pub use types::{ConditionKind, GetKind, GetShape, PhysicalGet, RequestedRange};

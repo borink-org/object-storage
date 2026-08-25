@@ -34,7 +34,15 @@ pub struct GetHead<'h> {
     pub last_modified: Option<&'h [u8]>,
     /// The value of the `x-ms-version-id` header.
     pub version: Option<&'h [u8]>,
-    /// `x-ms-request-id`, the identifier Azure support asks for.
+    /// The value of the `x-ms-error-code` header.
+    ///
+    /// Azure names the error here. See
+    /// [`classify_error`](crate::classify_error).
+    pub error_code: Option<&'h [u8]>,
+    /// The value of the `x-ms-request-id` header.
+    ///
+    /// Azure assigns one identifier to each request. Record it: Azure support
+    /// uses it to find the request in the service logs.
     pub request_id: Option<&'h [u8]>,
 }
 
@@ -73,6 +81,8 @@ impl<'h> GetHead<'h> {
                 &mut head.last_modified
             } else if name.eq_ignore_ascii_case("x-ms-version-id") {
                 &mut head.version
+            } else if name.eq_ignore_ascii_case("x-ms-error-code") {
+                &mut head.error_code
             } else if name.eq_ignore_ascii_case("x-ms-request-id") {
                 &mut head.request_id
             } else {

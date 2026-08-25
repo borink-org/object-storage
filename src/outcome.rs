@@ -107,3 +107,44 @@ pub enum GetHeadOutcome<'h> {
         request_id: Option<&'h [u8]>,
     },
 }
+
+/// The result of [`classify_error`](crate::classify_error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classification {
+    /// Azure named an error that this crate recognizes.
+    Classified(AzureErrorKind),
+    /// Your read limit cut the body short before the error code appeared.
+    ///
+    /// Read more of the body and classify it again.
+    Incomplete,
+    /// The response was complete, but it named no error code that this crate
+    /// recognizes.
+    Unknown,
+}
+
+/// An Azure error code, mapped to a name that does not change.
+///
+/// Azure defines many error codes. This enum groups the codes that a read can
+/// return. Match on this instead of on the code strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AzureErrorKind {
+    /// The object does not exist.
+    NotFound,
+    /// The container does not exist.
+    NoSuchContainer,
+    /// The object or the container already exists.
+    AlreadyExists,
+    /// Azure rejected the credentials or the authorization.
+    Unauthorized,
+    /// A precondition on the request did not hold.
+    Precondition,
+    /// Azure cannot serve the requested byte range.
+    RangeNotSatisfiable,
+    /// Azure throttled the request.
+    Throttled,
+    /// Azure timed out while it processed the request.
+    Timeout,
+    /// Azure failed, or the service was unavailable.
+    Service,
+}

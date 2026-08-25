@@ -2,7 +2,13 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{Blobs, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered};
+use borink_object_storage::{
+    Blobs, Classification, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, classify_error,
+    layered,
+};
+
+// Error bodies are diagnostics, so this host caps what it will read for one.
+const MAX_ERROR_BODY: u64 = 8 * 1024;
 
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -38,6 +44,23 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     match blobs.accept_get_head(get.shape(), head)? {
         GetHeadOutcome::Body { .. } => incoming.body_mut().read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete(_) => Ok(Vec::new()),
-        outcome => Err(format!("Azure GET failed: {outcome:?}").into()),
+        outcome => {
+            // The head already decided the outcome; the body only refines the
+            // message with Azure's own error code.
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            let truncated = body.len() as u64 >= MAX_ERROR_BODY;
+            Err(match classify_error(&head, &body, truncated) {
+                Classification::Classified(kind) => {
+                    format!("Azure GET failed: {outcome:?} ({kind:?})")
+                }
+                _ => format!("Azure GET failed: {outcome:?}"),
+            }
+            .into())
+        }
     }
 }
