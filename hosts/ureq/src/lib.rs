@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, GetHeadOutcome, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead,
-    Timestamps, layered,
+    Blobs, DeleteHeadOutcome, GetHeadOutcome, Payload, PhysicalDelete, PhysicalGet, PhysicalPut,
+    PutHeadOutcome, ResponseHead, Timestamps, layered,
 };
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
@@ -109,4 +109,51 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
 
 fn not_stored(outcome: PutHeadOutcome<'_>) -> Box<dyn std::error::Error> {
     format!("Azure stored no object: {outcome}").into()
+}
+
+/// Builds and executes one DELETE request, removing the whole object.
+///
+/// Reports a missing object rather than treating it as success: only the
+/// caller knows whether it meant to remove an object that is already gone.
+pub fn delete(blobs: &Blobs<'_>, key: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let now = Timestamps::from_unix(unix);
+    let delete = PhysicalDelete::new(key);
+    let mut buf = vec![0; layered::delete_requirements(blobs, &delete, &now)?];
+    let request = blobs.encode_delete(&mut buf, &delete, &now)?;
+
+    let mut outgoing = ureq::delete(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()?;
+    let status = incoming.status().as_u16();
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    match blobs.accept_delete_head(delete.shape(), head)? {
+        DeleteHeadOutcome::Accepted => Ok(()),
+        outcome @ DeleteHeadOutcome::NeedErrorBody { .. } => {
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(not_removed(blobs.accept_delete_error_body(outcome, &body)))
+        }
+        outcome => Err(not_removed(outcome)),
+    }
+}
+
+fn not_removed(outcome: DeleteHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("Azure removed no object: {outcome}").into()
 }

@@ -2,9 +2,10 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome,
-    PutShape, RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
+    BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteShape,
+    Error, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
+    ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -108,7 +109,7 @@ impl<'a> Blobs<'a> {
         validate_get(get)?;
         let available = buf.len();
         let mut out = Writer::new(buf);
-        let layout = self.build(&mut out, get, now);
+        let layout = self.build(&mut out, HeadSpec::read(get), now);
         let required = out.position();
         let bytes = out.finish().ok_or(CapacityError {
             required,
@@ -164,13 +165,7 @@ impl<'a> Blobs<'a> {
         let mut out = Writer::new(buf);
         let layout = self.build(
             &mut out,
-            &PhysicalGet {
-                key: put.key,
-                kind: GetKind::Bytes,
-                range: RequestedRange::Whole,
-                condition: put.condition,
-                condition_value: put.condition_value,
-            },
+            HeadSpec::write(put.key, put.condition, put.condition_value),
             now,
         );
         // The content length is head bytes like any other, so it is written
@@ -205,12 +200,12 @@ impl<'a> Blobs<'a> {
         request.push("x-ms-version", VERSION);
     }
 
-    fn build(&self, out: &mut Writer<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Layout {
+    fn build(&self, out: &mut Writer<'_>, head: HeadSpec<'_>, now: &Timestamps) -> Layout {
         out.push(self.container.endpoint.as_bytes());
         out.push(b"/");
         out.push(self.container.name.as_bytes());
         out.push(b"/");
-        for part in crate::path::encode_object_key(get.key) {
+        for part in crate::path::encode_object_key(head.key) {
             out.push(part.as_bytes());
         }
         let url_end = out.position();
@@ -219,7 +214,7 @@ impl<'a> Blobs<'a> {
         let authorization_end = out.position();
         out.push(now.rfc1123().as_bytes());
         let date_end = out.position();
-        let range = match get.range {
+        let range = match head.range {
             RequestedRange::Whole => None,
             range => {
                 let start = out.position();
@@ -241,9 +236,9 @@ impl<'a> Blobs<'a> {
                 Some(start..out.position())
             }
         };
-        let condition = condition_header(get.condition).map(|name| {
+        let condition = condition_header(head.condition).map(|name| {
             let start = out.position();
-            out.push(get.condition_value.expect("the plan was validated"));
+            out.push(head.condition_value.expect("the plan was validated"));
             (name, start..out.position())
         });
         Layout {
@@ -365,6 +360,131 @@ impl<'a> Blobs<'a> {
         }
     }
 
+    /// Writes the request head for `delete` into `buf`.
+    ///
+    /// The request has no content. Azure removes the object it names and
+    /// nothing else: see [`PhysicalDelete`] for what that excludes.
+    ///
+    /// This crate performs no I/O and cannot read the clock, so pass the
+    /// current time in `now`. This method copies the date into `buf` with the
+    /// rest of the head, so `now` can be a temporary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure
+    /// request. This method validates the plan before it writes any byte, so
+    /// it never reports an invalid plan as a capacity error.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
+    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// method again, or call
+    /// [`layered::delete_requirements`](crate::layered::delete_requirements)
+    /// first.
+    pub fn encode_delete<'r>(
+        &self,
+        buf: &'r mut [u8],
+        delete: &PhysicalDelete<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_delete(delete)?;
+        let available = buf.len();
+        let mut out = Writer::new(buf);
+        let layout = self.build(
+            &mut out,
+            HeadSpec::write(delete.key, delete.condition, delete.condition_value),
+            now,
+        );
+        let required = out.position();
+        let bytes = out.finish().ok_or(CapacityError {
+            required,
+            available,
+        })?;
+        let mut request = WireRequest::new(
+            "DELETE",
+            text(&bytes[..layout.url_end]),
+            Payload::Slice(&[]),
+        );
+        self.push_common(&mut request, bytes, &layout);
+        if let Some((name, span)) = layout.condition {
+            request.push(name, text(&bytes[span]));
+        }
+        Ok(request)
+    }
+
+    /// Reads the response head of a removal and reports what Azure did.
+    ///
+    /// Pass the same `shape` that you passed to [`Self::encode_delete`]. This
+    /// method checks the head against that plan, so you never restate what the
+    /// plan already holds.
+    ///
+    /// Every head that Azure sends becomes a [`DeleteHeadOutcome`], including
+    /// the heads that report a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] if the head is invalid, such as a success
+    /// status that a removal never returns.
+    ///
+    /// Returns [`Error::ResponseMismatch`] if the head does not answer
+    /// `shape`, such as a failed condition on a removal that carried none.
+    pub fn accept_delete_head<'h>(
+        &self,
+        shape: DeleteShape,
+        head: ResponseHead<'h>,
+    ) -> Result<DeleteHeadOutcome<'h>> {
+        match head.status {
+            202 => Ok(DeleteHeadOutcome::Accepted),
+            412 if shape.condition == ConditionKind::None => Err(Error::ResponseMismatch(
+                "412 answered a removal without a condition",
+            )),
+            412 => Ok(DeleteHeadOutcome::PreconditionFailed),
+            404 if head.error_code.is_none() => Ok(delete_need_error_body(404, head)),
+            404 => Ok(DeleteHeadOutcome::NotFound {
+                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
+            }),
+            200..=299 => Err(Error::Protocol(
+                "a removal returns 202, not another success",
+            )),
+            status if head.error_code.is_none() => Ok(delete_need_error_body(status, head)),
+            status => {
+                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
+                Ok(DeleteHeadOutcome::ServiceFailure {
+                    status,
+                    class: failure_class(status, kind),
+                    kind,
+                    request_id: head.request_id,
+                })
+            }
+        }
+    }
+
+    /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_error_body`] for a removal, and reads the body
+    /// the same way.
+    pub fn accept_delete_error_body<'h>(
+        &self,
+        outcome: DeleteHeadOutcome<'h>,
+        body: &[u8],
+    ) -> DeleteHeadOutcome<'h> {
+        let DeleteHeadOutcome::NeedErrorBody {
+            status, request_id, ..
+        } = outcome
+        else {
+            return outcome;
+        };
+        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        match status {
+            404 => DeleteHeadOutcome::NotFound { kind },
+            status => DeleteHeadOutcome::ServiceFailure {
+                status,
+                class: failure_class(status, kind),
+                kind,
+                request_id,
+            },
+        }
+    }
+
     /// Reads the response head of a write and reports what Azure did.
     ///
     /// Pass the same `shape` that you passed to [`Self::encode_put`]. This
@@ -444,6 +564,14 @@ impl<'a> Blobs<'a> {
                 request_id,
             },
         }
+    }
+}
+
+fn delete_need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> DeleteHeadOutcome<'h> {
+    DeleteHeadOutcome::NeedErrorBody {
+        status,
+        class: failure_class(status, None),
+        request_id: head.request_id,
     }
 }
 
@@ -647,6 +775,36 @@ fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
     }
 }
 
+// What the head writer needs from any plan: the parts that become bytes.
+#[derive(Clone, Copy)]
+struct HeadSpec<'a> {
+    key: &'a str,
+    range: RequestedRange,
+    condition: ConditionKind,
+    condition_value: Option<&'a [u8]>,
+}
+
+impl<'a> HeadSpec<'a> {
+    fn read(get: &PhysicalGet<'a>) -> Self {
+        Self {
+            key: get.key,
+            range: get.range,
+            condition: get.condition,
+            condition_value: get.condition_value,
+        }
+    }
+
+    // A write carries no range: it replaces or removes the whole object.
+    fn write(key: &'a str, condition: ConditionKind, condition_value: Option<&'a [u8]>) -> Self {
+        Self {
+            key,
+            range: RequestedRange::Whole,
+            condition,
+            condition_value,
+        }
+    }
+}
+
 struct Layout {
     url_end: usize,
     authorization_end: usize,
@@ -707,6 +865,13 @@ fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
     validate_condition(put.condition, put.condition_value)
+}
+
+fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {
+    if delete.key.is_empty() || delete.key.chars().count() > MAX_BLOB_NAME_CHARS {
+        return Err(InvalidPlan::Key.into());
+    }
+    validate_condition(delete.condition, delete.condition_value)
 }
 
 fn valid_header(value: &[u8]) -> bool {

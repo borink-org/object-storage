@@ -241,3 +241,58 @@ impl<'b> From<&'b [u8]> for Payload<'b> {
         Self::Slice(bytes)
     }
 }
+
+/// The part of a removal plan that holds no borrows.
+///
+/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
+/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) to read the
+/// response that answers the removal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteShape {
+    /// The condition that the removal carries.
+    pub condition: ConditionKind,
+}
+
+/// One removal of one object.
+///
+/// # Snapshots
+///
+/// Azure refuses to remove an object that has snapshots, and this crate does
+/// not ask it to remove them. A removal that would take more than the object
+/// you named fails instead of widening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalDelete<'h> {
+    /// The object key, within the container.
+    pub key: &'h str,
+    /// The condition that the removal carries.
+    pub condition: ConditionKind,
+    /// The entity tag that `condition` compares against.
+    pub condition_value: Option<&'h [u8]>,
+}
+
+impl<'h> PhysicalDelete<'h> {
+    /// Creates a plan that removes this object with no condition.
+    pub fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+
+    /// Creates a plan from a stored shape and the bytes that it needs.
+    pub fn from_shape(shape: DeleteShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+        Self {
+            key,
+            condition: shape.condition,
+            condition_value,
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub fn shape(&self) -> DeleteShape {
+        DeleteShape {
+            condition: self.condition,
+        }
+    }
+}

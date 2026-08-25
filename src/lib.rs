@@ -19,6 +19,9 @@
 //! response against the plan, so you never restate what the plan already
 //! holds.
 //!
+//! A removal has the same three steps, with [`PhysicalDelete`],
+//! [`Blobs::encode_delete`] and [`Blobs::accept_delete_head`].
+//!
 //! A write has the same three steps, with [`PhysicalPut`],
 //! [`Blobs::encode_put`] and [`Blobs::accept_put_head`]. The content stays
 //! where you put it: [`Blobs::encode_put`] states its length in the head, and
@@ -113,11 +116,12 @@ pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, PutHeadOutcome,
-    ServiceErrorKind,
+    BodyWindow, Classification, DeleteHeadOutcome, FailureClass, GetHeadOutcome, ObjectMeta,
+    PutHeadOutcome, ServiceErrorKind,
 };
 pub use request::WireRequest;
 pub use time::Timestamps;
 pub use types::{
-    ConditionKind, GetKind, GetShape, Payload, PhysicalGet, PhysicalPut, PutShape, RequestedRange,
+    ConditionKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalPut, PutShape, RequestedRange,
 };
