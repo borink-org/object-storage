@@ -122,6 +122,6 @@ pub use outcome::{
 pub use request::WireRequest;
 pub use time::Timestamps;
 pub use types::{
-    ConditionKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalPut, PutShape, RequestedRange,
+    ConditionKind, DeleteKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalPut, PutShape, RequestedRange,
 };

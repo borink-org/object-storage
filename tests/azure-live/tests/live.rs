@@ -2,8 +2,8 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteShape, GetHeadOutcome, GetKind,
-    GetShape, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, GetHeadOutcome,
+    GetKind, GetShape, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
     RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
@@ -447,6 +447,29 @@ enum RemoveOutcome {
     ServiceFailure(u16, Option<ServiceErrorKind>),
 }
 
+// This crate does not implement Snapshot Blob, so the test issues that one
+// request itself. The URL comes from an encoded plan, so the key is escaped
+// exactly as the crate escapes it rather than by a second implementation.
+fn snapshot(fixture: &Fixture) -> Result<(), Box<dyn std::error::Error>> {
+    let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+    let blobs = fixture.blobs();
+    let plan = PhysicalDelete::new(&fixture.put_key);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now)?];
+    let request = blobs.encode_delete(&mut buf, &plan, &now)?;
+    let url = format!("{}?comp=snapshot", request.url());
+    let mut outgoing = ureq::put(&url);
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let response = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(b"".as_slice())?;
+    assert_eq!(response.status().as_u16(), 201, "Snapshot Blob");
+    Ok(())
+}
+
 fn remove(
     fixture: &Fixture,
     shape: DeleteShape,
@@ -529,7 +552,8 @@ fn a_stale_entity_tag_refuses_the_removal() {
         remove(
             &fixture,
             DeleteShape {
-                condition: ConditionKind::IfMatch
+                condition: ConditionKind::IfMatch,
+                ..DeleteShape::default()
             },
             Some(b"\"stale\"")
         )
@@ -546,11 +570,83 @@ fn a_stale_entity_tag_refuses_the_removal() {
         remove(
             &fixture,
             DeleteShape {
-                condition: ConditionKind::IfMatch
+                condition: ConditionKind::IfMatch,
+                ..DeleteShape::default()
             },
             Some(e_tag.as_bytes())
         )
         .unwrap(),
+        RemoveOutcome::Accepted
+    );
+}
+
+/// Settles what Azure does with a removal that would leave snapshots behind,
+/// and proves the plan can ask for them.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object with a snapshot");
+    snapshot(&fixture).unwrap();
+
+    // Naming the object alone leaves its snapshot behind, so Azure refuses.
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
+        RemoveOutcome::ServiceFailure(409, None)
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).outcome,
+        Outcome::Body
+    );
+
+    // Asking for them removes both.
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                kind: DeleteKind::ObjectAndSnapshots,
+                ..DeleteShape::default()
+            },
+            None
+        )
+        .unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).outcome,
+        Outcome::NotFound
+    );
+}
+
+/// `SnapshotsOnly` keeps the object, which is the one accepted removal that
+/// leaves the key readable afterwards.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn removing_only_the_snapshots_keeps_the_object() {
+    let fixture = Fixture::from_env();
+    seed(&fixture, b"the object that outlives its snapshot");
+    snapshot(&fixture).unwrap();
+
+    assert_eq!(
+        remove(
+            &fixture,
+            DeleteShape {
+                kind: DeleteKind::SnapshotsOnly,
+                ..DeleteShape::default()
+            },
+            None
+        )
+        .unwrap(),
+        RemoveOutcome::Accepted
+    );
+    assert_eq!(
+        read_put_key(&fixture, GetShape::default()).body,
+        b"the object that outlives its snapshot"
+    );
+
+    // With the snapshots gone, naming the object alone now succeeds.
+    assert_eq!(
+        remove(&fixture, DeleteShape::default(), None).unwrap(),
         RemoveOutcome::Accepted
     );
 }

@@ -220,9 +220,8 @@ pub enum PutHeadOutcome<'h> {
 pub enum DeleteHeadOutcome<'h> {
     /// Azure accepted the removal.
     ///
-    /// Azure removes the object and its data separately, so the data can
-    /// outlive this answer. A later read of the same key still reports
-    /// [`GetHeadOutcome::NotFound`].
+    /// The object is gone unless the plan asked only for its snapshots: see
+    /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).
     Accepted,
     /// The entity tag in the condition did not match, so Azure removed
     /// nothing.
@@ -252,8 +251,8 @@ pub enum DeleteHeadOutcome<'h> {
     },
     /// The service refused the removal, or it failed to carry it out.
     ///
-    /// An object that has snapshots is refused here, because this crate never
-    /// asks Azure to remove them with it.
+    /// An object that has snapshots is refused here, unless the plan asked to
+    /// remove them too: see [`DeleteKind`](crate::DeleteKind).
     #[non_exhaustive]
     ServiceFailure {
         /// The HTTP status code.

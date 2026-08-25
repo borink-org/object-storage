@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteShape,
-    Error, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
+    BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
     ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
@@ -405,6 +405,9 @@ impl<'a> Blobs<'a> {
             Payload::Slice(&[]),
         );
         self.push_common(&mut request, bytes, &layout);
+        if let Some(value) = delete_snapshots(delete.kind) {
+            request.push("x-ms-delete-snapshots", value);
+        }
         if let Some((name, span)) = layout.condition {
             request.push(name, text(&bytes[span]));
         }
@@ -811,6 +814,16 @@ struct Layout {
     date_end: usize,
     range: Option<Range<usize>>,
     condition: Option<(&'static str, Range<usize>)>,
+}
+
+fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
+    match kind {
+        // Azure refuses an object with snapshots when the header is absent,
+        // which is the outcome a plan that names the object alone asks for.
+        DeleteKind::Object => None,
+        DeleteKind::ObjectAndSnapshots => Some("include"),
+        DeleteKind::SnapshotsOnly => Some("only"),
+    }
 }
 
 fn condition_header(kind: ConditionKind) -> Option<&'static str> {

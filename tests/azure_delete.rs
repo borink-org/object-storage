@@ -1,8 +1,8 @@
 //! Azure removal encoding and response interpretation.
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteShape, Error, FailureClass,
-    InvalidPlan, PhysicalDelete, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
+    FailureClass, InvalidPlan, PhysicalDelete, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -18,7 +18,10 @@ fn now() -> Timestamps {
 }
 
 fn conditional(condition: ConditionKind) -> DeleteShape {
-    DeleteShape { condition }
+    DeleteShape {
+        condition,
+        ..DeleteShape::default()
+    }
 }
 
 #[test]
@@ -67,9 +70,9 @@ fn a_removal_plan_is_validated_before_any_byte_is_written() {
         (PhysicalDelete::new(""), InvalidPlan::Key),
         (
             PhysicalDelete {
-                key: "object.bin",
                 condition: ConditionKind::IfMatch,
                 condition_value: None,
+                ..PhysicalDelete::new("object.bin")
             },
             InvalidPlan::Condition,
         ),
@@ -148,10 +151,44 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
 }
 
 #[test]
+fn a_removal_says_what_it_takes_with_it() {
+    let blobs = blobs();
+    for (kind, expected) in [
+        (DeleteKind::Object, None),
+        (DeleteKind::ObjectAndSnapshots, Some("include")),
+        (DeleteKind::SnapshotsOnly, Some("only")),
+    ] {
+        let delete = PhysicalDelete {
+            kind,
+            ..PhysicalDelete::new("object.bin")
+        };
+        let mut buf = vec![0; layered::delete_requirements(&blobs, &delete, &now()).unwrap()];
+        let request = blobs.encode_delete(&mut buf, &delete, &now()).unwrap();
+        let sent = request
+            .headers()
+            .find(|(name, _)| *name == "x-ms-delete-snapshots")
+            .map(|(_, value)| value);
+        assert_eq!(sent, expected, "{kind:?}");
+    }
+
+    // The header is a constant, so naming the snapshots costs no buffer.
+    let plain = PhysicalDelete::new("object.bin");
+    let widened = PhysicalDelete {
+        kind: DeleteKind::ObjectAndSnapshots,
+        ..plain
+    };
+    assert_eq!(
+        layered::delete_requirements(&blobs, &plain, &now()).unwrap(),
+        layered::delete_requirements(&blobs, &widened, &now()).unwrap()
+    );
+}
+
+#[test]
 fn an_object_with_snapshots_is_refused_rather_than_widened() {
-    // This crate never sends `x-ms-delete-snapshots`, so Azure refuses a base
-    // blob that has them. The code is not one this crate classifies, so it
-    // lands on the status alone, which is where an unknown code belongs.
+    // A plan that names the object alone sends no `x-ms-delete-snapshots`, so
+    // Azure refuses a base blob that has them. The code is not one this crate
+    // classifies, so it lands on the status alone, where an unknown code
+    // belongs.
     let mut head = ResponseHead::new(409);
     head.error_code = Some(b"SnapshotsPresent");
     head.request_id = Some(b"request-123");
