@@ -91,10 +91,10 @@ fn read(
     );
     let (outcome, size, e_tag) = match blobs.accept_get_head(shape, head)? {
         GetHeadOutcome::Body { meta, .. } => (Outcome::Body, meta.size, meta.e_tag),
-        GetHeadOutcome::Complete(meta) => (Outcome::Complete, meta.size, meta.e_tag),
+        GetHeadOutcome::Complete { meta } => (Outcome::Complete, meta.size, meta.e_tag),
         GetHeadOutcome::NotModified { .. } => (Outcome::NotModified, None, None),
         GetHeadOutcome::PreconditionFailed => (Outcome::PreconditionFailed, None, None),
-        GetHeadOutcome::NotFound => (Outcome::NotFound, None, None),
+        GetHeadOutcome::NotFound { .. } => (Outcome::NotFound, None, None),
         GetHeadOutcome::RangeNotSatisfiable { .. } => (Outcome::RangeNotSatisfiable, None, None),
         GetHeadOutcome::ServiceFailure { status, .. } => {
             (Outcome::ServiceFailure(status), None, None)

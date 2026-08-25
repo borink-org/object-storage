@@ -2,8 +2,8 @@ use core::fmt;
 
 /// Object metadata borrowed from a response head.
 ///
-/// Each field holds the bytes that Azure sent. To read `last_modified` as an
-/// instant, use [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// Each field holds the bytes that the service sent. To read `last_modified`
+/// as an instant, use [`layered::http_date_ms`](crate::layered::http_date_ms).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectMeta<'h> {
     /// The size of the whole object, if the head states it.
@@ -11,13 +11,14 @@ pub struct ObjectMeta<'h> {
     /// This is not the length of the returned range. For that length, read
     /// [`BodyWindow::expected_len`].
     pub size: Option<u64>,
-    /// The entity tag, if Azure returned one.
+    /// The entity tag, if the service returned one.
     pub e_tag: Option<&'h [u8]>,
-    /// The value of the `Last-Modified` header, if Azure returned one.
+    /// The value of the `Last-Modified` header, if the service returned one.
     pub last_modified: Option<&'h [u8]>,
-    /// The Azure blob version identifier, if Azure returned one.
+    /// The version identifier, if the service returned one.
     pub version: Option<&'h [u8]>,
-    /// The value of the `Content-Encoding` header, if Azure returned one.
+    /// The value of the `Content-Encoding` header, if the service returned
+    /// one.
     ///
     /// This crate does not decode the body. It returns this value so that you
     /// know how the bytes are encoded.
@@ -46,17 +47,18 @@ pub struct BodyWindow {
 
 /// The category of a service failure.
 ///
-/// Use this to decide whether to retry a request, and how.
+/// Use this to decide whether to retry a request, and how. For the specific
+/// error that the service named, read [`ServiceErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FailureClass {
-    /// Azure rejected the credentials or the authorization.
+    /// The service rejected the credentials or the authorization.
     Auth,
-    /// Azure throttled the request. You can retry it later.
+    /// The service throttled the request. You can retry it later.
     Throttled,
-    /// Azure failed, or the service was unavailable.
+    /// The service failed, or it was unavailable.
     Server,
-    /// Azure answered with a redirect.
+    /// The service answered with a redirect.
     ///
     /// This crate does not follow redirects. It reports them to you.
     Redirect,
@@ -66,8 +68,8 @@ pub enum FailureClass {
 
 /// The result of reading a response head.
 ///
-/// Every head that Azure sends becomes one of these values, including the
-/// heads that report a failure. Branch on this value to drive the request.
+/// Every head that the service sends becomes one of these values, including
+/// the heads that report a failure. Branch on this value to drive the request.
 ///
 /// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
@@ -84,27 +86,43 @@ pub enum GetHeadOutcome<'h> {
     /// No body follows and the request is complete.
     ///
     /// A metadata plan ends here.
-    Complete(ObjectMeta<'h>),
-    /// The `If-None-Match` condition held, so Azure sent no body.
+    Complete {
+        /// The metadata from the head.
+        meta: ObjectMeta<'h>,
+    },
+    /// The `If-None-Match` condition held, so the service sent no body.
     NotModified {
-        /// The entity tag, if Azure repeated it.
+        /// The entity tag, if the service repeated it.
         e_tag: Option<&'h [u8]>,
     },
-    /// The `If-Match` condition did not hold, so Azure sent no body.
+    /// The `If-Match` condition did not hold, so the service sent no body.
     PreconditionFailed,
-    /// The object does not exist.
-    NotFound,
-    /// Azure cannot serve the requested range.
+    /// The object does not exist, or the container that holds it does not.
+    NotFound {
+        /// Which of the two is missing, if the head names the error.
+        ///
+        /// [`ServiceErrorKind::NoSuchContainer`] means that the container is
+        /// missing. If this is [`None`], read the response body with
+        /// [`classify_error`](crate::classify_error).
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The service cannot serve the requested range.
     RangeNotSatisfiable {
         /// The size of the object, if `Content-Range: bytes */N` states it.
         object_size: Option<u64>,
     },
-    /// Azure refused the request, or failed to serve it.
+    /// The service refused the request, or it failed to serve it.
+    #[non_exhaustive]
     ServiceFailure {
         /// The HTTP status code.
         status: u16,
         /// The category of the failure. Use it to decide whether to retry.
         class: FailureClass,
+        /// The specific error, if the head names one.
+        ///
+        /// If this is [`None`], read the response body with
+        /// [`classify_error`](crate::classify_error).
+        kind: Option<ServiceErrorKind>,
         /// The value of the `x-ms-request-id` header, if Azure sent one.
         request_id: Option<&'h [u8]>,
     },
@@ -112,9 +130,10 @@ pub enum GetHeadOutcome<'h> {
 
 /// The result of [`classify_error`](crate::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Classification {
-    /// Azure named an error that this crate recognizes.
-    Classified(AzureErrorKind),
+    /// The body named an error that this crate recognizes.
+    Classified(ServiceErrorKind),
     /// Your read limit cut the body short before the error code appeared.
     ///
     /// Read more of the body and classify it again.
@@ -124,59 +143,62 @@ pub enum Classification {
     Unknown,
 }
 
-/// An Azure error code, mapped to a name that does not change.
+/// A service error code, mapped to a name that does not change.
 ///
-/// Azure defines many error codes. This enum groups the codes that a read can
-/// return. Match on this instead of on the code strings.
+/// A storage service defines many error codes, and two services name the same
+/// error differently. This enum groups the codes that a read can return. Match
+/// on this instead of on the code strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AzureErrorKind {
+pub enum ServiceErrorKind {
     /// The object does not exist.
     NotFound,
     /// The container does not exist.
     NoSuchContainer,
     /// The object or the container already exists.
     AlreadyExists,
-    /// Azure rejected the credentials or the authorization.
+    /// The service rejected the credentials or the authorization.
     Unauthorized,
     /// A precondition on the request did not hold.
     Precondition,
-    /// Azure cannot serve the requested byte range.
+    /// The service cannot serve the requested byte range.
     RangeNotSatisfiable,
-    /// Azure throttled the request.
+    /// The service throttled the request.
     Throttled,
-    /// Azure timed out while it processed the request.
+    /// The service timed out while it processed the request.
     Timeout,
-    /// Azure failed, or the service was unavailable.
+    /// The service failed, or it was unavailable.
     Service,
 }
 
 impl fmt::Display for FailureClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Auth => f.write_str("Azure rejected the credentials or the authorization"),
-            Self::Throttled => f.write_str("Azure throttled the request"),
-            Self::Server => f.write_str("Azure failed, or the service was unavailable"),
-            Self::Redirect => f.write_str("Azure answered with a redirect"),
-            Self::Other => f.write_str("Azure refused the request"),
+            Self::Auth => f.write_str("the service rejected the credentials or the authorization"),
+            Self::Throttled => f.write_str("the service throttled the request"),
+            Self::Server => f.write_str("the service failed, or it was unavailable"),
+            Self::Redirect => f.write_str("the service answered with a redirect"),
+            Self::Other => f.write_str("the service refused the request"),
         }
     }
 }
 
-impl fmt::Display for AzureErrorKind {
+impl fmt::Display for ServiceErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => f.write_str("the object does not exist"),
             Self::NoSuchContainer => f.write_str("the container does not exist"),
             Self::AlreadyExists => f.write_str("the object or the container already exists"),
             Self::Unauthorized => {
-                f.write_str("Azure rejected the credentials or the authorization")
+                f.write_str("the service rejected the credentials or the authorization")
             }
             Self::Precondition => f.write_str("a precondition on the request did not hold"),
-            Self::RangeNotSatisfiable => f.write_str("Azure cannot serve the requested byte range"),
-            Self::Throttled => f.write_str("Azure throttled the request"),
-            Self::Timeout => f.write_str("Azure timed out while it processed the request"),
-            Self::Service => f.write_str("Azure failed, or the service was unavailable"),
+            Self::RangeNotSatisfiable => {
+                f.write_str("the service cannot serve the requested byte range")
+            }
+            Self::Throttled => f.write_str("the service throttled the request"),
+            Self::Timeout => f.write_str("the service timed out while it processed the request"),
+            Self::Service => f.write_str("the service failed, or it was unavailable"),
         }
     }
 }
@@ -185,12 +207,17 @@ impl fmt::Display for GetHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Body { .. } => f.write_str("the object follows in the response body"),
-            Self::Complete(_) => f.write_str("the response carries no body and is complete"),
+            Self::Complete { .. } => f.write_str("the response carries no body and is complete"),
             Self::NotModified { .. } => f.write_str("the object is not modified"),
             Self::PreconditionFailed => f.write_str("the If-Match condition did not hold"),
-            Self::NotFound => f.write_str("the object does not exist"),
+            Self::NotFound { kind } => match kind {
+                Some(ServiceErrorKind::NoSuchContainer) => {
+                    f.write_str("the container does not exist")
+                }
+                _ => f.write_str("the object does not exist"),
+            },
             Self::RangeNotSatisfiable { object_size } => {
-                f.write_str("Azure cannot serve the requested range")?;
+                f.write_str("the service cannot serve the requested range")?;
                 match object_size {
                     Some(size) => write!(f, "; the object is {size} bytes"),
                     None => Ok(()),
@@ -199,9 +226,15 @@ impl fmt::Display for GetHeadOutcome<'_> {
             Self::ServiceFailure {
                 status,
                 class,
+                kind,
                 request_id,
             } => {
-                write!(f, "{class} (HTTP {status}")?;
+                // The kind is the finer parse, so it wins when the head named
+                // one. The class is the fallback and is always present.
+                match kind {
+                    Some(kind) => write!(f, "{kind} (HTTP {status}")?,
+                    None => write!(f, "{class} (HTTP {status}")?,
+                }
                 // Azure sends an ASCII identifier, but a header value carries
                 // no such guarantee. Name it only when it is printable.
                 if let Some(id) = request_id.and_then(|id| core::str::from_utf8(id).ok()) {
@@ -217,7 +250,7 @@ impl fmt::Display for GetHeadOutcome<'_> {
 mod tests {
     extern crate std;
 
-    use super::{AzureErrorKind, FailureClass, GetHeadOutcome};
+    use super::{FailureClass, GetHeadOutcome, ServiceErrorKind};
     use std::string::ToString;
 
     #[test]
@@ -225,11 +258,26 @@ mod tests {
         let failure = GetHeadOutcome::ServiceFailure {
             status: 429,
             class: FailureClass::Throttled,
+            kind: None,
             request_id: Some(b"request-123"),
         };
         assert_eq!(
             failure.to_string(),
-            "Azure throttled the request (HTTP 429, request request-123)"
+            "the service throttled the request (HTTP 429, request request-123)"
+        );
+    }
+
+    #[test]
+    fn prefers_the_named_error_over_the_category() {
+        let failure = GetHeadOutcome::ServiceFailure {
+            status: 409,
+            class: FailureClass::Other,
+            kind: Some(ServiceErrorKind::AlreadyExists),
+            request_id: None,
+        };
+        assert_eq!(
+            failure.to_string(),
+            "the object or the container already exists (HTTP 409)"
         );
     }
 
@@ -238,30 +286,38 @@ mod tests {
         let failure = GetHeadOutcome::ServiceFailure {
             status: 500,
             class: FailureClass::Server,
+            kind: None,
             request_id: Some(b"\xff"),
         };
         assert_eq!(
             failure.to_string(),
-            "Azure failed, or the service was unavailable (HTTP 500)"
+            "the service failed, or it was unavailable (HTTP 500)"
         );
     }
 
     #[test]
-    fn describes_the_remaining_outcomes() {
+    fn separates_a_missing_object_from_a_missing_container() {
+        assert_eq!(
+            GetHeadOutcome::NotFound { kind: None }.to_string(),
+            "the object does not exist"
+        );
+        assert_eq!(
+            GetHeadOutcome::NotFound {
+                kind: Some(ServiceErrorKind::NoSuchContainer)
+            }
+            .to_string(),
+            "the container does not exist"
+        );
+    }
+
+    #[test]
+    fn describes_an_unsatisfiable_range_with_the_object_size() {
         assert_eq!(
             GetHeadOutcome::RangeNotSatisfiable {
                 object_size: Some(10)
             }
             .to_string(),
-            "Azure cannot serve the requested range; the object is 10 bytes"
-        );
-        assert_eq!(
-            GetHeadOutcome::NotFound.to_string(),
-            "the object does not exist"
-        );
-        assert_eq!(
-            AzureErrorKind::NoSuchContainer.to_string(),
-            "the container does not exist"
+            "the service cannot serve the requested range; the object is 10 bytes"
         );
     }
 }

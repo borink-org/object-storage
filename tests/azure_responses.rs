@@ -1,8 +1,8 @@
 //! Azure response interpretation fixtures.
 
 use borink_object_storage::{
-    AzureErrorKind, Blobs, BodyWindow, Classification, ConditionKind, Container, Error,
-    FailureClass, GetHead, GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange,
+    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, FailureClass, GetHead,
+    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ServiceErrorKind,
     classify_error, layered,
 };
 
@@ -81,10 +81,12 @@ fn a_metadata_plan_completes_without_a_body() {
     let head = GetHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
     assert_eq!(
         accept(shape, head),
-        Ok(GetHeadOutcome::Complete(ObjectMeta {
-            size: Some(8),
-            ..ObjectMeta::default()
-        }))
+        Ok(GetHeadOutcome::Complete {
+            meta: ObjectMeta {
+                size: Some(8),
+                ..ObjectMeta::default()
+            }
+        })
     );
 }
 
@@ -220,27 +222,46 @@ fn a_416_carries_the_object_size_when_azure_states_it() {
 fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
     assert_eq!(
         accept(GetShape::default(), GetHead::new(404)),
-        Ok(GetHeadOutcome::NotFound)
+        Ok(GetHeadOutcome::NotFound { kind: None })
     );
-    for (status, code, expected) in [
-        (403, None, FailureClass::Auth),
-        (429, None, FailureClass::Throttled),
-        (500, None, FailureClass::Server),
-        (302, None, FailureClass::Redirect),
-        (400, None, FailureClass::Other),
-        // Azure's own code refines an otherwise unhelpful status.
-        (400, Some(b"ServerBusy".as_slice()), FailureClass::Throttled),
+    // A 404 that names the container separates it from a missing object.
+    let mut missing = GetHead::new(404);
+    missing.error_code = Some(b"ContainerNotFound");
+    assert_eq!(
+        accept(GetShape::default(), missing),
+        Ok(GetHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NoSuchContainer)
+        })
+    );
+    for (status, code, class, kind) in [
+        (403, None, FailureClass::Auth, None),
+        (429, None, FailureClass::Throttled, None),
+        (500, None, FailureClass::Server, None),
+        (302, None, FailureClass::Redirect, None),
+        (400, None, FailureClass::Other, None),
+        // Azure's own code refines an otherwise unhelpful status, and the
+        // outcome keeps it so that no caller classifies the response twice.
+        (
+            400,
+            Some(b"ServerBusy".as_slice()),
+            FailureClass::Throttled,
+            Some(ServiceErrorKind::Throttled),
+        ),
     ] {
         let mut head =
             GetHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
         head.error_code = code;
-        assert_eq!(
-            accept(GetShape::default(), head),
-            Ok(GetHeadOutcome::ServiceFailure {
-                status,
-                class: expected,
-                request_id: Some(b"request-123"),
-            }),
+        assert!(
+            matches!(
+                accept(GetShape::default(), head),
+                Ok(GetHeadOutcome::ServiceFailure {
+                    status: got_status,
+                    class: got_class,
+                    kind: got_kind,
+                    request_id: Some(b"request-123"),
+                    ..
+                }) if got_status == status && got_class == class && got_kind == kind
+            ),
             "{status} {code:?}"
         );
     }
@@ -249,22 +270,22 @@ fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
 #[test]
 fn classifies_the_offline_azure_response_corpus() {
     let cases = [
-        ("BlobNotFound", AzureErrorKind::NotFound),
-        ("ResourceNotFound", AzureErrorKind::NotFound),
-        ("ContainerNotFound", AzureErrorKind::NoSuchContainer),
-        ("BlobAlreadyExists", AzureErrorKind::AlreadyExists),
-        ("ConditionNotMet", AzureErrorKind::Precondition),
-        ("TargetConditionNotMet", AzureErrorKind::Precondition),
-        ("InvalidRange", AzureErrorKind::RangeNotSatisfiable),
-        ("ServerBusy", AzureErrorKind::Throttled),
-        ("OperationTimedOut", AzureErrorKind::Timeout),
-        ("AuthenticationFailed", AzureErrorKind::Unauthorized),
+        ("BlobNotFound", ServiceErrorKind::NotFound),
+        ("ResourceNotFound", ServiceErrorKind::NotFound),
+        ("ContainerNotFound", ServiceErrorKind::NoSuchContainer),
+        ("BlobAlreadyExists", ServiceErrorKind::AlreadyExists),
+        ("ConditionNotMet", ServiceErrorKind::Precondition),
+        ("TargetConditionNotMet", ServiceErrorKind::Precondition),
+        ("InvalidRange", ServiceErrorKind::RangeNotSatisfiable),
+        ("ServerBusy", ServiceErrorKind::Throttled),
+        ("OperationTimedOut", ServiceErrorKind::Timeout),
+        ("AuthenticationFailed", ServiceErrorKind::Unauthorized),
         (
             "AuthorizationPermissionMismatch",
-            AzureErrorKind::Unauthorized,
+            ServiceErrorKind::Unauthorized,
         ),
-        ("InternalError", AzureErrorKind::Service),
-        ("ServiceUnavailable", AzureErrorKind::Service),
+        ("InternalError", ServiceErrorKind::Service),
+        ("ServiceUnavailable", ServiceErrorKind::Service),
     ];
 
     for (code, expected) in cases {
@@ -282,7 +303,7 @@ fn falls_back_to_the_xml_error_body() {
     let head = GetHead::new(404);
     assert_eq!(
         classify_error(&head, b"<Error><Code>BlobNotFound</Code></Error>", false),
-        Classification::Classified(AzureErrorKind::NotFound)
+        Classification::Classified(ServiceErrorKind::NotFound)
     );
     // A complete body naming a code this crate does not know, and a body the
     // host's cap cut short, are different answers.

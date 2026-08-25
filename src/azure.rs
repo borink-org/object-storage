@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    AzureErrorKind, BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass,
-    GetHead, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet,
-    RequestedRange, Result, Timestamps, WireRequest,
+    BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHead,
+    GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange,
+    Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -189,7 +189,9 @@ impl<'a> Blobs<'a> {
     /// Every head that Azure sends becomes a [`GetHeadOutcome`], including the
     /// heads that report a failure. Azure names its errors in the
     /// `x-ms-error-code` header, so this method needs no part of the response
-    /// body. To read the specific Azure error code, call [`classify_error`].
+    /// body and returns the named error with the outcome. If Azure sent no
+    /// such header, the outcome names no error: call [`classify_error`] with
+    /// the response body to read the error code from there.
     ///
     /// # Errors
     ///
@@ -223,7 +225,9 @@ impl<'a> Blobs<'a> {
                 "412 answered a plan without an If-Match condition",
             )),
             412 => Ok(GetHeadOutcome::PreconditionFailed),
-            404 => Ok(GetHeadOutcome::NotFound),
+            404 => Ok(GetHeadOutcome::NotFound {
+                kind: head.error_code.map(trim_ascii).and_then(kind_for_code),
+            }),
             416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
                 object_size: match head.content_range.map(parse_content_range) {
                     None => None,
@@ -233,20 +237,25 @@ impl<'a> Blobs<'a> {
                 },
             }),
             200..=299 => Err(Error::Protocol("unexpected success status")),
-            status => Ok(GetHeadOutcome::ServiceFailure {
-                status,
-                class: failure_class(status, head.error_code),
-                request_id: head.request_id,
-            }),
+            status => {
+                let kind = head.error_code.map(trim_ascii).and_then(kind_for_code);
+                Ok(GetHeadOutcome::ServiceFailure {
+                    status,
+                    class: failure_class(status, kind),
+                    kind,
+                    request_id: head.request_id,
+                })
+            }
         }
     }
 }
 
-/// Reads the Azure error code from a failed response.
+/// Reads the Azure error code from a failed response body.
 ///
 /// Azure names the error in the `x-ms-error-code` header, and repeats it in an
-/// XML body. This function reads the header first, and falls back to the body.
-/// It allocates nothing and keeps nothing.
+/// XML body. [`Blobs::accept_get_head`] already reads the header, so call this
+/// only when the outcome names no error. This function reads the header first
+/// and falls back to the body. It allocates nothing and keeps nothing.
 ///
 /// Set `truncated` if your read limit cut `body` short. The result then
 /// separates a body that stopped early from a complete body that names a code
@@ -276,7 +285,9 @@ fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutco
         // An unranged plan reads from byte zero, and Azure states the whole
         // object length, so `Content-Length` is both the window and the size.
         return Ok(match shape.kind {
-            GetKind::Metadata => GetHeadOutcome::Complete(meta(content_length)),
+            GetKind::Metadata => GetHeadOutcome::Complete {
+                meta: meta(content_length),
+            },
             GetKind::Bytes => GetHeadOutcome::Body {
                 meta: meta(content_length),
                 body: BodyWindow {
@@ -319,7 +330,7 @@ fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutco
         };
         if end + 1 != satisfiable {
             return Err(Error::ResponseMismatch(
-                "Azure served less than the satisfiable range",
+                "the service served less than the satisfiable range",
             ));
         }
     }
@@ -389,30 +400,30 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
     value.trim_ascii()
 }
 
-fn kind_for_code(code: &[u8]) -> Option<AzureErrorKind> {
+fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     Some(match code {
-        b"BlobNotFound" | b"ResourceNotFound" => AzureErrorKind::NotFound,
-        b"ContainerNotFound" => AzureErrorKind::NoSuchContainer,
-        b"BlobAlreadyExists" | b"ContainerAlreadyExists" => AzureErrorKind::AlreadyExists,
-        b"ConditionNotMet" | b"TargetConditionNotMet" => AzureErrorKind::Precondition,
-        b"InvalidRange" => AzureErrorKind::RangeNotSatisfiable,
-        b"ServerBusy" => AzureErrorKind::Throttled,
-        b"OperationTimedOut" => AzureErrorKind::Timeout,
+        b"BlobNotFound" | b"ResourceNotFound" => ServiceErrorKind::NotFound,
+        b"ContainerNotFound" => ServiceErrorKind::NoSuchContainer,
+        b"BlobAlreadyExists" | b"ContainerAlreadyExists" => ServiceErrorKind::AlreadyExists,
+        b"ConditionNotMet" | b"TargetConditionNotMet" => ServiceErrorKind::Precondition,
+        b"InvalidRange" => ServiceErrorKind::RangeNotSatisfiable,
+        b"ServerBusy" => ServiceErrorKind::Throttled,
+        b"OperationTimedOut" => ServiceErrorKind::Timeout,
         b"AuthenticationFailed"
         | b"AuthorizationFailure"
         | b"InvalidAuthenticationInfo"
         | b"AuthorizationPermissionMismatch"
-        | b"InsufficientAccountPermissions" => AzureErrorKind::Unauthorized,
-        b"InternalError" | b"ServiceUnavailable" => AzureErrorKind::Service,
+        | b"InsufficientAccountPermissions" => ServiceErrorKind::Unauthorized,
+        b"InternalError" | b"ServiceUnavailable" => ServiceErrorKind::Service,
         _ => return None,
     })
 }
 
-fn failure_class(status: u16, code: Option<&[u8]>) -> FailureClass {
-    match code.map(trim_ascii).and_then(kind_for_code) {
-        Some(AzureErrorKind::Unauthorized) => FailureClass::Auth,
-        Some(AzureErrorKind::Throttled) => FailureClass::Throttled,
-        Some(AzureErrorKind::Service | AzureErrorKind::Timeout) => FailureClass::Server,
+fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
+    match kind {
+        Some(ServiceErrorKind::Unauthorized) => FailureClass::Auth,
+        Some(ServiceErrorKind::Throttled) => FailureClass::Throttled,
+        Some(ServiceErrorKind::Service | ServiceErrorKind::Timeout) => FailureClass::Server,
         _ => match status {
             300..=399 => FailureClass::Redirect,
             401 | 403 => FailureClass::Auth,

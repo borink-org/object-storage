@@ -88,7 +88,7 @@ pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
 pub use head::GetHead;
 pub use outcome::{
-    AzureErrorKind, BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta,
+    BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, ServiceErrorKind,
 };
 pub use request::WireRequest;
 pub use time::Timestamps;

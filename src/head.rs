@@ -36,8 +36,9 @@ pub struct GetHead<'h> {
     pub version: Option<&'h [u8]>,
     /// The value of the `x-ms-error-code` header.
     ///
-    /// Azure names the error here. See
-    /// [`classify_error`](crate::classify_error).
+    /// Azure names the error here.
+    /// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) reads it and
+    /// returns the error with the outcome.
     pub error_code: Option<&'h [u8]>,
     /// The value of the `x-ms-request-id` header.
     ///

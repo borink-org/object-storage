@@ -1,4 +1,4 @@
-/// What a plan asks Azure to return.
+/// What a plan asks the service to return.
 ///
 /// The provider chooses the request that delivers it. Azure Blob Storage sends
 /// a HEAD request for [`GetKind::Metadata`] and a GET request for
