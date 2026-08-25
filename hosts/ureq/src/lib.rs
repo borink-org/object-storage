@@ -1,8 +1,11 @@
-//! A synchronous `ureq` host for `borink-object-storage` Azure GET requests.
+//! A synchronous `ureq` host for `borink-object-storage` Azure requests.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{Blobs, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered};
+use borink_object_storage::{
+    Blobs, GetHeadOutcome, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome, ResponseHead,
+    Timestamps, layered,
+};
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
 const MAX_ERROR_BODY: u64 = 8 * 1024;
@@ -12,7 +15,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let get = PhysicalGet::new(key);
-    let mut buf = vec![0; layered::requirements(blobs, &get, &now)?];
+    let mut buf = vec![0; layered::get_requirements(blobs, &get, &now)?];
     let request = blobs.encode_get(&mut buf, &get, &now)?;
 
     let mut outgoing = ureq::get(request.url());
@@ -32,7 +35,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         .call()?;
     let status = incoming.status().as_u16();
     let headers = incoming.headers().clone();
-    let head = GetHead::from_headers(
+    let head = ResponseHead::from_headers(
         status,
         headers
             .iter()
@@ -60,4 +63,50 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
 
 fn no_object(outcome: GetHeadOutcome<'_>) -> Box<dyn std::error::Error> {
     format!("Azure returned no object: {outcome}").into()
+}
+
+/// Builds and executes one PUT request, storing `content` as the whole object.
+pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let now = Timestamps::from_unix(unix);
+    let put = PhysicalPut::new(key);
+    let content = Payload::Slice(content);
+    let mut buf = vec![0; layered::put_requirements(blobs, &put, content, &now)?];
+    let request = blobs.encode_put(&mut buf, &put, content, &now)?;
+
+    let mut outgoing = ureq::put(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        // This host writes from memory, so it always has the bytes to send.
+        .send(request.payload().bytes().unwrap_or_default())?;
+    let status = incoming.status().as_u16();
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    match blobs.accept_put_head(put.shape(), head)? {
+        PutHeadOutcome::Created { .. } => Ok(()),
+        outcome @ PutHeadOutcome::NeedErrorBody { .. } => {
+            let body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(not_stored(blobs.accept_put_error_body(outcome, &body)))
+        }
+        outcome => Err(not_stored(outcome)),
+    }
+}
+
+fn not_stored(outcome: PutHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("Azure stored no object: {outcome}").into()
 }

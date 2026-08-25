@@ -1,8 +1,8 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage::{
-    Blobs, BodyWindow, ConditionKind, Container, Error, GetHead, GetHeadOutcome, GetKind,
-    InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, Timestamps, VERSION, layered,
+    Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, InvalidPlan,
+    ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -80,7 +80,7 @@ fn reports_the_exact_required_capacity() {
     };
     assert_eq!(capacity.available, 0);
     assert_eq!(
-        layered::requirements(&blobs, &get, &now()),
+        layered::get_requirements(&blobs, &get, &now()),
         Ok(capacity.required)
     );
 
@@ -134,7 +134,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .unwrap();
     assert_eq!(metadata.method(), "HEAD");
 
-    let head = GetHead::from_headers(
+    let head = ResponseHead::from_headers(
         206,
         [
             ("Content-Range", b"bytes 2-5/10".as_slice()),
@@ -244,7 +244,7 @@ fn refuses_invalid_plans_before_writing_anything() {
         );
         // The layered requirement path reports the same refusal unchanged.
         assert_eq!(
-            layered::requirements(&blobs, &get, &now()),
+            layered::get_requirements(&blobs, &get, &now()),
             Err(Error::InvalidPlan(expected))
         );
     }

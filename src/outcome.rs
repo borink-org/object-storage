@@ -147,6 +147,67 @@ pub enum GetHeadOutcome<'h> {
     },
 }
 
+/// The result of reading the response head of a write.
+///
+/// Every head that Azure sends becomes one of these values, including the
+/// heads that report a failure.
+///
+/// [`Blobs::accept_put_head`](crate::Blobs::accept_put_head) returns an
+/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PutHeadOutcome<'h> {
+    /// Azure stored the object.
+    #[non_exhaustive]
+    Created {
+        /// The metadata of the object that Azure stored.
+        ///
+        /// A write reports no size, because the size is the length of the
+        /// content that you sent.
+        meta: ObjectMeta<'h>,
+    },
+    /// The entity tag in the condition did not match, so Azure stored nothing.
+    ///
+    /// A write conditional on `If-None-Match: *` does not report a lost race
+    /// here. Azure answers that with status 409, which reaches you as
+    /// [`Self::ServiceFailure`] whose kind is
+    /// [`ServiceErrorKind::AlreadyExists`]. The Azure documentation states 412
+    /// for that case; this crate follows the service.
+    PreconditionFailed,
+    /// The container does not exist, so Azure stored nothing.
+    NotFound {
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Read the response body and pass it to
+    /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body),
+    /// which returns the final outcome. If you cannot read the body, pass an
+    /// empty one and the error stays unnamed.
+    #[non_exhaustive]
+    NeedErrorBody {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure, from the status alone.
+        class: FailureClass,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
+    /// The service refused the write, or it failed to store the object.
+    #[non_exhaustive]
+    ServiceFailure {
+        /// The HTTP status code.
+        status: u16,
+        /// The category of the failure. Use it to decide whether to retry.
+        class: FailureClass,
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+        /// The value of the `x-ms-request-id` header, if Azure sent one.
+        request_id: Option<&'h [u8]>,
+    },
+}
+
 /// The result of [`classify_error`](crate::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -255,6 +316,30 @@ impl fmt::Display for GetHeadOutcome<'_> {
             } => match kind {
                 // The kind is the finer parse, so it wins when one was made.
                 // The class is the fallback and is always present.
+                Some(kind) => write_failure(f, kind, *status, *request_id),
+                None => write_failure(f, class, *status, *request_id),
+            },
+        }
+    }
+}
+
+impl fmt::Display for PutHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { .. } => f.write_str("the service stored the object"),
+            Self::PreconditionFailed => f.write_str("the condition on the write did not hold"),
+            Self::NotFound { .. } => f.write_str("the container does not exist"),
+            Self::NeedErrorBody {
+                status,
+                class,
+                request_id,
+            } => write_failure(f, class, *status, *request_id),
+            Self::ServiceFailure {
+                status,
+                class,
+                kind,
+                request_id,
+            } => match kind {
                 Some(kind) => write_failure(f, kind, *status, *request_id),
                 None => write_failure(f, class, *status, *request_id),
             },

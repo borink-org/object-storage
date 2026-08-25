@@ -7,7 +7,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 ///
 /// Grow the buffer to `required` bytes and call the same method again. To
 /// learn the requirement before the first call, use
-/// [`layered::requirements`](crate::layered::requirements).
+/// [`layered::get_requirements`](crate::layered::get_requirements).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
     /// The smallest buffer that the call accepts, in bytes.
@@ -30,8 +30,8 @@ impl core::error::Error for CapacityError {}
 
 /// The reason that a plan cannot become a request.
 ///
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) reports these before it
-/// writes any byte, and never confuses them with a capacity error.
+/// The encoding methods report these before they write any byte, and never
+/// confuse them with a capacity error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidPlan {
@@ -48,6 +48,8 @@ pub enum InvalidPlan {
     /// A kind without a value, and a value without a kind, are both invalid.
     /// The value must also be usable as one HTTP header value.
     Condition,
+    /// The content is longer than the service writes in one request.
+    PayloadTooLarge,
 }
 
 impl fmt::Display for InvalidPlan {
@@ -59,17 +61,19 @@ impl fmt::Display for InvalidPlan {
                 f.write_str("the service does not support Range: bytes=-N suffix requests")
             }
             Self::RangedMetadata => f.write_str("a metadata plan cannot carry a byte range"),
-            Self::Condition => f.write_str("invalid GET condition"),
+            Self::Condition => f.write_str("invalid condition"),
+            Self::PayloadTooLarge => f.write_str("the content is too long to write in one request"),
         }
     }
 }
 
-/// A failure to validate, to encode, or to read a GET request.
+/// A failure to validate, to encode, or to read a request.
 ///
 /// This type reports only your own mistakes and invalid responses. A response
-/// that the service sends in normal operation, such as a missing object or a failed
-/// precondition, is not an error here. It is a
-/// [`GetHeadOutcome`](crate::GetHeadOutcome) instead.
+/// that the service sends in normal operation, such as a missing object or a
+/// failed precondition, is not an error here. It is a
+/// [`GetHeadOutcome`](crate::GetHeadOutcome) or a
+/// [`PutHeadOutcome`](crate::PutHeadOutcome) instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {

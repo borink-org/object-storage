@@ -3,7 +3,7 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
-use crate::{Blobs, Error, PhysicalGet, Result, Timestamps};
+use crate::{Blobs, Error, Payload, PhysicalGet, PhysicalPut, Result, Timestamps};
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
@@ -18,9 +18,38 @@ const MONTHS: [&[u8; 3]; 12] = [
 ///
 /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure request,
 /// unchanged from [`Blobs::encode_get`].
-pub fn requirements(blobs: &Blobs<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Result<usize> {
-    match blobs.encode_get(&mut [], get, now) {
-        Ok(_) => Ok(0),
+pub fn get_requirements(
+    blobs: &Blobs<'_>,
+    get: &PhysicalGet<'_>,
+    now: &Timestamps,
+) -> Result<usize> {
+    required(blobs.encode_get(&mut [], get, now).map(drop))
+}
+
+/// Returns the number of bytes that [`Blobs::encode_put`] needs for this plan.
+///
+/// Call this to size a buffer before you encode. The answer covers the request
+/// head only, and never the content. Only the length of `content` reaches the
+/// head, so a [`Payload::Streamed`] sizes a buffer without the bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `put` cannot become an Azure request,
+/// unchanged from [`Blobs::encode_put`].
+pub fn put_requirements(
+    blobs: &Blobs<'_>,
+    put: &PhysicalPut<'_>,
+    content: Payload<'_>,
+    now: &Timestamps,
+) -> Result<usize> {
+    // The head states how long the content is, so the requirement depends on
+    // the length of `content`. Its bytes are never read.
+    required(blobs.encode_put(&mut [], put, content, now).map(drop))
+}
+
+fn required(result: Result<()>) -> Result<usize> {
+    match result {
+        Ok(()) => Ok(0),
         Err(Error::Capacity(error)) => Ok(error.required),
         Err(error) => Err(error),
     }
