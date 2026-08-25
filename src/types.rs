@@ -192,9 +192,9 @@ impl<'h> PhysicalPut<'h> {
 
 /// The content of a write, and where it comes from.
 ///
-/// A write states how long its content is, so this always names a length. The
-/// service requires that length in the request head and refuses a write
-/// without it, so content of an unknown length cannot be written.
+/// A write states how long its content is, so this always names a length.
+/// Azure refuses a write whose head does not state it, so content of an
+/// unknown length cannot be written in one request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Payload<'b> {
