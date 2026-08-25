@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use borink_object_storage::{Blobs, Container, GetOptions, RequestWorkspace, Response, Timestamps};
+use borink_object_storage::{Blobs, Container, GetHead, GetHeadOutcome, PhysicalGet, Timestamps};
 
 // Required to link this no_std artifact; the exported check does not panic.
 #[cfg(all(feature = "link-check", not(feature = "std")))]
@@ -22,16 +22,17 @@ pub extern "C" fn azure_get_without_an_allocator() -> usize {
     let Ok(blobs) = Blobs::new(container, "token") else {
         return 2;
     };
-    let mut storage = [0; 256];
-    let mut workspace = RequestWorkspace::new(&mut storage);
+    let mut buf = [0; 256];
     let now = Timestamps::from_unix(1_787_400_000);
-    let options = GetOptions::default();
-    let Ok(request) = blobs.get_request(&mut workspace, "object", &options, &now) else {
+    let get = PhysicalGet::new("object");
+    let Ok(request) = blobs.encode_get(&mut buf, &get, &now) else {
         return 3;
     };
-    let headers = [("content-length", "4")];
-    let Ok(meta) = blobs.interpret_get(Response::new(200, headers), &options) else {
+    let headers = [("content-length", b"4".as_slice())];
+    let Ok(GetHeadOutcome::Body { body, .. }) =
+        blobs.accept_get_head(get.shape, GetHead::from_headers(200, headers))
+    else {
         return 4;
     };
-    request.url().len() + meta.size as usize
+    request.url().len() + body.expected_len.unwrap_or_default() as usize
 }
