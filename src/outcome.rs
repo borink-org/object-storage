@@ -1,3 +1,5 @@
+use core::fmt;
+
 /// Object metadata borrowed from a response head.
 ///
 /// Each field holds the bytes that Azure sent. To read `last_modified` as an
@@ -147,4 +149,119 @@ pub enum AzureErrorKind {
     Timeout,
     /// Azure failed, or the service was unavailable.
     Service,
+}
+
+impl fmt::Display for FailureClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auth => f.write_str("Azure rejected the credentials or the authorization"),
+            Self::Throttled => f.write_str("Azure throttled the request"),
+            Self::Server => f.write_str("Azure failed, or the service was unavailable"),
+            Self::Redirect => f.write_str("Azure answered with a redirect"),
+            Self::Other => f.write_str("Azure refused the request"),
+        }
+    }
+}
+
+impl fmt::Display for AzureErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("the object does not exist"),
+            Self::NoSuchContainer => f.write_str("the container does not exist"),
+            Self::AlreadyExists => f.write_str("the object or the container already exists"),
+            Self::Unauthorized => {
+                f.write_str("Azure rejected the credentials or the authorization")
+            }
+            Self::Precondition => f.write_str("a precondition on the request did not hold"),
+            Self::RangeNotSatisfiable => f.write_str("Azure cannot serve the requested byte range"),
+            Self::Throttled => f.write_str("Azure throttled the request"),
+            Self::Timeout => f.write_str("Azure timed out while it processed the request"),
+            Self::Service => f.write_str("Azure failed, or the service was unavailable"),
+        }
+    }
+}
+
+impl fmt::Display for GetHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Body { .. } => f.write_str("the object follows in the response body"),
+            Self::Complete(_) => f.write_str("the response carries no body and is complete"),
+            Self::NotModified { .. } => f.write_str("the object is not modified"),
+            Self::PreconditionFailed => f.write_str("the If-Match condition did not hold"),
+            Self::NotFound => f.write_str("the object does not exist"),
+            Self::RangeNotSatisfiable { object_size } => {
+                f.write_str("Azure cannot serve the requested range")?;
+                match object_size {
+                    Some(size) => write!(f, "; the object is {size} bytes"),
+                    None => Ok(()),
+                }
+            }
+            Self::ServiceFailure {
+                status,
+                class,
+                request_id,
+            } => {
+                write!(f, "{class} (HTTP {status}")?;
+                // Azure sends an ASCII identifier, but a header value carries
+                // no such guarantee. Name it only when it is printable.
+                if let Some(id) = request_id.and_then(|id| core::str::from_utf8(id).ok()) {
+                    write!(f, ", request {id}")?;
+                }
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::{AzureErrorKind, FailureClass, GetHeadOutcome};
+    use std::string::ToString;
+
+    #[test]
+    fn describes_a_service_failure_with_its_status_and_request_id() {
+        let failure = GetHeadOutcome::ServiceFailure {
+            status: 429,
+            class: FailureClass::Throttled,
+            request_id: Some(b"request-123"),
+        };
+        assert_eq!(
+            failure.to_string(),
+            "Azure throttled the request (HTTP 429, request request-123)"
+        );
+    }
+
+    #[test]
+    fn omits_a_request_id_that_is_not_printable() {
+        let failure = GetHeadOutcome::ServiceFailure {
+            status: 500,
+            class: FailureClass::Server,
+            request_id: Some(b"\xff"),
+        };
+        assert_eq!(
+            failure.to_string(),
+            "Azure failed, or the service was unavailable (HTTP 500)"
+        );
+    }
+
+    #[test]
+    fn describes_the_remaining_outcomes() {
+        assert_eq!(
+            GetHeadOutcome::RangeNotSatisfiable {
+                object_size: Some(10)
+            }
+            .to_string(),
+            "Azure cannot serve the requested range; the object is 10 bytes"
+        );
+        assert_eq!(
+            GetHeadOutcome::NotFound.to_string(),
+            "the object does not exist"
+        );
+        assert_eq!(
+            AzureErrorKind::NoSuchContainer.to_string(),
+            "the container does not exist"
+        );
+    }
 }

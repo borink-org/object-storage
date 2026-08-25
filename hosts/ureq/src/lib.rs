@@ -64,8 +64,8 @@ fn failure(
         .unwrap_or_default();
     let truncated = body.len() as u64 >= MAX_ERROR_BODY;
     match classify_error(head, &body, truncated) {
-        Classification::Classified(kind) => format!("Azure GET failed: {outcome:?} ({kind:?})"),
-        _ => format!("Azure GET failed: {outcome:?}"),
+        Classification::Classified(kind) => format!("Azure GET failed: {outcome}: {kind}"),
+        _ => format!("Azure GET failed: {outcome}"),
     }
     .into()
 }
