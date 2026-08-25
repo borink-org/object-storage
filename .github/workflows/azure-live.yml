@@ -11,6 +11,9 @@ env:
   AZURE_STORAGE_ENDPOINT: https://borinkstoragetest.blob.core.windows.net
   AZURE_STORAGE_CONTAINER: borink-object-test
   AZURE_BLOB_KEY: borink-object-storage/azure-get-reference/a key+é.txt
+  # The write tests own this key and overwrite it on every run. It must never
+  # be the read reference above, whose contents the read tests assert.
+  AZURE_PUT_KEY: borink-object-storage/azure-put-scratch/a key+é.bin
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,4 +32,4 @@ jobs:
           TOKEN="$(az account get-access-token --resource https://storage.azure.com/ --query accessToken --output tsv)"
           echo "::add-mask::$TOKEN"
           export AZURE_STORAGE_ACCESS_TOKEN="$TOKEN"
-          cargo test --locked -p azure-get-live -- --ignored --test-threads=1
+          cargo test --locked -p azure-live -- --ignored --test-threads=1

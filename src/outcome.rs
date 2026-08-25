@@ -166,10 +166,11 @@ pub enum PutHeadOutcome<'h> {
         /// content that you sent.
         meta: ObjectMeta<'h>,
     },
-    /// The condition on the write did not hold, so Azure stored nothing.
+    /// The entity tag in the condition did not match, so Azure stored nothing.
     ///
-    /// A write conditional on `If-None-Match: *` reports a race that it lost
-    /// either here or as a [`Self::ServiceFailure`] whose kind is
+    /// A write conditional on `If-None-Match: *` does not report a lost race
+    /// here. Azure answers that with status 409, which reaches you as
+    /// [`Self::ServiceFailure`] whose kind is
     /// [`ServiceErrorKind::AlreadyExists`].
     PreconditionFailed,
     /// The container does not exist, so Azure stored nothing.
