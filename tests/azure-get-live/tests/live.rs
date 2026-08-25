@@ -2,8 +2,8 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, GetHead, GetHeadOutcome, GetKind, GetShape, PhysicalGet,
-    RequestedRange, Timestamps, layered,
+    Blobs, ConditionKind, Container, GetHeadOutcome, GetKind, GetShape, PhysicalGet,
+    RequestedRange, ResponseHead, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -67,7 +67,7 @@ fn read(
     let blobs = fixture.blobs();
     // The scheduler path: a stored shape plus the bytes it needs.
     let get = PhysicalGet::from_shape(shape, &fixture.key, condition_value);
-    let mut buf = vec![0; layered::requirements(&blobs, &get, &now)?];
+    let mut buf = vec![0; layered::get_requirements(&blobs, &get, &now)?];
     let request = blobs.encode_get(&mut buf, &get, &now)?;
     let mut outgoing = match request.method() {
         "GET" => ureq::get(request.url()),
@@ -83,7 +83,7 @@ fn read(
         .build()
         .call()?;
     let headers = incoming.headers().clone();
-    let head = GetHead::from_headers(
+    let head = ResponseHead::from_headers(
         incoming.status().as_u16(),
         headers
             .iter()

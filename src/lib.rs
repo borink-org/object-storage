@@ -11,7 +11,7 @@
 //! 1. Describe the read as a plan: a [`GetShape`] and a [`PhysicalGet`].
 //! 2. Call [`Blobs::encode_get`] to write the request head into your buffer,
 //!    and send the [`WireRequest`] with your HTTP client.
-//! 3. Put the response headers into a [`GetHead`] and call
+//! 3. Put the response headers into a [`ResponseHead`] and call
 //!    [`Blobs::accept_get_head`]. It returns a [`GetHeadOutcome`] that tells
 //!    you what to do with the body.
 //!
@@ -23,7 +23,7 @@
 //!
 //! ```
 //! use borink_object_storage::{
-//!     Blobs, Container, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered,
+//!     Blobs, Container, ResponseHead, GetHeadOutcome, PhysicalGet, Timestamps, layered,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +35,7 @@
 //! let get = PhysicalGet::new("directory/object.txt");
 //!
 //! // 2. Encode the request head into your own buffer, then send it.
-//! let mut buffer = vec![0; layered::requirements(&blobs, &get, &now)?];
+//! let mut buffer = vec![0; layered::get_requirements(&blobs, &get, &now)?];
 //! let request = blobs.encode_get(&mut buffer, &get, &now)?;
 //! assert_eq!(request.method(), "GET");
 //! for (name, value) in request.headers() {
@@ -43,7 +43,7 @@
 //! }
 //!
 //! // 3. Read the response head that your client returned.
-//! let head = GetHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
+//! let head = ResponseHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
 //! match blobs.accept_get_head(get.shape(), head)? {
 //!     GetHeadOutcome::Body { meta, body, .. } => {
 //!         assert_eq!(meta.size, Some(8));
@@ -86,7 +86,7 @@ mod xml;
 
 pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, InvalidPlan, Result};
-pub use head::GetHead;
+pub use head::ResponseHead;
 pub use outcome::{
     BodyWindow, Classification, FailureClass, GetHeadOutcome, ObjectMeta, ServiceErrorKind,
 };

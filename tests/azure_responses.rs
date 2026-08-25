@@ -1,8 +1,8 @@
 //! Azure response interpretation fixtures.
 
 use borink_object_storage::{
-    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, FailureClass, GetHead,
-    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ServiceErrorKind,
+    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, FailureClass,
+    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseHead, ServiceErrorKind,
     classify_error, layered,
 };
 
@@ -14,7 +14,7 @@ fn blobs() -> Blobs<'static> {
     .unwrap()
 }
 
-fn accept<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutcome<'h>, Error> {
+fn accept<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>, Error> {
     blobs().accept_get_head(shape, head)
 }
 
@@ -34,7 +34,7 @@ fn conditional(condition: ConditionKind) -> GetShape {
 
 #[test]
 fn accepts_a_whole_object_read() {
-    let head = GetHead::from_headers(
+    let head = ResponseHead::from_headers(
         200,
         [
             ("Content-Length", b"8".as_slice()),
@@ -78,7 +78,7 @@ fn a_metadata_plan_completes_without_a_body() {
         kind: GetKind::Metadata,
         ..GetShape::default()
     };
-    let head = GetHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
+    let head = ResponseHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
     assert_eq!(
         accept(shape, head),
         Ok(GetHeadOutcome::Complete {
@@ -92,7 +92,7 @@ fn a_metadata_plan_completes_without_a_body() {
 
 #[test]
 fn conditional_statuses_need_the_condition_that_explains_them() {
-    let not_modified = GetHead::from_headers(304, [("ETag", b"\"etag\"".as_slice())]);
+    let not_modified = ResponseHead::from_headers(304, [("ETag", b"\"etag\"".as_slice())]);
     assert_eq!(
         accept(conditional(ConditionKind::IfNoneMatch), not_modified),
         Ok(GetHeadOutcome::NotModified {
@@ -100,7 +100,7 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
         })
     );
     assert_eq!(
-        accept(conditional(ConditionKind::IfMatch), GetHead::new(412)),
+        accept(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
         Ok(GetHeadOutcome::PreconditionFailed)
     );
 
@@ -110,7 +110,7 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
         Err(Error::Protocol(_))
     ));
     assert!(matches!(
-        accept(GetShape::default(), GetHead::new(412)),
+        accept(GetShape::default(), ResponseHead::new(412)),
         Err(Error::Protocol(_))
     ));
 }
@@ -121,19 +121,19 @@ fn ranged_and_unranged_plans_must_be_answered_in_kind() {
     assert!(matches!(
         accept(
             bounded,
-            GetHead::from_headers(200, [("Content-Length", b"10".as_slice())]),
+            ResponseHead::from_headers(200, [("Content-Length", b"10".as_slice())]),
         ),
         Err(Error::ResponseMismatch(_))
     ));
     assert!(matches!(
         accept(
             GetShape::default(),
-            GetHead::from_headers(206, [("Content-Range", b"bytes 0-9/10".as_slice())]),
+            ResponseHead::from_headers(206, [("Content-Range", b"bytes 0-9/10".as_slice())]),
         ),
         Err(Error::ResponseMismatch(_))
     ));
     assert!(matches!(
-        accept(bounded, GetHead::new(206)),
+        accept(bounded, ResponseHead::new(206)),
         Err(Error::ResponseMismatch(_))
     ));
 }
@@ -141,7 +141,7 @@ fn ranged_and_unranged_plans_must_be_answered_in_kind() {
 #[test]
 fn enforces_maximal_satisfaction_of_the_requested_range() {
     let bounded = ranged(RequestedRange::Bounded { start: 2, end: 6 });
-    let head = |value: &'static [u8]| GetHead::from_headers(206, [("Content-Range", value)]);
+    let head = |value: &'static [u8]| ResponseHead::from_headers(206, [("Content-Range", value)]);
 
     // The request is served whole, and a request past EOF clamps at the size.
     assert!(accept(bounded, head(b"bytes 2-5/10")).is_ok());
@@ -178,7 +178,7 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
             matches!(
                 accept(
                     bounded,
-                    GetHead::from_headers(206, [("Content-Range", value)])
+                    ResponseHead::from_headers(206, [("Content-Range", value)])
                 ),
                 Err(Error::Protocol(_))
             ),
@@ -188,7 +188,7 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
     assert!(matches!(
         accept(
             bounded,
-            GetHead::from_headers(
+            ResponseHead::from_headers(
                 206,
                 [
                     ("Content-Range", b"bytes 2-5/10".as_slice()),
@@ -206,14 +206,14 @@ fn a_416_carries_the_object_size_when_azure_states_it() {
     assert_eq!(
         accept(
             shape,
-            GetHead::from_headers(416, [("Content-Range", b"bytes */10".as_slice())]),
+            ResponseHead::from_headers(416, [("Content-Range", b"bytes */10".as_slice())]),
         ),
         Ok(GetHeadOutcome::RangeNotSatisfiable {
             object_size: Some(10)
         })
     );
     assert_eq!(
-        accept(shape, GetHead::new(416)),
+        accept(shape, ResponseHead::new(416)),
         Ok(GetHeadOutcome::RangeNotSatisfiable { object_size: None })
     );
 }
@@ -221,7 +221,7 @@ fn a_416_carries_the_object_size_when_azure_states_it() {
 #[test]
 fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
     // A 404 that names the container separates it from a missing object.
-    let mut missing = GetHead::new(404);
+    let mut missing = ResponseHead::new(404);
     missing.error_code = Some(b"ContainerNotFound");
     assert_eq!(
         accept(GetShape::default(), missing),
@@ -261,7 +261,7 @@ fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
         ),
     ] {
         let mut head =
-            GetHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
+            ResponseHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
         head.error_code = Some(code);
         assert!(
             matches!(
@@ -301,7 +301,7 @@ fn classifies_the_offline_azure_response_corpus() {
     ];
 
     for (code, expected) in cases {
-        let head = GetHead::from_headers(400, [("x-ms-error-code", code.as_bytes())]);
+        let head = ResponseHead::from_headers(400, [("x-ms-error-code", code.as_bytes())]);
         assert_eq!(
             classify_error(&head, b"", false),
             Classification::Classified(expected),
@@ -312,7 +312,7 @@ fn classifies_the_offline_azure_response_corpus() {
 
 #[test]
 fn falls_back_to_the_xml_error_body() {
-    let head = GetHead::new(404);
+    let head = ResponseHead::new(404);
     assert_eq!(
         classify_error(&head, b"<Error><Code>BlobNotFound</Code></Error>", false),
         Classification::Classified(ServiceErrorKind::NotFound)
@@ -333,7 +333,8 @@ fn falls_back_to_the_xml_error_body() {
 fn a_head_without_a_code_asks_for_the_error_body() {
     let blobs = blobs();
     for status in [404u16, 403, 500] {
-        let head = GetHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
+        let head =
+            ResponseHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
         let expected = match status {
             404 => FailureClass::Other,
             403 => FailureClass::Auth,
@@ -358,7 +359,7 @@ fn a_head_without_a_code_asks_for_the_error_body() {
 fn the_error_body_names_an_error_the_head_left_out() {
     let blobs = blobs();
     let missing = blobs
-        .accept_get_head(GetShape::default(), GetHead::new(404))
+        .accept_get_head(GetShape::default(), ResponseHead::new(404))
         .unwrap();
     assert_eq!(
         blobs.accept_error_body(missing, b"<Error><Code>ContainerNotFound</Code></Error>"),
@@ -370,7 +371,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     // A code that arrives in the body refines the category, as a code in the
     // header would have.
     let refused = blobs
-        .accept_get_head(GetShape::default(), GetHead::new(400))
+        .accept_get_head(GetShape::default(), ResponseHead::new(400))
         .unwrap();
     assert!(matches!(
         blobs.accept_error_body(refused, b"<Error><Code>ServerBusy</Code></Error>"),
@@ -392,7 +393,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     let named = blobs
         .accept_get_head(
             GetShape::default(),
-            GetHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
+            ResponseHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
         )
         .unwrap();
     assert_eq!(

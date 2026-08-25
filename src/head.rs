@@ -1,7 +1,8 @@
 /// The response header values that this crate reads.
 ///
-/// Each field holds the value of one header. Fill the fields with
-/// [`GetHead::from_headers`], or set them directly from a streaming parser.
+/// One head describes any response. Each field holds the value of one header.
+/// Fill the fields with [`ResponseHead::from_headers`], or set them directly
+/// from a streaming parser.
 ///
 /// The values are byte slices, not strings. A server can send a header value
 /// that is not UTF-8, and this crate carries such a value instead of
@@ -16,7 +17,7 @@
 /// response body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct GetHead<'h> {
+pub struct ResponseHead<'h> {
     /// The HTTP status code.
     pub status: u16,
     /// The value of the `Content-Length` header.
@@ -47,7 +48,7 @@ pub struct GetHead<'h> {
     pub request_id: Option<&'h [u8]>,
 }
 
-impl<'h> GetHead<'h> {
+impl<'h> ResponseHead<'h> {
     /// Creates a head with this status and no header values.
     pub fn new(status: u16) -> Self {
         Self {
@@ -99,11 +100,11 @@ impl<'h> GetHead<'h> {
 
 #[cfg(test)]
 mod tests {
-    use super::GetHead;
+    use super::ResponseHead;
 
     #[test]
     fn retains_the_first_relevant_header_case_insensitively() {
-        let head = GetHead::from_headers(
+        let head = ResponseHead::from_headers(
             206,
             [
                 ("ignored", b"value".as_slice()),
@@ -121,7 +122,7 @@ mod tests {
 
     #[test]
     fn keeps_header_values_that_are_not_utf_8() {
-        let head = GetHead::from_headers(200, [("etag", b"\"\xff\"".as_slice())]);
+        let head = ResponseHead::from_headers(200, [("etag", b"\"\xff\"".as_slice())]);
         assert_eq!(head.e_tag, Some(b"\"\xff\"".as_slice()));
     }
 }

@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use crate::request::{U64Decimal, Writer, text};
 use crate::{
-    BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHead,
-    GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange,
-    Result, ServiceErrorKind, Timestamps, WireRequest,
+    BodyWindow, CapacityError, Classification, ConditionKind, Error, FailureClass, GetHeadOutcome,
+    GetKind, GetShape, InvalidPlan, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Result,
+    ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -98,7 +98,7 @@ impl<'a> Blobs<'a> {
     /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
     /// exact number of bytes that the head needs. Grow `buf` and call this
     /// method again, or call
-    /// [`layered::requirements`](crate::layered::requirements) first.
+    /// [`layered::get_requirements`](crate::layered::get_requirements) first.
     pub fn encode_get<'r>(
         &self,
         buf: &'r mut [u8],
@@ -204,7 +204,7 @@ impl<'a> Blobs<'a> {
     pub fn accept_get_head<'h>(
         &self,
         shape: GetShape,
-        head: GetHead<'h>,
+        head: ResponseHead<'h>,
     ) -> Result<GetHeadOutcome<'h>> {
         let ranged = shape.range != RequestedRange::Whole;
         match head.status {
@@ -291,7 +291,7 @@ impl<'a> Blobs<'a> {
     }
 }
 
-fn need_error_body<'h>(status: u16, head: GetHead<'h>) -> GetHeadOutcome<'h> {
+fn need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> GetHeadOutcome<'h> {
     GetHeadOutcome::NeedErrorBody {
         status,
         class: failure_class(status, None),
@@ -309,7 +309,7 @@ fn need_error_body<'h>(status: u16, head: GetHead<'h>) -> GetHeadOutcome<'h> {
 /// Set `truncated` if your read limit cut `body` short. The result then
 /// separates a body that stopped early from a complete body that names a code
 /// this crate does not recognize.
-pub fn classify_error(head: &GetHead<'_>, body: &[u8], truncated: bool) -> Classification {
+pub fn classify_error(head: &ResponseHead<'_>, body: &[u8], truncated: bool) -> Classification {
     let code = head
         .error_code
         .map(trim_ascii)
@@ -321,7 +321,7 @@ pub fn classify_error(head: &GetHead<'_>, body: &[u8], truncated: bool) -> Class
     }
 }
 
-fn accept_success<'h>(shape: GetShape, head: GetHead<'h>) -> Result<GetHeadOutcome<'h>> {
+fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>> {
     let content_length = decimal_header(head.content_length)?;
     let meta = |size| ObjectMeta {
         size,

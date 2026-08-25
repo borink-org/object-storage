@@ -7,7 +7,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 ///
 /// Grow the buffer to `required` bytes and call the same method again. To
 /// learn the requirement before the first call, use
-/// [`layered::requirements`](crate::layered::requirements).
+/// [`layered::get_requirements`](crate::layered::get_requirements).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
     /// The smallest buffer that the call accepts, in bytes.

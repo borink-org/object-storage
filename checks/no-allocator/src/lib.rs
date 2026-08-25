@@ -2,7 +2,9 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use borink_object_storage::{Blobs, Container, GetHead, GetHeadOutcome, PhysicalGet, Timestamps};
+use borink_object_storage::{
+    Blobs, Container, GetHeadOutcome, PhysicalGet, ResponseHead, Timestamps,
+};
 
 // Required to link this no_std artifact; the exported check does not panic.
 #[cfg(all(feature = "link-check", not(feature = "std")))]
@@ -30,7 +32,7 @@ pub extern "C" fn azure_get_without_an_allocator() -> usize {
     };
     let headers = [("content-length", b"4".as_slice())];
     let Ok(GetHeadOutcome::Body { body, .. }) =
-        blobs.accept_get_head(get.shape(), GetHead::from_headers(200, headers))
+        blobs.accept_get_head(get.shape(), ResponseHead::from_headers(200, headers))
     else {
         return 4;
     };

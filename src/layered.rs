@@ -18,7 +18,11 @@ const MONTHS: [&[u8; 3]; 12] = [
 ///
 /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure request,
 /// unchanged from [`Blobs::encode_get`].
-pub fn requirements(blobs: &Blobs<'_>, get: &PhysicalGet<'_>, now: &Timestamps) -> Result<usize> {
+pub fn get_requirements(
+    blobs: &Blobs<'_>,
+    get: &PhysicalGet<'_>,
+    now: &Timestamps,
+) -> Result<usize> {
     match blobs.encode_get(&mut [], get, now) {
         Ok(_) => Ok(0),
         Err(Error::Capacity(error)) => Ok(error.required),

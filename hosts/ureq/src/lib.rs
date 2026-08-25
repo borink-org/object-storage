@@ -2,7 +2,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{Blobs, GetHead, GetHeadOutcome, PhysicalGet, Timestamps, layered};
+use borink_object_storage::{
+    Blobs, GetHeadOutcome, PhysicalGet, ResponseHead, Timestamps, layered,
+};
 
 // Error bodies are diagnostics, so this host caps what it will read for one.
 const MAX_ERROR_BODY: u64 = 8 * 1024;
@@ -12,7 +14,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let get = PhysicalGet::new(key);
-    let mut buf = vec![0; layered::requirements(blobs, &get, &now)?];
+    let mut buf = vec![0; layered::get_requirements(blobs, &get, &now)?];
     let request = blobs.encode_get(&mut buf, &get, &now)?;
 
     let mut outgoing = ureq::get(request.url());
@@ -32,7 +34,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         .call()?;
     let status = incoming.status().as_u16();
     let headers = incoming.headers().clone();
-    let head = GetHead::from_headers(
+    let head = ResponseHead::from_headers(
         status,
         headers
             .iter()
