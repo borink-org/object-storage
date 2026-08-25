@@ -171,7 +171,8 @@ pub enum PutHeadOutcome<'h> {
     /// A write conditional on `If-None-Match: *` does not report a lost race
     /// here. Azure answers that with status 409, which reaches you as
     /// [`Self::ServiceFailure`] whose kind is
-    /// [`ServiceErrorKind::AlreadyExists`].
+    /// [`ServiceErrorKind::AlreadyExists`]. The Azure documentation states 412
+    /// for that case; this crate follows the service.
     PreconditionFailed,
     /// The container does not exist, so Azure stored nothing.
     NotFound {

@@ -317,9 +317,11 @@ fn writes_a_whole_object_and_reads_it_back() {
 
 /// Settles how Azure refuses a write whose object already exists.
 ///
-/// A conditional create can in principle fail as a precondition or as a
-/// conflict, and the two reach a caller as different values. This test is the
-/// authority on which Azure sends, and `PutHeadOutcome` states its answer.
+/// The Azure documentation gets this wrong, which is why the test exists. Its
+/// write-operations table gives 412 for an unmet `If-None-Match`, and the
+/// `Put Blob` page names no failure status at all. The service answers 409
+/// with `BlobAlreadyExists`, so a caller who followed the documentation would
+/// branch on the wrong outcome.
 #[test]
 #[ignore = "requires Azure credentials"]
 fn a_lost_race_to_create_is_a_conflict_that_names_the_object() {
