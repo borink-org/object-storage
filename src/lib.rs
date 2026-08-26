@@ -10,7 +10,9 @@
 //!
 //! 1. Describe the read as a plan: a [`GetShape`] and a [`PhysicalGet`].
 //! 2. Call [`Blobs::encode_get`] to write the request head into your buffer,
-//!    and send the [`WireRequest`] with your HTTP client.
+//!    and send the [`WireRequest`] with your HTTP client. Every byte of the
+//!    head is in that buffer, so [`WireRequest`] can also name each part of it
+//!    by offset and length: see [`WireRequest::url_span`].
 //! 3. Put the response headers into a [`ResponseHead`] and call
 //!    [`Blobs::accept_get_head`]. It returns a [`GetHeadOutcome`] that tells
 //!    you what to do with the body.
@@ -33,8 +35,8 @@
 //!
 //! ```
 //! use borink_object_storage::{
-//!     Blobs, Container, GetHeadOutcome, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome,
-//!     ResponseHead, Timestamps, layered,
+//!     Blobs, Container, GetHeadOutcome, Method, Payload, PhysicalGet, PhysicalPut,
+//!     PutHeadOutcome, ResponseHead, Timestamps, layered,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,7 +50,7 @@
 //! // 2. Encode the request head into your own buffer, then send it.
 //! let mut buffer = vec![0; layered::get_requirements(&blobs, &get, &now)?];
 //! let request = blobs.encode_get(&mut buffer, &get, &now)?;
-//! assert_eq!(request.method(), "GET");
+//! assert_eq!(request.method(), Method::Get);
 //! for (name, value) in request.headers() {
 //!     // your_client.header(name, value);
 //! }
@@ -68,7 +70,7 @@
 //! let content = Payload::Slice(b"contents");
 //! let mut buffer = vec![0; layered::put_requirements(&blobs, &put, content, &now)?];
 //! let request = blobs.encode_put(&mut buffer, &put, content, &now)?;
-//! assert_eq!(request.method(), "PUT");
+//! assert_eq!(request.method(), Method::Put);
 //! assert_eq!(request.payload().bytes(), Some(b"contents".as_slice()));
 //!
 //! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
@@ -113,13 +115,13 @@ mod types;
 mod xml;
 
 pub use azure::{Blobs, Container, VERSION, classify_error};
-pub use error::{CapacityError, Error, InvalidPlan, Result};
+pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, Mismatch, ProtocolFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, DeleteHeadOutcome, FailureClass, GetHeadOutcome, ObjectMeta,
-    PutHeadOutcome, ServiceErrorKind,
+    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,
+    ObjectMeta, PutHeadOutcome, ServiceErrorKind,
 };
-pub use request::WireRequest;
+pub use request::{MAX_HEADERS, Method, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     ConditionKind, DeleteKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete,

@@ -1,11 +1,10 @@
-use core::ops::Range;
-
-use crate::request::{U64Decimal, Writer, text};
+use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
+    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
+    Method, Mismatch, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, ProtocolFault,
+    PutHeadOutcome, PutShape, RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps,
+    WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -108,27 +107,14 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_get(get)?;
         let available = buf.len();
-        let mut out = Writer::new(buf);
-        let layout = self.build(&mut out, HeadSpec::read(get), now);
-        let required = out.position();
-        let bytes = out.finish().ok_or(CapacityError {
-            required,
-            available,
-        })?;
+        let mut head = HeadWriter::new(buf);
+        self.build(&mut head, get.key, get.range, now);
+        push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
-            GetKind::Bytes => "GET",
-            GetKind::Metadata => "HEAD",
+            GetKind::Bytes => Method::Get,
+            GetKind::Metadata => Method::Head,
         };
-        let mut request =
-            WireRequest::new(method, text(&bytes[..layout.url_end]), Payload::Slice(&[]));
-        self.push_common(&mut request, bytes, &layout);
-        if let Some(span) = layout.range {
-            request.push("range", text(&bytes[span]));
-        }
-        if let Some((name, span)) = layout.condition {
-            request.push(name, text(&bytes[span]));
-        }
-        Ok(request)
+        encoded(head, available, method, Payload::Slice(&[]))
     }
 
     /// Writes the request head for `put` into `buf`.
@@ -162,91 +148,39 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content.len())?;
         let available = buf.len();
-        let mut out = Writer::new(buf);
-        let layout = self.build(
-            &mut out,
-            HeadSpec::write(put.key, put.condition, put.condition_value),
-            now,
-        );
+        let length = content.len();
+        let mut head = HeadWriter::new(buf);
+        self.build(&mut head, put.key, RequestedRange::Whole, now);
+        head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
-        let length_start = out.position();
-        out.push(U64Decimal::new(content.len()).as_bytes());
-        let length_end = out.position();
-        let required = out.position();
-        let bytes = out.finish().ok_or(CapacityError {
-            required,
-            available,
-        })?;
-        let mut request = WireRequest::new("PUT", text(&bytes[..layout.url_end]), content);
-        self.push_common(&mut request, bytes, &layout);
-        request.push("x-ms-blob-type", "BlockBlob");
-        request.push("content-length", text(&bytes[length_start..length_end]));
-        if let Some((name, span)) = layout.condition {
-            request.push(name, text(&bytes[span]));
-        }
-        Ok(request)
-    }
-
-    fn push_common<'r>(&self, request: &mut WireRequest<'r>, bytes: &'r [u8], layout: &Layout) {
-        request.push(
-            "authorization",
-            text(&bytes[layout.url_end..layout.authorization_end]),
-        );
-        request.push(
-            "x-ms-date",
-            text(&bytes[layout.authorization_end..layout.date_end]),
-        );
-        request.push("x-ms-version", VERSION);
-    }
-
-    fn build(&self, out: &mut Writer<'_>, head: HeadSpec<'_>, now: &Timestamps) -> Layout {
-        out.push(self.container.endpoint.as_bytes());
-        out.push(b"/");
-        out.push(self.container.name.as_bytes());
-        out.push(b"/");
-        for part in crate::path::encode_object_key(head.key) {
-            out.push(part.as_bytes());
-        }
-        let url_end = out.position();
-        out.push(b"Bearer ");
-        out.push(self.token.as_bytes());
-        let authorization_end = out.position();
-        out.push(now.rfc1123().as_bytes());
-        let date_end = out.position();
-        let range = match head.range {
-            RequestedRange::Whole => None,
-            range => {
-                let start = out.position();
-                out.push(b"bytes=");
-                match range {
-                    RequestedRange::Bounded { start, end } => {
-                        out.push(U64Decimal::new(start).as_bytes());
-                        out.push(b"-");
-                        out.push(U64Decimal::new(end - 1).as_bytes());
-                    }
-                    RequestedRange::Offset(first) => {
-                        out.push(U64Decimal::new(first).as_bytes());
-                        out.push(b"-");
-                    }
-                    RequestedRange::Whole | RequestedRange::Suffix(_) => {
-                        unreachable!("the plan was validated")
-                    }
-                }
-                Some(start..out.position())
-            }
-        };
-        let condition = condition_header(head.condition).map(|name| {
-            let start = out.position();
-            out.push(head.condition_value.expect("the plan was validated"));
-            (name, start..out.position())
+        head.header("content-length", |out| {
+            out.push(U64Decimal::new(length).as_bytes());
         });
-        Layout {
-            url_end,
-            authorization_end,
-            date_end,
-            range,
-            condition,
+        push_condition(&mut head, put.condition, put.condition_value);
+        encoded(head, available, Method::Put, content)
+    }
+
+    // The parts that every request head carries, in the order that they are
+    // written into the caller's buffer. Each part is one range of that buffer.
+    fn build(&self, head: &mut HeadWriter<'_>, key: &str, range: RequestedRange, now: &Timestamps) {
+        head.url(|out| {
+            out.push(self.container.endpoint.as_bytes());
+            out.push(b"/");
+            out.push(self.container.name.as_bytes());
+            out.push(b"/");
+            for part in crate::path::encode_object_key(key) {
+                out.push(part.as_bytes());
+            }
+        });
+        head.header("authorization", |out| {
+            out.push(b"Bearer ");
+            out.push(self.token.as_bytes());
+        });
+        head.header("x-ms-date", |out| out.push(now.rfc1123().as_bytes()));
+        head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
+        if range != RequestedRange::Whole {
+            head.header("range", |out| write_range(out, range));
         }
     }
 
@@ -278,85 +212,72 @@ impl<'a> Blobs<'a> {
     ) -> Result<GetHeadOutcome<'h>> {
         let ranged = shape.range != RequestedRange::Whole;
         match head.status {
-            206 if !ranged => Err(Error::ResponseMismatch(
-                "an unranged plan was answered with 206",
-            )),
-            200 if ranged => Err(Error::ResponseMismatch(
-                "a ranged plan was answered without 206",
-            )),
+            206 if !ranged => Err(Mismatch::UnrangedAnsweredWith206.into()),
+            200 if ranged => Err(Mismatch::RangedAnsweredWithout206.into()),
             200 | 206 => accept_success(shape, head),
             // A conditional status the plan did not ask for is a contradiction,
             // not an outcome: nothing in the plan explains it.
-            304 if shape.condition != ConditionKind::IfNoneMatch => Err(Error::Protocol(
-                "304 answered a plan without an If-None-Match condition",
-            )),
+            304 if shape.condition != ConditionKind::IfNoneMatch => {
+                Err(ProtocolFault::NotModifiedWithoutCondition.into())
+            }
             304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            412 if shape.condition != ConditionKind::IfMatch => Err(Error::Protocol(
-                "412 answered a plan without an If-Match condition",
-            )),
+            412 if shape.condition != ConditionKind::IfMatch => {
+                Err(ProtocolFault::PreconditionWithoutCondition.into())
+            }
             412 => Ok(GetHeadOutcome::PreconditionFailed),
             // Azure repeats the header's code in the body, so only a
             // missing header is worth a body read. A header naming a code
             // this crate does not know is already decisive.
-            404 if head.error_code.is_none() => Ok(need_error_body(404, head)),
-            404 => Ok(GetHeadOutcome::NotFound {
-                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
-            }),
+            404 if head.error_code.is_none() => Ok(GetHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(GetHeadOutcome::NotFound { kind: named(&head) }),
             416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
                 object_size: match head.content_range.map(parse_content_range) {
                     None => None,
                     // `bytes */N` is the only form 416 may carry.
                     Some(Some(ContentRange::Unsatisfied { total })) => total,
-                    Some(_) => return Err(Error::Protocol("invalid 416 content-range")),
+                    Some(_) => return Err(ProtocolFault::UnsatisfiedRangeHead.into()),
                 },
             }),
-            200..=299 => Err(Error::Protocol("unexpected success status")),
-            status if head.error_code.is_none() => Ok(need_error_body(status, head)),
-            status => {
-                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
-                Ok(GetHeadOutcome::ServiceFailure {
-                    status,
-                    class: failure_class(status, kind),
-                    kind,
-                    request_id: head.request_id,
-                })
-            }
+            200..=299 => Err(ProtocolFault::UnexpectedSuccess.into()),
+            status if head.error_code.is_none() => Ok(GetHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(GetHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
         }
     }
 
     /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// The body names the error, exactly as the `x-ms-error-code` header would
-    /// have. Pass an empty body if you could not read one: the outcome is then
-    /// final with the error unnamed.
-    ///
-    /// Every other outcome is already final, and this method returns it
-    /// unchanged.
+    /// Pass the `status` and the `request_id` of that
+    /// [`Failure`](crate::Failure), and the body that you read. The body names
+    /// the error, exactly as the `x-ms-error-code` header would have. Pass an
+    /// empty body if you could not read one: the outcome is then final with
+    /// the error unnamed.
     ///
     /// To tell a body that your read limit cut short from a body that names an
     /// error this crate does not recognize, call [`classify_error`] instead.
     pub fn accept_error_body<'h>(
         &self,
-        outcome: GetHeadOutcome<'h>,
+        status: u16,
+        request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
-        let GetHeadOutcome::NeedErrorBody {
-            status, request_id, ..
-        } = outcome
-        else {
-            return outcome;
-        };
-        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        let kind = body_kind(body);
         match status {
             404 => GetHeadOutcome::NotFound { kind },
             // The body's code refines the category too, exactly as the
             // header's would have.
-            status => GetHeadOutcome::ServiceFailure {
-                status,
-                class: failure_class(status, kind),
-                kind,
-                request_id,
-            },
+            status => GetHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 
@@ -388,30 +309,13 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete)?;
         let available = buf.len();
-        let mut out = Writer::new(buf);
-        let layout = self.build(
-            &mut out,
-            HeadSpec::write(delete.key, delete.condition, delete.condition_value),
-            now,
-        );
-        let required = out.position();
-        let bytes = out.finish().ok_or(CapacityError {
-            required,
-            available,
-        })?;
-        let mut request = WireRequest::new(
-            "DELETE",
-            text(&bytes[..layout.url_end]),
-            Payload::Slice(&[]),
-        );
-        self.push_common(&mut request, bytes, &layout);
+        let mut head = HeadWriter::new(buf);
+        self.build(&mut head, delete.key, RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
-            request.push("x-ms-delete-snapshots", value);
+            head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
         }
-        if let Some((name, span)) = layout.condition {
-            request.push(name, text(&bytes[span]));
-        }
-        Ok(request)
+        push_condition(&mut head, delete.condition, delete.condition_value);
+        encoded(head, available, Method::Delete, Payload::Slice(&[]))
     }
 
     /// Reads the response head of a removal and reports what Azure did.
@@ -437,27 +341,27 @@ impl<'a> Blobs<'a> {
     ) -> Result<DeleteHeadOutcome<'h>> {
         match head.status {
             202 => Ok(DeleteHeadOutcome::Accepted),
-            412 if shape.condition == ConditionKind::None => Err(Error::ResponseMismatch(
-                "412 answered a removal without a condition",
-            )),
-            412 => Ok(DeleteHeadOutcome::PreconditionFailed),
-            404 if head.error_code.is_none() => Ok(delete_need_error_body(404, head)),
-            404 => Ok(DeleteHeadOutcome::NotFound {
-                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
-            }),
-            200..=299 => Err(Error::Protocol(
-                "a removal returns 202, not another success",
-            )),
-            status if head.error_code.is_none() => Ok(delete_need_error_body(status, head)),
-            status => {
-                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
-                Ok(DeleteHeadOutcome::ServiceFailure {
-                    status,
-                    class: failure_class(status, kind),
-                    kind,
-                    request_id: head.request_id,
-                })
+            412 if shape.condition == ConditionKind::None => {
+                Err(Mismatch::DeleteWithoutCondition.into())
             }
+            412 => Ok(DeleteHeadOutcome::PreconditionFailed),
+            404 if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(DeleteHeadOutcome::NotFound { kind: named(&head) }),
+            200..=299 => Err(ProtocolFault::DeleteNot202.into()),
+            status if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(DeleteHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
         }
     }
 
@@ -467,24 +371,14 @@ impl<'a> Blobs<'a> {
     /// the same way.
     pub fn accept_delete_error_body<'h>(
         &self,
-        outcome: DeleteHeadOutcome<'h>,
+        status: u16,
+        request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
-        let DeleteHeadOutcome::NeedErrorBody {
-            status, request_id, ..
-        } = outcome
-        else {
-            return outcome;
-        };
-        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        let kind = body_kind(body);
         match status {
             404 => DeleteHeadOutcome::NotFound { kind },
-            status => DeleteHeadOutcome::ServiceFailure {
-                status,
-                class: failure_class(status, kind),
-                kind,
-                request_id,
-            },
+            status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 
@@ -520,25 +414,27 @@ impl<'a> Blobs<'a> {
                 },
             }),
             // Nothing in an unconditional write explains a failed condition.
-            412 if shape.condition == ConditionKind::None => Err(Error::ResponseMismatch(
-                "412 answered a write without a condition",
-            )),
-            412 => Ok(PutHeadOutcome::PreconditionFailed),
-            404 if head.error_code.is_none() => Ok(put_need_error_body(404, head)),
-            404 => Ok(PutHeadOutcome::NotFound {
-                kind: kind_for_code(trim_ascii(head.error_code.unwrap_or_default())),
-            }),
-            200..=299 => Err(Error::Protocol("a write returns 201, not another success")),
-            status if head.error_code.is_none() => Ok(put_need_error_body(status, head)),
-            status => {
-                let kind = kind_for_code(trim_ascii(head.error_code.unwrap_or_default()));
-                Ok(PutHeadOutcome::ServiceFailure {
-                    status,
-                    class: failure_class(status, kind),
-                    kind,
-                    request_id: head.request_id,
-                })
+            412 if shape.condition == ConditionKind::None => {
+                Err(Mismatch::WriteWithoutCondition.into())
             }
+            412 => Ok(PutHeadOutcome::PreconditionFailed),
+            404 if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(PutHeadOutcome::NotFound { kind: named(&head) }),
+            200..=299 => Err(ProtocolFault::WriteNot201.into()),
+            status if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(PutHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
         }
     }
 
@@ -548,50 +444,34 @@ impl<'a> Blobs<'a> {
     /// same way.
     pub fn accept_put_error_body<'h>(
         &self,
-        outcome: PutHeadOutcome<'h>,
+        status: u16,
+        request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> PutHeadOutcome<'h> {
-        let PutHeadOutcome::NeedErrorBody {
-            status, request_id, ..
-        } = outcome
-        else {
-            return outcome;
-        };
-        let kind = crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()));
+        let kind = body_kind(body);
         match status {
             404 => PutHeadOutcome::NotFound { kind },
-            status => PutHeadOutcome::ServiceFailure {
-                status,
-                class: failure_class(status, kind),
-                kind,
-                request_id,
-            },
+            status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 }
 
-fn delete_need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> DeleteHeadOutcome<'h> {
-    DeleteHeadOutcome::NeedErrorBody {
+// The one record that every failing head becomes, whichever operation asked.
+fn failure<'h>(
+    status: u16,
+    kind: Option<ServiceErrorKind>,
+    request_id: Option<&'h [u8]>,
+) -> Failure<'h> {
+    Failure {
         status,
-        class: failure_class(status, None),
-        request_id: head.request_id,
+        class: failure_class(status, kind),
+        kind,
+        request_id,
     }
 }
 
-fn put_need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> PutHeadOutcome<'h> {
-    PutHeadOutcome::NeedErrorBody {
-        status,
-        class: failure_class(status, None),
-        request_id: head.request_id,
-    }
-}
-
-fn need_error_body<'h>(status: u16, head: ResponseHead<'h>) -> GetHeadOutcome<'h> {
-    GetHeadOutcome::NeedErrorBody {
-        status,
-        class: failure_class(status, None),
-        request_id: head.request_id,
-    }
+fn named<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
+    kind_for_code(trim_ascii(head.error_code.unwrap_or_default()))
 }
 
 /// Reads the Azure error code from a failed response body.
@@ -644,17 +524,15 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
     }
     let value = head
         .content_range
-        .ok_or(Error::ResponseMismatch("206 without a content-range"))?;
+        .ok_or(Error::ResponseMismatch(Mismatch::RangeWithoutContentRange))?;
     let ContentRange::Satisfied { start, end, total } =
-        parse_content_range(value).ok_or(Error::Protocol("invalid content-range"))?
+        parse_content_range(value).ok_or(Error::Protocol(ProtocolFault::ContentRange))?
     else {
-        return Err(Error::Protocol("bytes */N is valid only in a 416"));
+        return Err(ProtocolFault::UnsizedRangeOutside416.into());
     };
     let served = end - start + 1;
     if content_length.is_some_and(|length| length != served) {
-        return Err(Error::Protocol(
-            "content-length disagrees with content-range",
-        ));
+        return Err(ProtocolFault::ContentLengthDisagrees.into());
     }
     // Azure serves the whole satisfiable range, so a short serve is a
     // mismatch: silently accepting it would hand consumers a partial read.
@@ -665,7 +543,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
         }
     };
     if start != requested_start {
-        return Err(Error::ResponseMismatch("the served range starts elsewhere"));
+        return Err(Mismatch::RangeStartsElsewhere.into());
     }
     if let Some(total) = total {
         let satisfiable = match shape.range {
@@ -673,9 +551,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
             _ => total,
         };
         if end + 1 != satisfiable {
-            return Err(Error::ResponseMismatch(
-                "the service served less than the satisfiable range",
-            ));
+            return Err(Mismatch::RangeServedShort.into());
         }
     }
     Ok(GetHeadOutcome::Body {
@@ -726,7 +602,7 @@ fn decimal_header(value: Option<&[u8]>) -> Result<Option<u64>> {
         None => Ok(None),
         Some(value) => decimal(trim_ascii(value))
             .map(Some)
-            .ok_or(Error::Protocol("invalid content-length")),
+            .ok_or(Error::Protocol(ProtocolFault::ContentLength)),
     }
 }
 
@@ -763,6 +639,12 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     })
 }
 
+// The error that a failed response body names, if it names one this crate
+// recognizes.
+fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
+    crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+}
+
 fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
     match kind {
         Some(ServiceErrorKind::Unauthorized) => FailureClass::Auth,
@@ -778,42 +660,45 @@ fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
     }
 }
 
-// What the head writer needs from any plan: the parts that become bytes.
-#[derive(Clone, Copy)]
-struct HeadSpec<'a> {
-    key: &'a str,
-    range: RequestedRange,
-    condition: ConditionKind,
-    condition_value: Option<&'a [u8]>,
+// The condition is the last header of every request that carries one.
+fn push_condition(head: &mut HeadWriter<'_>, condition: ConditionKind, value: Option<&[u8]>) {
+    if let Some(name) = condition_header(condition) {
+        let value = value.expect("the plan was validated");
+        head.header(name, |out| out.push(value));
+    }
 }
 
-impl<'a> HeadSpec<'a> {
-    fn read(get: &PhysicalGet<'a>) -> Self {
-        Self {
-            key: get.key,
-            range: get.range,
-            condition: get.condition,
-            condition_value: get.condition_value,
+fn write_range(out: &mut Writer<'_>, range: RequestedRange) {
+    out.push(b"bytes=");
+    match range {
+        RequestedRange::Bounded { start, end } => {
+            out.push(U64Decimal::new(start).as_bytes());
+            out.push(b"-");
+            out.push(U64Decimal::new(end - 1).as_bytes());
         }
-    }
-
-    // A write carries no range: it replaces or removes the whole object.
-    fn write(key: &'a str, condition: ConditionKind, condition_value: Option<&'a [u8]>) -> Self {
-        Self {
-            key,
-            range: RequestedRange::Whole,
-            condition,
-            condition_value,
+        RequestedRange::Offset(first) => {
+            out.push(U64Decimal::new(first).as_bytes());
+            out.push(b"-");
+        }
+        RequestedRange::Whole | RequestedRange::Suffix(_) => {
+            unreachable!("the plan was validated")
         }
     }
 }
 
-struct Layout {
-    url_end: usize,
-    authorization_end: usize,
-    date_end: usize,
-    range: Option<Range<usize>>,
-    condition: Option<(&'static str, Range<usize>)>,
+// The written head, or the exact number of bytes that it needed.
+fn encoded<'r>(
+    head: HeadWriter<'r>,
+    available: usize,
+    method: Method,
+    payload: Payload<'r>,
+) -> Result<WireRequest<'r>> {
+    let required = head.position();
+    head.finish(method, payload)
+        .ok_or(Error::Capacity(CapacityError {
+            required,
+            available,
+        }))
 }
 
 fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {

@@ -166,6 +166,67 @@ void reads_an_object() {
           std::string::npos);
 }
 
+// A read names its range, its precondition and whether it wants the bytes at
+// all. Each of those reaches the wire through the shape that C++ stores.
+void reads_a_range_of_an_object() {
+    Server server("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-5/10\r\n"
+                  "Content-Length: 4\r\nConnection: close\r\n\r\npart");
+    std::vector<std::uint8_t> object;
+    borink::host::Client client = open(server);
+    client.get(
+        "a key",
+        [&](std::span<const std::uint8_t> part) {
+            object.insert(object.end(), part.begin(), part.end());
+        },
+        borink::host::Read{borink::GetKindView::Bytes, borink::host::bounded(2, 6),
+                           borink::ConditionView::None, {}});
+
+    CHECK(std::string(object.begin(), object.end()) == "part");
+    CHECK(lowercase(std::string(server.head())).find("range: bytes=2-5\r\n") !=
+          std::string::npos);
+    CHECK(client.outcome().body.object_offset == 2);
+    CHECK(client.outcome().body.object_size.value == 10);
+}
+
+// A condition that held returns no object, which this host reports rather than
+// deciding for its caller what an unchanged object means.
+void reads_an_object_only_if_it_changed() {
+    Server server("HTTP/1.1 304 Not Modified\r\nETag: \"tag\"\r\nContent-Length: 0\r\n"
+                  "Connection: close\r\n\r\n");
+    borink::host::Client client = open(server);
+    std::string reported;
+    try {
+        client.get(
+            "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
+            borink::host::Read{borink::GetKindView::Bytes, borink::host::whole(),
+                               borink::ConditionView::IfNoneMatch, "\"tag\""});
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("not modified") != std::string::npos);
+    CHECK(client.outcome().disposition == borink::Disposition::NotModified);
+    CHECK(lowercase(std::string(server.head())).find("if-none-match: \"tag\"\r\n") !=
+          std::string::npos);
+}
+
+// A metadata read asks for the head alone, which Azure answers with HEAD.
+void reads_the_metadata_of_an_object() {
+    Server server("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"tag\"\r\n"
+                  "Connection: close\r\n\r\n");
+    borink::host::Client client = open(server);
+    client.get(
+        "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
+        borink::host::Read{borink::GetKindView::Metadata, borink::host::whole(),
+                           borink::ConditionView::None, {}});
+
+    CHECK(server.head().starts_with("HEAD /container/a%20key HTTP/1.1\r\n"));
+    CHECK(client.outcome().disposition == borink::Disposition::Complete);
+    CHECK(client.outcome().meta.size.value == 10);
+    const std::span<const std::uint8_t> tag = client.head().at(client.outcome().meta.e_tag);
+    CHECK(std::string(tag.begin(), tag.end()) == "\"tag\"");
+}
+
 void writes_an_object() {
     Server server("HTTP/1.1 201 Created\r\nETag: \"tag\"\r\nContent-Length: 0\r\n"
                   "Connection: close\r\n\r\n");
@@ -188,6 +249,16 @@ void removes_an_object() {
     CHECK(server.head().starts_with("DELETE /container/a%20key HTTP/1.1\r\n"));
 }
 
+// A removal says what it takes with it, and Azure refuses to guess.
+void removes_an_object_and_its_snapshots() {
+    Server server("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    open(server).remove("a key", borink::host::Removal{borink::DeleteKindView::ObjectAndSnapshots,
+                                                       borink::ConditionView::None, {}});
+
+    CHECK(lowercase(std::string(server.head())).find("x-ms-delete-snapshots: include\r\n") !=
+          std::string::npos);
+}
+
 // Azure names an error in the head when it can, and in the body when it
 // cannot. A host that stops at the head would report neither.
 void names_an_error_that_only_the_body_carries() {
@@ -205,6 +276,29 @@ void names_an_error_that_only_the_body_carries() {
     }
     CHECK(reported.find("already exists") != std::string::npos);
     CHECK(reported.find("request-123") != std::string::npos);
+}
+
+// A read whose head names no error reads a bounded body, and the outcome that
+// the bridge finishes from it names the error and keeps the request id.
+void names_an_error_that_only_a_read_body_carries() {
+    const std::string error = "<?xml version=\"1.0\"?><Error><Code>ServerBusy</Code></Error>";
+    Server server("HTTP/1.1 503 Service Unavailable\r\nContent-Length: " +
+                  std::to_string(error.size()) +
+                  "\r\nx-ms-request-id: request-123\r\nConnection: close\r\n\r\n" + error);
+
+    borink::host::Client client = open(server);
+    std::string reported;
+    try {
+        client.get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("throttled") != std::string::npos);
+    CHECK(reported.find("request-123") != std::string::npos);
+    CHECK(client.outcome().disposition == borink::Disposition::ServiceFailure);
+    CHECK(client.outcome().failure.kind == borink::ServiceErrorKindView::Throttled);
+    CHECK(client.outcome().failure.category == borink::FailureClassView::Throttled);
 }
 
 void reports_a_missing_object() {
@@ -245,9 +339,14 @@ void refuses_a_request_over_the_limit() {
 int main() {
     try {
         reads_an_object();
+        reads_a_range_of_an_object();
+        reads_an_object_only_if_it_changed();
+        reads_the_metadata_of_an_object();
         writes_an_object();
         removes_an_object();
+        removes_an_object_and_its_snapshots();
         names_an_error_that_only_the_body_carries();
+        names_an_error_that_only_a_read_body_carries();
         reports_a_missing_object();
         refuses_a_request_over_the_limit();
     } catch (const std::exception &failure) {

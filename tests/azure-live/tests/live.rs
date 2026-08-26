@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, GetHeadOutcome,
-    GetKind, GetShape, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    GetKind, GetShape, Method, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
+    PutShape, RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -74,8 +74,8 @@ fn read(
     let mut buf = vec![0; layered::get_requirements(&blobs, &get, &now)?];
     let request = blobs.encode_get(&mut buf, &get, &now)?;
     let mut outgoing = match request.method() {
-        "GET" => ureq::get(request.url()),
-        "HEAD" => ureq::head(request.url()),
+        Method::Get => ureq::get(request.url()),
+        Method::Head => ureq::head(request.url()),
         method => panic!("unexpected method {method}"),
     };
     for (name, value) in request.headers() {
@@ -100,8 +100,8 @@ fn read(
         GetHeadOutcome::PreconditionFailed => (Outcome::PreconditionFailed, None, None),
         GetHeadOutcome::NotFound { .. } => (Outcome::NotFound, None, None),
         GetHeadOutcome::RangeNotSatisfiable { .. } => (Outcome::RangeNotSatisfiable, None, None),
-        GetHeadOutcome::ServiceFailure { status, .. } => {
-            (Outcome::ServiceFailure(status), None, None)
+        GetHeadOutcome::ServiceFailure(failure) => {
+            (Outcome::ServiceFailure(failure.status), None, None)
         }
         // Azure sends `x-ms-error-code` on every failure, so a live response
         // never asks for the body. This asserts that.
@@ -273,16 +273,22 @@ fn write_as(
             .map(|(name, value)| (name.as_str(), value.as_bytes())),
     );
     let outcome = blobs.accept_put_head(shape, head)?;
-    let head_was_decisive = !matches!(outcome, PutHeadOutcome::NeedErrorBody { .. });
+    let head_was_decisive = !matches!(outcome, PutHeadOutcome::NeedErrorBody(_));
     // Read the body even when the head decided, so a run that disproves the
     // header claim still reports which error Azure named.
     let body = incoming.body_mut().read_to_vec().unwrap_or_default();
-    let outcome = match blobs.accept_put_error_body(outcome, &body) {
+    let finished = match outcome {
+        PutHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_put_error_body(failure.status, failure.request_id, &body)
+        }
+        outcome => outcome,
+    };
+    let outcome = match finished {
         PutHeadOutcome::Created { .. } => WriteOutcome::Created,
         PutHeadOutcome::PreconditionFailed => WriteOutcome::PreconditionFailed,
         PutHeadOutcome::NotFound { kind } => WriteOutcome::NotFound(kind),
-        PutHeadOutcome::ServiceFailure { status, kind, .. } => {
-            WriteOutcome::ServiceFailure(status, kind)
+        PutHeadOutcome::ServiceFailure(failure) => {
+            WriteOutcome::ServiceFailure(failure.status, failure.kind)
         }
         outcome => panic!("unresolved outcome {outcome:?}"),
     };
@@ -498,12 +504,18 @@ fn remove(
     );
     let outcome = blobs.accept_delete_head(shape, head)?;
     let body = incoming.body_mut().read_to_vec().unwrap_or_default();
-    Ok(match blobs.accept_delete_error_body(outcome, &body) {
+    let finished = match outcome {
+        DeleteHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_delete_error_body(failure.status, failure.request_id, &body)
+        }
+        outcome => outcome,
+    };
+    Ok(match finished {
         DeleteHeadOutcome::Accepted => RemoveOutcome::Accepted,
         DeleteHeadOutcome::PreconditionFailed => RemoveOutcome::PreconditionFailed,
         DeleteHeadOutcome::NotFound { kind } => RemoveOutcome::NotFound(kind),
-        DeleteHeadOutcome::ServiceFailure { status, kind, .. } => {
-            RemoveOutcome::ServiceFailure(status, kind)
+        DeleteHeadOutcome::ServiceFailure(failure) => {
+            RemoveOutcome::ServiceFailure(failure.status, failure.kind)
         }
         outcome => panic!("unresolved outcome {outcome:?}"),
     })

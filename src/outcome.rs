@@ -51,19 +51,84 @@ pub struct BodyWindow {
 /// error that the service named, read [`ServiceErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum FailureClass {
     /// The service rejected the credentials or the authorization.
-    Auth,
+    Auth = 1,
     /// The service throttled the request. You can retry it later.
-    Throttled,
+    Throttled = 2,
     /// The service failed, or it was unavailable.
-    Server,
+    Server = 3,
     /// The service answered with a redirect.
     ///
     /// This crate does not follow redirects. It reports them to you.
-    Redirect,
+    Redirect = 4,
     /// Any other failure, such as a malformed request.
-    Other,
+    Other = 5,
+}
+
+impl FailureClass {
+    /// Returns the sentence that [`Display`](fmt::Display) writes for this
+    /// category.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "the service rejected the credentials or the authorization",
+            Self::Throttled => "the service throttled the request",
+            Self::Server => "the service failed, or it was unavailable",
+            Self::Redirect => "the service answered with a redirect",
+            Self::Other => "the service refused the request",
+        }
+    }
+
+    /// Returns the category with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Auth,
+            2 => Self::Throttled,
+            3 => Self::Server,
+            4 => Self::Redirect,
+            5 => Self::Other,
+            _ => return None,
+        })
+    }
+}
+
+/// A response head that reports a failure.
+///
+/// The three head-reading methods return this in the two outcomes that carry a
+/// failure. Its fields are public, so you can store one and hand the parts
+/// back to
+/// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body) later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure<'h> {
+    /// The HTTP status code.
+    pub status: u16,
+    /// The category of the failure. Use it to decide whether to retry.
+    pub class: FailureClass,
+    /// The specific error, if the head or the body named one.
+    pub kind: Option<ServiceErrorKind>,
+    /// The value of the `x-ms-request-id` header, if Azure sent one.
+    pub request_id: Option<&'h [u8]>,
+}
+
+impl fmt::Display for Failure<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The kind is the finer parse, so it wins when one was made. The class
+        // is the fallback and is always present.
+        let reason = match self.kind {
+            Some(kind) => kind.as_str(),
+            None => self.class.as_str(),
+        };
+        write!(f, "{reason} (HTTP {}", self.status)?;
+        // Azure sends an ASCII identifier, but a header value carries no such
+        // guarantee. Name it only when it is printable.
+        if let Some(id) = self.request_id.and_then(|id| core::str::from_utf8(id).ok()) {
+            write!(f, ", request {id}")?;
+        }
+        f.write_str(")")
+    }
 }
 
 /// The result of reading a response head.
@@ -77,7 +142,6 @@ pub enum FailureClass {
 #[non_exhaustive]
 pub enum GetHeadOutcome<'h> {
     /// A body follows. Read it and put the bytes at `body`.
-    #[non_exhaustive]
     Body {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,
@@ -114,37 +178,19 @@ pub enum GetHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it to
-    /// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body), which
-    /// returns the final outcome. If you cannot read the body, pass an empty
-    /// one and the error stays unnamed.
+    /// This outcome is not final. Read the response body and pass it, with the
+    /// status and the request identifier of this failure, to
+    /// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body). That
+    /// call returns the final outcome. If you cannot read the body, pass an
+    /// empty one and the error stays unnamed.
     ///
     /// Cap what you read. An error body is a diagnostic, and the service
     /// decides how long it is.
-    #[non_exhaustive]
-    NeedErrorBody {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure, from the status alone.
-        class: FailureClass,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    ///
+    /// The `kind` of this failure is always [`None`].
+    NeedErrorBody(Failure<'h>),
     /// The service refused the request, or it failed to serve it.
-    #[non_exhaustive]
-    ServiceFailure {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure. Use it to decide whether to retry.
-        class: FailureClass,
-        /// The specific error, if the head names one.
-        ///
-        /// If this is [`None`], read the response body with
-        /// [`classify_error`](crate::classify_error).
-        kind: Option<ServiceErrorKind>,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    ServiceFailure(Failure<'h>),
 }
 
 /// The result of reading the response head of a write.
@@ -158,7 +204,6 @@ pub enum GetHeadOutcome<'h> {
 #[non_exhaustive]
 pub enum PutHeadOutcome<'h> {
     /// Azure stored the object.
-    #[non_exhaustive]
     Created {
         /// The metadata of the object that Azure stored.
         ///
@@ -181,31 +226,16 @@ pub enum PutHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it to
-    /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body),
-    /// which returns the final outcome. If you cannot read the body, pass an
-    /// empty one and the error stays unnamed.
-    #[non_exhaustive]
-    NeedErrorBody {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure, from the status alone.
-        class: FailureClass,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    /// This outcome is not final. Read the response body and pass it, with the
+    /// status and the request identifier of this failure, to
+    /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body).
+    /// That call returns the final outcome. If you cannot read the body, pass
+    /// an empty one and the error stays unnamed.
+    ///
+    /// The `kind` of this failure is always [`None`].
+    NeedErrorBody(Failure<'h>),
     /// The service refused the write, or it failed to store the object.
-    #[non_exhaustive]
-    ServiceFailure {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure. Use it to decide whether to retry.
-        class: FailureClass,
-        /// The specific error, if the head names one.
-        kind: Option<ServiceErrorKind>,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    ServiceFailure(Failure<'h>),
 }
 
 /// The result of reading the response head of a removal.
@@ -236,34 +266,19 @@ pub enum DeleteHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it to
-    /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body),
-    /// which returns the final outcome. If you cannot read the body, pass an
-    /// empty one and the error stays unnamed.
-    #[non_exhaustive]
-    NeedErrorBody {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure, from the status alone.
-        class: FailureClass,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    /// This outcome is not final. Read the response body and pass it, with the
+    /// status and the request identifier of this failure, to
+    /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body).
+    /// That call returns the final outcome. If you cannot read the body, pass
+    /// an empty one and the error stays unnamed.
+    ///
+    /// The `kind` of this failure is always [`None`].
+    NeedErrorBody(Failure<'h>),
     /// The service refused the removal, or it failed to carry it out.
     ///
     /// An object that has snapshots is refused here, unless the plan asked to
     /// remove them too: see [`DeleteKind`](crate::DeleteKind).
-    #[non_exhaustive]
-    ServiceFailure {
-        /// The HTTP status code.
-        status: u16,
-        /// The category of the failure. Use it to decide whether to retry.
-        class: FailureClass,
-        /// The specific error, if the head names one.
-        kind: Option<ServiceErrorKind>,
-        /// The value of the `x-ms-request-id` header, if Azure sent one.
-        request_id: Option<&'h [u8]>,
-    },
+    ServiceFailure(Failure<'h>),
 }
 
 /// The result of [`classify_error`](crate::classify_error).
@@ -288,56 +303,73 @@ pub enum Classification {
 /// on this instead of on the code strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum ServiceErrorKind {
     /// The object does not exist.
-    NotFound,
+    NotFound = 1,
     /// The container does not exist.
-    NoSuchContainer,
+    NoSuchContainer = 2,
     /// The object or the container already exists.
-    AlreadyExists,
+    AlreadyExists = 3,
     /// The service rejected the credentials or the authorization.
-    Unauthorized,
+    Unauthorized = 4,
     /// A precondition on the request did not hold.
-    Precondition,
+    Precondition = 5,
     /// The service cannot serve the requested byte range.
-    RangeNotSatisfiable,
+    RangeNotSatisfiable = 6,
     /// The service throttled the request.
-    Throttled,
+    Throttled = 7,
     /// The service timed out while it processed the request.
-    Timeout,
+    Timeout = 8,
     /// The service failed, or it was unavailable.
-    Service,
+    Service = 9,
+}
+
+impl ServiceErrorKind {
+    /// Returns the sentence that [`Display`](fmt::Display) writes for this
+    /// error.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "the object does not exist",
+            Self::NoSuchContainer => "the container does not exist",
+            Self::AlreadyExists => "the object or the container already exists",
+            Self::Unauthorized => "the service rejected the credentials or the authorization",
+            Self::Precondition => "a precondition on the request did not hold",
+            Self::RangeNotSatisfiable => "the service cannot serve the requested byte range",
+            Self::Throttled => "the service throttled the request",
+            Self::Timeout => "the service timed out while it processed the request",
+            Self::Service => "the service failed, or it was unavailable",
+        }
+    }
+
+    /// Returns the error with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::NotFound,
+            2 => Self::NoSuchContainer,
+            3 => Self::AlreadyExists,
+            4 => Self::Unauthorized,
+            5 => Self::Precondition,
+            6 => Self::RangeNotSatisfiable,
+            7 => Self::Throttled,
+            8 => Self::Timeout,
+            9 => Self::Service,
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for FailureClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Auth => f.write_str("the service rejected the credentials or the authorization"),
-            Self::Throttled => f.write_str("the service throttled the request"),
-            Self::Server => f.write_str("the service failed, or it was unavailable"),
-            Self::Redirect => f.write_str("the service answered with a redirect"),
-            Self::Other => f.write_str("the service refused the request"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
 impl fmt::Display for ServiceErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound => f.write_str("the object does not exist"),
-            Self::NoSuchContainer => f.write_str("the container does not exist"),
-            Self::AlreadyExists => f.write_str("the object or the container already exists"),
-            Self::Unauthorized => {
-                f.write_str("the service rejected the credentials or the authorization")
-            }
-            Self::Precondition => f.write_str("a precondition on the request did not hold"),
-            Self::RangeNotSatisfiable => {
-                f.write_str("the service cannot serve the requested byte range")
-            }
-            Self::Throttled => f.write_str("the service throttled the request"),
-            Self::Timeout => f.write_str("the service timed out while it processed the request"),
-            Self::Service => f.write_str("the service failed, or it was unavailable"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -350,9 +382,9 @@ impl fmt::Display for GetHeadOutcome<'_> {
             Self::PreconditionFailed => f.write_str("the If-Match condition did not hold"),
             Self::NotFound { kind } => match kind {
                 Some(ServiceErrorKind::NoSuchContainer) => {
-                    f.write_str("the container does not exist")
+                    f.write_str(ServiceErrorKind::NoSuchContainer.as_str())
                 }
-                _ => f.write_str("the object does not exist"),
+                _ => f.write_str(ServiceErrorKind::NotFound.as_str()),
             },
             Self::RangeNotSatisfiable { object_size } => {
                 f.write_str("the service cannot serve the requested range")?;
@@ -361,22 +393,9 @@ impl fmt::Display for GetHeadOutcome<'_> {
                     None => Ok(()),
                 }
             }
-            Self::NeedErrorBody {
-                status,
-                class,
-                request_id,
-            } => write_failure(f, class, *status, *request_id),
-            Self::ServiceFailure {
-                status,
-                class,
-                kind,
-                request_id,
-            } => match kind {
-                // The kind is the finer parse, so it wins when one was made.
-                // The class is the fallback and is always present.
-                Some(kind) => write_failure(f, kind, *status, *request_id),
-                None => write_failure(f, class, *status, *request_id),
-            },
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                fmt::Display::fmt(failure, f)
+            }
         }
     }
 }
@@ -386,21 +405,10 @@ impl fmt::Display for PutHeadOutcome<'_> {
         match self {
             Self::Created { .. } => f.write_str("the service stored the object"),
             Self::PreconditionFailed => f.write_str("the condition on the write did not hold"),
-            Self::NotFound { .. } => f.write_str("the container does not exist"),
-            Self::NeedErrorBody {
-                status,
-                class,
-                request_id,
-            } => write_failure(f, class, *status, *request_id),
-            Self::ServiceFailure {
-                status,
-                class,
-                kind,
-                request_id,
-            } => match kind {
-                Some(kind) => write_failure(f, kind, *status, *request_id),
-                None => write_failure(f, class, *status, *request_id),
-            },
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                fmt::Display::fmt(failure, f)
+            }
         }
     }
 }
@@ -410,55 +418,29 @@ impl fmt::Display for DeleteHeadOutcome<'_> {
         match self {
             Self::Accepted => f.write_str("the service accepted the removal"),
             Self::PreconditionFailed => f.write_str("the condition on the removal did not hold"),
-            Self::NotFound { .. } => f.write_str("the object does not exist"),
-            Self::NeedErrorBody {
-                status,
-                class,
-                request_id,
-            } => write_failure(f, class, *status, *request_id),
-            Self::ServiceFailure {
-                status,
-                class,
-                kind,
-                request_id,
-            } => match kind {
-                Some(kind) => write_failure(f, kind, *status, *request_id),
-                None => write_failure(f, class, *status, *request_id),
-            },
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NotFound.as_str()),
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                fmt::Display::fmt(failure, f)
+            }
         }
     }
-}
-
-fn write_failure(
-    f: &mut fmt::Formatter<'_>,
-    reason: &dyn fmt::Display,
-    status: u16,
-    request_id: Option<&[u8]>,
-) -> fmt::Result {
-    write!(f, "{reason} (HTTP {status}")?;
-    // Azure sends an ASCII identifier, but a header value carries no such
-    // guarantee. Name it only when it is printable.
-    if let Some(id) = request_id.and_then(|id| core::str::from_utf8(id).ok()) {
-        write!(f, ", request {id}")?;
-    }
-    f.write_str(")")
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
 
-    use super::{FailureClass, GetHeadOutcome, ServiceErrorKind};
+    use super::{Failure, FailureClass, GetHeadOutcome, ServiceErrorKind};
     use std::string::ToString;
 
     #[test]
     fn describes_a_service_failure_with_its_status_and_request_id() {
-        let failure = GetHeadOutcome::ServiceFailure {
+        let failure = GetHeadOutcome::ServiceFailure(Failure {
             status: 429,
             class: FailureClass::Throttled,
             kind: None,
             request_id: Some(b"request-123"),
-        };
+        });
         assert_eq!(
             failure.to_string(),
             "the service throttled the request (HTTP 429, request request-123)"
@@ -467,12 +449,12 @@ mod tests {
 
     #[test]
     fn prefers_the_named_error_over_the_category() {
-        let failure = GetHeadOutcome::ServiceFailure {
+        let failure = GetHeadOutcome::ServiceFailure(Failure {
             status: 409,
             class: FailureClass::Other,
             kind: Some(ServiceErrorKind::AlreadyExists),
             request_id: None,
-        };
+        });
         assert_eq!(
             failure.to_string(),
             "the object or the container already exists (HTTP 409)"
@@ -481,12 +463,12 @@ mod tests {
 
     #[test]
     fn omits_a_request_id_that_is_not_printable() {
-        let failure = GetHeadOutcome::ServiceFailure {
+        let failure = GetHeadOutcome::ServiceFailure(Failure {
             status: 500,
             class: FailureClass::Server,
             kind: None,
             request_id: Some(b"\xff"),
-        };
+        });
         assert_eq!(
             failure.to_string(),
             "the service failed, or it was unavailable (HTTP 500)"

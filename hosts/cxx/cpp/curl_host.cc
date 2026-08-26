@@ -153,20 +153,20 @@ std::size_t keep(std::vector<std::uint8_t> &bytes, std::size_t cap, const char *
 }
 
 // A read, which has to know what the head means before the body arrives.
-struct Read {
+struct Reading {
     const Session &session;
-    std::string_view key;
+    GetShapeView shape;
     const Sink &sink;
     const CollectedHead &head;
     std::vector<std::uint8_t> &diagnostic;
     std::size_t error_bytes;
-    std::optional<GetOutcome> outcome;
+    std::optional<Outcome> outcome;
     // A callback may not let an exception reach libcurl, so it stops the
     // transfer and keeps the exception for the caller to rethrow.
     std::exception_ptr failure;
 
     void decide() {
-        outcome = session.accept_get_head(as_bytes(key), head.status(), head.bytes(), head.fields());
+        outcome = session.accept_get_head(shape, head.status(), head.bytes(), head.fields());
     }
 
     std::size_t take(const char *data, std::size_t length) {
@@ -174,13 +174,13 @@ struct Read {
             decide();
         }
         switch (outcome->disposition) {
-        case GetDisposition::Body:
+        case Disposition::Body:
             // The object never lands in a buffer of this host. It goes
             // straight from libcurl to whoever asked for it.
             sink(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(data),
                                                length));
             return length;
-        case GetDisposition::NeedErrorBody:
+        case Disposition::NeedErrorBody:
             return keep(diagnostic, error_bytes, data, length);
         default:
             return length;
@@ -189,12 +189,12 @@ struct Read {
 };
 
 std::size_t read_body(char *data, std::size_t size, std::size_t count, void *user) {
-    Read &read = *static_cast<Read *>(user);
+    Reading &reading = *static_cast<Reading *>(user);
     try {
-        return read.take(data, size * count);
+        return reading.take(data, size * count);
     } catch (...) {
         // The bridge throws nothing, so this catches what the sink raised.
-        read.failure = std::current_exception();
+        reading.failure = std::current_exception();
         return 0;
     }
 }
@@ -229,50 +229,60 @@ std::size_t send_content(char *data, std::size_t size, std::size_t count, void *
 
 const std::string_view client = "libcurl";
 
-void Client::get(std::string_view key, const Sink &sink) {
+void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     const std::uint64_t now = now_unix();
-    const RequestHead &request =
-        encode([&] { return session_->encode_get(as_bytes(key), request_buffer(), now); });
+    const GetShapeView shape = read.shape();
+    const RequestHead &request = encode([&] {
+        return session_->encode_get(shape, as_bytes(key), as_bytes(read.condition_value),
+                                    request_buffer(), now);
+    });
 
-    Read read{*session_,          key,          sink,   head_,
-              diagnostic_,         limits_.error_bytes, std::nullopt, nullptr};
+    Reading reading{*session_,   shape,               sink,         head_,
+                    diagnostic_, limits_.error_bytes, std::nullopt, nullptr};
     Handle handle;
     apply(handle, *this, request);
+    // A metadata read sends HEAD, which carries no body at all.
+    if (request.method == Method::Head) {
+        handle.set(CURLOPT_NOBODY, 1L);
+    }
     handle.set(CURLOPT_HEADERFUNCTION, collect_head);
     handle.set(CURLOPT_HEADERDATA, &head_);
     handle.set(CURLOPT_WRITEFUNCTION, read_body);
-    handle.set(CURLOPT_WRITEDATA, &read);
+    handle.set(CURLOPT_WRITEDATA, &reading);
     handle.send();
 
-    if (read.failure) {
-        std::rethrow_exception(read.failure);
+    if (reading.failure) {
+        std::rethrow_exception(reading.failure);
     }
     // A response without a body never reaches the body callback, so the head
     // still has to be read.
-    if (!read.outcome.has_value()) {
-        read.decide();
+    if (!reading.outcome.has_value()) {
+        reading.decide();
     }
-    switch (read.outcome->disposition) {
-    case GetDisposition::Body:
-    case GetDisposition::Complete:
+    outcome_ = *reading.outcome;
+    // Azure names the error in the head when it can. When it did not, the
+    // diagnostic body names it, and the bridge finishes the outcome from it.
+    if (outcome_.disposition == Disposition::NeedErrorBody) {
+        outcome_ = session_->finish_get_error_body(outcome_.failure, head_.bytes(), kept_body());
+    }
+    switch (outcome_.disposition) {
+    case Disposition::Body:
+    case Disposition::Complete:
         return;
     default:
-        // Azure may have named the error in the head, and otherwise the
-        // diagnostic body names it.
-        fail("Azure returned no object", [&](std::vector<std::uint8_t> &message) {
-            return session_->describe_get(as_bytes(key), head_.status(), head_.bytes(),
-                                          head_.fields(),
-                                          borrow(std::span<const std::uint8_t>(diagnostic_)),
-                                          into(message));
-        });
+        fail("Azure returned no object");
     }
 }
 
-void Client::put(std::string_view key, std::span<const std::uint8_t> content) {
+void Client::put(std::string_view key, std::span<const std::uint8_t> content,
+                 const Write &write) {
     const std::uint64_t now = now_unix();
     const std::uint64_t length = content.size();
-    const RequestHead &request = encode(
-        [&] { return session_->encode_put(as_bytes(key), request_buffer(), length, now); });
+    const PutShapeView shape = write.shape();
+    const RequestHead &request = encode([&] {
+        return session_->encode_put(shape, as_bytes(key), as_bytes(write.condition_value),
+                                    request_buffer(), length, now);
+    });
 
     Content sending{content, 0};
     Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
@@ -288,22 +298,22 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content) {
     handle.set(CURLOPT_WRITEDATA, &diagnostic);
     handle.send();
 
-    const WriteOutcome outcome = session_->accept_put_head(as_bytes(key), head_.status(),
-                                                           head_.bytes(), head_.fields());
-    if (outcome.disposition != WriteDisposition::Done) {
-        fail("Azure stored no object", [&](std::vector<std::uint8_t> &message) {
-            return session_->describe_put(as_bytes(key), head_.status(), head_.bytes(),
-                                          head_.fields(),
-                                          borrow(std::span<const std::uint8_t>(diagnostic_)),
-                                          into(message));
-        });
+    outcome_ = session_->accept_put_head(shape, head_.status(), head_.bytes(), head_.fields());
+    if (outcome_.disposition == Disposition::NeedErrorBody) {
+        outcome_ = session_->finish_put_error_body(outcome_.failure, head_.bytes(), kept_body());
+    }
+    if (outcome_.disposition != Disposition::Done) {
+        fail("Azure stored no object");
     }
 }
 
-void Client::remove(std::string_view key) {
+void Client::remove(std::string_view key, const Removal &removal) {
     const std::uint64_t now = now_unix();
-    const RequestHead &request =
-        encode([&] { return session_->encode_delete(as_bytes(key), request_buffer(), now); });
+    const DeleteShapeView shape = removal.shape();
+    const RequestHead &request = encode([&] {
+        return session_->encode_delete(shape, as_bytes(key), as_bytes(removal.condition_value),
+                                       request_buffer(), now);
+    });
 
     Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
     Handle handle;
@@ -315,15 +325,13 @@ void Client::remove(std::string_view key) {
     handle.set(CURLOPT_WRITEDATA, &diagnostic);
     handle.send();
 
-    const WriteOutcome outcome = session_->accept_delete_head(as_bytes(key), head_.status(),
-                                                              head_.bytes(), head_.fields());
-    if (outcome.disposition != WriteDisposition::Done) {
-        fail("Azure removed no object", [&](std::vector<std::uint8_t> &message) {
-            return session_->describe_delete(as_bytes(key), head_.status(), head_.bytes(),
-                                             head_.fields(),
-                                             borrow(std::span<const std::uint8_t>(diagnostic_)),
-                                             into(message));
-        });
+    outcome_ = session_->accept_delete_head(shape, head_.status(), head_.bytes(), head_.fields());
+    if (outcome_.disposition == Disposition::NeedErrorBody) {
+        outcome_ =
+            session_->finish_delete_error_body(outcome_.failure, head_.bytes(), kept_body());
+    }
+    if (outcome_.disposition != Disposition::Accepted) {
+        fail("Azure removed no object");
     }
 }
 

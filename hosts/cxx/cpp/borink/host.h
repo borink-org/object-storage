@@ -46,6 +46,48 @@ struct Limits {
     std::size_t error_bytes = 8 * 1024;
 };
 
+// Every byte of the object.
+inline RangeView whole() { return RangeView{RangeForm::Whole, 0, 0}; }
+
+// The half-open interval `start..end`.
+inline RangeView bounded(std::uint64_t start, std::uint64_t end) {
+    return RangeView{RangeForm::Bounded, start, end};
+}
+
+// Every byte from `start` to the end of the object.
+inline RangeView from(std::uint64_t start) { return RangeView{RangeForm::Offset, start, 0}; }
+
+// One read, and everything that decides what it asks for.
+struct Read {
+    // Whether the read asks for bytes or for metadata.
+    GetKindView kind = GetKindView::Bytes;
+    // The byte range that the read requests.
+    RangeView range = whole();
+    // The precondition that the read carries.
+    ConditionView condition = ConditionView::None;
+    // The entity tag that the precondition compares against.
+    std::string_view condition_value;
+
+    GetShapeView shape() const { return GetShapeView{kind, range, condition}; }
+};
+
+// One write, and the precondition that it carries.
+struct Write {
+    ConditionView condition = ConditionView::None;
+    std::string_view condition_value;
+
+    PutShapeView shape() const { return PutShapeView{condition}; }
+};
+
+// One removal, what it takes with it, and the precondition that it carries.
+struct Removal {
+    DeleteKindView kind = DeleteKindView::Object;
+    ConditionView condition = ConditionView::None;
+    std::string_view condition_value;
+
+    DeleteShapeView shape() const { return DeleteShapeView{kind, condition}; }
+};
+
 // The application owns the clock, so it reads the current time itself.
 inline std::uint64_t now_unix() {
     const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
@@ -132,32 +174,39 @@ class Client {
     // Opens a client against one container.
     //
     // Throws std::runtime_error if the endpoint, the container or the token
-    // cannot be used.
+    // cannot be used. The message is the sentence that the core crate wrote.
     static Client open(std::string_view endpoint, std::string_view container,
                        std::string_view token, Limits limits = {});
 
-    // Reads the whole object, passing its stored bytes to `sink` as they
-    // arrive.
+    // Reads the object that `read` describes, passing its stored bytes to
+    // `sink` as they arrive.
+    //
+    // A metadata read returns no bytes and calls `sink` not at all. Read the
+    // metadata from `outcome()` and `head()` afterwards.
     //
     // Throws std::runtime_error if Azure returned no object. The message is
     // the sentence that the core crate wrote for the outcome.
-    void get(std::string_view key, const Sink &sink);
+    void get(std::string_view key, const Sink &sink, const Read &read = {});
 
     // Writes `content` as the whole object. The bytes stay where the caller
     // put them, and the host sends them from there.
-    void put(std::string_view key, std::span<const std::uint8_t> content);
+    void put(std::string_view key, std::span<const std::uint8_t> content,
+             const Write &write = {});
 
-    // Removes the whole object.
+    // Removes what `removal` names.
     //
     // Reports a missing object rather than treating it as success: only the
     // caller knows whether it meant to remove an object that is already gone.
-    void remove(std::string_view key);
+    void remove(std::string_view key, const Removal &removal = {});
 
     const Session &session() const { return *session_; }
 
     // The head of the response to the last request, for a caller that wants
     // the metadata that came with it.
     const CollectedHead &head() const { return head_; }
+
+    // What the last response said. Its spans name ranges of `head()`.
+    const Outcome &outcome() const { return outcome_; }
 
     // Reads one range of the request buffer, such as the URL or a header.
     std::string_view part(const Span &range) const {
@@ -169,40 +218,53 @@ class Client {
     //
     // `write` calls the bridge, which reports the size that the head needs.
     // The buffer grows to that size once and is reused from then on.
-    template <typename Write> const RequestHead &encode(Write write) {
+    template <typename Encode> const RequestHead &encode(Encode encode) {
         head_.restart(0);
         diagnostic_.clear();
-        request_head_ = write();
-        if (request_head_.outcome == PlanOutcome::NeedsBuffer) {
+        outcome_ = Outcome{};
+        request_head_ = encode();
+        if (request_head_.status.code == static_cast<std::uint16_t>(ErrorCode::Capacity)) {
             if (request_head_.required > limits_.request_bytes) {
                 throw std::runtime_error("the request head is larger than this client allows");
             }
             request_.resize(request_head_.required);
-            request_head_ = write();
+            request_head_ = encode();
         }
-        if (request_head_.outcome != PlanOutcome::Written) {
-            throw std::runtime_error(refusal(request_head_.outcome));
+        if (request_head_.status.code != 0) {
+            throw std::runtime_error(std::string(sentence([&](rust::Slice<std::uint8_t> room) {
+                return describe_status(request_head_.status, room);
+            })));
         }
         return request_head_;
     }
 
     rust::Slice<std::uint8_t> request_buffer() { return into(request_); }
 
-    // Reports an outcome that carries no object, in the words of the core
-    // crate. This is the one place that a request allocates.
-    template <typename Describe>
-    [[noreturn]] void fail(std::string_view what, Describe describe) {
-        std::size_t length = describe(message_);
-        if (length > message_.size()) {
-            message_.resize(length);
-            length = describe(message_);
-        }
-        throw std::runtime_error(std::string(what) + ": " +
-                                 std::string(reinterpret_cast<const char *>(message_.data()),
-                                             std::min(length, message_.size())));
+    // The diagnostic body that this client kept, capped by its limits.
+    rust::Slice<const std::uint8_t> kept_body() const {
+        return borrow(std::span<const std::uint8_t>(diagnostic_));
     }
 
-    static const char *refusal(PlanOutcome outcome);
+    // Writes what the bridge says into this client's message buffer. This is
+    // the one place that a failing request allocates.
+    template <typename Describe> std::string_view sentence(Describe describe) {
+        std::size_t length = describe(into(message_));
+        if (length > message_.size()) {
+            message_.resize(length);
+            length = describe(into(message_));
+        }
+        return std::string_view(reinterpret_cast<const char *>(message_.data()),
+                                std::min(length, message_.size()));
+    }
+
+    // Reports an outcome that carries no object, in the words of the core
+    // crate.
+    [[noreturn]] void fail(std::string_view what) {
+        const std::string_view said = sentence([&](rust::Slice<std::uint8_t> room) {
+            return borink::describe(outcome_, head_.bytes(), room);
+        });
+        throw std::runtime_error(std::string(what) + ": " + std::string(said));
+    }
 
     rust::Box<Session> session_;
     Limits limits_;
@@ -211,6 +273,7 @@ class Client {
     std::vector<std::uint8_t> message_;
     CollectedHead head_;
     std::vector<std::uint8_t> diagnostic_;
+    Outcome outcome_{};
 };
 
 } // namespace borink::host

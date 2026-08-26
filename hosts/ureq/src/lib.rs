@@ -48,14 +48,18 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
         // only response whose body this host reads for a diagnostic, and it
         // caps the read: an error body that does not arrive costs the name of
         // the error, not the outcome.
-        outcome @ GetHeadOutcome::NeedErrorBody { .. } => {
+        GetHeadOutcome::NeedErrorBody(failure) => {
             let body = incoming
                 .body_mut()
                 .with_config()
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(no_object(blobs.accept_error_body(outcome, &body)))
+            Err(no_object(blobs.accept_error_body(
+                failure.status,
+                failure.request_id,
+                &body,
+            )))
         }
         outcome => Err(no_object(outcome)),
     }
@@ -94,14 +98,18 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
     );
     match blobs.accept_put_head(put.shape(), head)? {
         PutHeadOutcome::Created { .. } => Ok(()),
-        outcome @ PutHeadOutcome::NeedErrorBody { .. } => {
+        PutHeadOutcome::NeedErrorBody(failure) => {
             let body = incoming
                 .body_mut()
                 .with_config()
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(not_stored(blobs.accept_put_error_body(outcome, &body)))
+            Err(not_stored(blobs.accept_put_error_body(
+                failure.status,
+                failure.request_id,
+                &body,
+            )))
         }
         outcome => Err(not_stored(outcome)),
     }
@@ -141,14 +149,18 @@ pub fn delete(blobs: &Blobs<'_>, key: &str) -> Result<(), Box<dyn std::error::Er
     );
     match blobs.accept_delete_head(delete.shape(), head)? {
         DeleteHeadOutcome::Accepted => Ok(()),
-        outcome @ DeleteHeadOutcome::NeedErrorBody { .. } => {
+        DeleteHeadOutcome::NeedErrorBody(failure) => {
             let body = incoming
                 .body_mut()
                 .with_config()
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(not_removed(blobs.accept_delete_error_body(outcome, &body)))
+            Err(not_removed(blobs.accept_delete_error_body(
+                failure.status,
+                failure.request_id,
+                &body,
+            )))
         }
         outcome => Err(not_removed(outcome)),
     }

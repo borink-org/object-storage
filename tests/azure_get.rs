@@ -2,7 +2,7 @@
 
 use borink_object_storage::{
     Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, InvalidPlan,
-    ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps, VERSION, layered,
+    Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -25,7 +25,7 @@ fn encodes_a_bearer_get_in_caller_memory() {
         .encode_get(&mut buf, &PhysicalGet::new("directory/a key+é"), &now())
         .unwrap();
 
-    assert_eq!(request.method(), "GET");
+    assert_eq!(request.method(), Method::Get);
     assert_eq!(
         request.url(),
         "https://account.blob.core.windows.net/objects/directory/a%20key%2B%C3%A9"
@@ -110,7 +110,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         condition_value: Some(b"\"etag\""),
     };
     let request = blobs.encode_get(&mut buf, &get, &now()).unwrap();
-    assert_eq!(request.method(), "GET");
+    assert_eq!(request.method(), Method::Get);
     assert!(
         request
             .headers()
@@ -132,7 +132,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
             &now(),
         )
         .unwrap();
-    assert_eq!(metadata.method(), "HEAD");
+    assert_eq!(metadata.method(), Method::Head);
 
     let head = ResponseHead::from_headers(
         206,

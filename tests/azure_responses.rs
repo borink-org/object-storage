@@ -1,7 +1,7 @@
 //! Azure response interpretation fixtures.
 
 use borink_object_storage::{
-    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, FailureClass,
+    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, Failure, FailureClass,
     GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseHead, ServiceErrorKind,
     classify_error, layered,
 };
@@ -266,13 +266,12 @@ fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
         assert!(
             matches!(
                 accept(GetShape::default(), head),
-                Ok(GetHeadOutcome::ServiceFailure {
+                Ok(GetHeadOutcome::ServiceFailure(Failure {
                     status: got_status,
                     class: got_class,
                     kind: got_kind,
                     request_id: Some(b"request-123"),
-                    ..
-                }) if got_status == status && got_class == class && got_kind == kind
+                })) if got_status == status && got_class == class && got_kind == kind
             ),
             "{status} {code:?}"
         );
@@ -343,12 +342,12 @@ fn a_head_without_a_code_asks_for_the_error_body() {
         assert!(
             matches!(
                 blobs.accept_get_head(GetShape::default(), head),
-                Ok(GetHeadOutcome::NeedErrorBody {
+                Ok(GetHeadOutcome::NeedErrorBody(Failure {
                     status: got_status,
                     class,
+                    kind: None,
                     request_id: Some(b"request-123"),
-                    ..
-                }) if got_status == status && class == expected
+                })) if got_status == status && class == expected
             ),
             "{status}"
         );
@@ -358,11 +357,13 @@ fn a_head_without_a_code_asks_for_the_error_body() {
 #[test]
 fn the_error_body_names_an_error_the_head_left_out() {
     let blobs = blobs();
-    let missing = blobs
-        .accept_get_head(GetShape::default(), ResponseHead::new(404))
-        .unwrap();
+    let missing = need_error_body(&blobs, 404);
     assert_eq!(
-        blobs.accept_error_body(missing, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        blobs.accept_error_body(
+            missing.status,
+            missing.request_id,
+            b"<Error><Code>ContainerNotFound</Code></Error>"
+        ),
         GetHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
@@ -370,34 +371,44 @@ fn the_error_body_names_an_error_the_head_left_out() {
 
     // A code that arrives in the body refines the category, as a code in the
     // header would have.
-    let refused = blobs
-        .accept_get_head(GetShape::default(), ResponseHead::new(400))
-        .unwrap();
+    let refused = need_error_body(&blobs, 400);
     assert!(matches!(
-        blobs.accept_error_body(refused, b"<Error><Code>ServerBusy</Code></Error>"),
-        GetHeadOutcome::ServiceFailure {
+        blobs.accept_error_body(
+            refused.status,
+            refused.request_id,
+            b"<Error><Code>ServerBusy</Code></Error>"
+        ),
+        GetHeadOutcome::ServiceFailure(Failure {
             class: FailureClass::Throttled,
             kind: Some(ServiceErrorKind::Throttled),
             ..
-        }
+        })
     ));
 
     // A host that could read no body still gets a final outcome, with the
     // error unnamed.
     assert_eq!(
-        blobs.accept_error_body(missing, b""),
+        blobs.accept_error_body(missing.status, missing.request_id, b""),
         GetHeadOutcome::NotFound { kind: None }
     );
 
-    // Every other outcome is already final.
-    let named = blobs
-        .accept_get_head(
+    // A head that named the error is final without a body read.
+    assert_eq!(
+        blobs.accept_get_head(
             GetShape::default(),
             ResponseHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
-        )
-        .unwrap();
-    assert_eq!(
-        blobs.accept_error_body(named, b"<Error><Code>ContainerNotFound</Code></Error>"),
-        named
+        ),
+        Ok(GetHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NotFound)
+        })
     );
+}
+
+// The failure of a head that asks for the error body, which the finisher takes
+// apart rather than the outcome itself.
+fn need_error_body<'h>(blobs: &Blobs<'_>, status: u16) -> Failure<'h> {
+    match blobs.accept_get_head(GetShape::default(), ResponseHead::new(status)) {
+        Ok(GetHeadOutcome::NeedErrorBody(failure)) => failure,
+        other => panic!("unexpected outcome: {other:?}"),
+    }
 }
