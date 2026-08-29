@@ -2,7 +2,7 @@
 
 Standard implementations of object storage on crates.io (such as `object_store`) have many dependencies, depend on particular runtimes (Tokio), and cannot avoid global allocations. This makes them unsuitable for various environments:
 
-- Embedded in other programming languages (such as C++)
+- Embedded in other programming languages (such as C and C++)
 - Embedded systems with no dynamic allocations or very little memory
 
 Furthermore, since they have many dependencies, they can quickly bloat your supply chain and are slow to compile. For many large Rust applications that already have many of those widely used dependencies, this is not a problem (basically, if you're using Tokio and a web framework, just use the `object_store` crate). But if it is, then `borink-object-storage` is for you. Additionally, when crates freely allocate a lot of memory internally for things like scratch space and can abort when these allocations fail, it makes it quite hard to manage resources. For example, you might want to limit the memory used by one tenant in a multi-tenant environment.
@@ -11,7 +11,7 @@ This library uses a style of programming inspired by Zig, but still provides Rus
 
 Currently we only provide the sans-I/O core as a library; you must provide the host yourself. [`hosts/ureq`](hosts/ureq) contains an example host.
 
-For C++, [`crates/object-storage-cxx`](crates/object-storage-cxx) is a bridge and [`hosts/cxx-curl`](hosts/cxx-curl) is a libcurl host built on it. The bridge allocates once per client and never per request, and returns no `Result`, so an application built without exceptions can use it. Your application keeps its HTTP client, its buffers and its memory budget.
+For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `extern "C"` static archive and [`hosts/cxx-curl`](hosts/cxx-curl) is a libcurl host built on it. It allocates nothing at all, returns no `Result` and throws nothing, so an application built without exceptions can use it. A C++ program includes the header-only `borink/object_storage.hpp` for `std::span` and `std::string_view` ergonomics; a C program includes the generated `borink/object_storage.h` alone. Neither needs a C++ runtime library, so the same archive links on a hosted operating system and on a bare-metal board (`--no-default-features`, no allocator, no panic handler of ours to replace). Your application keeps its HTTP client, its buffers and its memory budget.
 
 ## Supported features
 
