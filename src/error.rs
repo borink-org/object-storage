@@ -51,6 +51,13 @@ pub enum InvalidPlan {
     Condition = 5,
     /// The content is longer than the service writes in one request.
     PayloadTooLarge = 6,
+    /// A field of the plan holds a discriminant that this crate does not
+    /// define.
+    ///
+    /// A plan built in another language carries each enum as its number. A
+    /// number that names no value here is refused rather than read as the
+    /// value that happens to be oldest.
+    Unknown = 7,
 }
 
 impl InvalidPlan {
@@ -66,6 +73,7 @@ impl InvalidPlan {
             Self::RangedMetadata => "a metadata plan cannot carry a byte range",
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
+            Self::Unknown => "the plan holds a value that this crate does not define",
         }
     }
 
@@ -80,6 +88,7 @@ impl InvalidPlan {
             4 => Self::RangedMetadata,
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
+            7 => Self::Unknown,
             _ => return None,
         })
     }
@@ -92,6 +101,11 @@ impl fmt::Display for InvalidPlan {
 }
 
 /// What is wrong with a response head.
+///
+/// Each of these is a head that Azure does not send. Some contradict
+/// themselves, such as a length that disagrees with a range. Others carry a
+/// status that the operation does not use. Neither has a meaning to read, so
+/// this crate reports the head instead of choosing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]

@@ -5,9 +5,11 @@
 // carries its requests.
 //
 // The bridge allocates nothing per request and throws nothing. This host
-// allocates nothing per request either: every buffer it uses belongs to the
-// `Client` that the application built, and is reused by the next request. A
-// failure is the one exception, because it builds a message.
+// keeps every buffer on the `Client` that the application built, and reuses it
+// for the next request. It still allocates twice per request, and both are
+// libcurl's terms rather than the bridge's: `curl_slist_append` copies each
+// header line, and a failure builds a message. A host that will not pay for
+// the first chooses a different HTTP library, not a different bridge.
 
 #pragma once
 
@@ -44,18 +46,23 @@ struct Limits {
     // the service decides how long it is: one that does not arrive costs the
     // name of the error, not the outcome.
     std::size_t error_bytes = 8 * 1024;
+    // The most that one response head may take. libcurl keeps no header
+    // buffer of its own, so this host copies each header into an arena that it
+    // reserves once at this size. A head that would outgrow it is refused
+    // rather than served, exactly as an oversized request head is.
+    std::size_t head_bytes = 8 * 1024;
 };
 
 // Every byte of the object.
-inline RangeView whole() { return RangeView{RangeForm::Whole, 0, 0}; }
+inline RangeView whole() { return RangeView{RangeFormView::Whole, 0, 0}; }
 
 // The half-open interval `start..end`.
 inline RangeView bounded(std::uint64_t start, std::uint64_t end) {
-    return RangeView{RangeForm::Bounded, start, end};
+    return RangeView{RangeFormView::Bounded, start, end};
 }
 
 // Every byte from `start` to the end of the object.
-inline RangeView from(std::uint64_t start) { return RangeView{RangeForm::Offset, start, 0}; }
+inline RangeView from(std::uint64_t start) { return RangeView{RangeFormView::Offset, start, 0}; }
 
 // One read, and everything that decides what it asks for.
 struct Read {
@@ -113,53 +120,84 @@ template <typename T> rust::Slice<const T> borrow(std::span<const T> items) {
     return items.empty() ? rust::Slice<const T>() : rust::Slice<const T>(items.data(), items.size());
 }
 
-// The bytes of one response head, and where each header sits in them.
+// The bytes of a value that the response head may not have carried.
 //
-// The HTTP client hands over one header at a time and keeps nothing, so this
-// is where the head lives. The bridge reads it here, in place.
+// The span points into the head that this client collected, and is valid
+// until the next request restarts it. Copy what you keep.
+inline std::span<const std::uint8_t> bytes_of(const MaybeBytes &value) {
+    if (!value.present) {
+        return {};
+    }
+    return std::span<const std::uint8_t>(value.bytes.data(), value.bytes.size());
+}
+
+// The same bytes as text, for a value that is one.
+inline std::string_view text_of(const MaybeBytes &value) {
+    const std::span<const std::uint8_t> bytes = bytes_of(value);
+    return std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+// Where this host keeps the response head, and one `HeaderRef` per header.
+//
+// The bridge takes the head as borrowed bytes and dictates no layout for it. A
+// client whose HTTP library retains its own header buffer points straight into
+// that. libcurl retains none: it hands over one header at a time and keeps
+// nothing, so this host copies each into an arena. That is libcurl's fact, and
+// this class is where it stays.
+//
+// The arena is reserved once and never grows, because every `HeaderRef` points
+// into it and a reallocation would leave them all dangling. A head that would
+// outgrow the reserve is refused: see `overflowed`.
 class CollectedHead {
   public:
+    // Reserves the arena. Call once, before the first head.
+    void reserve(std::size_t capacity) {
+        capacity_ = capacity;
+        bytes_.reserve(capacity);
+    }
+
     // Starts a new head. A client that reports more than one response, such as
     // a 100 Continue before the answer, calls this for each.
     void restart(std::uint16_t status) {
         status_ = status;
         bytes_.clear();
-        fields_.clear();
+        headers_.clear();
+        overflowed_ = false;
     }
 
     void field(std::string_view name, std::string_view value) {
-        fields_.push_back(HeaderField{append(name), append(value)});
+        if (bytes_.size() + name.size() + value.size() > capacity_) {
+            overflowed_ = true;
+            return;
+        }
+        const rust::Slice<const std::uint8_t> stored_name = append(name);
+        headers_.push_back(HeaderRef{stored_name, append(value)});
     }
 
     std::uint16_t status() const { return status_; }
 
-    rust::Slice<const std::uint8_t> bytes() const {
-        return borrow(std::span<const std::uint8_t>(bytes_));
-    }
+    // Whether a header did not fit, and was therefore not reported. A head
+    // read in part would turn a named failure into an unnamed one.
+    bool overflowed() const { return overflowed_; }
 
-    rust::Slice<const HeaderField> fields() const {
-        return borrow(std::span<const HeaderField>(fields_));
-    }
-
-    // Reads one range of the head, such as the entity tag that an outcome
-    // names. The range is empty if the head did not carry that value.
-    std::span<const std::uint8_t> at(const MaybeSpan &range) const {
-        if (!range.present) {
-            return {};
-        }
-        return std::span<const std::uint8_t>(bytes_).subspan(range.span.start, range.span.len);
+    // The headers, as bytes that this client owns. They stay valid until the
+    // next `restart`.
+    rust::Slice<const HeaderRef> refs() const {
+        return borrow(std::span<const HeaderRef>(headers_));
     }
 
   private:
-    Span append(std::string_view value) {
-        const Span range{bytes_.size(), value.size()};
+    rust::Slice<const std::uint8_t> append(std::string_view value) {
+        const std::size_t start = bytes_.size();
         bytes_.insert(bytes_.end(), value.begin(), value.end());
-        return range;
+        return rust::Slice<const std::uint8_t>(bytes_.data() + start, value.size());
     }
 
     std::uint16_t status_ = 0;
+    std::size_t capacity_ = 0;
+    bool overflowed_ = false;
     std::vector<std::uint8_t> bytes_;
-    std::vector<HeaderField> fields_;
+    std::vector<HeaderRef> headers_;
 };
 
 // One session, and the memory that every request through it reuses.
@@ -169,7 +207,9 @@ class CollectedHead {
 class Client {
   public:
     Client(rust::Box<Session> session, Limits limits)
-        : session_(std::move(session)), limits_(limits) {}
+        : session_(std::move(session)), limits_(limits) {
+        head_.reserve(limits_.head_bytes);
+    }
 
     // Opens a client against one container.
     //
@@ -201,11 +241,13 @@ class Client {
 
     const Session &session() const { return *session_; }
 
-    // The head of the response to the last request, for a caller that wants
-    // the metadata that came with it.
+    // The head of the response to the last request.
     const CollectedHead &head() const { return head_; }
 
-    // What the last response said. Its spans name ranges of `head()`.
+    // What the last response said.
+    //
+    // Everything it borrows points into `head()`, and stays valid until the
+    // next request through this client. Read `bytes_of` for one such value.
     const Outcome &outcome() const { return outcome_; }
 
     // Reads one range of the request buffer, such as the URL or a header.
@@ -257,12 +299,18 @@ class Client {
                                 std::min(length, message_.size()));
     }
 
+    // Refuses a head that did not fit the arena, before it is read in part.
+    void checked_head() const {
+        if (head_.overflowed()) {
+            throw std::runtime_error("the response head is larger than this client allows");
+        }
+    }
+
     // Reports an outcome that carries no object, in the words of the core
     // crate.
     [[noreturn]] void fail(std::string_view what) {
-        const std::string_view said = sentence([&](rust::Slice<std::uint8_t> room) {
-            return borink::describe(outcome_, head_.bytes(), room);
-        });
+        const std::string_view said = sentence(
+            [&](rust::Slice<std::uint8_t> room) { return borink::describe(outcome_, room); });
         throw std::runtime_error(std::string(what) + ": " + std::string(said));
     }
 

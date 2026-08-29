@@ -5,12 +5,64 @@
 /// [`GetKind::Bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum GetKind {
     /// The bytes of the object.
     #[default]
-    Bytes,
+    Bytes = 1,
     /// The metadata of the object, without its bytes.
-    Metadata,
+    Metadata = 2,
+}
+
+impl GetKind {
+    /// Returns the kind with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    /// A caller that carries a plan across a language boundary sends each
+    /// value as its number, and refuses a number that names nothing here.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Bytes,
+            2 => Self::Metadata,
+            _ => return None,
+        })
+    }
+}
+
+/// Which form of byte range a plan requests, without its offsets.
+///
+/// [`RequestedRange`] carries the offsets as well, which a number cannot. This
+/// is the part of it that is one value, for a caller that carries a plan
+/// across a language boundary: pair it with the offsets in
+/// [`RequestedRange::from_parts`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u16)]
+pub enum RangeForm {
+    /// [`RequestedRange::Whole`].
+    #[default]
+    Whole = 1,
+    /// [`RequestedRange::Bounded`].
+    Bounded = 2,
+    /// [`RequestedRange::Offset`].
+    Offset = 3,
+    /// [`RequestedRange::Suffix`].
+    Suffix = 4,
+}
+
+impl RangeForm {
+    /// Returns the form with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Whole,
+            2 => Self::Bounded,
+            3 => Self::Offset,
+            4 => Self::Suffix,
+            _ => return None,
+        })
+    }
 }
 
 /// The byte range that a plan requests.
@@ -38,17 +90,65 @@ pub enum RequestedRange {
     Suffix(u64),
 }
 
+impl RequestedRange {
+    /// Returns which form of range this is, without its offsets.
+    pub const fn form(self) -> RangeForm {
+        match self {
+            Self::Whole => RangeForm::Whole,
+            Self::Bounded { .. } => RangeForm::Bounded,
+            Self::Offset(_) => RangeForm::Offset,
+            Self::Suffix(_) => RangeForm::Suffix,
+        }
+    }
+
+    /// Rebuilds a range from its form and its two offsets.
+    ///
+    /// `start` and `end` are the fields of [`Self::Bounded`], which is the
+    /// only form that reads both. [`RangeForm::Offset`] and
+    /// [`RangeForm::Suffix`] read `start` and **ignore `end`**;
+    /// [`RangeForm::Whole`] ignores both. A value in an ignored offset is
+    /// dropped rather than refused, because the form alone says which offsets
+    /// the range has.
+    ///
+    /// [`Self::form`] and this method are inverses: a range taken apart by one
+    /// and rebuilt by the other is the range it started as.
+    pub const fn from_parts(form: RangeForm, start: u64, end: u64) -> Self {
+        match form {
+            RangeForm::Whole => Self::Whole,
+            RangeForm::Bounded => Self::Bounded { start, end },
+            RangeForm::Offset => Self::Offset(start),
+            RangeForm::Suffix => Self::Suffix(start),
+        }
+    }
+}
+
 /// The ETag precondition that a plan carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum ConditionKind {
     /// The request carries no precondition.
     #[default]
-    None,
+    None = 1,
     /// The request succeeds only if the current ETag matches.
-    IfMatch,
+    IfMatch = 2,
     /// The request succeeds only if the current ETag differs.
-    IfNoneMatch,
+    IfNoneMatch = 3,
+}
+
+impl ConditionKind {
+    /// Returns the precondition with this discriminant.
+    ///
+    /// Returns [`None`](Option::None) for a discriminant that this version
+    /// does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::None,
+            2 => Self::IfMatch,
+            3 => Self::IfNoneMatch,
+            _ => return None,
+        })
+    }
 }
 
 /// The part of a plan that holds no borrows.
@@ -249,16 +349,31 @@ impl<'b> From<&'b [u8]> for Payload<'b> {
 /// mean, so a removal never takes more than you asked for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum DeleteKind {
     /// Remove the object alone.
     ///
     /// Azure refuses this if the object has snapshots.
     #[default]
-    Object,
+    Object = 1,
     /// Remove the object and its snapshots.
-    ObjectAndSnapshots,
+    ObjectAndSnapshots = 2,
     /// Remove the snapshots and keep the object.
-    SnapshotsOnly,
+    SnapshotsOnly = 3,
+}
+
+impl DeleteKind {
+    /// Returns the kind with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Object,
+            2 => Self::ObjectAndSnapshots,
+            3 => Self::SnapshotsOnly,
+            _ => return None,
+        })
+    }
 }
 
 /// The part of a removal plan that holds no borrows.
@@ -317,5 +432,55 @@ impl<'h> PhysicalDelete<'h> {
             kind: self.kind,
             condition: self.condition,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConditionKind, DeleteKind, GetKind, RangeForm, RequestedRange};
+
+    // The tables are hand-written, so a number that names the wrong value is
+    // the bug worth checking for.
+    #[test]
+    fn each_number_names_the_value_it_projects_from() {
+        for (form, range) in [
+            (RangeForm::Whole, RequestedRange::Whole),
+            (
+                RangeForm::Bounded,
+                RequestedRange::Bounded { start: 2, end: 6 },
+            ),
+            (RangeForm::Offset, RequestedRange::Offset(2)),
+            (RangeForm::Suffix, RequestedRange::Suffix(2)),
+        ] {
+            assert_eq!(range.form(), form);
+            assert_eq!(RangeForm::from_discriminant(form as u16), Some(form));
+            assert_eq!(RequestedRange::from_parts(form, 2, 6), range);
+        }
+        for kind in [GetKind::Bytes, GetKind::Metadata] {
+            assert_eq!(GetKind::from_discriminant(kind as u16), Some(kind));
+        }
+        for condition in [
+            ConditionKind::None,
+            ConditionKind::IfMatch,
+            ConditionKind::IfNoneMatch,
+        ] {
+            assert_eq!(
+                ConditionKind::from_discriminant(condition as u16),
+                Some(condition)
+            );
+        }
+        for kind in [
+            DeleteKind::Object,
+            DeleteKind::ObjectAndSnapshots,
+            DeleteKind::SnapshotsOnly,
+        ] {
+            assert_eq!(DeleteKind::from_discriminant(kind as u16), Some(kind));
+        }
+
+        // 0 is the twins' "absent", so no plan value may claim it.
+        assert_eq!(GetKind::from_discriminant(0), None);
+        assert_eq!(ConditionKind::from_discriminant(0), None);
+        assert_eq!(DeleteKind::from_discriminant(0), None);
+        assert_eq!(RangeForm::from_discriminant(0), None);
     }
 }

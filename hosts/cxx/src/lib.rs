@@ -1,42 +1,51 @@
 //! The bridge that lets a C++ application drive `borink-object-storage`.
 //!
-//! This is for an application that already has an HTTP client and its own
-//! memory budget. It keeps both. The bridge plans a request, writes the
-//! request head into the buffer that C++ handed it, and reads the response
-//! head that C++ collected. It opens no socket, reads no clock, and keeps
-//! nothing between calls.
+//! The bridge plans a request, writes the request head into a buffer that C++
+//! owns, and reads the response head that C++ collected. It opens no socket,
+//! reads no clock, and keeps nothing between calls.
+//!
+//! No call returns `Result`, so no call throws. Each call reports what
+//! happened in a field of the value that it returns.
 //!
 //! # What it costs
 //!
-//! One allocation per session, in `open_session`, for the endpoint, the
-//! container and the token. **Nothing per request**: every other call writes
-//! into memory that C++ supplied and returns a value that holds no pointer.
+//! `open_session` allocates four times: once each for the endpoint, the
+//! container and the token, and once for the session itself. No other call
+//! allocates.
 //!
-//! No call returns `Result`, so no call throws. A C++ application built
-//! without exceptions can use this bridge. Each call reports what happened in
-//! a field of the value that it returns.
+//! This crate needs the Rust standard library, so it does not build for a
+//! freestanding target. The core crate is `no_std`; a binding for such a
+//! target would be a separate glue crate over it.
 //!
-//! # Everything is a range of your buffer
+//! # Offsets out, slices in
 //!
-//! `encode_get` writes the request head into your buffer and returns a
-//! `RequestHead`, which names the URL and each header by offset and length.
-//! The core crate writes every byte of the head into that one buffer,
-//! including each header name, so there is nothing else to read.
+//! `encode_get` writes the head into your buffer and returns a `RequestHead`,
+//! which names the URL and each header by offset and length. You resize and
+//! reuse that buffer, so an offset keeps its meaning where a pointer would
+//! not. Call `encode_get` with an empty buffer to learn the size: it reports
+//! `ErrorCode::Capacity` and the exact number of bytes.
 //!
-//! Call `encode_get` with an empty buffer to learn the size: it reports
-//! `ErrorCode::Capacity` and the exact number of bytes. Size the buffer once
-//! per client and reuse it.
+//! A response head crosses the other way. You name each header with a
+//! `HeaderRef` that points at bytes you already hold, and the `Outcome` points
+//! at the same bytes. Nothing is copied, and no layout is required of you.
 //!
-//! A response works the same way in reverse. You keep the response head in
-//! your own bytes and name each header with a `HeaderField`. The outcome then
-//! names each metadata value by offset and length into those same bytes.
+//! Each borrowed field states under its own `# Lifetime` how long it is valid.
+//! Those sentences are the contract.
 //!
-//! # How a failure crosses
+//! The six reading calls are `unsafe fn` below because `cxx` refuses an
+//! `extern "Rust"` signature that names a lifetime unless it is. Their bodies
+//! are safe, and this crate contains no `unsafe` block.
 //!
-//! Every failure crosses as a `Status`, which is the error code and the
-//! discriminant that the core crate defines. `describe_status` writes the
+//! # How a value crosses
+//!
+//! A failure crosses as a `Status`: the error code the core crate defines, and
+//! the discriminant of the value inside it. `describe_status` writes the
 //! sentence for one. A response that the service sends in normal operation is
-//! not a failure: it is a `Disposition` on the `Outcome`.
+//! not a failure. It is a `Disposition` on the `Outcome`.
+//!
+//! Every other enum crosses as the number the core crate gives it, in both
+//! directions. A number that this bridge does not define is refused as
+//! `ErrorCode::InvalidPlan`.
 //!
 //! # Examples
 //!
@@ -44,7 +53,7 @@
 //! rust::Box<borink::Session> session = borink::open_session(endpoint, container, token);
 //! if (session->status().code != 0) { /* ... */ }
 //!
-//! borink::GetShapeView shape = borink::whole_object();
+//! borink::GetShapeView shape = read.shape();
 //! borink::RequestHead head = session->encode_get(shape, key, {}, {buffer.data(), buffer.size()}, now);
 //! if (head.status.code == static_cast<std::uint16_t>(borink::ErrorCode::Capacity)) {
 //!     buffer.resize(head.required);
@@ -52,7 +61,7 @@
 //! }
 //! // ... send head.url and head.headers with your HTTP client ...
 //!
-//! borink::Outcome outcome = session->accept_get_head(shape, status, collected, fields);
+//! borink::Outcome outcome = session->accept_get_head(shape, status, header_refs);
 //! if (outcome.disposition == borink::Disposition::Body) {
 //!     // ... read the body ...
 //! }
@@ -63,14 +72,14 @@ use std::fmt::{self, Write as _};
 use borink_object_storage::{
     Blobs, BodyWindow, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     ErrorCode, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseHead, ServiceErrorKind, Timestamps, WireRequest,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RangeForm,
+    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 use ffi::{
     BodyWindowView, ConditionView, DeleteKindView, DeleteShapeView, Disposition, FailureClassView,
-    FailureView, GetKindView, GetShapeView, HeaderField, MaybeSpan, MaybeU64, Method,
-    ObjectMetaView, Operation, Outcome, PutShapeView, RangeForm, RequestHead, RequestHeader,
+    FailureView, GetKindView, GetShapeView, HeaderRef, MaybeBytes, MaybeU64, Method,
+    ObjectMetaView, Outcome, PutShapeView, RangeFormView, RequestHead, RequestHeader,
     ServiceErrorKindView, Span, Status,
 };
 
@@ -93,7 +102,7 @@ pub struct Session {
 
 #[cxx::bridge(namespace = "borink")]
 mod ffi {
-    /// A range of bytes, as an offset from the start of a buffer.
+    /// A range of bytes, as an offset from the start of your request buffer.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Span {
         /// The offset of the first byte.
@@ -102,22 +111,48 @@ mod ffi {
         len: usize,
     }
 
-    /// A range that the bytes may not carry.
+    /// Bytes that a response head may not carry.
+    ///
+    /// `present` and an empty `bytes` are different facts: a header that the
+    /// service sent empty is present, and one it did not send is not.
+    ///
+    /// # Lifetime
+    ///
+    /// `bytes` points into the storage that the `HeaderRef`s of the call
+    /// pointed into, or into the error body that you passed. It is valid until
+    /// you release or reuse that storage.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct MaybeSpan {
-        /// Whether the value is present.
+    struct MaybeBytes<'h> {
+        /// Whether the head carried this value.
         present: bool,
-        /// The range that holds it.
-        span: Span,
+        /// The bytes of it.
+        bytes: &'h [u8],
     }
 
-    /// A number that the response head may not carry.
+    /// A number that a response head may not carry.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct MaybeU64 {
         /// Whether the head carried this number.
         present: bool,
         /// The number.
         value: u64,
+    }
+
+    /// One response header, as the bytes that you already hold.
+    ///
+    /// Build a small array of these from wherever your HTTP library keeps the
+    /// head, and reuse the array. This bridge copies none of it.
+    ///
+    /// # Lifetime
+    ///
+    /// Both slices must stay valid for as long as you use the `Outcome` that
+    /// the reading call returns.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct HeaderRef<'h> {
+        /// The header name. A name that is not text is ignored.
+        name: &'h [u8],
+        /// The header value.
+        value: &'h [u8],
     }
 
     /// A failure, as the two numbers that describe every error of the core
@@ -136,8 +171,9 @@ mod ffi {
 
     /// Which kind of failure a `Status` carries.
     ///
-    /// These mirror the `ErrorCode` of the core crate.
+    /// These are the numbers that the core crate's `ErrorCode` uses.
     #[derive(Debug)]
+    #[repr(u16)]
     enum ErrorCode {
         /// Nothing failed.
         None = 0,
@@ -159,6 +195,7 @@ mod ffi {
 
     /// The HTTP method of a request.
     #[derive(Debug)]
+    #[repr(u8)]
     enum Method {
         /// `GET`.
         Get = 1,
@@ -172,6 +209,7 @@ mod ffi {
 
     /// What a read asks the service to return.
     #[derive(Debug)]
+    #[repr(u16)]
     enum GetKindView {
         /// The bytes of the object.
         Bytes = 1,
@@ -181,7 +219,8 @@ mod ffi {
 
     /// Which form of byte range a read requests.
     #[derive(Debug)]
-    enum RangeForm {
+    #[repr(u16)]
+    enum RangeFormView {
         /// Every byte of the object. `start` and `end` are 0.
         Whole = 1,
         /// The half-open interval `start..end`.
@@ -196,7 +235,7 @@ mod ffi {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct RangeView {
         /// Which form of range this is.
-        form: RangeForm,
+        form: RangeFormView,
         /// The first byte, or the length of a suffix.
         start: u64,
         /// The byte after the last byte, for a bounded range.
@@ -209,6 +248,7 @@ mod ffi {
     /// `condition_value`. A request that carries none passes an empty
     /// `condition_value`.
     #[derive(Debug)]
+    #[repr(u16)]
     enum ConditionView {
         /// The request carries no precondition.
         None = 1,
@@ -220,6 +260,7 @@ mod ffi {
 
     /// What a removal takes with it.
     #[derive(Debug)]
+    #[repr(u16)]
     enum DeleteKindView {
         /// Remove the object alone. Azure refuses this if it has snapshots.
         Object = 1,
@@ -232,7 +273,8 @@ mod ffi {
     /// The part of a read plan that holds no borrows.
     ///
     /// Store one of these while the request is in flight, and pass it to
-    /// `accept_get_head` when the response arrives.
+    /// `accept_get_head` when the response arrives. It is the whole
+    /// per-request context: this bridge keeps none of its own.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct GetShapeView {
         /// Whether the read asks for bytes or for metadata.
@@ -290,28 +332,24 @@ mod ffi {
         headers: [RequestHeader; 6],
     }
 
-    /// One response header, as two ranges of the bytes that you kept.
+    /// Object metadata, borrowed from the response head.
+    ///
+    /// # Lifetime
+    ///
+    /// Every field points into the storage that the `HeaderRef`s pointed
+    /// into, and is valid until you release or reuse it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct HeaderField {
-        /// The range that holds the header name.
-        name: Span,
-        /// The range that holds the header value.
-        value: Span,
-    }
-
-    /// Object metadata, as ranges of the response head.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct ObjectMetaView {
+    struct ObjectMetaView<'h> {
         /// The size of the whole object.
         size: MaybeU64,
         /// The entity tag.
-        e_tag: MaybeSpan,
+        e_tag: MaybeBytes<'h>,
         /// The value of the `Last-Modified` header.
-        last_modified: MaybeSpan,
+        last_modified: MaybeBytes<'h>,
         /// The version identifier.
-        version: MaybeSpan,
+        version: MaybeBytes<'h>,
         /// The value of the `Content-Encoding` header.
-        content_encoding: MaybeSpan,
+        content_encoding: MaybeBytes<'h>,
     }
 
     /// Where the bytes of the response body belong in the object.
@@ -327,9 +365,14 @@ mod ffi {
 
     /// The category of a service failure.
     ///
-    /// These mirror the `FailureClass` of the core crate.
+    /// These are the numbers that the core crate's `FailureClass` uses. A
+    /// number that is not listed here comes from a later version of that
+    /// crate. It crosses unchanged, never as a substitute.
     #[derive(Debug)]
+    #[repr(u16)]
     enum FailureClassView {
+        /// The failure carries no category.
+        None = 0,
         /// The service rejected the credentials or the authorization.
         Auth = 1,
         /// The service throttled the request. You can retry it later.
@@ -340,14 +383,14 @@ mod ffi {
         Redirect = 4,
         /// Any other failure, such as a malformed request.
         Other = 5,
-        /// A category that this bridge does not know.
-        Unknown = 6,
     }
 
     /// The specific error that the service named.
     ///
-    /// These mirror the `ServiceErrorKind` of the core crate.
+    /// These are the numbers that the core crate's `ServiceErrorKind` uses,
+    /// and they cross unchanged in both directions.
     #[derive(Debug)]
+    #[repr(u16)]
     enum ServiceErrorKindView {
         /// The service named no error.
         None = 0,
@@ -369,16 +412,23 @@ mod ffi {
         Timeout = 8,
         /// The service failed, or it was unavailable.
         Service = 9,
-        /// An error that this bridge does not know.
-        Unknown = 10,
     }
 
     /// A response head that reports a failure.
     ///
     /// Store one of these and pass it back to `finish_get_error_body` to
     /// finish a `Disposition::NeedErrorBody`.
+    ///
+    /// A `Disposition::NotFound` fills `kind` alone. A missing object is not a
+    /// failure of the head: it names an error and carries no status and no
+    /// category, so both are 0.
+    ///
+    /// # Lifetime
+    ///
+    /// `request_id` points into the storage that the `HeaderRef`s pointed
+    /// into. Copy it if you keep this value past that storage.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct FailureView {
+    struct FailureView<'h> {
         /// The HTTP status code.
         status: u16,
         /// The category of the failure. Use it to decide whether to retry.
@@ -387,23 +437,13 @@ mod ffi {
         category: FailureClassView,
         /// The specific error, if the head or the body named one.
         kind: ServiceErrorKindView,
-        /// The range of the response head that holds `x-ms-request-id`.
-        request_id: MaybeSpan,
-    }
-
-    /// Which operation a response answers.
-    #[derive(Debug)]
-    enum Operation {
-        /// A read.
-        Read = 1,
-        /// A write.
-        Write = 2,
-        /// A removal.
-        Removal = 3,
+        /// The value of the `x-ms-request-id` header.
+        request_id: MaybeBytes<'h>,
     }
 
     /// What a response tells you to do.
     #[derive(Debug)]
+    #[repr(u16)]
     enum Disposition {
         /// A body follows. Read it and put the bytes at `body`.
         Body = 1,
@@ -413,7 +453,7 @@ mod ffi {
         NotModified = 3,
         /// The condition did not hold, so Azure changed nothing.
         PreconditionFailed = 4,
-        /// The object or its container does not exist.
+        /// The object or its container does not exist. Read `failure.kind`.
         NotFound = 5,
         /// Azure cannot serve the requested range. Read `body.object_size`.
         RangeNotSatisfiable = 6,
@@ -428,31 +468,33 @@ mod ffi {
         NeedErrorBody = 9,
         /// Azure refused the request, or it failed to carry it out.
         ServiceFailure = 10,
-        /// The head is invalid, or it does not answer the plan. Read `error`.
+        /// The call was refused, or the head does not answer the plan. Read
+        /// `error`.
         Invalid = 11,
-        /// One `HeaderField` names a range outside the head that you passed.
-        InvalidInput = 12,
         /// The core crate returned a variant that this bridge does not know.
-        Unsupported = 13,
+        Unsupported = 12,
     }
 
     /// The result of reading one response head.
     ///
     /// One value describes a read, a write and a removal. The fields that the
     /// operation does not fill are absent.
+    ///
+    /// # Lifetime
+    ///
+    /// Everything that this value borrows is valid until you release or reuse
+    /// the storage that the `HeaderRef`s pointed into.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct Outcome {
-        /// Which operation this answers.
-        operation: Operation,
+    struct Outcome<'h> {
         /// What to do with the response.
         disposition: Disposition,
         /// The metadata from the head.
-        meta: ObjectMetaView,
+        meta: ObjectMetaView<'h>,
         /// Where the bytes of the body belong.
         body: BodyWindowView,
         /// The failure, for `NeedErrorBody`, `ServiceFailure` and `NotFound`.
-        failure: FailureView,
-        /// What is wrong with the head, for `Invalid`.
+        failure: FailureView<'h>,
+        /// Why the call was refused, for `Invalid`.
         error: Status,
     }
 
@@ -463,7 +505,8 @@ mod ffi {
         ///
         /// This is the one call that allocates. It copies the three values, so
         /// none of them has to outlive the call. A value that is not usable
-        /// leaves the session with a `status`, and every request refuses.
+        /// leaves the session with a `status`, and every request refuses with
+        /// that same status.
         fn open_session(endpoint: &[u8], container: &[u8], token: &[u8]) -> Box<Session>;
 
         /// Returns what is wrong with this session, if anything.
@@ -509,70 +552,88 @@ mod ffi {
 
         /// Reads the response head of a read.
         ///
-        /// Pass the same `shape` that you passed to `encode_get`. `head` holds
-        /// the response header bytes, and each `HeaderField` names one header
-        /// inside it. The outcome names ranges of `head`.
-        fn accept_get_head(
+        /// Pass the same `shape` that you passed to `encode_get`, and one
+        /// `HeaderRef` per response header. The outcome points into the same
+        /// bytes as those `HeaderRef`s.
+        ///
+        /// # Lifetime
+        ///
+        /// The bytes that `headers` points at must stay valid, and must not
+        /// move, for as long as you use the returned `Outcome`.
+        unsafe fn accept_get_head<'h>(
             self: &Session,
             shape: &GetShapeView,
             status: u16,
-            head: &[u8],
-            fields: &[HeaderField],
-        ) -> Outcome;
+            headers: &[HeaderRef<'h>],
+        ) -> Outcome<'h>;
 
         /// Reads the response head of a write.
-        fn accept_put_head(
+        ///
+        /// # Lifetime
+        ///
+        /// As `accept_get_head`.
+        unsafe fn accept_put_head<'h>(
             self: &Session,
             shape: &PutShapeView,
             status: u16,
-            head: &[u8],
-            fields: &[HeaderField],
-        ) -> Outcome;
+            headers: &[HeaderRef<'h>],
+        ) -> Outcome<'h>;
 
         /// Reads the response head of a removal.
-        fn accept_delete_head(
+        ///
+        /// # Lifetime
+        ///
+        /// As `accept_get_head`.
+        unsafe fn accept_delete_head<'h>(
             self: &Session,
             shape: &DeleteShapeView,
             status: u16,
-            head: &[u8],
-            fields: &[HeaderField],
-        ) -> Outcome;
+            headers: &[HeaderRef<'h>],
+        ) -> Outcome<'h>;
 
         /// Finishes a read whose head asked for the error body.
         ///
-        /// Pass the `failure` of that outcome, the same `head` bytes, and the
-        /// body that you read. Pass an empty body if you read none: the
-        /// outcome is then final with the error unnamed.
-        fn finish_get_error_body(
+        /// Pass the `failure` of that outcome and the body that you read. Pass
+        /// an empty body if you read none: the outcome is then final with the
+        /// error unnamed.
+        ///
+        /// # Lifetime
+        ///
+        /// `failure.request_id` must still point at valid bytes, and they must
+        /// stay valid for as long as you use the returned `Outcome`.
+        unsafe fn finish_get_error_body<'h>(
             self: &Session,
-            failure: &FailureView,
-            head: &[u8],
+            failure: &FailureView<'h>,
             body: &[u8],
-        ) -> Outcome;
+        ) -> Outcome<'h>;
 
         /// Finishes a write whose head asked for the error body.
-        fn finish_put_error_body(
+        ///
+        /// # Lifetime
+        ///
+        /// As `finish_get_error_body`.
+        unsafe fn finish_put_error_body<'h>(
             self: &Session,
-            failure: &FailureView,
-            head: &[u8],
+            failure: &FailureView<'h>,
             body: &[u8],
-        ) -> Outcome;
+        ) -> Outcome<'h>;
 
         /// Finishes a removal whose head asked for the error body.
-        fn finish_delete_error_body(
+        ///
+        /// # Lifetime
+        ///
+        /// As `finish_get_error_body`.
+        unsafe fn finish_delete_error_body<'h>(
             self: &Session,
-            failure: &FailureView,
-            head: &[u8],
+            failure: &FailureView<'h>,
             body: &[u8],
-        ) -> Outcome;
+        ) -> Outcome<'h>;
 
         /// Writes one sentence naming what `outcome` says.
         ///
-        /// Pass the `head` bytes that the outcome names, so that the sentence
-        /// can carry the request identifier. Returns the length of the whole
-        /// sentence, which may be longer than `into`: the part that fits is
-        /// written, and nothing is allocated.
-        fn describe(outcome: &Outcome, head: &[u8], into: &mut [u8]) -> usize;
+        /// Returns the length of the whole sentence, which may be longer than
+        /// `into`: the part that fits is written, and nothing is allocated.
+        fn describe(outcome: &Outcome, into: &mut [u8]) -> usize;
 
         /// Writes one sentence naming what `status` says.
         ///
@@ -581,9 +642,62 @@ mod ffi {
     }
 }
 
-// The twin carries the core crate's headers and no more. A header added there
-// stops this build rather than being dropped at the boundary.
-const _: () = assert!(MAX_HEADERS == 6);
+// Every enum below crosses as a number, and this is where the two lists are
+// pinned to each other. A value renumbered on either side stops this build,
+// which is what makes each conversion a cast rather than a table.
+const _: () = {
+    use borink_object_storage as core;
+
+    assert!(MAX_HEADERS == 6);
+
+    assert!(ffi::ErrorCode::InvalidEndpoint.repr == ErrorCode::InvalidEndpoint as u16);
+    assert!(ffi::ErrorCode::InvalidContainer.repr == ErrorCode::InvalidContainer as u16);
+    assert!(ffi::ErrorCode::InvalidToken.repr == ErrorCode::InvalidToken as u16);
+    assert!(ffi::ErrorCode::InvalidPlan.repr == ErrorCode::InvalidPlan as u16);
+    assert!(ffi::ErrorCode::Capacity.repr == ErrorCode::Capacity as u16);
+    assert!(ffi::ErrorCode::Protocol.repr == ErrorCode::Protocol as u16);
+    assert!(ffi::ErrorCode::ResponseMismatch.repr == ErrorCode::ResponseMismatch as u16);
+
+    assert!(Method::Get.repr == core::Method::Get as u8);
+    assert!(Method::Head.repr == core::Method::Head as u8);
+    assert!(Method::Put.repr == core::Method::Put as u8);
+    assert!(Method::Delete.repr == core::Method::Delete as u8);
+
+    assert!(GetKindView::Bytes.repr == GetKind::Bytes as u16);
+    assert!(GetKindView::Metadata.repr == GetKind::Metadata as u16);
+
+    assert!(RangeFormView::Whole.repr == RangeForm::Whole as u16);
+    assert!(RangeFormView::Bounded.repr == RangeForm::Bounded as u16);
+    assert!(RangeFormView::Offset.repr == RangeForm::Offset as u16);
+    assert!(RangeFormView::Suffix.repr == RangeForm::Suffix as u16);
+
+    assert!(ConditionView::None.repr == ConditionKind::None as u16);
+    assert!(ConditionView::IfMatch.repr == ConditionKind::IfMatch as u16);
+    assert!(ConditionView::IfNoneMatch.repr == ConditionKind::IfNoneMatch as u16);
+
+    assert!(DeleteKindView::Object.repr == DeleteKind::Object as u16);
+    assert!(DeleteKindView::ObjectAndSnapshots.repr == DeleteKind::ObjectAndSnapshots as u16);
+    assert!(DeleteKindView::SnapshotsOnly.repr == DeleteKind::SnapshotsOnly as u16);
+
+    assert!(FailureClassView::Auth.repr == FailureClass::Auth as u16);
+    assert!(FailureClassView::Throttled.repr == FailureClass::Throttled as u16);
+    assert!(FailureClassView::Server.repr == FailureClass::Server as u16);
+    assert!(FailureClassView::Redirect.repr == FailureClass::Redirect as u16);
+    assert!(FailureClassView::Other.repr == FailureClass::Other as u16);
+
+    assert!(ServiceErrorKindView::NotFound.repr == ServiceErrorKind::NotFound as u16);
+    assert!(ServiceErrorKindView::NoSuchContainer.repr == ServiceErrorKind::NoSuchContainer as u16);
+    assert!(ServiceErrorKindView::AlreadyExists.repr == ServiceErrorKind::AlreadyExists as u16);
+    assert!(ServiceErrorKindView::Unauthorized.repr == ServiceErrorKind::Unauthorized as u16);
+    assert!(ServiceErrorKindView::Precondition.repr == ServiceErrorKind::Precondition as u16);
+    assert!(
+        ServiceErrorKindView::RangeNotSatisfiable.repr
+            == ServiceErrorKind::RangeNotSatisfiable as u16
+    );
+    assert!(ServiceErrorKindView::Throttled.repr == ServiceErrorKind::Throttled as u16);
+    assert!(ServiceErrorKindView::Timeout.repr == ServiceErrorKind::Timeout as u16);
+    assert!(ServiceErrorKindView::Service.repr == ServiceErrorKind::Service as u16);
+};
 
 fn open_session(endpoint: &[u8], container: &[u8], token: &[u8]) -> Box<Session> {
     // A value that is not text cannot be the thing it names, so it fails as
@@ -640,19 +754,51 @@ impl Session {
         )
     }
 
-    // What every request needs before the core crate sees it: a usable
-    // session, and a key that is text.
-    fn plan<'s, 'k>(&'s self, key: &'k [u8]) -> Result<(&'k str, Blobs<'s>), Status> {
+    // What every call needs before the core crate sees it: a session that was
+    // opened. It reports the fault it was opened with, not a second guess at
+    // which of the three values was wrong.
+    fn usable(&self) -> Result<Blobs<'_>, Status> {
         if self.status.code != 0 {
             return Err(self.status);
         }
+        self.blobs().map_err(|error| status_of(&error))
+    }
+
+    // What every request needs on top of that: a key that is text, and the
+    // plan's shape as the core crate spells it.
+    fn planning<'s, 'k, V, S>(
+        &'s self,
+        shape: &V,
+        convert: impl FnOnce(&V) -> Result<S, Status>,
+        key: &'k [u8],
+    ) -> Result<(Blobs<'s>, S, &'k str), Status> {
+        let blobs = self.usable()?;
         let Ok(key) = std::str::from_utf8(key) else {
             return Err(status_of(&Error::InvalidPlan(InvalidPlan::Key)));
         };
-        match self.blobs() {
-            Ok(blobs) => Ok((key, blobs)),
-            Err(error) => Err(status_of(&error)),
-        }
+        Ok((blobs, convert(shape)?, key))
+    }
+
+    // What every reading call needs: the same shape the request was planned
+    // with, and the head where the host's HTTP library already put it.
+    fn reading<'s, 'h, V, S>(
+        &'s self,
+        shape: &V,
+        convert: impl FnOnce(&V) -> Result<S, Status>,
+        status: u16,
+        headers: &[HeaderRef<'h>],
+    ) -> Result<(Blobs<'s>, S, ResponseHead<'h>), Status> {
+        let blobs = self.usable()?;
+        Ok((blobs, convert(shape)?, head_of(status, headers)))
+    }
+
+    // What every finishing call needs. The status and the request identifier
+    // are the plain values the outcome carried, so nothing is read twice.
+    fn finishing<'s, 'h>(
+        &'s self,
+        failure: &FailureView<'h>,
+    ) -> Result<(Blobs<'s>, u16, Option<&'h [u8]>), Status> {
+        Ok((self.usable()?, failure.status, bytes(failure.request_id)))
     }
 
     fn encode_get(
@@ -663,12 +809,12 @@ impl Session {
         buf: &mut [u8],
         unix_seconds: u64,
     ) -> RequestHead {
-        let (key, blobs) = match self.plan(key) {
+        let (blobs, shape, key) = match self.planning(shape, get_shape, key) {
             Ok(planned) => planned,
             Err(status) => return refused(status, 0),
         };
         let now = Timestamps::from_unix(unix_seconds);
-        let get = PhysicalGet::from_shape(get_shape(shape), key, condition(condition_value));
+        let get = PhysicalGet::from_shape(shape, key, condition(condition_value));
         written(blobs.encode_get(buf, &get, &now))
     }
 
@@ -681,12 +827,12 @@ impl Session {
         content_len: u64,
         unix_seconds: u64,
     ) -> RequestHead {
-        let (key, blobs) = match self.plan(key) {
+        let (blobs, shape, key) = match self.planning(shape, put_shape, key) {
             Ok(planned) => planned,
             Err(status) => return refused(status, 0),
         };
         let now = Timestamps::from_unix(unix_seconds);
-        let put = PhysicalPut::from_shape(put_shape(shape), key, condition(condition_value));
+        let put = PhysicalPut::from_shape(shape, key, condition(condition_value));
         // The content stays in C++. Only its length reaches the head, so the
         // request borrows no content and you send the bytes yourself.
         let content = Payload::Streamed { len: content_len };
@@ -701,149 +847,94 @@ impl Session {
         buf: &mut [u8],
         unix_seconds: u64,
     ) -> RequestHead {
-        let (key, blobs) = match self.plan(key) {
+        let (blobs, shape, key) = match self.planning(shape, delete_shape, key) {
             Ok(planned) => planned,
             Err(status) => return refused(status, 0),
         };
         let now = Timestamps::from_unix(unix_seconds);
-        let delete =
-            PhysicalDelete::from_shape(delete_shape(shape), key, condition(condition_value));
+        let delete = PhysicalDelete::from_shape(shape, key, condition(condition_value));
         written(blobs.encode_delete(buf, &delete, &now))
     }
 
-    fn accept_get_head(
+    fn accept_get_head<'h>(
         &self,
         shape: &GetShapeView,
         status: u16,
-        head: &[u8],
-        fields: &[HeaderField],
-    ) -> Outcome {
-        let (blobs, response) = match self.reading(status, head, fields) {
-            Ok(reading) => reading,
-            Err(outcome) => return outcome(Operation::Read),
-        };
-        match blobs.accept_get_head(get_shape(shape), response) {
-            Ok(outcome) => get_outcome(Buffer::of(head), &outcome),
-            Err(error) => invalid(Operation::Read, &error),
+        headers: &[HeaderRef<'h>],
+    ) -> Outcome<'h> {
+        match self.reading(shape, get_shape, status, headers) {
+            Ok((blobs, shape, head)) => match blobs.accept_get_head(shape, head) {
+                Ok(outcome) => get_outcome(&outcome),
+                Err(error) => invalid(status_of(&error)),
+            },
+            Err(status) => invalid(status),
         }
     }
 
-    fn accept_put_head(
+    fn accept_put_head<'h>(
         &self,
         shape: &PutShapeView,
         status: u16,
-        head: &[u8],
-        fields: &[HeaderField],
-    ) -> Outcome {
-        let (blobs, response) = match self.reading(status, head, fields) {
-            Ok(reading) => reading,
-            Err(outcome) => return outcome(Operation::Write),
-        };
-        match blobs.accept_put_head(put_shape(shape), response) {
-            Ok(outcome) => put_outcome(Buffer::of(head), &outcome),
-            Err(error) => invalid(Operation::Write, &error),
+        headers: &[HeaderRef<'h>],
+    ) -> Outcome<'h> {
+        match self.reading(shape, put_shape, status, headers) {
+            Ok((blobs, shape, head)) => match blobs.accept_put_head(shape, head) {
+                Ok(outcome) => put_outcome(&outcome),
+                Err(error) => invalid(status_of(&error)),
+            },
+            Err(status) => invalid(status),
         }
     }
 
-    fn accept_delete_head(
+    fn accept_delete_head<'h>(
         &self,
         shape: &DeleteShapeView,
         status: u16,
-        head: &[u8],
-        fields: &[HeaderField],
-    ) -> Outcome {
-        let (blobs, response) = match self.reading(status, head, fields) {
-            Ok(reading) => reading,
-            Err(outcome) => return outcome(Operation::Removal),
-        };
-        match blobs.accept_delete_head(delete_shape(shape), response) {
-            Ok(outcome) => delete_outcome(Buffer::of(head), &outcome),
-            Err(error) => invalid(Operation::Removal, &error),
+        headers: &[HeaderRef<'h>],
+    ) -> Outcome<'h> {
+        match self.reading(shape, delete_shape, status, headers) {
+            Ok((blobs, shape, head)) => match blobs.accept_delete_head(shape, head) {
+                Ok(outcome) => delete_outcome(&outcome),
+                Err(error) => invalid(status_of(&error)),
+            },
+            Err(status) => invalid(status),
         }
     }
 
-    fn finish_get_error_body(&self, failure: &FailureView, head: &[u8], body: &[u8]) -> Outcome {
-        let (blobs, status, request_id) = match self.finishing(failure, head) {
-            Ok(parts) => parts,
-            Err(outcome) => return outcome(Operation::Read),
-        };
-        get_outcome(
-            Buffer::of(head),
-            &blobs.accept_error_body(status, request_id, body),
-        )
+    fn finish_get_error_body<'h>(&self, failure: &FailureView<'h>, body: &[u8]) -> Outcome<'h> {
+        match self.finishing(failure) {
+            Ok((blobs, status, id)) => get_outcome(&blobs.accept_error_body(status, id, body)),
+            Err(status) => invalid(status),
+        }
     }
 
-    fn finish_put_error_body(&self, failure: &FailureView, head: &[u8], body: &[u8]) -> Outcome {
-        let (blobs, status, request_id) = match self.finishing(failure, head) {
-            Ok(parts) => parts,
-            Err(outcome) => return outcome(Operation::Write),
-        };
-        put_outcome(
-            Buffer::of(head),
-            &blobs.accept_put_error_body(status, request_id, body),
-        )
+    fn finish_put_error_body<'h>(&self, failure: &FailureView<'h>, body: &[u8]) -> Outcome<'h> {
+        match self.finishing(failure) {
+            Ok((blobs, status, id)) => put_outcome(&blobs.accept_put_error_body(status, id, body)),
+            Err(status) => invalid(status),
+        }
     }
 
-    fn finish_delete_error_body(&self, failure: &FailureView, head: &[u8], body: &[u8]) -> Outcome {
-        let (blobs, status, request_id) = match self.finishing(failure, head) {
-            Ok(parts) => parts,
-            Err(outcome) => return outcome(Operation::Removal),
-        };
-        delete_outcome(
-            Buffer::of(head),
-            &blobs.accept_delete_error_body(status, request_id, body),
-        )
-    }
-
-    // The head that C++ collected, read in place. A field that names a range
-    // outside it is the caller's mistake and stops the call.
-    fn reading<'h>(
-        &self,
-        status: u16,
-        head: &'h [u8],
-        fields: &[HeaderField],
-    ) -> Result<(Blobs<'_>, ResponseHead<'h>), fn(Operation) -> Outcome> {
-        let Ok(blobs) = self.blobs() else {
-            return Err(unusable_session);
-        };
-        let Some(response) = response_head(status, head, fields) else {
-            return Err(invalid_input);
-        };
-        Ok((blobs, response))
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn finishing<'h>(
-        &self,
-        failure: &FailureView,
-        head: &'h [u8],
-    ) -> Result<(Blobs<'_>, u16, Option<&'h [u8]>), fn(Operation) -> Outcome> {
-        let Ok(blobs) = self.blobs() else {
-            return Err(unusable_session);
-        };
-        let request_id = match failure.request_id.present {
-            false => None,
-            true => match at(head, failure.request_id.span) {
-                Some(bytes) => Some(bytes),
-                None => return Err(invalid_input),
-            },
-        };
-        Ok((blobs, failure.status, request_id))
+    fn finish_delete_error_body<'h>(&self, failure: &FailureView<'h>, body: &[u8]) -> Outcome<'h> {
+        match self.finishing(failure) {
+            Ok((blobs, status, id)) => {
+                delete_outcome(&blobs.accept_delete_error_body(status, id, body))
+            }
+            Err(status) => invalid(status),
+        }
     }
 }
 
-fn unusable_session(operation: Operation) -> Outcome {
-    // A session that cannot build a request cannot read the answer to one.
-    let mut outcome = empty_outcome(operation, Disposition::Invalid);
-    outcome.error = Status {
-        code: ErrorCode::InvalidEndpoint as u16,
-        detail: 0,
-    };
-    outcome
-}
-
-fn invalid_input(operation: Operation) -> Outcome {
-    empty_outcome(operation, Disposition::InvalidInput)
+// The head, read where the host's HTTP library already put it. A name that is
+// not text is skipped: the core crate looks for its headers by text, so such a
+// name is none of them.
+fn head_of<'h>(status: u16, headers: &[HeaderRef<'h>]) -> ResponseHead<'h> {
+    ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .filter_map(|header| Some((std::str::from_utf8(header.name).ok()?, header.value))),
+    )
 }
 
 // The written head, or the exact size that it needed, or why the plan was
@@ -866,7 +957,9 @@ fn written(request: Result<WireRequest<'_>, Error>) -> RequestHead {
     RequestHead {
         status: Status { code: 0, detail: 0 },
         required: end,
-        method: method_view(request.method()),
+        method: Method {
+            repr: request.method() as u8,
+        },
         url: span(request.url_span()),
         header_count: request.header_spans().len(),
         headers,
@@ -891,61 +984,11 @@ fn empty_headers() -> [RequestHeader; MAX_HEADERS] {
     })
 }
 
-// Where a buffer starts and how long it is. An outcome borrows the response
-// head, so its address and length give each borrowed value as a range of it.
-#[derive(Debug, Clone, Copy)]
-struct Buffer {
-    base: usize,
-    len: usize,
-}
-
-impl Buffer {
-    fn of(bytes: &[u8]) -> Self {
-        Self {
-            base: bytes.as_ptr() as usize,
-            len: bytes.len(),
-        }
-    }
-
-    fn span(&self, part: &[u8]) -> Option<Span> {
-        let start = part.as_ptr() as usize;
-        let end = start.checked_add(part.len())?;
-        (start >= self.base && end <= self.base + self.len).then(|| Span {
-            start: start - self.base,
-            len: part.len(),
-        })
-    }
-}
-
 fn span(span: borink_object_storage::Span) -> Span {
     Span {
         start: span.start,
         len: span.len,
     }
-}
-
-fn at(bytes: &[u8], range: Span) -> Option<&[u8]> {
-    bytes.get(range.start..range.start.checked_add(range.len)?)
-}
-
-// Reads the head that the host collected. A field whose name is not text is
-// skipped: the core crate reads header names as text, so such a name cannot be
-// one that it looks for. A field that names a range outside `head` is not a
-// header at all, and stops the call: dropping it silently would turn a named
-// failure into one that asks for the error body.
-fn response_head<'h>(
-    status: u16,
-    head: &'h [u8],
-    fields: &[HeaderField],
-) -> Option<ResponseHead<'h>> {
-    let mut named = Vec::new();
-    for field in fields {
-        let (name, value) = (at(head, field.name)?, at(head, field.value)?);
-        if let Ok(name) = std::str::from_utf8(name) {
-            named.push((name, value));
-        }
-    }
-    Some(ResponseHead::from_headers(status, named))
 }
 
 fn status_of(error: &Error) -> Status {
@@ -955,159 +998,128 @@ fn status_of(error: &Error) -> Status {
     }
 }
 
-fn method_view(method: borink_object_storage::Method) -> Method {
-    match method {
-        borink_object_storage::Method::Get => Method::Get,
-        borink_object_storage::Method::Head => Method::Head,
-        borink_object_storage::Method::Put => Method::Put,
-        borink_object_storage::Method::Delete => Method::Delete,
-        // The core enum is sealed. A method it adds later is not one that this
-        // bridge can send, so it is reported rather than guessed.
-        _ => Method::Get,
-    }
+// A number that names no value of the core crate's enum. It is refused as an
+// invalid plan, and the plan is never read as the value that happens to be
+// oldest.
+fn unknown() -> Status {
+    status_of(&Error::InvalidPlan(InvalidPlan::Unknown))
 }
 
 fn condition(value: &[u8]) -> Option<&[u8]> {
     (!value.is_empty()).then_some(value)
 }
 
-fn get_shape(shape: &GetShapeView) -> GetShape {
-    GetShape {
-        kind: match shape.kind {
-            GetKindView::Metadata => GetKind::Metadata,
-            _ => GetKind::Bytes,
-        },
-        range: match shape.range.form {
-            RangeForm::Bounded => RequestedRange::Bounded {
-                start: shape.range.start,
-                end: shape.range.end,
-            },
-            RangeForm::Offset => RequestedRange::Offset(shape.range.start),
-            RangeForm::Suffix => RequestedRange::Suffix(shape.range.start),
-            _ => RequestedRange::Whole,
-        },
-        condition: condition_kind(shape.condition),
-    }
+fn get_shape(shape: &GetShapeView) -> Result<GetShape, Status> {
+    Ok(GetShape {
+        kind: GetKind::from_discriminant(shape.kind.repr).ok_or_else(unknown)?,
+        range: RequestedRange::from_parts(
+            RangeForm::from_discriminant(shape.range.form.repr).ok_or_else(unknown)?,
+            shape.range.start,
+            shape.range.end,
+        ),
+        condition: condition_kind(shape.condition)?,
+    })
 }
 
-fn put_shape(shape: &PutShapeView) -> PutShape {
-    PutShape {
-        condition: condition_kind(shape.condition),
-    }
+fn put_shape(shape: &PutShapeView) -> Result<PutShape, Status> {
+    Ok(PutShape {
+        condition: condition_kind(shape.condition)?,
+    })
 }
 
-fn delete_shape(shape: &DeleteShapeView) -> DeleteShape {
-    DeleteShape {
-        kind: match shape.kind {
-            DeleteKindView::ObjectAndSnapshots => DeleteKind::ObjectAndSnapshots,
-            DeleteKindView::SnapshotsOnly => DeleteKind::SnapshotsOnly,
-            _ => DeleteKind::Object,
-        },
-        condition: condition_kind(shape.condition),
-    }
+fn delete_shape(shape: &DeleteShapeView) -> Result<DeleteShape, Status> {
+    Ok(DeleteShape {
+        kind: DeleteKind::from_discriminant(shape.kind.repr).ok_or_else(unknown)?,
+        condition: condition_kind(shape.condition)?,
+    })
 }
 
-fn condition_kind(condition: ConditionView) -> ConditionKind {
-    match condition {
-        ConditionView::IfMatch => ConditionKind::IfMatch,
-        ConditionView::IfNoneMatch => ConditionKind::IfNoneMatch,
-        _ => ConditionKind::None,
-    }
+fn condition_kind(condition: ConditionView) -> Result<ConditionKind, Status> {
+    ConditionKind::from_discriminant(condition.repr).ok_or_else(unknown)
 }
 
 fn class_view(class: FailureClass) -> FailureClassView {
-    match class {
-        FailureClass::Auth => FailureClassView::Auth,
-        FailureClass::Throttled => FailureClassView::Throttled,
-        FailureClass::Server => FailureClassView::Server,
-        FailureClass::Redirect => FailureClassView::Redirect,
-        FailureClass::Other => FailureClassView::Other,
-        _ => FailureClassView::Unknown,
-    }
+    FailureClassView { repr: class as u16 }
 }
 
-fn class_of(class: FailureClassView) -> FailureClass {
-    match class {
-        FailureClassView::Auth => FailureClass::Auth,
-        FailureClassView::Throttled => FailureClass::Throttled,
-        FailureClassView::Server => FailureClass::Server,
-        FailureClassView::Redirect => FailureClass::Redirect,
-        _ => FailureClass::Other,
-    }
+fn class_of(class: FailureClassView) -> Option<FailureClass> {
+    FailureClass::from_discriminant(class.repr)
 }
 
 fn kind_view(kind: Option<ServiceErrorKind>) -> ServiceErrorKindView {
-    match kind {
-        None => ServiceErrorKindView::None,
-        Some(ServiceErrorKind::NotFound) => ServiceErrorKindView::NotFound,
-        Some(ServiceErrorKind::NoSuchContainer) => ServiceErrorKindView::NoSuchContainer,
-        Some(ServiceErrorKind::AlreadyExists) => ServiceErrorKindView::AlreadyExists,
-        Some(ServiceErrorKind::Unauthorized) => ServiceErrorKindView::Unauthorized,
-        Some(ServiceErrorKind::Precondition) => ServiceErrorKindView::Precondition,
-        Some(ServiceErrorKind::RangeNotSatisfiable) => ServiceErrorKindView::RangeNotSatisfiable,
-        Some(ServiceErrorKind::Throttled) => ServiceErrorKindView::Throttled,
-        Some(ServiceErrorKind::Timeout) => ServiceErrorKindView::Timeout,
-        Some(ServiceErrorKind::Service) => ServiceErrorKindView::Service,
-        Some(_) => ServiceErrorKindView::Unknown,
+    ServiceErrorKindView {
+        repr: kind.map_or(0, |kind| kind as u16),
     }
 }
 
 fn kind_of(kind: ServiceErrorKindView) -> Option<ServiceErrorKind> {
-    ServiceErrorKind::from_discriminant(kind.repr as u16)
+    ServiceErrorKind::from_discriminant(kind.repr)
 }
 
-fn failure_view(head: Buffer, failure: &Failure<'_>) -> FailureView {
+fn failure_view<'h>(failure: &Failure<'h>) -> FailureView<'h> {
     FailureView {
         status: failure.status,
         category: class_view(failure.class),
         kind: kind_view(failure.kind),
-        request_id: maybe_span(head, failure.request_id),
+        request_id: maybe_bytes(failure.request_id),
     }
 }
 
-// A `NotFound` names an error without being a failure of the head. It rides in
-// the same field, so one shape carries every named error.
-fn not_found_view(status: u16, kind: Option<ServiceErrorKind>) -> FailureView {
+// The failure that the twin carries, as the core crate's own record, so that
+// the sentence for it is the core crate's own too. It is `None` only for a
+// category that a later core crate defined and this bridge cannot name.
+fn failure_of<'h>(failure: &FailureView<'h>) -> Option<Failure<'h>> {
+    Some(Failure {
+        status: failure.status,
+        class: class_of(failure.category)?,
+        kind: kind_of(failure.kind),
+        request_id: bytes(failure.request_id),
+    })
+}
+
+// A named error and nothing else. A missing object is not a failure of the
+// head: the core crate's variant carries a kind alone, and so does this.
+fn named_error<'h>(kind: Option<ServiceErrorKind>) -> FailureView<'h> {
     FailureView {
-        status,
-        category: FailureClassView::Other,
+        status: 0,
+        category: FailureClassView { repr: 0 },
         kind: kind_view(kind),
-        request_id: absent_span(),
+        request_id: absent_bytes(),
     }
 }
 
-fn get_outcome(head: Buffer, outcome: &GetHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Operation::Read, Disposition::Unsupported);
-    match outcome {
-        GetHeadOutcome::Body { meta, body, .. } => {
+fn get_outcome<'h>(outcome: &GetHeadOutcome<'h>) -> Outcome<'h> {
+    let mut view = empty_outcome(Disposition::Unsupported);
+    match *outcome {
+        GetHeadOutcome::Body { meta, body } => {
             view.disposition = Disposition::Body;
-            view.meta = meta_view(head, meta);
-            view.body = body_view(body);
+            view.meta = meta_view(&meta);
+            view.body = body_view(&body);
         }
         GetHeadOutcome::Complete { meta } => {
             view.disposition = Disposition::Complete;
-            view.meta = meta_view(head, meta);
+            view.meta = meta_view(&meta);
         }
         GetHeadOutcome::NotModified { e_tag } => {
             view.disposition = Disposition::NotModified;
-            view.meta.e_tag = maybe_span(head, *e_tag);
+            view.meta.e_tag = maybe_bytes(e_tag);
         }
         GetHeadOutcome::PreconditionFailed => view.disposition = Disposition::PreconditionFailed,
         GetHeadOutcome::NotFound { kind } => {
             view.disposition = Disposition::NotFound;
-            view.failure = not_found_view(404, *kind);
+            view.failure = named_error(kind);
         }
         GetHeadOutcome::RangeNotSatisfiable { object_size } => {
             view.disposition = Disposition::RangeNotSatisfiable;
-            view.body.object_size = maybe_number(*object_size);
+            view.body.object_size = maybe_number(object_size);
         }
         GetHeadOutcome::NeedErrorBody(failure) => {
             view.disposition = Disposition::NeedErrorBody;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         GetHeadOutcome::ServiceFailure(failure) => {
             view.disposition = Disposition::ServiceFailure;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         // The outcome is sealed, so a later version can add a variant. Report
         // one that this bridge does not know rather than guessing at it.
@@ -1116,93 +1128,87 @@ fn get_outcome(head: Buffer, outcome: &GetHeadOutcome<'_>) -> Outcome {
     view
 }
 
-fn put_outcome(head: Buffer, outcome: &PutHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Operation::Write, Disposition::Unsupported);
-    match outcome {
-        PutHeadOutcome::Created { meta, .. } => {
+fn put_outcome<'h>(outcome: &PutHeadOutcome<'h>) -> Outcome<'h> {
+    let mut view = empty_outcome(Disposition::Unsupported);
+    match *outcome {
+        PutHeadOutcome::Created { meta } => {
             view.disposition = Disposition::Done;
-            view.meta = meta_view(head, meta);
+            view.meta = meta_view(&meta);
         }
         PutHeadOutcome::PreconditionFailed => view.disposition = Disposition::PreconditionFailed,
         PutHeadOutcome::NotFound { kind } => {
             view.disposition = Disposition::NotFound;
-            view.failure = not_found_view(404, *kind);
+            view.failure = named_error(kind);
         }
         PutHeadOutcome::NeedErrorBody(failure) => {
             view.disposition = Disposition::NeedErrorBody;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         PutHeadOutcome::ServiceFailure(failure) => {
             view.disposition = Disposition::ServiceFailure;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         _ => {}
     }
     view
 }
 
-fn delete_outcome(head: Buffer, outcome: &DeleteHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Operation::Removal, Disposition::Unsupported);
-    match outcome {
+fn delete_outcome<'h>(outcome: &DeleteHeadOutcome<'h>) -> Outcome<'h> {
+    let mut view = empty_outcome(Disposition::Unsupported);
+    match *outcome {
         // A removal returns no object, so Azure sends no metadata for one.
         DeleteHeadOutcome::Accepted => view.disposition = Disposition::Accepted,
         DeleteHeadOutcome::PreconditionFailed => view.disposition = Disposition::PreconditionFailed,
         DeleteHeadOutcome::NotFound { kind } => {
             view.disposition = Disposition::NotFound;
-            view.failure = not_found_view(404, *kind);
+            view.failure = named_error(kind);
         }
         DeleteHeadOutcome::NeedErrorBody(failure) => {
             view.disposition = Disposition::NeedErrorBody;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         DeleteHeadOutcome::ServiceFailure(failure) => {
             view.disposition = Disposition::ServiceFailure;
-            view.failure = failure_view(head, failure);
+            view.failure = failure_view(&failure);
         }
         _ => {}
     }
     view
 }
 
-fn invalid(operation: Operation, error: &Error) -> Outcome {
-    let mut view = empty_outcome(operation, Disposition::Invalid);
-    view.error = status_of(error);
+fn invalid<'h>(status: Status) -> Outcome<'h> {
+    let mut view = empty_outcome(Disposition::Invalid);
+    view.error = status;
     view
 }
 
-fn empty_outcome(operation: Operation, disposition: Disposition) -> Outcome {
+fn empty_outcome<'h>(disposition: Disposition) -> Outcome<'h> {
     Outcome {
-        operation,
         disposition,
         meta: ObjectMetaView {
             size: absent_number(),
-            e_tag: absent_span(),
-            last_modified: absent_span(),
-            version: absent_span(),
-            content_encoding: absent_span(),
+            e_tag: absent_bytes(),
+            last_modified: absent_bytes(),
+            version: absent_bytes(),
+            content_encoding: absent_bytes(),
         },
         body: BodyWindowView {
             object_offset: 0,
             expected_len: absent_number(),
             object_size: absent_number(),
         },
-        failure: FailureView {
-            status: 0,
-            category: FailureClassView::Other,
-            kind: ServiceErrorKindView::None,
-            request_id: absent_span(),
-        },
+        failure: named_error(None),
         error: Status { code: 0, detail: 0 },
     }
 }
 
-fn meta_view(head: Buffer, meta: &ObjectMeta<'_>) -> ObjectMetaView {
+fn meta_view<'h>(meta: &ObjectMeta<'h>) -> ObjectMetaView<'h> {
     ObjectMetaView {
         size: maybe_number(meta.size),
-        e_tag: maybe_span(head, meta.e_tag),
-        last_modified: maybe_span(head, meta.last_modified),
-        version: maybe_span(head, meta.version),
-        content_encoding: maybe_span(head, meta.content_encoding),
+        e_tag: maybe_bytes(meta.e_tag),
+        last_modified: maybe_bytes(meta.last_modified),
+        version: maybe_bytes(meta.version),
+        content_encoding: maybe_bytes(meta.content_encoding),
     }
 }
 
@@ -1214,20 +1220,24 @@ fn body_view(body: &BodyWindow) -> BodyWindowView {
     }
 }
 
-fn maybe_span(head: Buffer, value: Option<&[u8]>) -> MaybeSpan {
-    match value.and_then(|value| head.span(value)) {
-        Some(span) => MaybeSpan {
+fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes<'_> {
+    match value {
+        Some(bytes) => MaybeBytes {
             present: true,
-            span,
+            bytes,
         },
-        None => absent_span(),
+        None => absent_bytes(),
     }
 }
 
-fn absent_span() -> MaybeSpan {
-    MaybeSpan {
+fn bytes(value: MaybeBytes<'_>) -> Option<&[u8]> {
+    value.present.then_some(value.bytes)
+}
+
+fn absent_bytes<'h>() -> MaybeBytes<'h> {
+    MaybeBytes {
         present: false,
-        span: Span { start: 0, len: 0 },
+        bytes: &[],
     }
 }
 
@@ -1241,6 +1251,10 @@ fn maybe_number(value: Option<u64>) -> MaybeU64 {
     }
 }
 
+fn number(value: MaybeU64) -> Option<u64> {
+    value.present.then_some(value.value)
+}
+
 fn absent_number() -> MaybeU64 {
     MaybeU64 {
         present: false,
@@ -1248,87 +1262,49 @@ fn absent_number() -> MaybeU64 {
     }
 }
 
-fn describe(outcome: &Outcome, head: &[u8], into: &mut [u8]) -> usize {
-    let request_id = match outcome.failure.request_id.present {
-        true => at(head, outcome.failure.request_id.span),
-        false => None,
-    };
-    let failure = Failure {
-        status: outcome.failure.status,
-        class: class_of(outcome.failure.category),
-        kind: kind_of(outcome.failure.kind),
-        request_id,
-    };
-    let object_size = outcome
-        .body
-        .object_size
-        .present
-        .then_some(outcome.body.object_size.value);
+fn describe(outcome: &Outcome<'_>, into: &mut [u8]) -> usize {
     match outcome.disposition {
         Disposition::Invalid => describe_status(outcome.error, into),
-        Disposition::InvalidInput => say(
+        // The core crate wrote the sentence for a failure and for an
+        // unsatisfiable range, and both carry numbers that no table holds.
+        // The twin carries every field of them, so the sentence is borrowed.
+        Disposition::NeedErrorBody | Disposition::ServiceFailure => {
+            match failure_of(&outcome.failure) {
+                Some(failure) => say(into, &failure),
+                None => say(
+                    into,
+                    &"the service failed in a way that this bridge cannot name",
+                ),
+            }
+        }
+        Disposition::RangeNotSatisfiable => say(
             into,
-            &"a response header names bytes outside the head that you passed",
-        ),
-        Disposition::Unsupported => say(
-            into,
-            &"the core crate returned an outcome that this bridge does not know",
-        ),
-        disposition => match outcome.operation {
-            Operation::Write => say(into, &put_of(disposition, failure)),
-            Operation::Removal => say(into, &delete_of(disposition, failure)),
-            _ => say(into, &get_of(disposition, failure, object_size)),
-        },
-    }
-}
-
-// The core crate wrote the sentence for each of these. Rebuilding its outcome
-// is how this bridge borrows that sentence instead of writing its own.
-fn get_of<'h>(
-    disposition: Disposition,
-    failure: Failure<'h>,
-    object_size: Option<u64>,
-) -> GetHeadOutcome<'h> {
-    match disposition {
-        Disposition::Body => GetHeadOutcome::Body {
-            meta: ObjectMeta::default(),
-            body: BodyWindow {
-                object_offset: 0,
-                expected_len: None,
-                object_size: None,
+            &GetHeadOutcome::RangeNotSatisfiable {
+                object_size: number(outcome.body.object_size),
             },
+        ),
+        // A missing object names an error and carries nothing else, so the
+        // error is the whole sentence.
+        Disposition::NotFound => match kind_of(outcome.failure.kind) {
+            Some(kind) => say(into, &kind),
+            None => say(into, &"the object or its container does not exist"),
         },
-        Disposition::Complete => GetHeadOutcome::Complete {
-            meta: ObjectMeta::default(),
-        },
-        Disposition::NotModified => GetHeadOutcome::NotModified { e_tag: None },
-        Disposition::PreconditionFailed => GetHeadOutcome::PreconditionFailed,
-        Disposition::NotFound => GetHeadOutcome::NotFound { kind: failure.kind },
-        Disposition::RangeNotSatisfiable => GetHeadOutcome::RangeNotSatisfiable { object_size },
-        Disposition::NeedErrorBody => GetHeadOutcome::NeedErrorBody(failure),
-        _ => GetHeadOutcome::ServiceFailure(failure),
+        // One literal per remaining disposition. They say less than the core
+        // crate's own sentences, which name the operation: one outcome type
+        // crosses for all three operations, so the sentence names none.
+        settled => say(into, &settled_sentence(settled)),
     }
 }
 
-fn put_of(disposition: Disposition, failure: Failure<'_>) -> PutHeadOutcome<'_> {
+fn settled_sentence(disposition: Disposition) -> &'static str {
     match disposition {
-        Disposition::Done => PutHeadOutcome::Created {
-            meta: ObjectMeta::default(),
-        },
-        Disposition::PreconditionFailed => PutHeadOutcome::PreconditionFailed,
-        Disposition::NotFound => PutHeadOutcome::NotFound { kind: failure.kind },
-        Disposition::NeedErrorBody => PutHeadOutcome::NeedErrorBody(failure),
-        _ => PutHeadOutcome::ServiceFailure(failure),
-    }
-}
-
-fn delete_of(disposition: Disposition, failure: Failure<'_>) -> DeleteHeadOutcome<'_> {
-    match disposition {
-        Disposition::Accepted => DeleteHeadOutcome::Accepted,
-        Disposition::PreconditionFailed => DeleteHeadOutcome::PreconditionFailed,
-        Disposition::NotFound => DeleteHeadOutcome::NotFound { kind: failure.kind },
-        Disposition::NeedErrorBody => DeleteHeadOutcome::NeedErrorBody(failure),
-        _ => DeleteHeadOutcome::ServiceFailure(failure),
+        Disposition::Body => "the object follows in the response body",
+        Disposition::Complete => "the response carries no body and is complete",
+        Disposition::NotModified => "the object is not modified",
+        Disposition::PreconditionFailed => "the condition did not hold",
+        Disposition::Done => "the service stored the object",
+        Disposition::Accepted => "the service accepted the removal",
+        _ => "the core crate returned an outcome that this bridge does not know",
     }
 }
 
@@ -1375,16 +1351,14 @@ impl fmt::Write for Sentence<'_> {
 mod tests {
     use super::*;
     use crate::ffi::RangeView;
-    use borink_object_storage::{ErrorCode, Mismatch, ProtocolFault};
+    use borink_object_storage::{Mismatch, ProtocolFault};
 
-    const HEAD: &[u8] = b"\"etag\"Wed, 26 Aug 2026 12:00:00 GMTversion-1gziprequest-123";
+    // Two buffers, so that nothing here depends on one contiguous head.
+    const VALUES: &[u8] = b"\"etag\"Wed, 26 Aug 2026 12:00:00 GMTversion-1gzip";
+    const IDENTIFIER: &[u8] = b"request-123";
 
     fn e_tag() -> &'static [u8] {
-        &HEAD[..6]
-    }
-
-    fn request_id() -> &'static [u8] {
-        &HEAD[48..]
+        &VALUES[..6]
     }
 
     fn session() -> Box<Session> {
@@ -1395,9 +1369,38 @@ mod tests {
         )
     }
 
-    fn text(outcome: &Outcome) -> String {
+    fn whole() -> RangeView {
+        RangeView {
+            form: RangeFormView::Whole,
+            start: 0,
+            end: 0,
+        }
+    }
+
+    fn read_shape() -> GetShapeView {
+        GetShapeView {
+            kind: GetKindView::Bytes,
+            range: whole(),
+            condition: ConditionView::None,
+        }
+    }
+
+    fn write_shape() -> PutShapeView {
+        PutShapeView {
+            condition: ConditionView::None,
+        }
+    }
+
+    fn header(name: &'static str, value: &'static [u8]) -> HeaderRef<'static> {
+        HeaderRef {
+            name: name.as_bytes(),
+            value,
+        }
+    }
+
+    fn text(outcome: &Outcome<'_>) -> String {
         let mut into = [0; 256];
-        let length = describe(outcome, HEAD, &mut into);
+        let length = describe(outcome, &mut into);
         assert!(length <= into.len(), "{length}");
         String::from_utf8(into[..length].to_vec()).unwrap()
     }
@@ -1406,16 +1409,16 @@ mod tests {
         ObjectMeta {
             size: Some(10),
             e_tag: Some(e_tag()),
-            last_modified: Some(&HEAD[6..35]),
-            version: Some(&HEAD[35..44]),
-            content_encoding: Some(&HEAD[44..48]),
+            last_modified: Some(&VALUES[6..35]),
+            version: Some(&VALUES[35..44]),
+            content_encoding: Some(&VALUES[44..]),
         }
     }
 
     fn every_failure() -> Vec<Failure<'static>> {
         let mut failures = Vec::new();
         for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
-            for id in [None, Some(request_id())] {
+            for id in [None, Some(IDENTIFIER)] {
                 failures.push(Failure {
                     status: 503,
                     class: FailureClass::Server,
@@ -1427,24 +1430,18 @@ mod tests {
         failures
     }
 
-    // Every value that the core crate returns has one twin, and the twin
-    // carries every field of it.
+    // Every value that the core crate returns has one twin, the twin carries
+    // every field of it, and every borrowed field points at the same bytes.
     #[test]
     fn every_read_outcome_crosses_whole() {
-        let head = Buffer::of(HEAD);
-        let window = BodyWindow {
-            object_offset: 2,
-            expected_len: Some(4),
-            object_size: Some(10),
-        };
-        let view = get_outcome(
-            head,
-            &GetHeadOutcome::Body {
-                meta: full_meta(),
-                body: window,
+        let view = get_outcome(&GetHeadOutcome::Body {
+            meta: full_meta(),
+            body: BodyWindow {
+                object_offset: 2,
+                expected_len: Some(4),
+                object_size: Some(10),
             },
-        );
-        assert_eq!(view.operation, Operation::Read);
+        });
         assert_eq!(view.disposition, Disposition::Body);
         assert_eq!(
             view.meta.size,
@@ -1453,7 +1450,8 @@ mod tests {
                 value: 10
             }
         );
-        assert_eq!(view.meta.e_tag.span, Span { start: 0, len: 6 });
+        assert_eq!(view.meta.e_tag.bytes.as_ptr(), e_tag().as_ptr());
+        assert_eq!(view.meta.e_tag.bytes, e_tag());
         assert!(view.meta.last_modified.present);
         assert!(view.meta.version.present);
         assert!(view.meta.content_encoding.present);
@@ -1461,46 +1459,52 @@ mod tests {
         assert_eq!(view.body.expected_len.value, 4);
         assert_eq!(view.body.object_size.value, 10);
 
-        let empty = get_outcome(
-            head,
-            &GetHeadOutcome::Body {
-                meta: ObjectMeta::default(),
-                body: BodyWindow {
-                    object_offset: 0,
-                    expected_len: None,
-                    object_size: None,
-                },
+        let empty = get_outcome(&GetHeadOutcome::Body {
+            meta: ObjectMeta::default(),
+            body: BodyWindow {
+                object_offset: 0,
+                expected_len: None,
+                object_size: None,
             },
-        );
+        });
         assert!(!empty.meta.size.present);
         assert!(!empty.meta.e_tag.present);
+        assert!(empty.meta.e_tag.bytes.is_empty());
         assert!(!empty.body.expected_len.present);
 
-        let complete = get_outcome(head, &GetHeadOutcome::Complete { meta: full_meta() });
+        let complete = get_outcome(&GetHeadOutcome::Complete { meta: full_meta() });
         assert_eq!(complete.disposition, Disposition::Complete);
         assert!(complete.meta.e_tag.present);
 
-        for e_tag in [None, Some(e_tag())] {
-            let view = get_outcome(head, &GetHeadOutcome::NotModified { e_tag });
+        for tag in [None, Some(e_tag())] {
+            let view = get_outcome(&GetHeadOutcome::NotModified { e_tag: tag });
             assert_eq!(view.disposition, Disposition::NotModified);
-            assert_eq!(view.meta.e_tag.present, e_tag.is_some());
+            assert_eq!(view.meta.e_tag.present, tag.is_some());
         }
 
         assert_eq!(
-            get_outcome(head, &GetHeadOutcome::PreconditionFailed).disposition,
+            get_outcome(&GetHeadOutcome::PreconditionFailed).disposition,
             Disposition::PreconditionFailed
         );
 
+        // A missing object carries the error it named, and no status and no
+        // category that the head never stated.
         for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
-            let view = get_outcome(head, &GetHeadOutcome::NotFound { kind });
+            let view = get_outcome(&GetHeadOutcome::NotFound { kind });
             assert_eq!(view.disposition, Disposition::NotFound);
             assert_eq!(kind_of(view.failure.kind), kind);
+            assert_eq!(view.failure.status, 0);
+            assert_eq!(view.failure.category.repr, 0);
         }
 
         for object_size in [None, Some(10)] {
-            let view = get_outcome(head, &GetHeadOutcome::RangeNotSatisfiable { object_size });
+            let view = get_outcome(&GetHeadOutcome::RangeNotSatisfiable { object_size });
             assert_eq!(view.disposition, Disposition::RangeNotSatisfiable);
-            assert_eq!(view.body.object_size.present, object_size.is_some());
+            assert_eq!(number(view.body.object_size), object_size);
+            assert_eq!(
+                text(&view),
+                GetHeadOutcome::RangeNotSatisfiable { object_size }.to_string()
+            );
         }
 
         for failure in every_failure() {
@@ -1514,15 +1518,12 @@ mod tests {
                     Disposition::ServiceFailure,
                 ),
             ] {
-                let view = get_outcome(head, &outcome);
+                let view = get_outcome(&outcome);
                 assert_eq!(view.disposition, expected);
                 assert_eq!(view.failure.status, failure.status);
-                assert_eq!(class_of(view.failure.category), failure.class);
+                assert_eq!(class_of(view.failure.category), Some(failure.class));
                 assert_eq!(kind_of(view.failure.kind), failure.kind);
-                assert_eq!(
-                    view.failure.request_id.present,
-                    failure.request_id.is_some()
-                );
+                assert_eq!(bytes(view.failure.request_id), failure.request_id);
                 assert_eq!(text(&view), outcome.to_string());
             }
         }
@@ -1530,29 +1531,23 @@ mod tests {
 
     #[test]
     fn every_write_and_removal_outcome_crosses_whole() {
-        let head = Buffer::of(HEAD);
-        let created = put_outcome(head, &PutHeadOutcome::Created { meta: full_meta() });
-        assert_eq!(created.operation, Operation::Write);
+        let created = put_outcome(&PutHeadOutcome::Created { meta: full_meta() });
         assert_eq!(created.disposition, Disposition::Done);
         assert!(created.meta.e_tag.present);
 
         assert_eq!(
-            delete_outcome(head, &DeleteHeadOutcome::Accepted).disposition,
+            delete_outcome(&DeleteHeadOutcome::Accepted).disposition,
             Disposition::Accepted
         );
 
         for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
             assert_eq!(
-                kind_of(
-                    put_outcome(head, &PutHeadOutcome::NotFound { kind })
-                        .failure
-                        .kind
-                ),
+                kind_of(put_outcome(&PutHeadOutcome::NotFound { kind }).failure.kind),
                 kind
             );
             assert_eq!(
                 kind_of(
-                    delete_outcome(head, &DeleteHeadOutcome::NotFound { kind })
+                    delete_outcome(&DeleteHeadOutcome::NotFound { kind })
                         .failure
                         .kind
                 ),
@@ -1560,69 +1555,164 @@ mod tests {
             );
         }
 
+        // A failure says the same thing whichever operation it answers, so
+        // the twin needs no field naming the operation.
         for failure in every_failure() {
-            for outcome in [
-                PutHeadOutcome::NeedErrorBody(failure),
-                PutHeadOutcome::ServiceFailure(failure),
-                PutHeadOutcome::PreconditionFailed,
+            for (put, delete) in [
+                (
+                    PutHeadOutcome::NeedErrorBody(failure),
+                    DeleteHeadOutcome::NeedErrorBody(failure),
+                ),
+                (
+                    PutHeadOutcome::ServiceFailure(failure),
+                    DeleteHeadOutcome::ServiceFailure(failure),
+                ),
             ] {
-                assert_eq!(text(&put_outcome(head, &outcome)), outcome.to_string());
-            }
-            for outcome in [
-                DeleteHeadOutcome::NeedErrorBody(failure),
-                DeleteHeadOutcome::ServiceFailure(failure),
-                DeleteHeadOutcome::PreconditionFailed,
-            ] {
-                assert_eq!(text(&delete_outcome(head, &outcome)), outcome.to_string());
+                assert_eq!(text(&put_outcome(&put)), put.to_string());
+                assert_eq!(text(&delete_outcome(&delete)), delete.to_string());
             }
         }
     }
 
-    // The sentence for a read is the core crate's own, for every disposition.
+    // The sentence for a failure, a missing object and an unsatisfiable range
+    // is the core crate's own. A settled outcome gets a literal, which names
+    // no operation because one twin answers all three.
     #[test]
-    fn a_read_is_described_in_the_words_of_the_core_crate() {
-        let head = Buffer::of(HEAD);
-        for outcome in [
-            GetHeadOutcome::Body {
-                meta: full_meta(),
-                body: BodyWindow {
-                    object_offset: 0,
-                    expected_len: None,
-                    object_size: None,
-                },
-            },
-            GetHeadOutcome::Complete { meta: full_meta() },
-            GetHeadOutcome::NotModified { e_tag: None },
-            GetHeadOutcome::PreconditionFailed,
-            GetHeadOutcome::NotFound { kind: None },
-            GetHeadOutcome::NotFound {
-                kind: Some(ServiceErrorKind::NoSuchContainer),
-            },
-            GetHeadOutcome::RangeNotSatisfiable {
-                object_size: Some(10),
-            },
-            GetHeadOutcome::RangeNotSatisfiable { object_size: None },
+    fn every_disposition_says_something_of_its_own() {
+        for kind in [
+            ServiceErrorKind::NotFound,
+            ServiceErrorKind::NoSuchContainer,
         ] {
-            assert_eq!(text(&get_outcome(head, &outcome)), outcome.to_string());
+            let outcome = GetHeadOutcome::NotFound { kind: Some(kind) };
+            assert_eq!(text(&get_outcome(&outcome)), outcome.to_string());
         }
+        // A head that named neither leaves both open, and one twin answers
+        // for three operations, so the sentence says both.
+        assert_eq!(
+            text(&get_outcome(&GetHeadOutcome::NotFound { kind: None })),
+            "the object or its container does not exist"
+        );
+
+        let mut said = Vec::new();
+        for disposition in [
+            Disposition::Body,
+            Disposition::Complete,
+            Disposition::NotModified,
+            Disposition::PreconditionFailed,
+            Disposition::Done,
+            Disposition::Accepted,
+        ] {
+            let sentence = settled_sentence(disposition);
+            assert!(!sentence.is_empty());
+            assert_eq!(text(&empty_outcome(disposition)), sentence);
+            said.push(sentence);
+        }
+        said.sort_unstable();
+        said.dedup();
+        assert_eq!(said.len(), 6);
     }
 
-    // Both vocabularies cross by discriminant and come back the same value.
+    // Every enum crosses as its number, and comes back the same value. A
+    // number that names nothing is refused, never read as another value.
     #[test]
-    fn the_vocabularies_are_mirrored_one_to_one() {
-        for detail in 1..=u16::MAX {
-            if let Some(kind) = ServiceErrorKind::from_discriminant(detail) {
+    fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
+        for repr in 1..=u16::MAX {
+            if let Some(kind) = ServiceErrorKind::from_discriminant(repr) {
                 assert_eq!(kind_of(kind_view(Some(kind))), Some(kind), "{kind:?}");
+                assert_eq!(kind_view(Some(kind)).repr, repr);
             }
-            if let Some(class) = FailureClass::from_discriminant(detail) {
-                assert_eq!(class_of(class_view(class)), class, "{class:?}");
+            if let Some(class) = FailureClass::from_discriminant(repr) {
+                assert_eq!(class_of(class_view(class)), Some(class), "{class:?}");
+                assert_eq!(class_view(class).repr, repr);
             }
         }
         assert_eq!(kind_of(kind_view(None)), None);
-        for method in [Method::Get, Method::Head, Method::Put, Method::Delete] {
-            let core = borink_object_storage::Method::from_discriminant(method.repr).unwrap();
-            assert_eq!(method_view(core), method);
+        assert_eq!(kind_of(ServiceErrorKindView { repr: 4095 }), None);
+        assert_eq!(class_of(FailureClassView { repr: 4095 }), None);
+
+        // The plan side, which crosses inwards and must refuse.
+        for (kind, expected) in [
+            (GetKindView::Bytes, Some(GetKind::Bytes)),
+            (GetKindView::Metadata, Some(GetKind::Metadata)),
+            (GetKindView { repr: 0 }, None),
+            (GetKindView { repr: 4095 }, None),
+        ] {
+            let shape = GetShapeView {
+                kind,
+                ..read_shape()
+            };
+            assert_eq!(get_shape(&shape).map(|shape| shape.kind).ok(), expected);
         }
+        for (form, expected) in [
+            (RangeFormView::Whole, Some(RequestedRange::Whole)),
+            (
+                RangeFormView::Bounded,
+                Some(RequestedRange::Bounded { start: 2, end: 6 }),
+            ),
+            (RangeFormView::Offset, Some(RequestedRange::Offset(2))),
+            (RangeFormView::Suffix, Some(RequestedRange::Suffix(2))),
+            (RangeFormView { repr: 0 }, None),
+        ] {
+            let shape = GetShapeView {
+                range: RangeView {
+                    form,
+                    start: 2,
+                    end: 6,
+                },
+                ..read_shape()
+            };
+            assert_eq!(get_shape(&shape).map(|shape| shape.range).ok(), expected);
+        }
+        for (condition, expected) in [
+            (ConditionView::None, Some(ConditionKind::None)),
+            (ConditionView::IfMatch, Some(ConditionKind::IfMatch)),
+            (ConditionView::IfNoneMatch, Some(ConditionKind::IfNoneMatch)),
+            (ConditionView { repr: 0 }, None),
+        ] {
+            assert_eq!(condition_kind(condition).ok(), expected);
+        }
+        for (kind, expected) in [
+            (DeleteKindView::Object, Some(DeleteKind::Object)),
+            (
+                DeleteKindView::ObjectAndSnapshots,
+                Some(DeleteKind::ObjectAndSnapshots),
+            ),
+            (
+                DeleteKindView::SnapshotsOnly,
+                Some(DeleteKind::SnapshotsOnly),
+            ),
+            (DeleteKindView { repr: 0 }, None),
+        ] {
+            let shape = DeleteShapeView {
+                kind,
+                condition: ConditionView::None,
+            };
+            assert_eq!(delete_shape(&shape).map(|shape| shape.kind).ok(), expected);
+        }
+    }
+
+    // A number that this bridge does not define stops the call, and says so.
+    #[test]
+    fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
+        let session = session();
+        let shape = GetShapeView {
+            kind: GetKindView { repr: 4095 },
+            ..read_shape()
+        };
+        let mut buf = vec![0; 512];
+        let refused = session.encode_get(&shape, b"object.bin", b"", &mut buf, 1_787_400_000);
+        assert_eq!(refused.status, unknown());
+        assert_eq!(refused.status.code, ErrorCode::InvalidPlan as u16);
+        assert_eq!(refused.status.detail, InvalidPlan::Unknown as u16);
+        assert_eq!(refused.required, 0);
+
+        let outcome = session.accept_get_head(&shape, 200, &[]);
+        assert_eq!(outcome.disposition, Disposition::Invalid);
+        assert_eq!(outcome.error, unknown());
+        assert_eq!(
+            text(&outcome),
+            Error::InvalidPlan(InvalidPlan::Unknown).to_string()
+        );
     }
 
     // Every error of the core crate crosses as two numbers and comes back as
@@ -1653,7 +1743,7 @@ mod tests {
         }
         // Every variant of the three inner enums, and the three that carry no
         // inner value.
-        assert_eq!(checked, 3 + 6 + 10 + 7);
+        assert_eq!(checked, 3 + 7 + 10 + 7);
         assert_eq!(
             ProtocolFault::from_discriminant(10).map(Error::Protocol),
             Error::from_parts(ErrorCode::Protocol, 10)
@@ -1669,15 +1759,7 @@ mod tests {
     #[test]
     fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
         let session = session();
-        let shape = GetShapeView {
-            kind: GetKindView::Bytes,
-            range: RangeView {
-                form: RangeForm::Whole,
-                start: 0,
-                end: 0,
-            },
-            condition: ConditionView::None,
-        };
+        let shape = read_shape();
         let refused = session.encode_get(&shape, b"object.bin", b"", &mut [], 1_787_400_000);
         assert_eq!(refused.status.code, ErrorCode::Capacity as u16);
         assert!(refused.required > 0);
@@ -1708,7 +1790,7 @@ mod tests {
         let shape = GetShapeView {
             kind: GetKindView::Bytes,
             range: RangeView {
-                form: RangeForm::Bounded,
+                form: RangeFormView::Bounded,
                 start: 2,
                 end: 6,
             },
@@ -1730,46 +1812,49 @@ mod tests {
         assert_eq!(named("if-none-match").as_deref(), Some("\"etag\""));
     }
 
-    // A field that names bytes outside the head is the caller's mistake.
-    // Dropping it would turn a named failure into one that asks for a body.
+    // The head reaches the bridge as slices, from wherever the host keeps
+    // them. Nothing here is one buffer, and the outcome points back at each.
     #[test]
-    fn a_header_field_outside_the_head_stops_the_call() {
+    fn a_head_crosses_as_slices_of_whatever_holds_it() {
         let session = session();
-        let shape = PutShapeView {
-            condition: ConditionView::None,
-        };
-        let outside = [HeaderField {
-            name: Span { start: 0, len: 6 },
-            value: Span {
-                start: HEAD.len(),
-                len: 4,
+        let headers = [
+            header("ETag", e_tag()),
+            header("Content-Length", b"10"),
+            header("x-ms-request-id", IDENTIFIER),
+            // A name that is not text is none of the ones the core crate
+            // reads, so it is skipped rather than refused.
+            HeaderRef {
+                name: b"\xff",
+                value: b"value",
             },
-        }];
-        let outcome = session.accept_put_head(&shape, 500, HEAD, &outside);
-        assert_eq!(outcome.disposition, Disposition::InvalidInput);
-        assert_eq!(outcome.operation, Operation::Write);
-        assert!(text(&outcome).contains("outside the head"));
+        ];
+        let outcome = session.accept_get_head(&read_shape(), 200, &headers);
+        assert_eq!(outcome.disposition, Disposition::Body);
+        assert_eq!(outcome.meta.e_tag.bytes.as_ptr(), e_tag().as_ptr());
+        assert_eq!(
+            outcome.body.expected_len,
+            MaybeU64 {
+                present: true,
+                value: 10
+            }
+        );
     }
 
-    // The head asked for the error body, and the body names the error.
+    // The head asked for the error body, and the body names the error. The
+    // request id crosses as bytes the host still owns, both ways.
     #[test]
     fn the_error_body_finishes_what_the_head_left_open() {
         let session = session();
-        let shape = PutShapeView {
-            condition: ConditionView::None,
-        };
-        let fields = [HeaderField {
-            name: Span { start: 44, len: 4 },
-            value: Span { start: 48, len: 11 },
-        }];
-        // `gzip: request-123` is not a header the core crate reads, so the
-        // head names no error and asks for the body.
-        let outcome = session.accept_put_head(&shape, 409, HEAD, &fields);
+        let headers = [header("x-ms-request-id", IDENTIFIER)];
+        let outcome = session.accept_put_head(&write_shape(), 409, &headers);
         assert_eq!(outcome.disposition, Disposition::NeedErrorBody);
+        assert_eq!(
+            outcome.failure.request_id.bytes.as_ptr(),
+            IDENTIFIER.as_ptr()
+        );
 
         let finished = session.finish_put_error_body(
             &outcome.failure,
-            HEAD,
             b"<Error><Code>BlobAlreadyExists</Code></Error>",
         );
         assert_eq!(finished.disposition, Disposition::ServiceFailure);
@@ -1778,9 +1863,10 @@ mod tests {
             Some(ServiceErrorKind::AlreadyExists)
         );
         assert!(text(&finished).contains("already exists"));
+        assert!(text(&finished).contains("request-123"));
 
         // A body that never arrived leaves the outcome final and unnamed.
-        let unnamed = session.finish_put_error_body(&outcome.failure, HEAD, b"");
+        let unnamed = session.finish_put_error_body(&outcome.failure, b"");
         assert_eq!(unnamed.disposition, Disposition::ServiceFailure);
         assert_eq!(kind_of(unnamed.failure.kind), None);
     }
@@ -1789,10 +1875,7 @@ mod tests {
     #[test]
     fn an_invalid_head_carries_the_error_of_the_core_crate() {
         let session = session();
-        let shape = PutShapeView {
-            condition: ConditionView::None,
-        };
-        let outcome = session.accept_put_head(&shape, 412, HEAD, &[]);
+        let outcome = session.accept_put_head(&write_shape(), 412, &[]);
         assert_eq!(outcome.disposition, Disposition::Invalid);
         assert_eq!(outcome.error.code, ErrorCode::ResponseMismatch as u16);
         assert_eq!(outcome.error.detail, Mismatch::WriteWithoutCondition as u16);
@@ -1804,47 +1887,53 @@ mod tests {
 
     #[test]
     fn a_session_that_cannot_be_opened_says_which_value_is_wrong() {
-        assert_eq!(
-            open_session(b"account.example", b"container", b"token")
-                .status()
-                .code,
-            ErrorCode::InvalidEndpoint as u16
-        );
-        assert_eq!(
-            open_session(b"https://account.example", b"", b"token")
-                .status()
-                .code,
-            ErrorCode::InvalidContainer as u16
-        );
-        assert_eq!(
-            open_session(b"https://account.example", b"container", b"")
-                .status()
-                .code,
-            ErrorCode::InvalidToken as u16
-        );
-        assert_eq!(
-            open_session(b"\xff", b"container", b"token").status().code,
-            ErrorCode::InvalidEndpoint as u16
-        );
+        for (endpoint, container, token, expected) in [
+            (
+                "account.example".as_bytes(),
+                "container".as_bytes(),
+                "token".as_bytes(),
+                ErrorCode::InvalidEndpoint,
+            ),
+            (
+                b"https://account.example",
+                b"".as_slice(),
+                b"token".as_slice(),
+                ErrorCode::InvalidContainer,
+            ),
+            (
+                b"https://account.example",
+                b"container",
+                b"",
+                ErrorCode::InvalidToken,
+            ),
+            (b"\xff", b"container", b"token", ErrorCode::InvalidEndpoint),
+        ] {
+            let session = open_session(endpoint, container, token);
+            assert_eq!(session.status().code, expected as u16);
+            // A session that cannot build a request cannot read the answer to
+            // one, and says the same thing when asked to.
+            let refused = session.encode_get(&read_shape(), b"key", b"", &mut [], 0);
+            assert_eq!(refused.status, session.status());
+            let outcome = session.accept_get_head(&read_shape(), 200, &[]);
+            assert_eq!(outcome.disposition, Disposition::Invalid);
+            assert_eq!(outcome.error, session.status());
+        }
         assert_eq!(session().status().code, 0);
     }
 
     // A sentence longer than the buffer is counted, not cut off silently.
     #[test]
     fn a_short_buffer_still_learns_the_length_of_the_sentence() {
-        let outcome = get_outcome(
-            Buffer::of(HEAD),
-            &GetHeadOutcome::ServiceFailure(Failure {
-                status: 503,
-                class: FailureClass::Server,
-                kind: None,
-                request_id: Some(request_id()),
-            }),
-        );
+        let outcome = get_outcome(&GetHeadOutcome::ServiceFailure(Failure {
+            status: 503,
+            class: FailureClass::Server,
+            kind: None,
+            request_id: Some(IDENTIFIER),
+        }));
         let mut small = [0; 4];
-        let length = describe(&outcome, HEAD, &mut small);
+        let length = describe(&outcome, &mut small);
         assert!(length > small.len());
         let mut whole = vec![0; length];
-        assert_eq!(describe(&outcome, HEAD, &mut whole), length);
+        assert_eq!(describe(&outcome, &mut whole), length);
     }
 }

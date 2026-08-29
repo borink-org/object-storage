@@ -125,5 +125,5 @@ pub use request::{MAX_HEADERS, Method, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     ConditionKind, DeleteKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, PutShape, RequestedRange,
+    PhysicalGet, PhysicalPut, PutShape, RangeForm, RequestedRange,
 };

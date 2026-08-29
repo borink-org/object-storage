@@ -32,6 +32,10 @@ void start_curl() {
 }
 
 // One easy handle, and the header list that belongs to it.
+//
+// `curl_slist_append` copies the line it is given, so this is where a request
+// allocates: once per header, on libcurl's terms. The bridge allocates none of
+// it, and neither does the arena that holds the response head.
 class Handle {
   public:
     Handle() {
@@ -165,12 +169,15 @@ struct Reading {
     // transfer and keeps the exception for the caller to rethrow.
     std::exception_ptr failure;
 
-    void decide() {
-        outcome = session.accept_get_head(shape, head.status(), head.bytes(), head.fields());
-    }
+    void decide() { outcome = session.accept_get_head(shape, head.status(), head.refs()); }
 
     std::size_t take(const char *data, std::size_t length) {
         if (!outcome.has_value()) {
+            // A head read in part would turn a named failure into an unnamed
+            // one, so it stops the transfer instead of being interpreted.
+            if (head.overflowed()) {
+                throw std::runtime_error("the response head is larger than this client allows");
+            }
             decide();
         }
         switch (outcome->disposition) {
@@ -249,13 +256,23 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     handle.set(CURLOPT_HEADERDATA, &head_);
     handle.set(CURLOPT_WRITEFUNCTION, read_body);
     handle.set(CURLOPT_WRITEDATA, &reading);
-    handle.send();
-
+    try {
+        handle.send();
+    } catch (...) {
+        // A callback that stopped the transfer kept the reason. libcurl
+        // reports only that it was stopped, so the reason wins.
+        if (reading.failure) {
+            std::rethrow_exception(reading.failure);
+        }
+        throw;
+    }
     if (reading.failure) {
         std::rethrow_exception(reading.failure);
     }
     // A response without a body never reaches the body callback, so the head
-    // still has to be read.
+    // still has to be read here. It is checked first, for the reason that
+    // `Reading::take` checks: a head read in part is never interpreted.
+    checked_head();
     if (!reading.outcome.has_value()) {
         reading.decide();
     }
@@ -263,7 +280,7 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     // Azure names the error in the head when it can. When it did not, the
     // diagnostic body names it, and the bridge finishes the outcome from it.
     if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ = session_->finish_get_error_body(outcome_.failure, head_.bytes(), kept_body());
+        outcome_ = session_->finish_get_error_body(outcome_.failure, kept_body());
     }
     switch (outcome_.disposition) {
     case Disposition::Body:
@@ -298,9 +315,10 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     handle.set(CURLOPT_WRITEDATA, &diagnostic);
     handle.send();
 
-    outcome_ = session_->accept_put_head(shape, head_.status(), head_.bytes(), head_.fields());
+    checked_head();
+    outcome_ = session_->accept_put_head(shape, head_.status(), head_.refs());
     if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ = session_->finish_put_error_body(outcome_.failure, head_.bytes(), kept_body());
+        outcome_ = session_->finish_put_error_body(outcome_.failure, kept_body());
     }
     if (outcome_.disposition != Disposition::Done) {
         fail("Azure stored no object");
@@ -325,10 +343,10 @@ void Client::remove(std::string_view key, const Removal &removal) {
     handle.set(CURLOPT_WRITEDATA, &diagnostic);
     handle.send();
 
-    outcome_ = session_->accept_delete_head(shape, head_.status(), head_.bytes(), head_.fields());
+    checked_head();
+    outcome_ = session_->accept_delete_head(shape, head_.status(), head_.refs());
     if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ =
-            session_->finish_delete_error_body(outcome_.failure, head_.bytes(), kept_body());
+        outcome_ = session_->finish_delete_error_body(outcome_.failure, kept_body());
     }
     if (outcome_.disposition != Disposition::Accepted) {
         fail("Azure removed no object");

@@ -223,8 +223,7 @@ void reads_the_metadata_of_an_object() {
     CHECK(server.head().starts_with("HEAD /container/a%20key HTTP/1.1\r\n"));
     CHECK(client.outcome().disposition == borink::Disposition::Complete);
     CHECK(client.outcome().meta.size.value == 10);
-    const std::span<const std::uint8_t> tag = client.head().at(client.outcome().meta.e_tag);
-    CHECK(std::string(tag.begin(), tag.end()) == "\"tag\"");
+    CHECK(borink::host::text_of(client.outcome().meta.e_tag) == "\"tag\"");
 }
 
 void writes_an_object() {
@@ -334,6 +333,74 @@ void refuses_a_request_over_the_limit() {
     server.stop();
 }
 
+// The bridge takes the head as borrowed bytes and dictates no layout for it.
+// Two separate buffers are one head, and the outcome points back into both.
+void reads_a_head_that_lives_in_two_buffers() {
+    const std::string first = "\"tag\"";
+    const std::string second = "request-123";
+    rust::Box<borink::Session> session =
+        borink::open_session(borink::host::as_bytes("https://account.example"),
+                             borink::host::as_bytes("container"),
+                             borink::host::as_bytes("token"));
+    CHECK(session->status().code == 0);
+
+    const borink::HeaderRef headers[] = {
+        borink::HeaderRef{borink::host::as_bytes("ETag"), borink::host::as_bytes(first)},
+        borink::HeaderRef{borink::host::as_bytes("x-ms-request-id"),
+                          borink::host::as_bytes(second)},
+        borink::HeaderRef{borink::host::as_bytes("Content-Length"),
+                          borink::host::as_bytes("10")},
+    };
+    const borink::Outcome outcome = session->accept_get_head(
+        borink::host::Read{}.shape(), 200,
+        rust::Slice<const borink::HeaderRef>(headers, sizeof headers / sizeof headers[0]));
+
+    CHECK(outcome.disposition == borink::Disposition::Body);
+    CHECK(borink::host::text_of(outcome.meta.e_tag) == first);
+    CHECK(borink::host::bytes_of(outcome.meta.e_tag).data() ==
+          reinterpret_cast<const std::uint8_t *>(first.data()));
+    CHECK(outcome.body.expected_len.value == 10);
+}
+
+// A client says how much of a response head it will hold, and a head that
+// would outgrow it is refused rather than read in part.
+void refuses_a_head_over_the_limit() {
+    Server server("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"tag\"\r\n"
+                  "Connection: close\r\n\r\nbody");
+    borink::host::Client client = borink::host::Client::open(
+        server.endpoint(), "container", "token", borink::host::Limits{8192, 8192, 8});
+
+    std::string reported;
+    try {
+        client.get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("response head is larger") != std::string::npos);
+}
+
+// A metadata read never reaches the body callback, so it is the path that
+// checks the head for itself. It must refuse before it interprets, not after.
+void refuses_an_overflowed_head_on_a_read_with_no_body() {
+    Server server("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"tag\"\r\n"
+                  "Connection: close\r\n\r\n");
+    borink::host::Client client = borink::host::Client::open(
+        server.endpoint(), "container", "token", borink::host::Limits{8192, 8192, 8});
+
+    std::string reported;
+    try {
+        client.get(
+            "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
+            borink::host::Read{borink::GetKindView::Metadata, borink::host::whole(),
+                               borink::ConditionView::None, {}});
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("response head is larger") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -348,7 +415,10 @@ int main() {
         names_an_error_that_only_the_body_carries();
         names_an_error_that_only_a_read_body_carries();
         reports_a_missing_object();
+        reads_a_head_that_lives_in_two_buffers();
         refuses_a_request_over_the_limit();
+        refuses_a_head_over_the_limit();
+        refuses_an_overflowed_head_on_a_read_with_no_body();
     } catch (const std::exception &failure) {
         std::cerr << "unexpected failure: " << failure.what() << "\n";
         return 1;

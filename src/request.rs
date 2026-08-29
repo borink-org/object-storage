@@ -2,11 +2,14 @@ use core::str;
 
 use crate::Payload;
 
-/// The most headers that one request head carries.
+/// The most headers that this crate writes into one request head.
 ///
 /// `authorization`, `x-ms-date`, `x-ms-version`, `content-length`,
-/// `x-ms-blob-type` and one condition: the longest head that this crate
-/// writes.
+/// `x-ms-blob-type` and one condition. [`WireRequest::headers`] returns at
+/// most this many.
+///
+/// This is not a limit on your request. Headers that you add yourself, such as
+/// one a proxy needs, go to your HTTP client and are not counted here.
 pub const MAX_HEADERS: usize = 6;
 
 /// A range of bytes, as an offset from the start of a buffer.
@@ -51,19 +54,6 @@ impl Method {
             Self::Put => "PUT",
             Self::Delete => "DELETE",
         }
-    }
-
-    /// Returns the method with this discriminant.
-    ///
-    /// Returns [`None`] for a discriminant that this version does not define.
-    pub const fn from_discriminant(value: u8) -> Option<Self> {
-        Some(match value {
-            1 => Self::Get,
-            2 => Self::Head,
-            3 => Self::Put,
-            4 => Self::Delete,
-            _ => return None,
-        })
     }
 }
 
@@ -258,7 +248,7 @@ impl U64Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{Method, U64Decimal, Writer};
+    use super::{U64Decimal, Writer};
 
     #[test]
     fn an_exactly_sized_writer_returns_the_written_bytes() {
@@ -298,13 +288,5 @@ mod tests {
             U64Decimal::new(u64::MAX).as_bytes(),
             b"18446744073709551615"
         );
-    }
-
-    #[test]
-    fn every_method_round_trips_through_its_discriminant() {
-        for method in [Method::Get, Method::Head, Method::Put, Method::Delete] {
-            assert_eq!(Method::from_discriminant(method as u8), Some(method));
-        }
-        assert_eq!(Method::from_discriminant(0), None);
     }
 }
