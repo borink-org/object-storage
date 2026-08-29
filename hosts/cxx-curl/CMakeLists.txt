@@ -1,6 +1,6 @@
 # A host: one program that drives `borink::object_storage` with libcurl.
 #
-# This is what a consumer project looks like. It adds the glue crate as a
+# This is what a consumer project looks like. It adds the C ABI crate as a
 # subdirectory, links the target it exports, and finds the HTTP library it
 # chose — the only place in this repository that libcurl appears.
 
@@ -16,8 +16,8 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libcurl REQUIRED IMPORTED_TARGET libcurl)
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../crates/object-storage-cxx
-                 ${CMAKE_CURRENT_BINARY_DIR}/object-storage-cxx)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../crates/object-storage-c
+                 ${CMAKE_CURRENT_BINARY_DIR}/object-storage-c)
 
 # The host itself: the transport, the buffers and the clock, in one library
 # that the program and the test both link.

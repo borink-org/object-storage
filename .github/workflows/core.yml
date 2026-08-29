@@ -39,9 +39,8 @@ jobs:
       - name: Link without a global allocator
         run: cargo build --locked --profile no-allocator --no-default-features --features link-check --manifest-path checks/no-allocator/Cargo.toml
 
-  # The binding itself is a workspace member, so the jobs above already
-  # format, lint, document and test it. This one builds the C++ host that
-  # links it, which is the only thing here that needs libcurl.
+  # The C++ host of the C ABI crate, which is the only thing here that needs
+  # libcurl. What it links is checked by the `c-abi` job below.
   cxx-host:
     runs-on: ubuntu-latest
     steps:

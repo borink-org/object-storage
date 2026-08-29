@@ -10,16 +10,16 @@ namespace borink::host {
 
 Client Client::open(std::string_view endpoint, std::string_view container, std::string_view token,
                     Limits limits) {
-    rust::Box<Session> session =
-        open_session(as_bytes(endpoint), as_bytes(container), as_bytes(token));
-    const Status status = session->status();
+    Client client{std::string(endpoint), std::string(container), std::string(token), limits};
+    const borink_session session = client.session();
+    const borink_status status = borink_validate(&session);
     if (status.code != 0) {
         // The core crate names the value that cannot be used. This host writes
         // no second table of its own.
         std::vector<std::uint8_t> message(128);
         throw std::runtime_error(std::string(describe_into(message, status)));
     }
-    return Client(std::move(session), limits);
+    return client;
 }
 
 } // namespace borink::host

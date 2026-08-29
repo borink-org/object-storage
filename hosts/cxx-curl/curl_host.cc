@@ -1,7 +1,7 @@
 // The libcurl host.
 //
 // libcurl reports the response head through one callback and the body through
-// another, and it calls them in that order. A read therefore asks the bridge
+// another, and it calls them in that order. A read therefore asks the library
 // what the head means when the first body byte arrives, and passes on, caps or
 // drops what follows from the answer.
 
@@ -34,8 +34,8 @@ void start_curl() {
 // One easy handle, and the header list that belongs to it.
 //
 // `curl_slist_append` copies the line it is given, so this is where a request
-// allocates: once per header, on libcurl's terms. The bridge allocates none of
-// it, and neither does the arena that holds the response head.
+// allocates: once per header, on libcurl's terms. The library allocates none
+// of it, and neither does the arena that holds the response head.
 class Handle {
   public:
     Handle() {
@@ -98,8 +98,8 @@ class Handle {
     std::string line_;
 };
 
-// Gives libcurl the URL and the headers that the bridge named.
-void apply(Handle &handle, const Client &client, const RequestHead &request) {
+// Gives libcurl the URL and the headers that the library named.
+void apply(Handle &handle, const Client &client, const borink_request_head &request) {
     handle.url(client.part(request.url));
     for (std::size_t index = 0; index < request.header_count; index += 1) {
         handle.header(client.part(request.headers[index].name),
@@ -158,18 +158,21 @@ std::size_t keep(std::vector<std::uint8_t> &bytes, std::size_t cap, const char *
 
 // A read, which has to know what the head means before the body arrives.
 struct Reading {
-    const Session &session;
-    GetShapeView shape;
+    const borink_session &session;
+    borink_get_shape shape;
     const Sink &sink;
     const CollectedHead &head;
     std::vector<std::uint8_t> &diagnostic;
     std::size_t error_bytes;
-    std::optional<Outcome> outcome;
+    std::optional<borink_outcome> outcome;
     // A callback may not let an exception reach libcurl, so it stops the
     // transfer and keeps the exception for the caller to rethrow.
     std::exception_ptr failure;
 
-    void decide() { outcome = session.accept_get_head(shape, head.status(), head.refs()); }
+    void decide() {
+        outcome = borink_accept_get_head(&session, &shape, head.status(), head.refs(),
+                                         head.count());
+    }
 
     std::size_t take(const char *data, std::size_t length) {
         if (!outcome.has_value()) {
@@ -181,13 +184,13 @@ struct Reading {
             decide();
         }
         switch (outcome->disposition) {
-        case Disposition::Body:
+        case BORINK_DISPOSITION_BODY:
             // The object never lands in a buffer of this host. It goes
             // straight from libcurl to whoever asked for it.
             sink(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(data),
                                                length));
             return length;
-        case Disposition::NeedErrorBody:
+        case BORINK_DISPOSITION_NEED_ERROR_BODY:
             return keep(diagnostic, error_bytes, data, length);
         default:
             return length;
@@ -200,7 +203,7 @@ std::size_t read_body(char *data, std::size_t size, std::size_t count, void *use
     try {
         return reading.take(data, size * count);
     } catch (...) {
-        // The bridge throws nothing, so this catches what the sink raised.
+        // The library throws nothing, so this catches what the sink raised.
         reading.failure = std::current_exception();
         return 0;
     }
@@ -238,18 +241,19 @@ const std::string_view client = "libcurl";
 
 void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     const std::uint64_t now = now_unix();
-    const GetShapeView shape = read.shape();
-    const RequestHead &request = encode([&] {
-        return session_->encode_get(shape, as_bytes(key), as_bytes(read.condition_value),
-                                    request_buffer(), now);
+    const borink_session session = this->session();
+    const borink_get_shape shape = read.shape();
+    const borink_request_head &request = encode([&] {
+        return borink_encode_get(&session, &shape, as_bytes(key),
+                                 as_bytes(read.condition_value), request_buffer(), now);
     });
 
-    Reading reading{*session_,   shape,               sink,         head_,
+    Reading reading{session,     shape,               sink,         head_,
                     diagnostic_, limits_.error_bytes, std::nullopt, nullptr};
     Handle handle;
     apply(handle, *this, request);
     // A metadata read sends HEAD, which carries no body at all.
-    if (request.method == Method::Head) {
+    if (request.method == BORINK_METHOD_HEAD) {
         handle.set(CURLOPT_NOBODY, 1L);
     }
     handle.set(CURLOPT_HEADERFUNCTION, collect_head);
@@ -278,13 +282,13 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     }
     outcome_ = *reading.outcome;
     // Azure names the error in the head when it can. When it did not, the
-    // diagnostic body names it, and the bridge finishes the outcome from it.
-    if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ = session_->finish_get_error_body(outcome_.failure, kept_body());
+    // diagnostic body names it, and the library finishes the outcome from it.
+    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+        outcome_ = borink_finish_get_error_body(&session, &outcome_.failure, kept_body());
     }
     switch (outcome_.disposition) {
-    case Disposition::Body:
-    case Disposition::Complete:
+    case BORINK_DISPOSITION_BODY:
+    case BORINK_DISPOSITION_COMPLETE:
         return;
     default:
         fail("Azure returned no object");
@@ -295,10 +299,11 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
                  const Write &write) {
     const std::uint64_t now = now_unix();
     const std::uint64_t length = content.size();
-    const PutShapeView shape = write.shape();
-    const RequestHead &request = encode([&] {
-        return session_->encode_put(shape, as_bytes(key), as_bytes(write.condition_value),
-                                    request_buffer(), length, now);
+    const borink_session session = this->session();
+    const borink_put_shape shape = write.shape();
+    const borink_request_head &request = encode([&] {
+        return borink_encode_put(&session, &shape, as_bytes(key),
+                                 as_bytes(write.condition_value), request_buffer(), length, now);
     });
 
     Content sending{content, 0};
@@ -316,21 +321,23 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     handle.send();
 
     checked_head();
-    outcome_ = session_->accept_put_head(shape, head_.status(), head_.refs());
-    if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ = session_->finish_put_error_body(outcome_.failure, kept_body());
+    outcome_ = borink_accept_put_head(&session, &shape, head_.status(), head_.refs(),
+                                      head_.count());
+    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+        outcome_ = borink_finish_put_error_body(&session, &outcome_.failure, kept_body());
     }
-    if (outcome_.disposition != Disposition::Done) {
+    if (outcome_.disposition != BORINK_DISPOSITION_DONE) {
         fail("Azure stored no object");
     }
 }
 
 void Client::remove(std::string_view key, const Removal &removal) {
     const std::uint64_t now = now_unix();
-    const DeleteShapeView shape = removal.shape();
-    const RequestHead &request = encode([&] {
-        return session_->encode_delete(shape, as_bytes(key), as_bytes(removal.condition_value),
-                                       request_buffer(), now);
+    const borink_session session = this->session();
+    const borink_delete_shape shape = removal.shape();
+    const borink_request_head &request = encode([&] {
+        return borink_encode_delete(&session, &shape, as_bytes(key),
+                                    as_bytes(removal.condition_value), request_buffer(), now);
     });
 
     Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
@@ -344,11 +351,12 @@ void Client::remove(std::string_view key, const Removal &removal) {
     handle.send();
 
     checked_head();
-    outcome_ = session_->accept_delete_head(shape, head_.status(), head_.refs());
-    if (outcome_.disposition == Disposition::NeedErrorBody) {
-        outcome_ = session_->finish_delete_error_body(outcome_.failure, kept_body());
+    outcome_ = borink_accept_delete_head(&session, &shape, head_.status(), head_.refs(),
+                                         head_.count());
+    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+        outcome_ = borink_finish_delete_error_body(&session, &outcome_.failure, kept_body());
     }
-    if (outcome_.disposition != Disposition::Accepted) {
+    if (outcome_.disposition != BORINK_DISPOSITION_ACCEPTED) {
         fail("Azure removed no object");
     }
 }
