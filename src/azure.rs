@@ -2,8 +2,8 @@ use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
     DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
-    Method, Mismatch, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, ProtocolFault,
-    PutHeadOutcome, PutShape, RequestedRange, ResponseHead, Result, ServiceErrorKind, Timestamps,
+    Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
+    PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
     WireRequest,
 };
 
@@ -199,12 +199,10 @@ impl<'a> Blobs<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Protocol`] if the head is invalid or contradicts
-    /// itself, such as a `Content-Range` whose end is before its start.
-    ///
-    /// Returns [`Error::ResponseMismatch`] if the head does not answer
-    /// `shape`, such as a ranged plan that Azure answers with status 200, or a
-    /// range that Azure serves only in part.
+    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
+    /// A `Content-Range` whose end is before its start is
+    /// [`ResponseFault::Head`]. A ranged plan that Azure answers with status
+    /// 200 is [`ResponseFault::Range`].
     pub fn accept_get_head<'h>(
         &self,
         shape: GetShape,
@@ -212,18 +210,16 @@ impl<'a> Blobs<'a> {
     ) -> Result<GetHeadOutcome<'h>> {
         let ranged = shape.range != RequestedRange::Whole;
         match head.status {
-            206 if !ranged => Err(Mismatch::UnrangedAnsweredWith206.into()),
-            200 if ranged => Err(Mismatch::RangedAnsweredWithout206.into()),
+            206 if !ranged => Err(ResponseFault::Range.into()),
+            200 if ranged => Err(ResponseFault::Range.into()),
             200 | 206 => accept_success(shape, head),
             // A conditional status the plan did not ask for is a contradiction,
             // not an outcome: nothing in the plan explains it.
             304 if shape.condition != ConditionKind::IfNoneMatch => {
-                Err(ProtocolFault::NotModifiedWithoutCondition.into())
+                Err(ResponseFault::Status.into())
             }
             304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            412 if shape.condition != ConditionKind::IfMatch => {
-                Err(ProtocolFault::PreconditionWithoutCondition.into())
-            }
+            412 if shape.condition != ConditionKind::IfMatch => Err(ResponseFault::Status.into()),
             412 => Ok(GetHeadOutcome::PreconditionFailed),
             // Azure repeats the header's code in the body, so only a
             // missing header is worth a body read. A header naming a code
@@ -239,10 +235,10 @@ impl<'a> Blobs<'a> {
                     None => None,
                     // `bytes */N` is the only form 416 may carry.
                     Some(Some(ContentRange::Unsatisfied { total })) => total,
-                    Some(_) => return Err(ProtocolFault::UnsatisfiedRangeHead.into()),
+                    Some(_) => return Err(ResponseFault::Head.into()),
                 },
             }),
-            200..=299 => Err(ProtocolFault::UnexpectedSuccess.into()),
+            200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(GetHeadOutcome::NeedErrorBody(failure(
                 status,
                 None,
@@ -329,11 +325,9 @@ impl<'a> Blobs<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Protocol`] if the head is invalid, such as a success
-    /// status that a removal never returns.
-    ///
-    /// Returns [`Error::ResponseMismatch`] if the head does not answer
-    /// `shape`, such as a failed condition on a removal that carried none.
+    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
+    /// A success status that a removal never returns, and a failed condition
+    /// on a removal that carried none, are both [`ResponseFault::Status`].
     pub fn accept_delete_head<'h>(
         &self,
         shape: DeleteShape,
@@ -341,9 +335,7 @@ impl<'a> Blobs<'a> {
     ) -> Result<DeleteHeadOutcome<'h>> {
         match head.status {
             202 => Ok(DeleteHeadOutcome::Accepted),
-            412 if shape.condition == ConditionKind::None => {
-                Err(Mismatch::DeleteWithoutCondition.into())
-            }
+            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
             412 => Ok(DeleteHeadOutcome::PreconditionFailed),
             404 if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
                 404,
@@ -351,7 +343,7 @@ impl<'a> Blobs<'a> {
                 head.request_id,
             ))),
             404 => Ok(DeleteHeadOutcome::NotFound { kind: named(&head) }),
-            200..=299 => Err(ProtocolFault::DeleteNot202.into()),
+            200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
                 status,
                 None,
@@ -393,11 +385,9 @@ impl<'a> Blobs<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Protocol`] if the head is invalid, such as a success
-    /// status that a write never returns.
-    ///
-    /// Returns [`Error::ResponseMismatch`] if the head does not answer
-    /// `shape`, such as a failed condition on a write that carried none.
+    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
+    /// A success status that a write never returns, and a failed condition on
+    /// a write that carried none, are both [`ResponseFault::Status`].
     pub fn accept_put_head<'h>(
         &self,
         shape: PutShape,
@@ -414,9 +404,7 @@ impl<'a> Blobs<'a> {
                 },
             }),
             // Nothing in an unconditional write explains a failed condition.
-            412 if shape.condition == ConditionKind::None => {
-                Err(Mismatch::WriteWithoutCondition.into())
-            }
+            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
             412 => Ok(PutHeadOutcome::PreconditionFailed),
             404 if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
                 404,
@@ -424,7 +412,7 @@ impl<'a> Blobs<'a> {
                 head.request_id,
             ))),
             404 => Ok(PutHeadOutcome::NotFound { kind: named(&head) }),
-            200..=299 => Err(ProtocolFault::WriteNot201.into()),
+            200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
                 status,
                 None,
@@ -524,15 +512,15 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
     }
     let value = head
         .content_range
-        .ok_or(Error::ResponseMismatch(Mismatch::RangeWithoutContentRange))?;
+        .ok_or(Error::Response(ResponseFault::Head))?;
     let ContentRange::Satisfied { start, end, total } =
-        parse_content_range(value).ok_or(Error::Protocol(ProtocolFault::ContentRange))?
+        parse_content_range(value).ok_or(Error::Response(ResponseFault::Head))?
     else {
-        return Err(ProtocolFault::UnsizedRangeOutside416.into());
+        return Err(ResponseFault::Head.into());
     };
     let served = end - start + 1;
     if content_length.is_some_and(|length| length != served) {
-        return Err(ProtocolFault::ContentLengthDisagrees.into());
+        return Err(ResponseFault::Head.into());
     }
     // Azure serves the whole satisfiable range, so a short serve is a
     // mismatch: silently accepting it would hand consumers a partial read.
@@ -543,7 +531,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
         }
     };
     if start != requested_start {
-        return Err(Mismatch::RangeStartsElsewhere.into());
+        return Err(ResponseFault::Range.into());
     }
     if let Some(total) = total {
         let satisfiable = match shape.range {
@@ -551,7 +539,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
             _ => total,
         };
         if end + 1 != satisfiable {
-            return Err(Mismatch::RangeServedShort.into());
+            return Err(ResponseFault::Range.into());
         }
     }
     Ok(GetHeadOutcome::Body {
@@ -602,7 +590,7 @@ fn decimal_header(value: Option<&[u8]>) -> Result<Option<u64>> {
         None => Ok(None),
         Some(value) => decimal(trim_ascii(value))
             .map(Some)
-            .ok_or(Error::Protocol(ProtocolFault::ContentLength)),
+            .ok_or(Error::Response(ResponseFault::Head)),
     }
 }
 

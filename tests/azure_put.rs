@@ -2,8 +2,8 @@
 
 use borink_object_storage::{
     Blobs, ConditionKind, Container, Error, Failure, FailureClass, InvalidPlan, Method, ObjectMeta,
-    Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseHead, ServiceErrorKind, Timestamps,
-    layered,
+    Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead, ServiceErrorKind,
+    Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -205,16 +205,16 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
     );
 
     // Nothing in an unconditional write explains a 412.
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_put_head(PutShape::default(), ResponseHead::new(412)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 
     // A write answers 201, never another success status.
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_put_head(PutShape::default(), ResponseHead::new(200)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]

@@ -115,7 +115,7 @@ mod types;
 mod xml;
 
 pub use azure::{Blobs, Container, VERSION, classify_error};
-pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, Mismatch, ProtocolFault, Result};
+pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
     BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,

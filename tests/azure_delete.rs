@@ -2,8 +2,8 @@
 
 use borink_object_storage::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    FailureClass, InvalidPlan, Method, PhysicalDelete, ResponseHead, ServiceErrorKind, Timestamps,
-    layered,
+    FailureClass, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -107,10 +107,10 @@ fn an_accepted_removal_reports_no_metadata() {
     );
 
     // A removal answers 202, never another success status.
-    assert!(matches!(
+    assert_eq!(
         blobs().accept_delete_head(DeleteShape::default(), ResponseHead::new(200)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
@@ -120,10 +120,10 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
         blobs.accept_delete_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
         Ok(DeleteHeadOutcome::PreconditionFailed)
     );
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_delete_head(DeleteShape::default(), ResponseHead::new(412)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]

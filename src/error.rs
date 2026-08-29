@@ -100,58 +100,64 @@ impl fmt::Display for InvalidPlan {
     }
 }
 
-/// What is wrong with a response head.
+/// Why a response cannot be read.
 ///
-/// Each of these is a head that Azure does not send. Some contradict
-/// themselves, such as a length that disagrees with a range. Others carry a
-/// status that the operation does not use. Neither has a meaning to read, so
-/// this crate reports the head instead of choosing one.
+/// Azure sends none of these. Each one means that the response was changed on
+/// the way to you, or that the service did not behave as it documents. This
+/// crate cannot recover from any of them, and neither can you: retry the
+/// request, or report it. These three values are for the message you write.
+///
+/// # Reading the exact value that was wrong
+///
+/// This crate names the part of the response, not the value. If your program
+/// needs the value, read it yourself: you hold the
+/// [`ResponseHead`](crate::ResponseHead) you passed in, and the shape you
+/// planned with. Both are [`Copy`] and both have public fields, and every
+/// fault here is decided from those two.
+///
+/// ```
+/// use borink_object_storage::{
+///     Blobs, Container, Error, GetShape, RequestedRange, ResponseFault, ResponseHead,
+/// };
+///
+/// # fn main() -> borink_object_storage::Result<()> {
+/// let blobs = Blobs::new(Container::new("https://account.blob.core.windows.net", "c")?, "t")?;
+/// let shape = GetShape {
+///     range: RequestedRange::Bounded { start: 2, end: 6 },
+///     ..GetShape::default()
+/// };
+/// let head = ResponseHead::from_headers(206, [("Content-Range", b"bytes 2-4/10".as_slice())]);
+///
+/// let fault = blobs.accept_get_head(shape, head);
+/// assert_eq!(fault, Err(Error::Response(ResponseFault::Range)));
+///
+/// // The head is still yours, so the exact values are too.
+/// assert_eq!(head.content_range, Some(b"bytes 2-4/10".as_slice()));
+/// assert_eq!(shape.range, RequestedRange::Bounded { start: 2, end: 6 });
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
-pub enum ProtocolFault {
-    /// The `Content-Length` header is not a number.
-    ContentLength = 1,
-    /// The `Content-Range` header is malformed, or its arithmetic does not
-    /// hold.
-    ContentRange = 2,
-    /// `Content-Length` and `Content-Range` state different lengths.
-    ContentLengthDisagrees = 3,
-    /// The head carries `Content-Range: bytes */N` outside a 416.
-    UnsizedRangeOutside416 = 4,
-    /// The head reports status 416 with no readable `Content-Range`.
-    UnsatisfiedRangeHead = 5,
-    /// A read was answered with a success status that it does not answer with.
-    UnexpectedSuccess = 6,
-    /// A write was answered with a success status other than 201.
-    WriteNot201 = 7,
-    /// A removal was answered with a success status other than 202.
-    DeleteNot202 = 8,
-    /// Status 304 answered a plan that carries no `If-None-Match` condition.
-    NotModifiedWithoutCondition = 9,
-    /// Status 412 answered a read that carries no `If-Match` condition.
-    PreconditionWithoutCondition = 10,
+pub enum ResponseFault {
+    /// A value in the head is missing, is not a number, or disagrees with
+    /// another value in the same head.
+    Head = 1,
+    /// The status does not answer the request that was sent.
+    Status = 2,
+    /// The service served a range other than the one that the plan requested.
+    Range = 3,
 }
 
-impl ProtocolFault {
+impl ResponseFault {
     /// Returns the sentence that [`Display`](fmt::Display) writes for this
     /// fault.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ContentLength => "invalid content-length",
-            Self::ContentRange => "invalid content-range",
-            Self::ContentLengthDisagrees => "content-length disagrees with content-range",
-            Self::UnsizedRangeOutside416 => "bytes */N is valid only in a 416",
-            Self::UnsatisfiedRangeHead => "invalid 416 content-range",
-            Self::UnexpectedSuccess => "unexpected success status",
-            Self::WriteNot201 => "a write returns 201, not another success",
-            Self::DeleteNot202 => "a removal returns 202, not another success",
-            Self::NotModifiedWithoutCondition => {
-                "304 answered a plan without an If-None-Match condition"
-            }
-            Self::PreconditionWithoutCondition => {
-                "412 answered a plan without an If-Match condition"
-            }
+            Self::Head => "the response head is unreadable, or it contradicts itself",
+            Self::Status => "the status does not answer the request",
+            Self::Range => "the service served another range than the plan requested",
         }
     }
 
@@ -160,81 +166,15 @@ impl ProtocolFault {
     /// Returns [`None`] for a discriminant that this version does not define.
     pub const fn from_discriminant(value: u16) -> Option<Self> {
         Some(match value {
-            1 => Self::ContentLength,
-            2 => Self::ContentRange,
-            3 => Self::ContentLengthDisagrees,
-            4 => Self::UnsizedRangeOutside416,
-            5 => Self::UnsatisfiedRangeHead,
-            6 => Self::UnexpectedSuccess,
-            7 => Self::WriteNot201,
-            8 => Self::DeleteNot202,
-            9 => Self::NotModifiedWithoutCondition,
-            10 => Self::PreconditionWithoutCondition,
+            1 => Self::Head,
+            2 => Self::Status,
+            3 => Self::Range,
             _ => return None,
         })
     }
 }
 
-impl fmt::Display for ProtocolFault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// How a response head disagrees with the plan that it answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-#[repr(u16)]
-pub enum Mismatch {
-    /// Status 206 answered a plan that requests no range.
-    UnrangedAnsweredWith206 = 1,
-    /// A status other than 206 answered a plan that requests a range.
-    RangedAnsweredWithout206 = 2,
-    /// Status 206 arrived without a `Content-Range` header.
-    RangeWithoutContentRange = 3,
-    /// The served range starts somewhere other than the plan asked.
-    RangeStartsElsewhere = 4,
-    /// The service served less than the satisfiable part of the range.
-    RangeServedShort = 5,
-    /// Status 412 answered a write that carries no condition.
-    WriteWithoutCondition = 6,
-    /// Status 412 answered a removal that carries no condition.
-    DeleteWithoutCondition = 7,
-}
-
-impl Mismatch {
-    /// Returns the sentence that [`Display`](fmt::Display) writes for this
-    /// mismatch.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::UnrangedAnsweredWith206 => "an unranged plan was answered with 206",
-            Self::RangedAnsweredWithout206 => "a ranged plan was answered without 206",
-            Self::RangeWithoutContentRange => "206 without a content-range",
-            Self::RangeStartsElsewhere => "the served range starts elsewhere",
-            Self::RangeServedShort => "the service served less than the satisfiable range",
-            Self::WriteWithoutCondition => "412 answered a write without a condition",
-            Self::DeleteWithoutCondition => "412 answered a removal without a condition",
-        }
-    }
-
-    /// Returns the mismatch with this discriminant.
-    ///
-    /// Returns [`None`] for a discriminant that this version does not define.
-    pub const fn from_discriminant(value: u16) -> Option<Self> {
-        Some(match value {
-            1 => Self::UnrangedAnsweredWith206,
-            2 => Self::RangedAnsweredWithout206,
-            3 => Self::RangeWithoutContentRange,
-            4 => Self::RangeStartsElsewhere,
-            5 => Self::RangeServedShort,
-            6 => Self::WriteWithoutCondition,
-            7 => Self::DeleteWithoutCondition,
-            _ => return None,
-        })
-    }
-}
-
-impl fmt::Display for Mismatch {
+impl fmt::Display for ResponseFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -259,10 +199,8 @@ pub enum ErrorCode {
     InvalidPlan = 4,
     /// [`Error::Capacity`].
     Capacity = 5,
-    /// [`Error::Protocol`].
-    Protocol = 6,
-    /// [`Error::ResponseMismatch`].
-    ResponseMismatch = 7,
+    /// [`Error::Response`].
+    Response = 6,
 }
 
 impl ErrorCode {
@@ -274,8 +212,7 @@ impl ErrorCode {
             Self::InvalidToken => "invalid bearer token",
             Self::InvalidPlan => "the plan cannot become a request",
             Self::Capacity => "the request buffer is too small",
-            Self::Protocol => "invalid response",
-            Self::ResponseMismatch => "the response does not answer the plan",
+            Self::Response => "the response cannot be read",
         }
     }
 
@@ -289,8 +226,7 @@ impl ErrorCode {
             3 => Self::InvalidToken,
             4 => Self::InvalidPlan,
             5 => Self::Capacity,
-            6 => Self::Protocol,
-            7 => Self::ResponseMismatch,
+            6 => Self::Response,
             _ => return None,
         })
     }
@@ -327,10 +263,8 @@ pub enum Error {
     InvalidPlan(InvalidPlan),
     /// Your request buffer is too small.
     Capacity(CapacityError),
-    /// The response head is invalid, or it contradicts itself.
-    Protocol(ProtocolFault),
-    /// The response head does not answer the plan that you passed in.
-    ResponseMismatch(Mismatch),
+    /// The response cannot be read.
+    Response(ResponseFault),
 }
 
 impl fmt::Display for Error {
@@ -341,10 +275,7 @@ impl fmt::Display for Error {
             }
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
-            Self::Protocol(fault) => write!(f, "invalid response: {fault}"),
-            Self::ResponseMismatch(mismatch) => {
-                write!(f, "the response does not answer the plan: {mismatch}")
-            }
+            Self::Response(fault) => fmt::Display::fmt(fault, f),
         }
     }
 }
@@ -363,15 +294,9 @@ impl From<InvalidPlan> for Error {
     }
 }
 
-impl From<ProtocolFault> for Error {
-    fn from(value: ProtocolFault) -> Self {
-        Self::Protocol(value)
-    }
-}
-
-impl From<Mismatch> for Error {
-    fn from(value: Mismatch) -> Self {
-        Self::ResponseMismatch(value)
+impl From<ResponseFault> for Error {
+    fn from(value: ResponseFault) -> Self {
+        Self::Response(value)
     }
 }
 
@@ -392,8 +317,7 @@ impl Error {
             Self::InvalidToken => ErrorCode::InvalidToken,
             Self::InvalidPlan(_) => ErrorCode::InvalidPlan,
             Self::Capacity(_) => ErrorCode::Capacity,
-            Self::Protocol(_) => ErrorCode::Protocol,
-            Self::ResponseMismatch(_) => ErrorCode::ResponseMismatch,
+            Self::Response(_) => ErrorCode::Response,
         }
     }
 
@@ -404,8 +328,7 @@ impl Error {
     pub const fn detail(&self) -> u16 {
         match *self {
             Self::InvalidPlan(plan) => plan as u16,
-            Self::Protocol(fault) => fault as u16,
-            Self::ResponseMismatch(mismatch) => mismatch as u16,
+            Self::Response(fault) => fault as u16,
             _ => 0,
         }
     }
@@ -428,12 +351,8 @@ impl Error {
                 Some(plan) => Self::InvalidPlan(plan),
                 None => return None,
             },
-            ErrorCode::Protocol => match ProtocolFault::from_discriminant(detail) {
-                Some(fault) => Self::Protocol(fault),
-                None => return None,
-            },
-            ErrorCode::ResponseMismatch => match Mismatch::from_discriminant(detail) {
-                Some(mismatch) => Self::ResponseMismatch(mismatch),
+            ErrorCode::Response => match ResponseFault::from_discriminant(detail) {
+                Some(fault) => Self::Response(fault),
                 None => return None,
             },
             ErrorCode::Capacity => return None,
@@ -445,7 +364,7 @@ impl Error {
 mod tests {
     extern crate std;
 
-    use super::{CapacityError, Error, ErrorCode, InvalidPlan, Mismatch, ProtocolFault};
+    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault};
     use std::string::ToString;
     use std::vec::Vec;
 
@@ -469,11 +388,8 @@ mod tests {
             if let Some(plan) = InvalidPlan::from_discriminant(detail) {
                 errors.push(Error::InvalidPlan(plan));
             }
-            if let Some(fault) = ProtocolFault::from_discriminant(detail) {
-                errors.push(Error::Protocol(fault));
-            }
-            if let Some(mismatch) = Mismatch::from_discriminant(detail) {
-                errors.push(Error::ResponseMismatch(mismatch));
+            if let Some(fault) = ResponseFault::from_discriminant(detail) {
+                errors.push(Error::Response(fault));
             }
         }
         errors
@@ -504,7 +420,7 @@ mod tests {
     #[test]
     fn an_unknown_discriminant_rebuilds_nothing() {
         assert_eq!(Error::from_parts(ErrorCode::InvalidPlan, 0), None);
-        assert_eq!(Error::from_parts(ErrorCode::Protocol, 4095), None);
+        assert_eq!(Error::from_parts(ErrorCode::Response, 4095), None);
         // A code that carries no value inside takes no detail either.
         assert_eq!(Error::from_parts(ErrorCode::InvalidToken, 1), None);
     }

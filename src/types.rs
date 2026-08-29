@@ -32,9 +32,8 @@ impl GetKind {
 /// Which form of byte range a plan requests, without its offsets.
 ///
 /// [`RequestedRange`] carries the offsets as well, which a number cannot. This
-/// is the part of it that is one value, for a caller that carries a plan
-/// across a language boundary: pair it with the offsets in
-/// [`RequestedRange::from_parts`].
+/// is the part of it that is one value. Pair it with the offsets in
+/// [`RequestedRange::from_parts`] to carry a plan across a language boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]

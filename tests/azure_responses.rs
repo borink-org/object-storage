@@ -2,8 +2,8 @@
 
 use borink_object_storage::{
     Blobs, BodyWindow, Classification, ConditionKind, Container, Error, Failure, FailureClass,
-    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseHead, ServiceErrorKind,
-    classify_error, layered,
+    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
+    ServiceErrorKind, classify_error, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -105,37 +105,38 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
     );
 
     // Nothing in an unconditional plan explains either status.
-    assert!(matches!(
+    assert_eq!(
         accept(GetShape::default(), not_modified),
-        Err(Error::Protocol(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Status))
+    );
+    assert_eq!(
         accept(GetShape::default(), ResponseHead::new(412)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
 fn ranged_and_unranged_plans_must_be_answered_in_kind() {
     let bounded = ranged(RequestedRange::Bounded { start: 2, end: 6 });
-    assert!(matches!(
+    assert_eq!(
         accept(
             bounded,
             ResponseHead::from_headers(200, [("Content-Length", b"10".as_slice())]),
         ),
-        Err(Error::ResponseMismatch(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Range))
+    );
+    assert_eq!(
         accept(
             GetShape::default(),
             ResponseHead::from_headers(206, [("Content-Range", b"bytes 0-9/10".as_slice())]),
         ),
-        Err(Error::ResponseMismatch(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Range))
+    );
+    // A 206 that names no range leaves the head missing a value it needs.
+    assert_eq!(
         accept(bounded, ResponseHead::new(206)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Head))
+    );
 }
 
 #[test]
@@ -149,18 +150,16 @@ fn enforces_maximal_satisfaction_of_the_requested_range() {
     assert!(accept(ranged(RequestedRange::Offset(2)), head(b"bytes 2-9/10")).is_ok());
 
     for short in [b"bytes 2-4/10".as_slice(), b"bytes 3-5/10"] {
-        assert!(
-            matches!(
-                accept(bounded, head(short)),
-                Err(Error::ResponseMismatch(_))
-            ),
+        assert_eq!(
+            accept(bounded, head(short)),
+            Err(Error::Response(ResponseFault::Range)),
             "{short:?}"
         );
     }
-    assert!(matches!(
+    assert_eq!(
         accept(ranged(RequestedRange::Offset(2)), head(b"bytes 2-8/10")),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Range))
+    );
 }
 
 #[test]
@@ -174,18 +173,16 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
         // `bytes */N` answers a 416 and nothing else.
         b"bytes */10",
     ] {
-        assert!(
-            matches!(
-                accept(
-                    bounded,
-                    ResponseHead::from_headers(206, [("Content-Range", value)])
-                ),
-                Err(Error::Protocol(_))
+        assert_eq!(
+            accept(
+                bounded,
+                ResponseHead::from_headers(206, [("Content-Range", value)])
             ),
+            Err(Error::Response(ResponseFault::Head)),
             "{value:?}"
         );
     }
-    assert!(matches!(
+    assert_eq!(
         accept(
             bounded,
             ResponseHead::from_headers(
@@ -196,8 +193,8 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
                 ],
             ),
         ),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Head))
+    );
 }
 
 #[test]

@@ -13,9 +13,12 @@
 //! container and the token, and once for the session itself. No other call
 //! allocates.
 //!
-//! This crate needs the Rust standard library, so it does not build for a
-//! freestanding target. The core crate is `no_std`; a binding for such a
-//! target would be a separate glue crate over it.
+//! This crate builds as a static archive, which carries the Rust standard
+//! library with it. An archive supplies its own allocator, panic handler and
+//! unwinder, and on a stable toolchain only `std` has all three. `cxx` is
+//! itself `no_std` and the core crate is too, so a freestanding target needs
+//! its own glue crate rather than a different bridge. It would still need a
+//! heap for the three strings that a session holds.
 //!
 //! # Offsets out, slices in
 //!
@@ -42,6 +45,10 @@
 //! the discriminant of the value inside it. `describe_status` writes the
 //! sentence for one. A response that the service sends in normal operation is
 //! not a failure. It is a `Disposition` on the `Outcome`.
+//!
+//! The set is deliberately small. A `Status` names the part of the exchange
+//! that was wrong, never the value. You passed the headers and the shape in.
+//! Read those when your program needs the value itself.
 //!
 //! Every other enum crosses as the number the core crate gives it, in both
 //! directions. A number that this bridge does not define is refused as
@@ -85,9 +92,9 @@ use ffi::{
 
 /// The most headers that one request head carries.
 ///
-/// This is the core crate's own bound. The twin's array has exactly this many
-/// slots, so a header added to the core crate is a compile error here rather
-/// than a header that this bridge drops.
+/// This is the core crate's own bound, and the twin's array has exactly this
+/// many slots. A header added to the core crate is therefore a compile error
+/// here, not a header that this bridge drops.
 const MAX_HEADERS: usize = borink_object_storage::MAX_HEADERS;
 
 /// One container, and the token that opens it.
@@ -187,10 +194,8 @@ mod ffi {
         InvalidPlan = 4,
         /// The buffer is too small. Grow it to `required` and call again.
         Capacity = 5,
-        /// The response head is invalid, or it contradicts itself.
-        Protocol = 6,
-        /// The response head does not answer the plan.
-        ResponseMismatch = 7,
+        /// The response cannot be read. `detail` says which part was wrong.
+        Response = 6,
     }
 
     /// The HTTP method of a request.
@@ -468,8 +473,12 @@ mod ffi {
         NeedErrorBody = 9,
         /// Azure refused the request, or it failed to carry it out.
         ServiceFailure = 10,
-        /// The call was refused, or the head does not answer the plan. Read
+        /// The call was refused, or the response cannot be read. Read
         /// `error`.
+        ///
+        /// `error.detail` names the part that was wrong, not the value. You
+        /// still hold the `HeaderRef`s and the shape, so read those for the
+        /// value itself.
         Invalid = 11,
         /// The core crate returned a variant that this bridge does not know.
         Unsupported = 12,
@@ -655,8 +664,7 @@ const _: () = {
     assert!(ffi::ErrorCode::InvalidToken.repr == ErrorCode::InvalidToken as u16);
     assert!(ffi::ErrorCode::InvalidPlan.repr == ErrorCode::InvalidPlan as u16);
     assert!(ffi::ErrorCode::Capacity.repr == ErrorCode::Capacity as u16);
-    assert!(ffi::ErrorCode::Protocol.repr == ErrorCode::Protocol as u16);
-    assert!(ffi::ErrorCode::ResponseMismatch.repr == ErrorCode::ResponseMismatch as u16);
+    assert!(ffi::ErrorCode::Response.repr == ErrorCode::Response as u16);
 
     assert!(Method::Get.repr == core::Method::Get as u8);
     assert!(Method::Head.repr == core::Method::Head as u8);
@@ -1351,7 +1359,7 @@ impl fmt::Write for Sentence<'_> {
 mod tests {
     use super::*;
     use crate::ffi::RangeView;
-    use borink_object_storage::{Mismatch, ProtocolFault};
+    use borink_object_storage::ResponseFault;
 
     // Two buffers, so that nothing here depends on one contiguous head.
     const VALUES: &[u8] = b"\"etag\"Wed, 26 Aug 2026 12:00:00 GMTversion-1gzip";
@@ -1741,16 +1749,12 @@ mod tests {
                 checked += 1;
             }
         }
-        // Every variant of the three inner enums, and the three that carry no
+        // Every variant of the two inner enums, and the three that carry no
         // inner value.
-        assert_eq!(checked, 3 + 7 + 10 + 7);
+        assert_eq!(checked, 3 + 7 + 3);
         assert_eq!(
-            ProtocolFault::from_discriminant(10).map(Error::Protocol),
-            Error::from_parts(ErrorCode::Protocol, 10)
-        );
-        assert_eq!(
-            Mismatch::from_discriminant(7).map(Error::ResponseMismatch),
-            Error::from_parts(ErrorCode::ResponseMismatch, 7)
+            ResponseFault::from_discriminant(3).map(Error::Response),
+            Error::from_parts(ErrorCode::Response, 3)
         );
     }
 
@@ -1877,11 +1881,11 @@ mod tests {
         let session = session();
         let outcome = session.accept_put_head(&write_shape(), 412, &[]);
         assert_eq!(outcome.disposition, Disposition::Invalid);
-        assert_eq!(outcome.error.code, ErrorCode::ResponseMismatch as u16);
-        assert_eq!(outcome.error.detail, Mismatch::WriteWithoutCondition as u16);
+        assert_eq!(outcome.error.code, ErrorCode::Response as u16);
+        assert_eq!(outcome.error.detail, ResponseFault::Status as u16);
         assert_eq!(
             text(&outcome),
-            Error::ResponseMismatch(Mismatch::WriteWithoutCondition).to_string()
+            Error::Response(ResponseFault::Status).to_string()
         );
     }
 
