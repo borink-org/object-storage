@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-borink-object-storage = { path = "../.." }
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
 cxx = "1.0"
 
 [build-dependencies]

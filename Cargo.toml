@@ -1,26 +1,12 @@
+# A virtual workspace. `crates/` holds what a consumer depends on; `hosts/`
+# holds programs that drive one of those crates with a real HTTP client.
 [workspace]
-members = ["checks/no-allocator", "hosts/ureq", "tests/azure-live"]
-default-members = ["."]
+members = ["crates/*", "checks/no-allocator", "hosts/ureq", "tests/azure-live"]
+default-members = ["crates/object-storage-proto"]
 # The C++ hosts need libcurl, Boost and OpenSSL, which `flake.nix` provides.
 # They are their own workspace so that a checkout without those libraries
 # still builds and tests everything else.
 exclude = ["hosts/cxx"]
-
-[package]
-name = "borink-object-storage"
-version = "0.0.1"
-edition = "2024"
-license = "Apache-2.0"
-description = "Object storage operations with a sans-IO core and externally buffered API"
-repository = "https://github.com/borink-org/object-storage"
-readme = "README.md"
-
-[dependencies]
-percent-encoding = { version = "2.3", default-features = false }
-xmlparser = { version = "0.13", default-features = false }
-
-[lints.rust]
-missing_docs = "deny"
 
 [profile.no-allocator]
 inherits = "dev"

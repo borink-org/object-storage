@@ -34,7 +34,7 @@
 //! # Example
 //!
 //! ```
-//! use borink_object_storage::{
+//! use borink_object_storage_proto::{
 //!     Blobs, Container, GetHeadOutcome, Method, Payload, PhysicalGet, PhysicalPut,
 //!     PutHeadOutcome, ResponseHead, Timestamps, layered,
 //! };

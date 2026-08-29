@@ -1,6 +1,6 @@
 //! Azure removal encoding and response interpretation.
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
     FailureClass, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
     ServiceErrorKind, Timestamps, layered,

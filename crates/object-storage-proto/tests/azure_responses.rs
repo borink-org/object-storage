@@ -1,6 +1,6 @@
 //! Azure response interpretation fixtures.
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, BodyWindow, Classification, ConditionKind, Container, Error, Failure, FailureClass,
     GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
     ServiceErrorKind, classify_error, layered,

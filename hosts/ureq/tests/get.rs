@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage::{Blobs, Container};
+use borink_object_storage_proto::{Blobs, Container};
 
 #[test]
 fn executes_the_generated_request() {

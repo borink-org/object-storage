@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-borink-object-storage = { path = "../.." }
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
 # `default-features = false` drops ureq's `gzip` and `brotli` features. They
 # decode the response body and remove the headers that record it, which would
 # contradict the byte offsets and lengths that this crate reads from the head.

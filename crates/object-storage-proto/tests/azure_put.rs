@@ -1,6 +1,6 @@
 //! Azure write encoding and response interpretation.
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, Error, Failure, FailureClass, InvalidPlan, Method, ObjectMeta,
     Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead, ServiceErrorKind,
     Timestamps, layered,

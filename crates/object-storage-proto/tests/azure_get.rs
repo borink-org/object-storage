@@ -1,6 +1,6 @@
 //! Azure bearer GET integration tests.
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, InvalidPlan,
     Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps, VERSION, layered,
 };

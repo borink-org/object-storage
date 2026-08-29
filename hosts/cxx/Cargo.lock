@@ -12,13 +12,13 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "borink-azure-cxx"
 version = "0.0.0"
 dependencies = [
- "borink-object-storage",
+ "borink-object-storage-proto",
  "cxx",
  "cxx-build",
 ]
 
 [[package]]
-name = "borink-object-storage"
+name = "borink-object-storage-proto"
 version = "0.0.1"
 dependencies = [
  "percent-encoding",

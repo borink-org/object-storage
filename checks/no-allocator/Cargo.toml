@@ -15,7 +15,7 @@ test = false
 doctest = false
 
 [dependencies]
-borink-object-storage = { path = "../.." }
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
 
 [lints.rust]
 missing_docs = "deny"
