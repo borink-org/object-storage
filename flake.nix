@@ -21,9 +21,9 @@
     {
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          # The Rust core needs only cargo. The rest is what `hosts/cxx`
-          # builds and links: CMake drives the C++ hosts, and libcurl is what
-          # the one host in it sends with.
+          # The Rust crates need only cargo. The rest is what
+          # `hosts/cxx-curl` builds and links: CMake drives the host, and
+          # libcurl is what it sends with.
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustc

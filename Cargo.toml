@@ -1,12 +1,15 @@
 # A virtual workspace. `crates/` holds what a consumer depends on; `hosts/`
 # holds programs that drive one of those crates with a real HTTP client.
 [workspace]
+# The workspace is virtual, so the resolver it wants is stated rather than
+# inferred from an edition.
+resolver = "3"
 members = ["crates/*", "checks/no-allocator", "hosts/ureq", "tests/azure-live"]
 default-members = ["crates/object-storage-proto"]
-# The C++ hosts need libcurl, Boost and OpenSSL, which `flake.nix` provides.
-# They are their own workspace so that a checkout without those libraries
-# still builds and tests everything else.
-exclude = ["hosts/cxx"]
+# `hosts/cxx-curl` is a CMake project, not a Cargo package: it needs libcurl,
+# which `flake.nix` provides, and a checkout without it still builds and tests
+# everything here. The C++ glue crate needs only a C++ compiler, so it is a
+# member like any other.
 
 [profile.no-allocator]
 inherits = "dev"
