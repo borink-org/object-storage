@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -30,6 +31,15 @@ namespace borink::host {
 
 // The name of the HTTP client that this host sends with.
 extern const std::string_view client;
+
+// The clock is the host's, not the bridge's: the bridge reads no clock and
+// takes the time as a number. <chrono> is what this costs, and it is paid
+// here rather than by everyone who includes `borink/object_storage.hpp`.
+inline std::uint64_t now_unix() {
+    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count());
+}
 
 // Where the bytes of an object go as they arrive.
 //

@@ -5,7 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Object storage operations with a sans-IO core and externally buffered API"
 repository = "https://github.com/borink-org/object-storage"
-readme = "README.md"
+readme = "../../README.md"
 
 [dependencies]
 percent-encoding = { version = "2.3", default-features = false }

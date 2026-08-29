@@ -9,8 +9,11 @@
 
 #pragma once
 
-#include <algorithm>
-#include <chrono>
+// `rust/cxx.h`, which the generated header below pulls in, already includes
+// <cstddef>, <cstdint>, <string_view> and <vector>; they are named here
+// because this file uses them, not because it adds them. <span> is the one
+// header it does add, and nothing here needs <chrono> or <algorithm>: the
+// clock belongs to the host, and the one clamp is written out.
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -63,13 +66,6 @@ struct Removal {
     DeleteShapeView shape() const { return DeleteShapeView{kind, condition}; }
 };
 
-// The application owns the clock, so it reads the current time itself.
-inline std::uint64_t now_unix() {
-    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count());
-}
-
 // Reads a key as the bytes that the bridge takes.
 inline rust::Slice<const std::uint8_t> as_bytes(std::string_view value) {
     return value.empty() ? rust::Slice<const std::uint8_t>()
@@ -119,7 +115,7 @@ std::string_view sentence(std::vector<std::uint8_t> &room, Describe describe) {
         length = describe(into(room));
     }
     return std::string_view(reinterpret_cast<const char *>(room.data()),
-                            std::min(length, room.size()));
+                            length < room.size() ? length : room.size());
 }
 
 // What an outcome says, in the words of the core crate.
