@@ -1,9 +1,9 @@
 //! Azure response interpretation fixtures.
 
 use borink_object_storage::{
-    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, FailureClass,
-    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseHead, ServiceErrorKind,
-    classify_error, layered,
+    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, Failure, FailureClass,
+    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
+    ServiceErrorKind, classify_error, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -105,37 +105,38 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
     );
 
     // Nothing in an unconditional plan explains either status.
-    assert!(matches!(
+    assert_eq!(
         accept(GetShape::default(), not_modified),
-        Err(Error::Protocol(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Status))
+    );
+    assert_eq!(
         accept(GetShape::default(), ResponseHead::new(412)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
 fn ranged_and_unranged_plans_must_be_answered_in_kind() {
     let bounded = ranged(RequestedRange::Bounded { start: 2, end: 6 });
-    assert!(matches!(
+    assert_eq!(
         accept(
             bounded,
             ResponseHead::from_headers(200, [("Content-Length", b"10".as_slice())]),
         ),
-        Err(Error::ResponseMismatch(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Range))
+    );
+    assert_eq!(
         accept(
             GetShape::default(),
             ResponseHead::from_headers(206, [("Content-Range", b"bytes 0-9/10".as_slice())]),
         ),
-        Err(Error::ResponseMismatch(_))
-    ));
-    assert!(matches!(
+        Err(Error::Response(ResponseFault::Range))
+    );
+    // A 206 that names no range leaves the head missing a value it needs.
+    assert_eq!(
         accept(bounded, ResponseHead::new(206)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Head))
+    );
 }
 
 #[test]
@@ -149,18 +150,16 @@ fn enforces_maximal_satisfaction_of_the_requested_range() {
     assert!(accept(ranged(RequestedRange::Offset(2)), head(b"bytes 2-9/10")).is_ok());
 
     for short in [b"bytes 2-4/10".as_slice(), b"bytes 3-5/10"] {
-        assert!(
-            matches!(
-                accept(bounded, head(short)),
-                Err(Error::ResponseMismatch(_))
-            ),
+        assert_eq!(
+            accept(bounded, head(short)),
+            Err(Error::Response(ResponseFault::Range)),
             "{short:?}"
         );
     }
-    assert!(matches!(
+    assert_eq!(
         accept(ranged(RequestedRange::Offset(2)), head(b"bytes 2-8/10")),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Range))
+    );
 }
 
 #[test]
@@ -174,18 +173,16 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
         // `bytes */N` answers a 416 and nothing else.
         b"bytes */10",
     ] {
-        assert!(
-            matches!(
-                accept(
-                    bounded,
-                    ResponseHead::from_headers(206, [("Content-Range", value)])
-                ),
-                Err(Error::Protocol(_))
+        assert_eq!(
+            accept(
+                bounded,
+                ResponseHead::from_headers(206, [("Content-Range", value)])
             ),
+            Err(Error::Response(ResponseFault::Head)),
             "{value:?}"
         );
     }
-    assert!(matches!(
+    assert_eq!(
         accept(
             bounded,
             ResponseHead::from_headers(
@@ -196,8 +193,8 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
                 ],
             ),
         ),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Head))
+    );
 }
 
 #[test]
@@ -266,13 +263,12 @@ fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
         assert!(
             matches!(
                 accept(GetShape::default(), head),
-                Ok(GetHeadOutcome::ServiceFailure {
+                Ok(GetHeadOutcome::ServiceFailure(Failure {
                     status: got_status,
                     class: got_class,
                     kind: got_kind,
                     request_id: Some(b"request-123"),
-                    ..
-                }) if got_status == status && got_class == class && got_kind == kind
+                })) if got_status == status && got_class == class && got_kind == kind
             ),
             "{status} {code:?}"
         );
@@ -343,12 +339,12 @@ fn a_head_without_a_code_asks_for_the_error_body() {
         assert!(
             matches!(
                 blobs.accept_get_head(GetShape::default(), head),
-                Ok(GetHeadOutcome::NeedErrorBody {
+                Ok(GetHeadOutcome::NeedErrorBody(Failure {
                     status: got_status,
                     class,
+                    kind: None,
                     request_id: Some(b"request-123"),
-                    ..
-                }) if got_status == status && class == expected
+                })) if got_status == status && class == expected
             ),
             "{status}"
         );
@@ -358,11 +354,13 @@ fn a_head_without_a_code_asks_for_the_error_body() {
 #[test]
 fn the_error_body_names_an_error_the_head_left_out() {
     let blobs = blobs();
-    let missing = blobs
-        .accept_get_head(GetShape::default(), ResponseHead::new(404))
-        .unwrap();
+    let missing = need_error_body(&blobs, 404);
     assert_eq!(
-        blobs.accept_error_body(missing, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        blobs.accept_error_body(
+            missing.status,
+            missing.request_id,
+            b"<Error><Code>ContainerNotFound</Code></Error>"
+        ),
         GetHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
@@ -370,34 +368,44 @@ fn the_error_body_names_an_error_the_head_left_out() {
 
     // A code that arrives in the body refines the category, as a code in the
     // header would have.
-    let refused = blobs
-        .accept_get_head(GetShape::default(), ResponseHead::new(400))
-        .unwrap();
+    let refused = need_error_body(&blobs, 400);
     assert!(matches!(
-        blobs.accept_error_body(refused, b"<Error><Code>ServerBusy</Code></Error>"),
-        GetHeadOutcome::ServiceFailure {
+        blobs.accept_error_body(
+            refused.status,
+            refused.request_id,
+            b"<Error><Code>ServerBusy</Code></Error>"
+        ),
+        GetHeadOutcome::ServiceFailure(Failure {
             class: FailureClass::Throttled,
             kind: Some(ServiceErrorKind::Throttled),
             ..
-        }
+        })
     ));
 
     // A host that could read no body still gets a final outcome, with the
     // error unnamed.
     assert_eq!(
-        blobs.accept_error_body(missing, b""),
+        blobs.accept_error_body(missing.status, missing.request_id, b""),
         GetHeadOutcome::NotFound { kind: None }
     );
 
-    // Every other outcome is already final.
-    let named = blobs
-        .accept_get_head(
+    // A head that named the error is final without a body read.
+    assert_eq!(
+        blobs.accept_get_head(
             GetShape::default(),
             ResponseHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
-        )
-        .unwrap();
-    assert_eq!(
-        blobs.accept_error_body(named, b"<Error><Code>ContainerNotFound</Code></Error>"),
-        named
+        ),
+        Ok(GetHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NotFound)
+        })
     );
+}
+
+// The failure of a head that asks for the error body, which the finisher takes
+// apart rather than the outcome itself.
+fn need_error_body<'h>(blobs: &Blobs<'_>, status: u16) -> Failure<'h> {
+    match blobs.accept_get_head(GetShape::default(), ResponseHead::new(status)) {
+        Ok(GetHeadOutcome::NeedErrorBody(failure)) => failure,
+        other => panic!("unexpected outcome: {other:?}"),
+    }
 }

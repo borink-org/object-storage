@@ -2,15 +2,77 @@ use core::str;
 
 use crate::Payload;
 
-/// A request that borrows its URL and header values from your buffer.
+/// The most headers that this crate writes into one request head.
+///
+/// `authorization`, `x-ms-date`, `x-ms-version`, `content-length`,
+/// `x-ms-blob-type` and one condition. [`WireRequest::headers`] returns at
+/// most this many.
+///
+/// This is not a limit on your request. Headers that you add yourself, such as
+/// one a proxy needs, go to your HTTP client and are not counted here.
+pub const MAX_HEADERS: usize = 6;
+
+/// A range of bytes, as an offset from the start of a buffer.
+///
+/// [`WireRequest::url_span`] and [`WireRequest::header_spans`] return these,
+/// for a host that addresses the request head by range instead of by slice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Span {
+    /// The offset of the first byte.
+    pub start: usize,
+    /// The number of bytes.
+    pub len: usize,
+}
+
+impl Span {
+    fn of(self, bytes: &str) -> &str {
+        &bytes[self.start..self.start + self.len]
+    }
+}
+
+/// The HTTP method of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum Method {
+    /// `GET`.
+    Get = 1,
+    /// `HEAD`.
+    Head = 2,
+    /// `PUT`.
+    Put = 3,
+    /// `DELETE`.
+    Delete = 4,
+}
+
+impl Method {
+    /// Returns the method as it is written on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+impl core::fmt::Display for Method {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A request that borrows its head from your buffer.
 ///
 /// Send this with the HTTP client of your choice. Read the method, the URL,
 /// the headers and the body, and give them to the client.
 ///
-/// The encoding methods copy every byte of the head into your buffer. The head
-/// therefore borrows nothing that you passed to them, and each of those
-/// arguments can be a temporary. The content is the one exception: it stays
-/// where you put it, and this request borrows it or leaves it to you.
+/// The encoding methods copy every byte of the head into your buffer,
+/// including each header name. The head therefore borrows nothing that you
+/// passed to them, and each of those arguments can be a temporary. The content
+/// is the one exception: it stays where you put it, and this request borrows
+/// it or leaves it to you.
 ///
 /// # Lifetime
 ///
@@ -19,48 +81,32 @@ use crate::Payload;
 /// The compiler enforces this order.
 #[derive(Debug, Clone, Copy)]
 pub struct WireRequest<'r> {
-    method: &'static str,
-    url: &'r str,
-    headers: [(&'static str, &'r str); MAX_HEADERS],
+    bytes: &'r str,
+    method: Method,
+    url: Span,
+    headers: [(Span, Span); MAX_HEADERS],
     header_count: usize,
     payload: Payload<'r>,
 }
 
-// authorization, x-ms-date, x-ms-version, x-ms-blob-type, content-length and
-// one condition: the longest head this crate writes.
-const MAX_HEADERS: usize = 6;
-
 impl<'r> WireRequest<'r> {
-    pub(crate) fn new(method: &'static str, url: &'r str, payload: Payload<'r>) -> Self {
-        Self {
-            method,
-            url,
-            headers: [("", ""); MAX_HEADERS],
-            header_count: 0,
-            payload,
-        }
-    }
-
-    pub(crate) fn push(&mut self, name: &'static str, value: &'r str) {
-        self.headers[self.header_count] = (name, value);
-        self.header_count += 1;
-    }
-
     /// Returns the HTTP method.
-    pub fn method(&self) -> &'static str {
+    pub fn method(&self) -> Method {
         self.method
     }
 
     /// Returns the complete object URL.
     pub fn url(&self) -> &'r str {
-        self.url
+        self.url.of(self.bytes)
     }
 
     /// Returns an iterator over the request headers.
     ///
     /// The order of the headers does not matter to Azure.
-    pub fn headers(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
-        self.headers[..self.header_count].iter().copied()
+    pub fn headers(&self) -> impl ExactSizeIterator<Item = (&'r str, &'r str)> {
+        let bytes = self.bytes;
+        self.header_spans()
+            .map(move |(name, value)| (name.of(bytes), value.of(bytes)))
     }
 
     /// Returns the content of the request.
@@ -70,6 +116,17 @@ impl<'r> WireRequest<'r> {
     /// must send, and carries no bytes.
     pub fn payload(&self) -> Payload<'r> {
         self.payload
+    }
+
+    /// Returns the URL as a range of the buffer that holds the head.
+    pub fn url_span(&self) -> Span {
+        self.url
+    }
+
+    /// Returns each header name and value as a range of that same buffer.
+    pub fn header_spans(&self) -> impl ExactSizeIterator<Item = (Span, Span)> {
+        let headers = self.headers;
+        (0..self.header_count).map(move |index| headers[index])
     }
 }
 
@@ -99,6 +156,62 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn finish(self) -> Option<&'a [u8]> {
         (self.position <= self.bytes.len()).then(|| &self.bytes[..self.position])
+    }
+}
+
+// The head as it is written: every byte of it goes into the caller's buffer,
+// and every part of it is recorded as a range of that buffer.
+pub(crate) struct HeadWriter<'a> {
+    out: Writer<'a>,
+    url: Span,
+    headers: [(Span, Span); MAX_HEADERS],
+    count: usize,
+}
+
+impl<'a> HeadWriter<'a> {
+    pub(crate) fn new(bytes: &'a mut [u8]) -> Self {
+        Self {
+            out: Writer::new(bytes),
+            url: Span::default(),
+            headers: [(Span::default(), Span::default()); MAX_HEADERS],
+            count: 0,
+        }
+    }
+
+    pub(crate) fn position(&self) -> usize {
+        self.out.position()
+    }
+
+    pub(crate) fn url(&mut self, write: impl FnOnce(&mut Writer<'a>)) {
+        self.url = self.part(write);
+    }
+
+    pub(crate) fn header(&mut self, name: &str, write: impl FnOnce(&mut Writer<'a>)) {
+        let name = self.part(|out| out.push(name.as_bytes()));
+        let value = self.part(write);
+        self.headers[self.count] = (name, value);
+        self.count += 1;
+    }
+
+    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
+        let (url, headers, header_count) = (self.url, self.headers, self.count);
+        Some(WireRequest {
+            bytes: text(self.out.finish()?),
+            method,
+            url,
+            headers,
+            header_count,
+            payload,
+        })
+    }
+
+    fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
+        let start = self.out.position();
+        write(&mut self.out);
+        Span {
+            start,
+            len: self.out.position() - start,
+        }
     }
 }
 

@@ -1,6 +1,10 @@
 [workspace]
 members = ["checks/no-allocator", "hosts/ureq", "tests/azure-live"]
 default-members = ["."]
+# The C++ hosts need libcurl, Boost and OpenSSL, which `flake.nix` provides.
+# They are their own workspace so that a checkout without those libraries
+# still builds and tests everything else.
+exclude = ["hosts/cxx"]
 
 [package]
 name = "borink-object-storage"

@@ -1,8 +1,9 @@
 //! Azure write encoding and response interpretation.
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, Error, FailureClass, InvalidPlan, ObjectMeta, Payload,
-    PhysicalPut, PutHeadOutcome, PutShape, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, Error, Failure, FailureClass, InvalidPlan, Method, ObjectMeta,
+    Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead, ServiceErrorKind,
+    Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -32,7 +33,7 @@ fn a_write_states_the_content_length_and_borrows_the_content() {
         .encode_put(&mut buf, &put, Payload::Slice(&content), &now())
         .unwrap();
 
-    assert_eq!(request.method(), "PUT");
+    assert_eq!(request.method(), Method::Put);
     assert_eq!(
         request.url(),
         "https://account.blob.core.windows.net/container/directory/object.txt"
@@ -204,16 +205,16 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
     );
 
     // Nothing in an unconditional write explains a 412.
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_put_head(PutShape::default(), ResponseHead::new(412)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 
     // A write answers 201, never another success status.
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_put_head(PutShape::default(), ResponseHead::new(200)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
@@ -223,13 +224,12 @@ fn a_lost_race_to_create_names_the_object_that_already_exists() {
     head.request_id = Some(b"request-123");
     assert!(matches!(
         blobs().accept_put_head(conditional(ConditionKind::IfNoneMatch), head),
-        Ok(PutHeadOutcome::ServiceFailure {
+        Ok(PutHeadOutcome::ServiceFailure(Failure {
             status: 409,
             class: FailureClass::Other,
             kind: Some(ServiceErrorKind::AlreadyExists),
             request_id: Some(b"request-123"),
-            ..
-        })
+        }))
     ));
 }
 
@@ -249,15 +249,22 @@ fn a_write_to_a_missing_container_reports_the_container() {
     let unnamed = blobs
         .accept_put_head(PutShape::default(), ResponseHead::new(404))
         .unwrap();
-    assert!(matches!(unnamed, PutHeadOutcome::NeedErrorBody { .. }));
+    let PutHeadOutcome::NeedErrorBody(failure) = unnamed else {
+        panic!("unexpected outcome: {unnamed:?}");
+    };
+    assert_eq!(failure.kind, None);
     assert_eq!(
-        blobs.accept_put_error_body(unnamed, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        blobs.accept_put_error_body(
+            failure.status,
+            failure.request_id,
+            b"<Error><Code>ContainerNotFound</Code></Error>"
+        ),
         PutHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
     );
     assert_eq!(
-        blobs.accept_put_error_body(unnamed, b""),
+        blobs.accept_put_error_body(failure.status, failure.request_id, b""),
         PutHeadOutcome::NotFound { kind: None }
     );
 }
@@ -268,16 +275,22 @@ fn a_refused_write_carries_the_category_and_the_request_id() {
     let mut head = ResponseHead::new(503);
     head.request_id = Some(b"request-123");
     let outcome = blobs.accept_put_head(PutShape::default(), head).unwrap();
-    assert!(matches!(
-        blobs.accept_put_error_body(outcome, b"<Error><Code>ServerBusy</Code></Error>"),
-        PutHeadOutcome::ServiceFailure {
+    let PutHeadOutcome::NeedErrorBody(failure) = outcome else {
+        panic!("unexpected outcome: {outcome:?}");
+    };
+    assert_eq!(
+        blobs.accept_put_error_body(
+            failure.status,
+            failure.request_id,
+            b"<Error><Code>ServerBusy</Code></Error>"
+        ),
+        PutHeadOutcome::ServiceFailure(Failure {
             status: 503,
             class: FailureClass::Throttled,
             kind: Some(ServiceErrorKind::Throttled),
             request_id: Some(b"request-123"),
-            ..
-        }
-    ));
+        })
+    );
 }
 
 #[test]

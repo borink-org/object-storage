@@ -1,8 +1,9 @@
 //! Azure removal encoding and response interpretation.
 
 use borink_object_storage::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
-    FailureClass, InvalidPlan, PhysicalDelete, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
+    FailureClass, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -31,7 +32,7 @@ fn a_removal_names_the_object_and_carries_no_content() {
     let mut buf = vec![0; layered::delete_requirements(&blobs, &delete, &now()).unwrap()];
     let request = blobs.encode_delete(&mut buf, &delete, &now()).unwrap();
 
-    assert_eq!(request.method(), "DELETE");
+    assert_eq!(request.method(), Method::Delete);
     assert_eq!(
         request.url(),
         "https://account.blob.core.windows.net/container/directory/object.txt"
@@ -106,10 +107,10 @@ fn an_accepted_removal_reports_no_metadata() {
     );
 
     // A removal answers 202, never another success status.
-    assert!(matches!(
+    assert_eq!(
         blobs().accept_delete_head(DeleteShape::default(), ResponseHead::new(200)),
-        Err(Error::Protocol(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
@@ -119,10 +120,10 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
         blobs.accept_delete_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
         Ok(DeleteHeadOutcome::PreconditionFailed)
     );
-    assert!(matches!(
+    assert_eq!(
         blobs.accept_delete_head(DeleteShape::default(), ResponseHead::new(412)),
-        Err(Error::ResponseMismatch(_))
-    ));
+        Err(Error::Response(ResponseFault::Status))
+    );
 }
 
 #[test]
@@ -141,9 +142,15 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
     let unnamed = blobs
         .accept_delete_head(DeleteShape::default(), ResponseHead::new(404))
         .unwrap();
-    assert!(matches!(unnamed, DeleteHeadOutcome::NeedErrorBody { .. }));
+    let DeleteHeadOutcome::NeedErrorBody(failure) = unnamed else {
+        panic!("unexpected outcome: {unnamed:?}");
+    };
     assert_eq!(
-        blobs.accept_delete_error_body(unnamed, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        blobs.accept_delete_error_body(
+            failure.status,
+            failure.request_id,
+            b"<Error><Code>ContainerNotFound</Code></Error>"
+        ),
         DeleteHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
@@ -171,15 +178,17 @@ fn a_removal_says_what_it_takes_with_it() {
         assert_eq!(sent, expected, "{kind:?}");
     }
 
-    // The header is a constant, so naming the snapshots costs no buffer.
+    // The header is written into the caller's buffer with the rest of the
+    // head, so naming the snapshots costs exactly its own bytes.
     let plain = PhysicalDelete::new("object.bin");
     let widened = PhysicalDelete {
         kind: DeleteKind::ObjectAndSnapshots,
         ..plain
     };
     assert_eq!(
-        layered::delete_requirements(&blobs, &plain, &now()).unwrap(),
         layered::delete_requirements(&blobs, &widened, &now()).unwrap()
+            - layered::delete_requirements(&blobs, &plain, &now()).unwrap(),
+        "x-ms-delete-snapshots".len() + "include".len()
     );
 }
 
@@ -194,13 +203,12 @@ fn an_object_with_snapshots_is_refused_rather_than_widened() {
     head.request_id = Some(b"request-123");
     assert!(matches!(
         blobs().accept_delete_head(DeleteShape::default(), head),
-        Ok(DeleteHeadOutcome::ServiceFailure {
+        Ok(DeleteHeadOutcome::ServiceFailure(Failure {
             status: 409,
             class: FailureClass::Other,
             kind: None,
             request_id: Some(b"request-123"),
-            ..
-        })
+        }))
     ));
 }
 
