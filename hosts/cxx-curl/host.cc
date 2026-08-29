@@ -1,6 +1,6 @@
 // The parts of a client that do not depend on the HTTP client it sends with.
 
-#include "borink/host.h"
+#include "host.h"
 
 #include <stdexcept>
 #include <string>
@@ -17,13 +17,7 @@ Client Client::open(std::string_view endpoint, std::string_view container, std::
         // The core crate names the value that cannot be used. This host writes
         // no second table of its own.
         std::vector<std::uint8_t> message(128);
-        std::size_t length = describe_status(status, into(message));
-        if (length > message.size()) {
-            message.resize(length);
-            length = describe_status(status, into(message));
-        }
-        throw std::runtime_error(
-            std::string(reinterpret_cast<const char *>(message.data()), length));
+        throw std::runtime_error(std::string(describe_into(message, status)));
     }
     return Client(std::move(session), limits);
 }

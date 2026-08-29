@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, Container, GetHeadOutcome, PhysicalGet, ResponseHead, Timestamps,
 };
 

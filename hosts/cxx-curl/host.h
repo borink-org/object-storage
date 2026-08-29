@@ -1,8 +1,10 @@
-// What a host does, and the memory that one client gives it.
+// What this host does, and the memory that one client gives it.
 //
-// A host in this directory sends requests with one HTTP client. A program
-// links exactly one of them, so `main.cc` is the same program whichever client
-// carries its requests.
+// This is a host: it sends the requests that `borink::object_storage` builds,
+// with one HTTP client, and it is a consumer's code rather than the library's.
+// Everything here is shaped by libcurl. A program written against another HTTP
+// library writes its own `Client` over the same bridge, and includes
+// `borink/object_storage.hpp` alone.
 //
 // The bridge allocates nothing per request and throws nothing. This host
 // keeps every buffer on the `Client` that the application built, and reuses it
@@ -13,7 +15,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,12 +25,21 @@
 #include <string_view>
 #include <vector>
 
-#include "borink-azure-cxx/src/lib.rs.h"
+#include "borink/object_storage.hpp"
 
 namespace borink::host {
 
 // The name of the HTTP client that this host sends with.
 extern const std::string_view client;
+
+// The clock is the host's, not the bridge's: the bridge reads no clock and
+// takes the time as a number. <chrono> is what this costs, and it is paid
+// here rather than by everyone who includes `borink/object_storage.hpp`.
+inline std::uint64_t now_unix() {
+    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count());
+}
 
 // Where the bytes of an object go as they arrive.
 //
@@ -52,90 +62,6 @@ struct Limits {
     // rather than served, exactly as an oversized request head is.
     std::size_t head_bytes = 8 * 1024;
 };
-
-// Every byte of the object.
-inline RangeView whole() { return RangeView{RangeFormView::Whole, 0, 0}; }
-
-// The half-open interval `start..end`.
-inline RangeView bounded(std::uint64_t start, std::uint64_t end) {
-    return RangeView{RangeFormView::Bounded, start, end};
-}
-
-// Every byte from `start` to the end of the object.
-inline RangeView from(std::uint64_t start) { return RangeView{RangeFormView::Offset, start, 0}; }
-
-// One read, and everything that decides what it asks for.
-struct Read {
-    // Whether the read asks for bytes or for metadata.
-    GetKindView kind = GetKindView::Bytes;
-    // The byte range that the read requests.
-    RangeView range = whole();
-    // The precondition that the read carries.
-    ConditionView condition = ConditionView::None;
-    // The entity tag that the precondition compares against.
-    std::string_view condition_value;
-
-    GetShapeView shape() const { return GetShapeView{kind, range, condition}; }
-};
-
-// One write, and the precondition that it carries.
-struct Write {
-    ConditionView condition = ConditionView::None;
-    std::string_view condition_value;
-
-    PutShapeView shape() const { return PutShapeView{condition}; }
-};
-
-// One removal, what it takes with it, and the precondition that it carries.
-struct Removal {
-    DeleteKindView kind = DeleteKindView::Object;
-    ConditionView condition = ConditionView::None;
-    std::string_view condition_value;
-
-    DeleteShapeView shape() const { return DeleteShapeView{kind, condition}; }
-};
-
-// The application owns the clock, so it reads the current time itself.
-inline std::uint64_t now_unix() {
-    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(since_epoch).count());
-}
-
-// Reads a key as the bytes that the bridge takes.
-inline rust::Slice<const std::uint8_t> as_bytes(std::string_view value) {
-    return value.empty() ? rust::Slice<const std::uint8_t>()
-                         : rust::Slice<const std::uint8_t>(
-                               reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
-}
-
-// A buffer that the bridge writes into, safe to hand over when it is empty.
-inline rust::Slice<std::uint8_t> into(std::vector<std::uint8_t> &bytes) {
-    return bytes.empty() ? rust::Slice<std::uint8_t>()
-                         : rust::Slice<std::uint8_t>(bytes.data(), bytes.size());
-}
-
-// A slice that is safe to hand to the bridge when the range is empty.
-template <typename T> rust::Slice<const T> borrow(std::span<const T> items) {
-    return items.empty() ? rust::Slice<const T>() : rust::Slice<const T>(items.data(), items.size());
-}
-
-// The bytes of a value that the response head may not have carried.
-//
-// The span points into the head that this client collected, and is valid
-// until the next request restarts it. Copy what you keep.
-inline std::span<const std::uint8_t> bytes_of(const MaybeBytes &value) {
-    if (!value.present) {
-        return {};
-    }
-    return std::span<const std::uint8_t>(value.bytes.data(), value.bytes.size());
-}
-
-// The same bytes as text, for a value that is one.
-inline std::string_view text_of(const MaybeBytes &value) {
-    const std::span<const std::uint8_t> bytes = bytes_of(value);
-    return std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size());
-}
 
 // Where this host keeps the response head, and one `HeaderRef` per header.
 //
@@ -273,9 +199,7 @@ class Client {
             request_head_ = encode();
         }
         if (request_head_.status.code != 0) {
-            throw std::runtime_error(std::string(sentence([&](rust::Slice<std::uint8_t> room) {
-                return describe_status(request_head_.status, room);
-            })));
+            throw std::runtime_error(std::string(describe_into(message_, request_head_.status)));
         }
         return request_head_;
     }
@@ -287,18 +211,6 @@ class Client {
         return borrow(std::span<const std::uint8_t>(diagnostic_));
     }
 
-    // Writes what the bridge says into this client's message buffer. This is
-    // the one place that a failing request allocates.
-    template <typename Describe> std::string_view sentence(Describe describe) {
-        std::size_t length = describe(into(message_));
-        if (length > message_.size()) {
-            message_.resize(length);
-            length = describe(into(message_));
-        }
-        return std::string_view(reinterpret_cast<const char *>(message_.data()),
-                                std::min(length, message_.size()));
-    }
-
     // Refuses a head that did not fit the arena, before it is read in part.
     void checked_head() const {
         if (head_.overflowed()) {
@@ -308,9 +220,10 @@ class Client {
 
     // Reports an outcome that carries no object, in the words of the core
     // crate.
+    // `message_` is this client's room for such a sentence, and writing it is
+    // the one place that a failing request allocates.
     [[noreturn]] void fail(std::string_view what) {
-        const std::string_view said = sentence(
-            [&](rust::Slice<std::uint8_t> room) { return borink::describe(outcome_, room); });
+        const std::string_view said = describe_into(message_, outcome_);
         throw std::runtime_error(std::string(what) + ": " + std::string(said));
     }
 

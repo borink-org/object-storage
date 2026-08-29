@@ -5,5 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-borink-object-storage = { path = "../.." }
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
 ureq = { version = "3.1", default-features = false, features = ["rustls"] }

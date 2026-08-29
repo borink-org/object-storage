@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, DeleteHeadOutcome, GetHeadOutcome, Payload, PhysicalDelete, PhysicalGet, PhysicalPut,
     PutHeadOutcome, ResponseHead, Timestamps, layered,
 };

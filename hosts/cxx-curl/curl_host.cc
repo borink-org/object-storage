@@ -5,7 +5,7 @@
 // what the head means when the first body byte arrives, and passes on, caps or
 // drops what follows from the answer.
 
-#include "borink/host.h"
+#include "host.h"
 
 #include <algorithm>
 #include <cstring>

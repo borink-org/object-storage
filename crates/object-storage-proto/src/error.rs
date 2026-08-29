@@ -116,11 +116,11 @@ impl fmt::Display for InvalidPlan {
 /// fault here is decided from those two.
 ///
 /// ```
-/// use borink_object_storage::{
+/// use borink_object_storage_proto::{
 ///     Blobs, Container, Error, GetShape, RequestedRange, ResponseFault, ResponseHead,
 /// };
 ///
-/// # fn main() -> borink_object_storage::Result<()> {
+/// # fn main() -> borink_object_storage_proto::Result<()> {
 /// let blobs = Blobs::new(Container::new("https://account.blob.core.windows.net", "c")?, "t")?;
 /// let shape = GetShape {
 ///     range: RequestedRange::Bounded { start: 2, end: 6 },

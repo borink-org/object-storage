@@ -1,7 +1,7 @@
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, GetHeadOutcome,
     GetKind, GetShape, Method, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
     PutShape, RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,

@@ -110,7 +110,7 @@
 
 use std::fmt::{self, Write as _};
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, BodyWindow, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     ErrorCode, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ObjectMeta,
     Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RangeForm,
@@ -129,7 +129,7 @@ use ffi::{
 /// This is the core crate's own bound, and the twin's array has exactly this
 /// many slots. A header added to the core crate is therefore a compile error
 /// here, not a header that this bridge drops.
-const MAX_HEADERS: usize = borink_object_storage::MAX_HEADERS;
+const MAX_HEADERS: usize = borink_object_storage_proto::MAX_HEADERS;
 
 /// One container, and the token that opens it.
 ///
@@ -689,7 +689,7 @@ mod ffi {
 // pinned to each other. A value renumbered on either side stops this build,
 // which is what makes each conversion a cast rather than a table.
 const _: () = {
-    use borink_object_storage as core;
+    use borink_object_storage_proto as core;
 
     assert!(MAX_HEADERS == 6);
 
@@ -1026,7 +1026,7 @@ fn empty_headers() -> [RequestHeader; MAX_HEADERS] {
     })
 }
 
-fn span(span: borink_object_storage::Span) -> Span {
+fn span(span: borink_object_storage_proto::Span) -> Span {
     Span {
         start: span.start,
         len: span.len,
@@ -1393,7 +1393,7 @@ impl fmt::Write for Sentence<'_> {
 mod tests {
     use super::*;
     use crate::ffi::RangeView;
-    use borink_object_storage::ResponseFault;
+    use borink_object_storage_proto::ResponseFault;
 
     // Two buffers, so that nothing here depends on one contiguous head.
     const VALUES: &[u8] = b"\"etag\"Wed, 26 Aug 2026 12:00:00 GMTversion-1gzip";

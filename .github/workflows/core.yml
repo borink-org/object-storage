@@ -39,6 +39,9 @@ jobs:
       - name: Link without a global allocator
         run: cargo build --locked --profile no-allocator --no-default-features --features link-check --manifest-path checks/no-allocator/Cargo.toml
 
+  # The binding itself is a workspace member, so the jobs above already
+  # format, lint, document and test it. This one builds the C++ host that
+  # links it, which is the only thing here that needs libcurl.
   cxx-host:
     runs-on: ubuntu-latest
     steps:
@@ -46,18 +49,10 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       # The development shell pins the compiler, CMake and libcurl that the
       # C++ host is built and tested against.
-      - name: Check the bridge
-        run: |
-          nix develop --command bash -c '
-            cd hosts/cxx
-            cargo fmt -- --check
-            cargo clippy --locked --all-targets -- -D warnings
-            RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-          '
       - name: Test the host
         run: |
           nix develop --command bash -c '
-            cmake -S hosts/cxx -B hosts/cxx/build -DCMAKE_BUILD_TYPE=Debug
-            cmake --build hosts/cxx/build
-            ctest --test-dir hosts/cxx/build --output-on-failure
+            cmake -S hosts/cxx-curl -B hosts/cxx-curl/build -DCMAKE_BUILD_TYPE=Debug
+            cmake --build hosts/cxx-curl/build
+            ctest --test-dir hosts/cxx-curl/build --output-on-failure
           '

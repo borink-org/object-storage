@@ -1,6 +1,6 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
-use borink_object_storage::{
+use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteKind, GetKind, MAX_HEADERS, Payload, PhysicalDelete,
     PhysicalGet, PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
 };

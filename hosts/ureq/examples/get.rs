@@ -3,7 +3,7 @@
 use std::env;
 use std::io::Write;
 
-use borink_object_storage::{Blobs, Container};
+use borink_object_storage_proto::{Blobs, Container};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = env::var("AZURE_STORAGE_ENDPOINT")?;
