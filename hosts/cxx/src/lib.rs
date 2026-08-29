@@ -1,60 +1,36 @@
-//! The bridge that lets a C++ application drive `borink-object-storage`.
+//! Azure Blob Storage for a C++ application that owns its memory and its I/O.
 //!
-//! The bridge plans a request, writes the request head into a buffer that C++
-//! owns, and reads the response head that C++ collected. It opens no socket,
-//! reads no clock, and keeps nothing between calls.
+//! This crate builds HTTP request heads and reads HTTP response heads. It
+//! never opens a socket, never reads the clock, and allocates only when you
+//! open a session. C++ supplies the buffer, the current time and the HTTP
+//! client.
 //!
-//! No call returns `Result`, so no call throws. Each call reports what
-//! happened in a field of the value that it returns.
+//! # How a read works
 //!
-//! # What it costs
+//! A read has four steps.
 //!
-//! `open_session` allocates four times: once each for the endpoint, the
-//! container and the token, and once for the session itself. No other call
-//! allocates.
+//! 1. Call `open_session` once for one container, and keep the `Session`.
+//! 2. Describe the read as a `GetShapeView`, and keep it while the request is
+//!    in flight. It holds no pointer, so it outlives the key and ETag bytes.
+//! 3. Call `encode_get` to write the request head into your buffer. It
+//!    returns a `RequestHead`, which names the URL and each header by offset
+//!    and length into that buffer. Send them with your HTTP client.
+//! 4. Name each response header with a `HeaderRef` and call
+//!    `accept_get_head` with the same `GetShapeView`. It returns an `Outcome`
+//!    whose `disposition` tells you what to do with the body.
 //!
-//! This crate builds as a static archive, which carries the Rust standard
-//! library with it. An archive supplies its own allocator, panic handler and
-//! unwinder, and on a stable toolchain only `std` has all three. `cxx` is
-//! itself `no_std` and the core crate is too, so a freestanding target needs
-//! its own glue crate rather than a different bridge. It would still need a
-//! heap for the three strings that a session holds.
+//! Pass the same shape to steps 3 and 4. The second call checks the response
+//! against the plan, so you never restate what the shape already holds.
 //!
-//! # Offsets out, slices in
+//! A write has the same four steps, with `PutShapeView`, `encode_put` and
+//! `accept_put_head`. A removal has them with `DeleteShapeView`,
+//! `encode_delete` and `accept_delete_head`.
 //!
-//! `encode_get` writes the head into your buffer and returns a `RequestHead`,
-//! which names the URL and each header by offset and length. You resize and
-//! reuse that buffer, so an offset keeps its meaning where a pointer would
-//! not. Call `encode_get` with an empty buffer to learn the size: it reports
-//! `ErrorCode::Capacity` and the exact number of bytes.
+//! An `Outcome` whose disposition is `NeedErrorBody` is not final. Azure named
+//! no error in the head, so read a bounded error body and pass it, with the
+//! `failure` of that outcome, to `finish_get_error_body`.
 //!
-//! A response head crosses the other way. You name each header with a
-//! `HeaderRef` that points at bytes you already hold, and the `Outcome` points
-//! at the same bytes. Nothing is copied, and no layout is required of you.
-//!
-//! Each borrowed field states under its own `# Lifetime` how long it is valid.
-//! Those sentences are the contract.
-//!
-//! The six reading calls are `unsafe fn` below because `cxx` refuses an
-//! `extern "Rust"` signature that names a lifetime unless it is. Their bodies
-//! are safe, and this crate contains no `unsafe` block.
-//!
-//! # How a value crosses
-//!
-//! A failure crosses as a `Status`: the error code the core crate defines, and
-//! the discriminant of the value inside it. `describe_status` writes the
-//! sentence for one. A response that the service sends in normal operation is
-//! not a failure. It is a `Disposition` on the `Outcome`.
-//!
-//! The set is deliberately small. A `Status` names the part of the exchange
-//! that was wrong, never the value. You passed the headers and the shape in.
-//! Read those when your program needs the value itself.
-//!
-//! Every other enum crosses as the number the core crate gives it, in both
-//! directions. A number that this bridge does not define is refused as
-//! `ErrorCode::InvalidPlan`.
-//!
-//! # Examples
+//! # Example
 //!
 //! ```cpp
 //! rust::Box<borink::Session> session = borink::open_session(endpoint, container, token);
@@ -73,6 +49,64 @@
 //!     // ... read the body ...
 //! }
 //! ```
+//!
+//! # Sizing the buffer
+//!
+//! `encode_get` refuses a buffer that is too small. It reports
+//! `ErrorCode::Capacity` in `status`, and the number of bytes it needs in
+//! `required`. Call it with an empty buffer to learn that number, then size
+//! one buffer per session and reuse it.
+//!
+//! # Where each value lives
+//!
+//! The request head is in your buffer, so `RequestHead` names its parts by
+//! offset rather than by pointer. Resizing the buffer moves the bytes; the
+//! offsets still address them.
+//!
+//! The response head stays wherever your HTTP library put it. A `HeaderRef`
+//! points at those bytes, and every borrowed field of the `Outcome` points
+//! into the same bytes. This crate copies no part of a head, and requires no
+//! particular layout of one.
+//!
+//! Each borrowed field states under its own `# Lifetime` when it stops being
+//! valid. The six reading calls are `unsafe fn` because `cxx` rejects an
+//! `extern "Rust"` signature that names a lifetime unless it is. Their bodies
+//! are safe, and this crate contains no `unsafe` block.
+//!
+//! # Reading a failure
+//!
+//! No call returns `Result`, so no call throws. `Session::status`,
+//! `RequestHead::status` and `Outcome::error` each carry a `Status` instead.
+//!
+//! A `Status` is two numbers. `code` is an `ErrorCode`, and `detail` is the
+//! discriminant of the value inside it. Both are the core crate's own, and
+//! `describe_status` writes the sentence for a pair.
+//!
+//! A `Status` names the part of the exchange that was wrong, not the value
+//! that was wrong. You passed the headers and the shape in, so read those to
+//! find the value.
+//!
+//! A response that Azure sends in normal operation is not a failure. A missing
+//! object, a failed condition and a throttle each arrive as a `Disposition` on
+//! the `Outcome`.
+//!
+//! Every other enum crosses as the number the core crate gives it, in both
+//! directions. A number that this bridge does not define is refused as
+//! `ErrorCode::InvalidPlan`, not read as another value.
+//!
+//! # What it costs
+//!
+//! `open_session` allocates four times: once each for the endpoint, the
+//! container and the token, and once for the session itself. No other call
+//! allocates.
+//!
+//! This crate builds as a static archive, which carries the Rust standard
+//! library with it. An archive supplies its own allocator, panic handler and
+//! unwinder, and on a stable toolchain only `std` has all three. `cxx` is
+//! itself `no_std` and the core crate is too, so a freestanding target needs
+//! its own glue crate rather than a different bridge. It would still need a
+//! heap for the three strings that a session holds.
+//!
 
 use std::fmt::{self, Write as _};
 
