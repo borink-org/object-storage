@@ -1,0 +1,27 @@
+[package]
+name = "borink-object-storage-c"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The staticlib is what C and C++ link; the rlib is what another Rust crate
+# depends on. `cargo build` writes both into the workspace's `target/`.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = ["std"]
+# Links the Rust standard library, for the panic handler and the unwinder that
+# a static archive carries on a hosted target. The crate itself is `no_std`
+# and uses nothing from it. Turn it off for a freestanding target, which gets
+# the panic handler in `src/panic.rs` instead.
+std = []
+
+[dependencies]
+borink-object-storage-proto = { path = "../object-storage-proto" }
+
+[build-dependencies]
+cbindgen = "0.29"
+
+[lints.rust]
+missing_docs = "deny"
