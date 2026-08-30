@@ -1,48 +1,21 @@
 // The C header on a board with no C standard library at all.
 //
 // This program is never run. It is compiled for a Cortex-M7 with only the
-// headers the compiler itself provides, and linked with `-nostdlib`, so
-// nothing but the compiler's own intrinsics is available: no newlib, no heap.
-// A header that named a hosted-only header would fail to compile here, and an
-// archive that called an allocator would fail to link. See
-// `freestanding.sh`, which is what compiles and links it.
+// headers the compiler itself provides, and linked with `-nostdlib`, so no
+// newlib and no heap are available. A header that named a hosted-only header
+// would fail to compile here, and an archive that called an allocator would
+// fail to link. See `freestanding.sh`, which is what compiles and links it.
 //
-// The three memory functions below are the only ones the archive asks for. A
-// real board writes them or takes them from its libc; this file writes them so
-// the link has nothing else in it.
+// This file defines no `memcpy`, `memset` or `memcmp`. The archive carries
+// weak definitions of those, of `memmove` and `bcmp`, and of the `__aeabi_mem*`
+// wrappers that the ARM C library ABI calls for, so a board supplies none of
+// them. Defining them here would override the weak ones and stop this program
+// from checking that they are there.
 
 #include "borink/object_storage.h"
 
 // Where each result goes, so that nothing here is optimized away.
 static volatile unsigned sink;
-
-void *memcpy(void *to, const void *from, size_t count) {
-    unsigned char *target = to;
-    const unsigned char *source = from;
-    while (count--) {
-        *target++ = *source++;
-    }
-    return to;
-}
-
-void *memset(void *to, int byte, size_t count) {
-    unsigned char *target = to;
-    while (count--) {
-        *target++ = (unsigned char)byte;
-    }
-    return to;
-}
-
-int memcmp(const void *left, const void *right, size_t count) {
-    const unsigned char *one = left;
-    const unsigned char *other = right;
-    for (; count--; one++, other++) {
-        if (*one != *other) {
-            return *one < *other ? -1 : 1;
-        }
-    }
-    return 0;
-}
 
 static size_t length(const char *text) {
     size_t count = 0;

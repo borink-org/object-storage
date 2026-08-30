@@ -14,6 +14,9 @@
 #   2. Nothing in the archive calls an allocator. `-nostdlib` leaves out
 #      newlib, so no malloc exists to link against; the image is then checked
 #      for an undefined symbol and for an allocator that reached it anyway.
+#      The archive answers for its own `memcpy`, `memset`, `memcmp`, `memmove`
+#      and `bcmp` and for the `__aeabi_mem*` wrappers, all weakly, so the
+#      program supplies none of them and a board would not have to either.
 #
 #     cargo build --locked -p borink-object-storage-c --no-default-features \
 #         --target thumbv7em-none-eabihf
@@ -37,6 +40,8 @@ arm-none-eabi-gcc -std=c11 -ffreestanding -nostdinc -isystem "$freestanding" \
     -I "$here/../include" -c "$here/freestanding.c" -o "$work/freestanding.o"
 
 # libgcc is the compiler's own arithmetic, not a library the board must have.
+# This archive turns out to carry its own, so the link succeeds without it too;
+# it stays on the line because that is what a board's own build does.
 arm-none-eabi-gcc -nostdlib -nostartfiles -Wl,-e,board_main -Wl,-Ttext=0x08000000 \
     -Wl,-z,noexecstack -Wl,--no-warn-execstack "${core[@]}" \
     "$work/freestanding.o" "$archive" -lgcc -o "$work/freestanding.elf"
