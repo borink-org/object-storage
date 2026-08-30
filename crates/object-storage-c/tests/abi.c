@@ -1,9 +1,8 @@
 // What a C program sees of this crate, checked against what Rust compiled.
 //
-// This test opens no socket. It checks three things: that the C compiler lays
-// every struct out as the Rust declarations promise, that one request head is
-// written into a stack buffer, and that one response head is read from headers
-// in two separate buffers.
+// This test opens no socket. It checks every struct's layout as the C compiler
+// computes it, one request head written into a stack buffer, and one response
+// head read from headers in two separate buffers.
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -1,16 +1,14 @@
 // The C header on a board with no C standard library at all.
 //
-// This program is never run. It is compiled for a Cortex-M7 with only the
-// headers the compiler itself provides, and linked with `-nostdlib`, so no
-// newlib and no heap are available. A header that named a hosted-only header
-// would fail to compile here, and an archive that called an allocator would
-// fail to link. See `freestanding.sh`, which is what compiles and links it.
+// This program is never run. It is compiled for a Cortex-M7 against the
+// compiler's own headers, and linked with `-nostdlib`. A hosted-only include
+// then fails to compile, and an archive that called an allocator fails to
+// link. `freestanding.sh` compiles and links it.
 //
-// This file defines no `memcpy`, `memset` or `memcmp`. The archive carries
-// weak definitions of those, of `memmove` and `bcmp`, and of the `__aeabi_mem*`
-// wrappers that the ARM C library ABI calls for, so a board supplies none of
-// them. Defining them here would override the weak ones and stop this program
-// from checking that they are there.
+// Define no `memcpy`, `memset` or `memcmp` here. The archive carries weak
+// definitions of those and of the `__aeabi_mem*` wrappers. A definition here
+// would override them and stop this program from checking that they are
+// there.
 
 #include "borink/object_storage.h"
 

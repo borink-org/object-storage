@@ -25,9 +25,8 @@ std = []
 borink-object-storage-proto = { path = "../object-storage-proto" }
 
 # There is no build script. `include/borink/object_storage.h` is committed, and
-# `generate-header.sh` rewrites it with the cbindgen that `flake.nix` pins. A
-# build that generated it would write outside OUT_DIR, and every consumer would
-# vendor and compile cbindgen to reproduce a file they already have.
+# `generate-header.sh` rewrites it with the cbindgen that `flake.nix` pins.
+# docs/PACKAGING.md says why.
 
 # What `cargo cbuild` and `cargo cinstall` write. They are the only producer of
 # the C artifacts; docs/PACKAGING.md says why, and explains each setting below.

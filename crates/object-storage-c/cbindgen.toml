@@ -5,14 +5,10 @@ language = "C"
 # `usize` is `size_t`, which is what a C program spells it.
 usize_is_size_t = true
 # The three headers this one uses, rather than cbindgen's default list. All
-# three are freestanding, so a board supplies them without a libc; the default
-# list also names <stdarg.h>, which nothing here is variadic enough to need,
-# and <stdlib.h>, which is hosted and declares the allocator this crate does
-# not call.
+# three are freestanding; see docs/PACKAGING.md.
 no_includes = true
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
-# The same header serves a C++ program, which includes it through
-# `borink/object_storage.hpp`.
+# The same header serves a C++ program.
 cpp_compat = true
 include_guard = "BORINK_OBJECT_STORAGE_H"
 tab_width = 4

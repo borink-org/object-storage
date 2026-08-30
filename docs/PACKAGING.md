@@ -51,15 +51,58 @@ them would not link. cargo-c does this on purpose; see `only_staticlib` in its
 cargo-c's default points into the subdirectory, which would only answer
 `#include <object_storage.h>`; `strip_include_path_components = 1` corrects it.
 
-## Two things the header does not do
+## Why the header is committed
 
-The header is committed, and `generate-header.sh` writes it. `generation =
-false` stops cargo-c from writing its own. Its cbindgen run adds
-`*_MAJOR/_MINOR/_PATCH` macros and drops the C23 enum typedefs ours carries.
-CI compares the installed header against the committed one byte for byte.
+`include/borink/object_storage.h` is generated from `src/lib.rs`, and checked
+in. `generate-header.sh` rewrites it and CI fails on a diff.
+
+It is not written by a build script. A build script that generated it would
+write outside `OUT_DIR`, which the Cargo Book forbids. Every consumer would
+also vendor and compile cbindgen's 31 crates to reproduce a file they already
+have. cbindgen is therefore a tool the development shell pins, not a
+dependency of the crate.
+
+cargo-c can generate a header too, and `generation = false` stops it. Its
+cbindgen run adds `*_MAJOR/_MINOR/_PATCH` macros and drops the C23 enum
+typedefs ours carries. CI compares the installed header against the committed
+one byte for byte.
+
+`cbindgen.toml` names three system headers — `<stdbool.h>`, `<stddef.h>`,
+`<stdint.h>` — rather than taking cbindgen's default list. All three are
+freestanding, so a board supplies them without a libc. The default list also
+names `<stdlib.h>`, which is hosted and declares an allocator this crate never
+calls.
 
 The library is a static archive only, so `versioning = false`. There is no
 soname, and nothing to promise about ABI stability yet.
+
+## What the bare-metal check proves
+
+`tests/freestanding.sh` compiles `tests/freestanding.c` for a Cortex-M7 and
+links it against the archive. The program is never run. Three things only a
+bare-metal link can establish:
+
+**The header names no hosted header.** `-nostdinc` with the compiler's own
+include directory is the whole C library a conforming freestanding
+implementation must provide. Naming `<stdlib.h>` is then a compile error.
+`-ffreestanding` alone is not enough: newlib's headers stay on the include path.
+
+**Nothing calls an allocator.** `-nostdlib` leaves out newlib, so no `malloc`
+exists to link against. The image is then checked for undefined symbols and for
+an allocator that reached it anyway.
+
+**The image is the size a board would flash.** `-ffunction-sections`,
+`-fdata-sections` and `--gc-sections` are what an embedded build uses. Without
+them the linker keeps every object in the archive: 256 KB rather than 51 KB.
+
+The archive carries weak definitions of `memcpy`, `memset`, `memcmp`,
+`memmove`, `bcmp` and the `__aeabi_mem*` wrappers. A board supplies none of
+them. `freestanding.c` must not define them either, or it would override the
+weak ones and stop testing that they are there.
+
+`-lgcc` stays on the link line although this archive turns out not to need it.
+It is the compiler's own arithmetic, not a library a board must have, and a
+board's own build passes it.
 
 ## Where the toolchains split
 

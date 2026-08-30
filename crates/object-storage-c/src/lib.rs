@@ -781,9 +781,8 @@ pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize 
         .count()
 }
 
-// Every enum above crosses as a number, and this is where the two lists are
-// pinned to each other. A value renumbered on either side stops this build,
-// which is what makes each conversion a cast rather than a table.
+// Every enum above crosses as a number. These pin the two lists to each other:
+// a value renumbered on either side stops this build.
 const _: () = {
     assert!(BORINK_MAX_HEADERS == proto::MAX_HEADERS);
 
@@ -1225,8 +1224,8 @@ unsafe fn usable<'a>(session: *const Session) -> Result<Blobs<'a>, Status> {
             slice(session.token),
         )
     };
-    // A value that is not text cannot be the thing it names, so it fails as
-    // that thing rather than as a fourth kind of fault.
+    // A value that is not text cannot be the thing it names. It fails as that
+    // thing, not as a fourth kind of fault.
     let (Ok(endpoint), Ok(container), Ok(token)) = (
         core::str::from_utf8(endpoint),
         core::str::from_utf8(container),
