@@ -20,8 +20,10 @@ std = []
 [dependencies]
 borink-object-storage-proto = { path = "../object-storage-proto" }
 
-[build-dependencies]
-cbindgen = "0.29"
+# There is no build script. `include/borink/object_storage.h` is committed, and
+# `generate-header.sh` rewrites it with the cbindgen that `flake.nix` pins. A
+# build that generated it would write outside OUT_DIR, and every consumer would
+# vendor and compile cbindgen to reproduce a file they already have.
 
 [lints.rust]
 missing_docs = "deny"

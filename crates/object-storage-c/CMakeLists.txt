@@ -1,7 +1,7 @@
 # The C ABI crate, as a target that a consumer links.
 #
-# Cargo builds this crate into a static archive, and `build.rs` writes the
-# header that declares it into `include/`. This file wraps both, plus the
+# Cargo builds this crate into a static archive, and `include/` holds the
+# committed header that declares it. This file wraps both, plus the
 # header-only C++ layer beside it, as `borink::object_storage`. Add it with
 # `add_subdirectory` or `FetchContent` and link that target; nothing here needs
 # an HTTP library, and a C program needs no C++ compiler.
@@ -29,8 +29,7 @@ add_custom_command(
   OUTPUT ${abi_archive}
   COMMAND cargo build --locked --package borink-object-storage-c ${cargo_arguments}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  DEPENDS src/lib.rs src/panic.rs build.rs cbindgen.toml Cargo.toml
-          ${workspace_root}/Cargo.lock
+  DEPENDS src/lib.rs src/panic.rs Cargo.toml ${workspace_root}/Cargo.lock
   COMMENT "Building the Rust archive with cargo"
   VERBATIM)
 add_custom_target(borink_object_storage_build DEPENDS ${abi_archive})

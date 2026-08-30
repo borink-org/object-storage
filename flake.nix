@@ -22,13 +22,18 @@
     {
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          # The Rust crates need only cargo. The rest is what the two C and
-          # C++ checks build and link: CMake drives the libcurl host, libcurl
-          # is what it sends with, and arm-none-eabi-gcc is what
+          # The Rust crates need only cargo. The rest is what the C and C++
+          # checks build and link: CMake drives the libcurl host, libcurl is
+          # what it sends with, and arm-none-eabi-gcc is what
           # `crates/object-storage-c/tests/freestanding.sh` links a board
           # image with. That toolchain carries no Rust target: the archive it
           # links comes from a `cargo build --target thumbv7em-none-eabihf`
           # made outside this shell.
+          #
+          # cbindgen is a tool here rather than a build-dependency of the C ABI
+          # crate, so nothing a consumer vendors carries it and no build of
+          # ours writes the header as a side effect. This pins its version the
+          # same way the rest of this list is pinned.
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustc
@@ -37,6 +42,7 @@
             pkgs.cmake
             pkgs.pkg-config
             pkgs.gcc-arm-embedded
+            pkgs.rust-cbindgen
           ];
           buildInputs = [
             pkgs.curl.dev
