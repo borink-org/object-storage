@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "borink-object-storage-c"
+version = "0.0.0"
+dependencies = [
+ "borink-object-storage-proto",
+]
+
+[[package]]
 name = "borink-object-storage-cxx"
 version = "0.0.0"
 dependencies = [

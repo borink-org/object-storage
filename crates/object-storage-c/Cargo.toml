@@ -1,0 +1,58 @@
+[package]
+name = "borink-object-storage-c"
+version = "0.0.0"
+edition = "2024"
+publish = false
+# cargo-c copies this into the pkg-config file's `Description:`.
+description = "Azure Blob Storage for a C or C++ program that owns its memory and its I/O"
+
+# The staticlib is what C and C++ link; the rlib is what another Rust crate
+# depends on. `cargo build` writes both into the workspace's `target/`.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = ["std"]
+# How cargo-c finds this package in the workspace. It enables nothing.
+capi = []
+# Links the Rust standard library, for the panic handler and the unwinder that
+# a static archive carries on a hosted target. The crate itself is `no_std`
+# and uses nothing from it. Turn it off for a freestanding target, which gets
+# the panic handler in `src/panic.rs` instead.
+std = []
+
+[dependencies]
+borink-object-storage-proto = { path = "../object-storage-proto" }
+
+# There is no build script. `include/borink/object_storage.h` is committed, and
+# `generate-header.sh` rewrites it with the cbindgen that `flake.nix` pins.
+
+# What `cargo cbuild` and `cargo cinstall` write. They are the only producer of
+# the C artifacts; docs/PACKAGING.md says what a consumer gets.
+[package.metadata.capi.header]
+# `generate-header.sh` writes the header, so cargo-c does not.
+generation = false
+name = "object_storage"
+subdirectory = "borink"
+
+# What puts the committed header under the install prefix.
+[package.metadata.capi.install.include]
+asset = [{ from = "include/borink/object_storage.h", to = "borink/" }]
+
+[package.metadata.capi.library]
+# A static archive only, so there is no soname to version.
+versioning = false
+
+# There is no `Requires` and no `Requires.private` here, and adding one would
+# make every consumer propagate it.
+[package.metadata.capi.pkg_config]
+# A consumer queries the file name, not `Name:`. Both say the same thing.
+filename = "borink-object-storage-c"
+name = "borink-object-storage-c"
+description = "Azure Blob Storage for a C or C++ program that owns its memory and its I/O"
+# Puts `${includedir}` in `Cflags` rather than `${includedir}/borink`, which is
+# what `#include "borink/object_storage.h"` needs.
+strip_include_path_components = 1
+
+[lints.rust]
+missing_docs = "deny"

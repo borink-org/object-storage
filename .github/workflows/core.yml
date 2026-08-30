@@ -56,3 +56,82 @@ jobs:
             cmake --build hosts/cxx-curl/build
             ctest --test-dir hosts/cxx-curl/build --output-on-failure
           '
+
+  # What the C ABI crate needs a C toolchain for. The jobs above already
+  # format, lint, document and test it. Every artifact here comes from
+  # cargo-c; see docs/PACKAGING.md.
+  c-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      # The development shell's rustc carries no bare-metal target, so this
+      # build cannot run inside it.
+      - name: Put the pinned cargo-c on PATH
+        run: echo "$(nix build --no-link --print-out-paths .#cargo-c)/bin" >> "$GITHUB_PATH"
+      # Release, because that is the archive a board flashes. A board has no
+      # libc, so the pkg-config file beside it must claim no native libraries.
+      - name: Build for a bare-metal board
+        run: |
+          cargo cbuild --locked -p borink-object-storage-c --no-default-features \
+            --release --target thumbv7em-none-eabihf --library-type staticlib
+          pc=target/thumbv7em-none-eabihf/release/borink-object-storage-c.pc
+          cat "$pc"
+          if grep -q '^Libs.private: .' "$pc"; then
+            echo "the board build claims native libraries it cannot have" >&2
+            exit 1
+          fi
+      # What keeps the committed header and `src/lib.rs` from disagreeing.
+      - name: Check the committed header
+        run: |
+          nix develop --command crates/object-storage-c/generate-header.sh
+          git diff --exit-code crates/object-storage-c/include
+      # The archive built above, linked into an image with no newlib and no
+      # heap. The flash and RAM it takes go to the job summary.
+      - name: Link a board image with no C library
+        run: |
+          nix develop --command crates/object-storage-c/tests/freestanding.sh \
+            target/thumbv7em-none-eabihf/release/libborink_object_storage_c.a
+      - name: Test the ABI from C
+        run: |
+          nix develop --command bash -c '
+            cmake -S crates/object-storage-c -B crates/object-storage-c/build -DCMAKE_BUILD_TYPE=Debug
+            cmake --build crates/object-storage-c/build
+            ctest --test-dir crates/object-storage-c/build --output-on-failure
+          '
+      # The packaged path, which a distribution takes. The prefix is queried
+      # somewhere other than where it was installed, because a nix store path
+      # depends on that relocation.
+      - name: Install to a prefix and build against it
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            install=$RUNNER_TEMP/install
+            cargo cinstall --locked -p borink-object-storage-c --release \
+              --library-type staticlib --prefix=/usr --destdir="$install"
+            find "$install" -type f
+
+            diff -u crates/object-storage-c/include/borink/object_storage.h \
+                    "$install/usr/include/borink/object_storage.h"
+
+            moved=$RUNNER_TEMP/moved
+            cp -r "$install/usr" "$moved"
+            sed -i "s|^prefix=/usr$|prefix=$moved|" "$moved"/lib/*/pkgconfig/*.pc
+            export PKG_CONFIG_PATH=$(dirname "$(find "$moved" -name "borink-object-storage-c.pc")")
+
+            pkg-config --modversion borink-object-storage-c
+            cc -Wall -Wextra -Wpedantic -std=c11 crates/object-storage-c/tests/abi.c \
+              $(pkg-config --cflags borink-object-storage-c) \
+              $(pkg-config --static --libs borink-object-storage-c) \
+              -o "$RUNNER_TEMP/abi_from_prefix"
+            "$RUNNER_TEMP/abi_from_prefix"
+          '
+      # The same path, as nix takes it. The check compiles the ABI test
+      # against the store path knowing only what pkg-config reported.
+      - name: Package the library and consume it from nix
+        run: |
+          nix build --no-link .#default
+          nix flake check
