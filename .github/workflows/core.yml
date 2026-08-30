@@ -92,7 +92,7 @@ jobs:
       # heap. The flash and RAM it takes go to the job summary.
       - name: Link a board image with no C library
         run: |
-          nix develop --command crates/object-storage-c/tests/freestanding.sh \
+          nix develop --command checks/freestanding/freestanding.sh \
             target/thumbv7em-none-eabihf/release/libborink_object_storage_c.a
       - name: Test the ABI from C, and the header from C++
         run: |

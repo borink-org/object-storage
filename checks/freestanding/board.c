@@ -5,6 +5,10 @@
 // then fails to compile, and an archive that called an allocator fails to
 // link. `freestanding.sh` compiles and links it.
 //
+// `board_main` calls `board_cxx` in `board.cc`, which does the same for the
+// C++ header. The linker starts at `board_main` and discards what nothing
+// reaches, so a call here is what puts that code in the image.
+//
 // Define no `memcpy`, `memset` or `memcmp` here. The archive carries weak
 // definitions of those and of the `__aeabi_mem*` wrappers. A definition here
 // would override them and stop this program from checking that they are
@@ -26,6 +30,9 @@ static size_t length(const char *text) {
 static borink_bytes as_bytes(const char *text) {
     return (borink_bytes){(const uint8_t *)text, length(text)};
 }
+
+// What the board would call from C, and then from C++.
+void board_cxx(void);
 
 // One of everything the board would call: a session, a request head, a
 // response head, and a sentence. The clock is a constant here.
@@ -54,6 +61,8 @@ void board_main(void) {
 
     static uint8_t sentence[256];
     sink = (unsigned)borink_describe(&outcome, (borink_bytes_mut){sentence, sizeof sentence});
+
+    board_cxx();
 
     // A board's entry point never returns.
     for (;;) {

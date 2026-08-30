@@ -82,11 +82,10 @@ if(PROJECT_IS_TOP_LEVEL)
   target_link_libraries(borink_object_storage_abi_test PRIVATE borink::object_storage)
   add_test(NAME borink_object_storage_abi COMMAND borink_object_storage_abi_test)
 
-  # What a C++ program sees with no allocator. This is the only thing that
-  # compiles `object_storage/core.hpp` alone, which is what keeps an owning
-  # container out of it.
+  # What a C++ program sees. That the headers reach no allocator is checked by
+  # `checks/freestanding`, which reads the symbols of a board image instead.
   enable_language(CXX)
-  add_executable(borink_object_storage_cxx_test tests/cxx_no_allocator.cc)
+  add_executable(borink_object_storage_cxx_test tests/cxx.cc)
   target_compile_features(borink_object_storage_cxx_test PRIVATE cxx_std_23)
   target_compile_options(borink_object_storage_cxx_test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(borink_object_storage_cxx_test PRIVATE borink::object_storage)
