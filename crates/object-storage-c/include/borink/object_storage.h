@@ -15,8 +15,8 @@
  * The most headers that one request head carries.
  *
  * This is the core crate's own bound, and the array in `borink_request_head`
- * has exactly this many slots. The assertion below stops the build if the
- * core crate raises it.
+ * has exactly this many slots. A compile-time assertion stops the build if
+ * the core crate raises it.
  */
 #define BORINK_MAX_HEADERS 6
 
@@ -394,72 +394,6 @@ typedef enum borink_disposition borink_disposition;
 typedef uint16_t borink_disposition;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
-
-/**
- * What a C compiler computes for the structs that cross this boundary.
- *
- * Fill every field with the `sizeof`, `alignof` or `offsetof` that its name
- * gives, and pass it to `borink_layout_disagrees`.
- */
-typedef struct borink_layout {
-    size_t sizeof_bytes;
-    size_t alignof_bytes;
-    size_t offsetof_bytes_len;
-    size_t sizeof_bytes_mut;
-    size_t alignof_bytes_mut;
-    size_t sizeof_span;
-    size_t offsetof_span_len;
-    size_t sizeof_maybe_bytes;
-    size_t alignof_maybe_bytes;
-    size_t offsetof_maybe_bytes_bytes;
-    size_t sizeof_maybe_u64;
-    size_t alignof_maybe_u64;
-    size_t offsetof_maybe_u64_value;
-    size_t sizeof_status;
-    size_t offsetof_status_detail;
-    size_t sizeof_session;
-    size_t offsetof_session_container;
-    size_t offsetof_session_token;
-    size_t sizeof_range;
-    size_t alignof_range;
-    size_t offsetof_range_start;
-    size_t offsetof_range_end;
-    size_t sizeof_get_shape;
-    size_t offsetof_get_shape_range;
-    size_t offsetof_get_shape_condition;
-    size_t sizeof_put_shape;
-    size_t sizeof_delete_shape;
-    size_t offsetof_delete_shape_condition;
-    size_t sizeof_request_header;
-    size_t offsetof_request_header_value;
-    size_t sizeof_request_head;
-    size_t alignof_request_head;
-    size_t offsetof_request_head_required;
-    size_t offsetof_request_head_method;
-    size_t offsetof_request_head_url;
-    size_t offsetof_request_head_header_count;
-    size_t offsetof_request_head_headers;
-    size_t sizeof_header_ref;
-    size_t offsetof_header_ref_value;
-    size_t sizeof_object_meta;
-    size_t offsetof_object_meta_e_tag;
-    size_t offsetof_object_meta_last_modified;
-    size_t offsetof_object_meta_version;
-    size_t offsetof_object_meta_content_encoding;
-    size_t sizeof_body_window;
-    size_t offsetof_body_window_expected_len;
-    size_t offsetof_body_window_object_size;
-    size_t sizeof_failure;
-    size_t offsetof_failure_class;
-    size_t offsetof_failure_kind;
-    size_t offsetof_failure_request_id;
-    size_t sizeof_outcome;
-    size_t alignof_outcome;
-    size_t offsetof_outcome_meta;
-    size_t offsetof_outcome_body;
-    size_t offsetof_outcome_failure;
-    size_t offsetof_outcome_error;
-} borink_layout;
 
 /**
  * A failure, as the two numbers that describe every error of the core crate.
@@ -850,23 +784,75 @@ typedef struct borink_header_ref {
     struct borink_bytes value;
 } borink_header_ref;
 
+/**
+ * What a C compiler computes for the structs that cross this boundary.
+ *
+ * Fill every field with the `sizeof`, `alignof` or `offsetof` that its name
+ * gives, and pass it to `borink_layout_disagrees`.
+ */
+typedef struct borink_layout {
+    size_t sizeof_bytes;
+    size_t alignof_bytes;
+    size_t offsetof_bytes_len;
+    size_t sizeof_bytes_mut;
+    size_t alignof_bytes_mut;
+    size_t sizeof_span;
+    size_t offsetof_span_len;
+    size_t sizeof_maybe_bytes;
+    size_t alignof_maybe_bytes;
+    size_t offsetof_maybe_bytes_bytes;
+    size_t sizeof_maybe_u64;
+    size_t alignof_maybe_u64;
+    size_t offsetof_maybe_u64_value;
+    size_t sizeof_status;
+    size_t offsetof_status_detail;
+    size_t sizeof_session;
+    size_t offsetof_session_container;
+    size_t offsetof_session_token;
+    size_t sizeof_range;
+    size_t alignof_range;
+    size_t offsetof_range_start;
+    size_t offsetof_range_end;
+    size_t sizeof_get_shape;
+    size_t offsetof_get_shape_range;
+    size_t offsetof_get_shape_condition;
+    size_t sizeof_put_shape;
+    size_t sizeof_delete_shape;
+    size_t offsetof_delete_shape_condition;
+    size_t sizeof_request_header;
+    size_t offsetof_request_header_value;
+    size_t sizeof_request_head;
+    size_t alignof_request_head;
+    size_t offsetof_request_head_required;
+    size_t offsetof_request_head_method;
+    size_t offsetof_request_head_url;
+    size_t offsetof_request_head_header_count;
+    size_t offsetof_request_head_headers;
+    size_t sizeof_header_ref;
+    size_t offsetof_header_ref_value;
+    size_t sizeof_object_meta;
+    size_t offsetof_object_meta_e_tag;
+    size_t offsetof_object_meta_last_modified;
+    size_t offsetof_object_meta_version;
+    size_t offsetof_object_meta_content_encoding;
+    size_t sizeof_body_window;
+    size_t offsetof_body_window_expected_len;
+    size_t offsetof_body_window_object_size;
+    size_t sizeof_failure;
+    size_t offsetof_failure_class;
+    size_t offsetof_failure_kind;
+    size_t offsetof_failure_request_id;
+    size_t sizeof_outcome;
+    size_t alignof_outcome;
+    size_t offsetof_outcome_meta;
+    size_t offsetof_outcome_body;
+    size_t offsetof_outcome_failure;
+    size_t offsetof_outcome_error;
+} borink_layout;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-/**
- * Compares the layout a C compiler computed with the one this crate uses.
- *
- * Returns the number of fields of `probe` that differ, and 0 when every one
- * agrees. Call it once at startup, or from a static assertion in your own
- * test, before you read a field of any struct here.
- *
- * # Safety
- *
- * `probe` must be null or point at one readable `borink_layout`. A null
- * `probe` counts every field as different.
- */
-size_t borink_layout_disagrees(const struct borink_layout *probe);
 
 /**
  * Reports what is wrong with `session`, if anything.
@@ -1065,6 +1051,20 @@ size_t borink_describe(const struct borink_outcome *outcome, struct borink_bytes
  * during the call.
  */
 size_t borink_describe_status(struct borink_status status, struct borink_bytes_mut into);
+
+/**
+ * Compares the layout a C compiler computed with the one this crate uses.
+ *
+ * Returns the number of fields of `probe` that differ, and 0 when every one
+ * agrees. Call it once at startup, or from a static assertion in your own
+ * test, before you read a field of any struct here.
+ *
+ * # Safety
+ *
+ * `probe` must be null or point at one readable `borink_layout`. A null
+ * `probe` counts every field as different.
+ */
+size_t borink_layout_disagrees(const struct borink_layout *probe);
 
 #ifdef __cplusplus
 }  // extern "C"

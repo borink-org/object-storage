@@ -1,0 +1,485 @@
+//! Every type that crosses the boundary.
+//!
+//! `cbindgen` generates `include/borink/object_storage.h` from this module, so
+//! a C program's declarations cannot differ from these. `layout` checks that
+//! both compilers lay them out the same way.
+
+/// The most headers that one request head carries.
+///
+/// This is the core crate's own bound, and the array in `borink_request_head`
+/// has exactly this many slots. A compile-time assertion stops the build if
+/// the core crate raises it.
+pub const BORINK_MAX_HEADERS: usize = 6;
+
+// ---------------------------------------------------------------- primitives
+
+/// Bytes that your program owns and lends to a call.
+///
+/// A `len` of 0 is an empty value, and `ptr` may then be null.
+///
+/// # Lifetime
+///
+/// The bytes must stay valid for the whole call. A value returned by a reading
+/// call points into the storage that the call read, and is valid until you
+/// release or reuse that storage.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Bytes {
+    /// The first byte.
+    pub ptr: *const u8,
+    /// The number of bytes.
+    pub len: usize,
+}
+
+/// Storage that a call writes into.
+///
+/// A `len` of 0 is an empty buffer, and `ptr` may then be null.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BytesMut {
+    /// The first byte.
+    pub ptr: *mut u8,
+    /// The number of bytes.
+    pub len: usize,
+}
+
+/// A range of bytes, as an offset from the start of your request buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Span {
+    /// The offset of the first byte.
+    pub start: usize,
+    /// The number of bytes.
+    pub len: usize,
+}
+
+/// Bytes that a response head may not carry.
+///
+/// `present` and an empty `bytes` are different facts. A header that the
+/// service sent empty is present, and one it did not send is not.
+///
+/// # Lifetime
+///
+/// `bytes` points into the storage that the `borink_header_ref`s of the call
+/// pointed into, or into the error body that you passed. It is valid until you
+/// release or reuse that storage.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MaybeBytes {
+    /// Whether the head carried this value.
+    pub present: bool,
+    /// The bytes of it.
+    pub bytes: Bytes,
+}
+
+/// A number that a response head may not carry.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MaybeU64 {
+    /// Whether the head carried this number.
+    pub present: bool,
+    /// The number.
+    pub value: u64,
+}
+
+/// A failure, as the two numbers that describe every error of the core crate.
+///
+/// `code` is a `borink_error_code`, and `detail` is the discriminant of the
+/// value inside it. A `code` of 0 means that nothing failed. Both numbers are
+/// append-only: a value defined today keeps its meaning.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Status {
+    /// The kind of failure, or 0 if there is none.
+    pub code: u16,
+    /// The discriminant of the value inside, or 0 if there is none.
+    pub detail: u16,
+}
+
+// --------------------------------------------------------------------- enums
+
+/// Which kind of failure a `borink_status` carries.
+///
+/// These are the numbers that the core crate's error code uses.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum ErrorCode {
+    /// Nothing failed.
+    None = 0,
+    /// The endpoint is not an ASCII HTTP or HTTPS origin.
+    InvalidEndpoint = 1,
+    /// The container name is not usable in a request.
+    InvalidContainer = 2,
+    /// The token is not usable as one HTTP header value.
+    InvalidToken = 3,
+    /// The plan cannot become a request. `detail` says why.
+    InvalidPlan = 4,
+    /// The buffer is too small. Grow it to `required` and call again.
+    Capacity = 5,
+    /// The response cannot be read. `detail` says which part was wrong.
+    Response = 6,
+}
+
+/// The HTTP method of a request.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum Method {
+    /// `GET`.
+    Get = 1,
+    /// `HEAD`.
+    Head = 2,
+    /// `PUT`.
+    Put = 3,
+    /// `DELETE`.
+    Delete = 4,
+}
+
+/// What a read asks the service to return.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum GetKind {
+    /// The bytes of the object.
+    Bytes = 1,
+    /// The metadata of the object, without its bytes.
+    Metadata = 2,
+}
+
+/// Which form of byte range a read requests.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum RangeForm {
+    /// Every byte of the object. `start` and `end` are 0.
+    Whole = 1,
+    /// The half-open interval `start..end`.
+    Bounded = 2,
+    /// Every byte from `start` to the end of the object.
+    Offset = 3,
+    /// The last `start` bytes. Azure Blob Storage refuses this form.
+    Suffix = 4,
+}
+
+/// The ETag precondition that a request carries.
+///
+/// A request that carries one passes the entity tag as `condition_value`. A
+/// request that carries none passes an empty `condition_value`.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum Condition {
+    /// The request carries no precondition.
+    None = 1,
+    /// The request succeeds only if the current ETag matches.
+    IfMatch = 2,
+    /// The request succeeds only if the current ETag differs.
+    IfNoneMatch = 3,
+}
+
+/// What a removal takes with it.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum DeleteKind {
+    /// Remove the object alone. Azure refuses this if it has snapshots.
+    Object = 1,
+    /// Remove the object and its snapshots.
+    ObjectAndSnapshots = 2,
+    /// Remove the snapshots and keep the object.
+    SnapshotsOnly = 3,
+}
+
+/// The category of a service failure.
+///
+/// These are the numbers that the core crate's failure class uses. A number
+/// that is not listed here comes from a later version of that crate. It
+/// crosses unchanged, never as a substitute.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum FailureClass {
+    /// The failure carries no category.
+    None = 0,
+    /// The service rejected the credentials or the authorization.
+    Auth = 1,
+    /// The service throttled the request. You can retry it later.
+    Throttled = 2,
+    /// The service failed, or it was unavailable.
+    Server = 3,
+    /// The service answered with a redirect.
+    Redirect = 4,
+    /// Any other failure, such as a malformed request.
+    Other = 5,
+}
+
+/// The specific error that the service named.
+///
+/// These are the numbers that the core crate's service error kind uses, and
+/// they cross unchanged in both directions.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum ServiceError {
+    /// The service named no error.
+    None = 0,
+    /// The object does not exist.
+    NotFound = 1,
+    /// The container does not exist.
+    NoSuchContainer = 2,
+    /// The object or the container already exists.
+    AlreadyExists = 3,
+    /// The service rejected the credentials or the authorization.
+    Unauthorized = 4,
+    /// A precondition on the request did not hold.
+    Precondition = 5,
+    /// The service cannot serve the requested byte range.
+    RangeNotSatisfiable = 6,
+    /// The service throttled the request.
+    Throttled = 7,
+    /// The service timed out while it processed the request.
+    Timeout = 8,
+    /// The service failed, or it was unavailable.
+    Service = 9,
+}
+
+/// What a response tells you to do.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Disposition {
+    /// A body follows. Read it and put the bytes at `body`.
+    Body = 1,
+    /// No body follows and the read is complete.
+    Complete = 2,
+    /// The `If-None-Match` condition held, so Azure sent no body.
+    NotModified = 3,
+    /// The condition did not hold, so Azure changed nothing.
+    PreconditionFailed = 4,
+    /// The object or its container does not exist. Read `failure.kind`.
+    NotFound = 5,
+    /// Azure cannot serve the requested range. Read `body.object_size`.
+    RangeNotSatisfiable = 6,
+    /// Azure stored the object.
+    Done = 7,
+    /// Azure accepted the removal.
+    Accepted = 8,
+    /// The head reports a failure but names no error.
+    ///
+    /// Read the response body, cap what you read, and pass it with `failure`
+    /// to `borink_finish_get_error_body` or one of its two siblings.
+    NeedErrorBody = 9,
+    /// Azure refused the request, or it failed to carry it out.
+    ServiceFailure = 10,
+    /// The call was refused, or the response cannot be read. Read `error`.
+    ///
+    /// `error.detail` names the part that was wrong, not the value. You still
+    /// hold the headers and the shape, so read those for the value itself.
+    Invalid = 11,
+    /// The core crate returned a variant that this crate does not know.
+    Unsupported = 12,
+}
+
+// ------------------------------------------------------------------- session
+
+/// One container, and the token that opens it.
+///
+/// Fill one in per client and keep it. Your program owns the three values, and
+/// refreshing the token is assigning `token` again.
+///
+/// # Lifetime
+///
+/// The three values must stay valid for every call that takes this session.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Session {
+    /// The HTTP or HTTPS origin of the storage account.
+    pub endpoint: Bytes,
+    /// The container name.
+    pub container: Bytes,
+    /// The Entra ID bearer token, without the `Bearer ` prefix.
+    pub token: Bytes,
+}
+
+// --------------------------------------------------------------------- plans
+
+/// The byte range that a read requests.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Range {
+    /// Which form of range this is, as a `borink_range_form`.
+    pub form: u16,
+    /// The first byte, or the length of a suffix.
+    pub start: u64,
+    /// The byte after the last byte, for a bounded range.
+    pub end: u64,
+}
+
+/// The part of a read plan that holds no borrows.
+///
+/// Store one of these while the request is in flight, and pass it to
+/// `borink_accept_get_head` when the response arrives. It is the whole
+/// per-request context: this crate keeps none of its own.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GetShape {
+    /// Whether the read asks for bytes or for metadata, as a
+    /// `borink_get_kind`.
+    pub kind: u16,
+    /// The byte range that the read requests.
+    pub range: Range,
+    /// The precondition that the read carries, as a `borink_condition`.
+    pub condition: u16,
+}
+
+/// The part of a write plan that holds no borrows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PutShape {
+    /// The precondition that the write carries, as a `borink_condition`.
+    pub condition: u16,
+}
+
+/// The part of a removal plan that holds no borrows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DeleteShape {
+    /// What the removal takes with it, as a `borink_delete_kind`.
+    pub kind: u16,
+    /// The precondition that the removal carries, as a `borink_condition`.
+    pub condition: u16,
+}
+
+// -------------------------------------------------------------- request head
+
+/// One request header, as two ranges of the request buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RequestHeader {
+    /// The range that holds the header name.
+    pub name: Span,
+    /// The range that holds the header value.
+    pub value: Span,
+}
+
+/// A request head, as ranges of the buffer that holds it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RequestHead {
+    /// Whether the head was written, and what stopped it.
+    ///
+    /// A `code` of 0 means that the head is in your buffer.
+    pub status: Status,
+    /// The number of bytes that this request head needs.
+    ///
+    /// This is the exact size whenever the plan is valid, whether or not the
+    /// head was written. Size one buffer by it and reuse that buffer.
+    pub required: usize,
+    /// The HTTP method, as a `borink_method`.
+    pub method: u16,
+    /// The range that holds the complete object URL.
+    pub url: Span,
+    /// How many of `headers` this request uses.
+    pub header_count: usize,
+    /// The headers, in the order that the core crate wrote them.
+    pub headers: [RequestHeader; BORINK_MAX_HEADERS],
+}
+
+// ------------------------------------------------------- response and outcome
+
+/// One response header, as the bytes that you already hold.
+///
+/// Build a small array of these from wherever your HTTP library keeps the
+/// head, and reuse the array. This crate copies none of it.
+///
+/// # Lifetime
+///
+/// Both values must stay valid for as long as you use the outcome that the
+/// reading call returns.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HeaderRef {
+    /// The header name. A name that is not text is ignored.
+    pub name: Bytes,
+    /// The header value.
+    pub value: Bytes,
+}
+
+/// Object metadata, borrowed from the response head.
+///
+/// # Lifetime
+///
+/// Every field points into the storage that the `borink_header_ref`s pointed
+/// into, and is valid until you release or reuse it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ObjectMeta {
+    /// The size of the whole object.
+    pub size: MaybeU64,
+    /// The entity tag.
+    pub e_tag: MaybeBytes,
+    /// The value of the `Last-Modified` header.
+    pub last_modified: MaybeBytes,
+    /// The version identifier.
+    pub version: MaybeBytes,
+    /// The value of the `Content-Encoding` header.
+    pub content_encoding: MaybeBytes,
+}
+
+/// Where the bytes of the response body belong in the object.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BodyWindow {
+    /// The offset in the object of the first byte of the response body.
+    pub object_offset: u64,
+    /// The exact length of the response body.
+    pub expected_len: MaybeU64,
+    /// The size of the whole object.
+    pub object_size: MaybeU64,
+}
+
+/// A response head that reports a failure.
+///
+/// Store one of these and pass it back to `borink_finish_get_error_body` to
+/// finish a `NeedErrorBody`.
+///
+/// A `NotFound` fills `kind` alone. A missing object is not a failure of the
+/// head: it names an error and carries no status and no category, so both are
+/// 0.
+///
+/// # Lifetime
+///
+/// `request_id` points into the storage that the `borink_header_ref`s pointed
+/// into. Copy it if you keep this value past that storage.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Failure {
+    /// The HTTP status code.
+    pub status: u16,
+    /// The category of the failure, as a `borink_failure_class`. Use it to
+    /// decide whether to retry.
+    ///
+    /// This is `class` in the core crate, which C++ cannot spell.
+    pub class: u16,
+    /// The specific error that the head or the body named, as a
+    /// `borink_service_error`.
+    pub kind: u16,
+    /// The value of the `x-ms-request-id` header.
+    pub request_id: MaybeBytes,
+}
+
+/// The result of reading one response head.
+///
+/// One value describes a read, a write and a removal. The fields that the
+/// operation does not fill are absent.
+///
+/// # Lifetime
+///
+/// Everything that this value borrows is valid until you release or reuse the
+/// storage that the `borink_header_ref`s pointed into.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Outcome {
+    /// What to do with the response, as a `borink_disposition`.
+    pub disposition: u16,
+    /// The metadata from the head.
+    pub meta: ObjectMeta,
+    /// Where the bytes of the body belong.
+    pub body: BodyWindow,
+    /// The failure, for `NeedErrorBody`, `ServiceFailure` and `NotFound`.
+    pub failure: Failure,
+    /// Why the call was refused, for `Invalid`.
+    pub error: Status,
+}
