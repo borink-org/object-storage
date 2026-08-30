@@ -9,13 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
-name = "azure-get-no-allocator"
-version = "0.0.0"
-dependencies = [
- "borink-object-storage-proto",
-]
-
-[[package]]
 name = "azure-live"
 version = "0.0.0"
 dependencies = [
@@ -51,6 +44,13 @@ dependencies = [
  "borink-object-storage-proto",
  "cxx",
  "cxx-build",
+]
+
+[[package]]
+name = "borink-object-storage-no-allocator"
+version = "0.0.0"
+dependencies = [
+ "borink-object-storage-proto",
 ]
 
 [[package]]

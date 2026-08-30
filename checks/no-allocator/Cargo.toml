@@ -1,5 +1,5 @@
 [package]
-name = "azure-get-no-allocator"
+name = "borink-object-storage-no-allocator"
 version = "0.0.0"
 edition = "2024"
 publish = false
