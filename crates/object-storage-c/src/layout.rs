@@ -6,17 +6,9 @@
 //! [`borink_layout_disagrees`] counts the fields that differ. The `const`
 //! block at the end fails the build if an enum is renumbered on either side.
 
-use crate::{ptr::*, types::*};
+use crate::{ptr::items, types::*};
 
 use borink_object_storage_proto as proto;
-
-// ------------------------------------------------------------------- layout
-//
-// The header is generated from the declarations above, so the two spellings of
-// a struct cannot drift. `borink_layout_disagrees` checks the remaining
-// assumption: that a C compiler lays each of them out as `#[repr(C)]`
-// promises. `tests/abi.c` fills a `borink_layout` with its own `sizeof`,
-// `alignof` and `offsetof`, and this crate compares it field by field.
 
 /// What a C compiler computes for the structs that cross this boundary.
 ///
@@ -170,8 +162,8 @@ pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize 
     // `Layout` is `usize` fields alone, so reading it as those is its layout.
     let (theirs, ours) = unsafe {
         (
-            parts(probe.cast::<usize>(), fields),
-            parts(core::ptr::from_ref(&ours).cast::<usize>(), fields),
+            items(probe.cast::<usize>(), fields),
+            items(core::ptr::from_ref(&ours).cast::<usize>(), fields),
         )
     };
     theirs

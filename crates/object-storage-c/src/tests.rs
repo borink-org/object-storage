@@ -1,6 +1,6 @@
 //! Tests for the whole boundary, driven through the entry points.
 
-use crate::{convert::*, entry::*, layout::*, ptr::*, sentence::*, step::*, types::*};
+use crate::{convert::*, entry::*, layout::*, ptr::*, sentence::*, types::*};
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
     BodyWindow as CoreBodyWindow, DeleteHeadOutcome, Error, Failure as CoreFailure,
@@ -17,6 +17,18 @@ const IDENTIFIER: &[u8] = b"request-123";
 const ENDPOINT: &[u8] = b"https://account.blob.core.windows.net";
 const CONTAINER: &[u8] = b"container";
 const TOKEN: &[u8] = b"token";
+
+fn unknown() -> Status {
+    status_of(&UNKNOWN)
+}
+
+fn kind_of(kind: u16) -> Option<ServiceErrorKind> {
+    ServiceErrorKind::from_discriminant(kind)
+}
+
+fn class_of(class: u16) -> Option<CoreFailureClass> {
+    CoreFailureClass::from_discriminant(class)
+}
 
 fn e_tag() -> &'static [u8] {
     &VALUES[..6]
@@ -287,7 +299,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     ] {
         let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());
-        assert_eq!(text(&empty_outcome(kind)), sentence);
+        assert_eq!(text(&only(kind)), sentence);
         said.push(sentence);
     }
     said.sort_unstable();
@@ -295,7 +307,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     assert_eq!(said.len(), 6);
 
     // A kind from a later version of this crate names nothing here.
-    let mut later = empty_outcome(OutcomeKind::Body);
+    let mut later = only(OutcomeKind::Body);
     later.kind = 4095;
     assert_eq!(text(&later), settled_sentence(None));
 }
@@ -305,11 +317,11 @@ fn every_outcome_kind_says_something_of_its_own() {
 #[test]
 fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     for repr in 1..=u16::MAX {
-        if let Some(kind) = ServiceErrorKind::from_discriminant(repr) {
+        if let Some(kind) = kind_of(repr) {
             assert_eq!(kind_of(kind_view(Some(kind))), Some(kind), "{kind:?}");
             assert_eq!(kind_view(Some(kind)), repr);
         }
-        if let Some(class) = CoreFailureClass::from_discriminant(repr) {
+        if let Some(class) = class_of(repr) {
             assert_eq!(class_of(class as u16), Some(class), "{class:?}");
         }
         assert_eq!(

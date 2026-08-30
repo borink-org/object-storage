@@ -124,9 +124,9 @@ extern crate std;
 
 // The source, in the order a reviewer might take it. `types` and `layout` need
 // no line-by-line reading: cbindgen generates the header from `types`, and a C
-// compiler checks `layout` against it. `ptr` holds every read of a caller's
-// pointer. The logic is in `step`, `convert` and `sentence`, and `entry` is the
-// shape they are called in.
+// compiler checks `layout` against it. Every read of a caller's pointer is in
+// `ptr`, and every call of one is in `entry` and `layout`. The logic is in
+// `step`, `convert` and `sentence`, which forbid `unsafe` code.
 mod convert;
 mod entry;
 mod layout;

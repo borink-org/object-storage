@@ -1,15 +1,22 @@
 //! The functions a C program calls.
 //!
-//! Each one has the same shape: refuse what cannot be read, convert inwards,
-//! call the core crate, convert outwards. The steps they share are in
-//! [`crate::step`], and the conversions are in [`crate::convert`].
+//! Each one reads every pointer it was passed in one `unsafe` block, under
+//! the `# Safety` contract written above it, and hands Rust values to
+//! [`crate::step`] and [`crate::convert`]. Those modules forbid `unsafe`
+//! code, so what a pointer read needs is checked here and nowhere else.
 
-use crate::{convert::*, ptr::*, sentence::*, step::*, types::*};
+use crate::convert::{
+    delete_outcome, delete_shape, get_outcome, get_shape, invalid, put_outcome, put_shape,
+    status_of,
+};
+use crate::ptr;
+use crate::sentence::{describe, describe_status};
+use crate::step::{condition, finishing, head_of, open, ready, text, written};
+use crate::types::*;
 
-use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{PhysicalDelete, PhysicalGet, PhysicalPut, Timestamps};
-
-// ------------------------------------------------------------- entry points
+use borink_object_storage_proto::{
+    InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, Timestamps,
+};
 
 /// Reports what is wrong with `session`, if anything.
 ///
@@ -23,10 +30,8 @@ use borink_object_storage_proto::{PhysicalDelete, PhysicalGet, PhysicalPut, Time
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { usable(session) } {
-        Ok(_) => Status { code: 0, detail: 0 },
-        Err(status) => status,
-    }
+    let session = unsafe { ptr::session(session) };
+    open(session).map_or_else(|error| status_of(&error), |_| Status::default())
 }
 
 /// Writes the request head of a read into `buf`.
@@ -49,16 +54,23 @@ pub unsafe extern "C" fn borink_encode_get(
     unix_seconds: u64,
 ) -> RequestHead {
     // SAFETY: the caller states the contract of this function.
-    let planned = unsafe { planning(session, shape, get_shape, key) };
-    let (blobs, shape, key) = match planned {
-        Ok(planned) => planned,
-        Err(status) => return refused(status, 0),
+    let (session, shape, key, condition_value, buf) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::slice(key),
+            ptr::slice(condition_value),
+            ptr::slice_mut(buf),
+        )
     };
-    let now = Timestamps::from_unix(unix_seconds);
-    // SAFETY: as above.
-    let get = PhysicalGet::from_shape(shape, key, unsafe { condition(condition_value) });
-    // SAFETY: as above.
-    written(blobs.encode_get(unsafe { parts_mut(buf) }, &get, &now))
+    written(ready(session, shape, get_shape).and_then(|(blobs, shape)| {
+        let get = PhysicalGet::from_shape(
+            shape,
+            text(key, InvalidPlan::Key)?,
+            condition(condition_value),
+        );
+        blobs.encode_get(buf, &get, &Timestamps::from_unix(unix_seconds))
+    }))
 }
 
 /// Writes the request head of a write into `buf`.
@@ -79,19 +91,27 @@ pub unsafe extern "C" fn borink_encode_put(
     unix_seconds: u64,
 ) -> RequestHead {
     // SAFETY: the caller states the contract of this function.
-    let planned = unsafe { planning(session, shape, put_shape, key) };
-    let (blobs, shape, key) = match planned {
-        Ok(planned) => planned,
-        Err(status) => return refused(status, 0),
+    let (session, shape, key, condition_value, buf) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::slice(key),
+            ptr::slice(condition_value),
+            ptr::slice_mut(buf),
+        )
     };
-    let now = Timestamps::from_unix(unix_seconds);
-    // SAFETY: as above.
-    let put = PhysicalPut::from_shape(shape, key, unsafe { condition(condition_value) });
-    // The content stays in your program. Only its length reaches the head, so
-    // the request borrows no content and you send the bytes yourself.
-    let content = proto::Payload::Streamed { len: content_len };
-    // SAFETY: as above.
-    written(blobs.encode_put(unsafe { parts_mut(buf) }, &put, content, &now))
+    written(ready(session, shape, put_shape).and_then(|(blobs, shape)| {
+        let put = PhysicalPut::from_shape(
+            shape,
+            text(key, InvalidPlan::Key)?,
+            condition(condition_value),
+        );
+        // The content stays in your program. Only its length reaches the
+        // head, so the request borrows no content and you send the bytes
+        // yourself.
+        let content = Payload::Streamed { len: content_len };
+        blobs.encode_put(buf, &put, content, &Timestamps::from_unix(unix_seconds))
+    }))
 }
 
 /// Writes the request head of a removal into `buf`.
@@ -109,16 +129,25 @@ pub unsafe extern "C" fn borink_encode_delete(
     unix_seconds: u64,
 ) -> RequestHead {
     // SAFETY: the caller states the contract of this function.
-    let planned = unsafe { planning(session, shape, delete_shape, key) };
-    let (blobs, shape, key) = match planned {
-        Ok(planned) => planned,
-        Err(status) => return refused(status, 0),
+    let (session, shape, key, condition_value, buf) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::slice(key),
+            ptr::slice(condition_value),
+            ptr::slice_mut(buf),
+        )
     };
-    let now = Timestamps::from_unix(unix_seconds);
-    // SAFETY: as above.
-    let delete = PhysicalDelete::from_shape(shape, key, unsafe { condition(condition_value) });
-    // SAFETY: as above.
-    written(blobs.encode_delete(unsafe { parts_mut(buf) }, &delete, &now))
+    written(
+        ready(session, shape, delete_shape).and_then(|(blobs, shape)| {
+            let delete = PhysicalDelete::from_shape(
+                shape,
+                text(key, InvalidPlan::Key)?,
+                condition(condition_value),
+            );
+            blobs.encode_delete(buf, &delete, &Timestamps::from_unix(unix_seconds))
+        }),
+    )
 }
 
 /// Reads the response head of a read.
@@ -145,13 +174,16 @@ pub unsafe extern "C" fn borink_accept_get_head(
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { reading(session, shape, get_shape, status, headers, header_count) } {
-        Ok((blobs, shape, head)) => match blobs.accept_get_head(shape, head) {
-            Ok(outcome) => get_outcome(&outcome),
-            Err(error) => invalid(status_of(&error)),
-        },
-        Err(status) => invalid(status),
-    }
+    let (session, shape, headers) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::headers(headers, header_count),
+        )
+    };
+    ready(session, shape, get_shape)
+        .and_then(|(blobs, shape)| blobs.accept_get_head(shape, head_of(status, headers)))
+        .map_or_else(invalid, |outcome| get_outcome(&outcome))
 }
 
 /// Reads the response head of a write.
@@ -172,13 +204,16 @@ pub unsafe extern "C" fn borink_accept_put_head(
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { reading(session, shape, put_shape, status, headers, header_count) } {
-        Ok((blobs, shape, head)) => match blobs.accept_put_head(shape, head) {
-            Ok(outcome) => put_outcome(&outcome),
-            Err(error) => invalid(status_of(&error)),
-        },
-        Err(status) => invalid(status),
-    }
+    let (session, shape, headers) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::headers(headers, header_count),
+        )
+    };
+    ready(session, shape, put_shape)
+        .and_then(|(blobs, shape)| blobs.accept_put_head(shape, head_of(status, headers)))
+        .map_or_else(invalid, |outcome| put_outcome(&outcome))
 }
 
 /// Reads the response head of a removal.
@@ -199,13 +234,16 @@ pub unsafe extern "C" fn borink_accept_delete_head(
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { reading(session, shape, delete_shape, status, headers, header_count) } {
-        Ok((blobs, shape, head)) => match blobs.accept_delete_head(shape, head) {
-            Ok(outcome) => delete_outcome(&outcome),
-            Err(error) => invalid(status_of(&error)),
-        },
-        Err(status) => invalid(status),
-    }
+    let (session, shape, headers) = unsafe {
+        (
+            ptr::session(session),
+            shape.as_ref(),
+            ptr::headers(headers, header_count),
+        )
+    };
+    ready(session, shape, delete_shape)
+        .and_then(|(blobs, shape)| blobs.accept_delete_head(shape, head_of(status, headers)))
+        .map_or_else(invalid, |outcome| delete_outcome(&outcome))
 }
 
 /// Finishes a read whose head asked for the error body.
@@ -230,13 +268,16 @@ pub unsafe extern "C" fn borink_finish_get_error_body(
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { finishing(session, failure) } {
-        // SAFETY: as above.
-        Ok((blobs, status, id)) => {
-            get_outcome(&blobs.accept_error_body(status, id, unsafe { slice(body) }))
-        }
-        Err(status) => invalid(status),
-    }
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .map(|(blobs, status, id)| blobs.accept_error_body(status, id, body))
+        .map_or_else(invalid, |outcome| get_outcome(&outcome))
 }
 
 /// Finishes a write whose head asked for the error body.
@@ -255,13 +296,16 @@ pub unsafe extern "C" fn borink_finish_put_error_body(
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { finishing(session, failure) } {
-        // SAFETY: as above.
-        Ok((blobs, status, id)) => {
-            put_outcome(&blobs.accept_put_error_body(status, id, unsafe { slice(body) }))
-        }
-        Err(status) => invalid(status),
-    }
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .map(|(blobs, status, id)| blobs.accept_put_error_body(status, id, body))
+        .map_or_else(invalid, |outcome| put_outcome(&outcome))
 }
 
 /// Finishes a removal whose head asked for the error body.
@@ -280,13 +324,16 @@ pub unsafe extern "C" fn borink_finish_delete_error_body(
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    match unsafe { finishing(session, failure) } {
-        // SAFETY: as above.
-        Ok((blobs, status, id)) => {
-            delete_outcome(&blobs.accept_delete_error_body(status, id, unsafe { slice(body) }))
-        }
-        Err(status) => invalid(status),
-    }
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .map(|(blobs, status, id)| blobs.accept_delete_error_body(status, id, body))
+        .map_or_else(invalid, |outcome| delete_outcome(&outcome))
 }
 
 /// Writes one sentence naming what `outcome` says.
@@ -302,11 +349,18 @@ pub unsafe extern "C" fn borink_finish_delete_error_body(
 /// reached through nothing else during the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut) -> usize {
-    if outcome.is_null() {
-        return 0;
-    }
     // SAFETY: the caller states the contract of this function.
-    unsafe { describe(&*outcome, parts_mut(into)) }
+    let Some(outcome) = (unsafe { outcome.as_ref() }) else {
+        return 0;
+    };
+    // SAFETY: as above, for the identifier the outcome borrows and for `into`.
+    let (request_id, into) = unsafe {
+        (
+            ptr::maybe_slice(outcome.failure.request_id),
+            ptr::slice_mut(into),
+        )
+    };
+    describe(outcome, request_id, into)
 }
 
 /// Writes one sentence naming what `status` says.
@@ -320,5 +374,5 @@ pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_describe_status(status: Status, into: BytesMut) -> usize {
     // SAFETY: the caller states the contract of this function.
-    describe_status(status, unsafe { parts_mut(into) })
+    describe_status(status, unsafe { ptr::slice_mut(into) })
 }

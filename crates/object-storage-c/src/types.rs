@@ -4,6 +4,8 @@
 //! a C program's declarations cannot differ from these. `layout` checks that
 //! both compilers lay them out the same way.
 
+#![forbid(unsafe_code)]
+
 /// The most headers that one request head carries.
 ///
 /// This is the core crate's own bound, and the array in `borink_request_head`
@@ -31,6 +33,16 @@ pub struct Bytes {
     pub len: usize,
 }
 
+// The default of every struct that a call returns is each field absent or 0.
+impl Default for Bytes {
+    fn default() -> Self {
+        Self {
+            ptr: core::ptr::null(),
+            len: 0,
+        }
+    }
+}
+
 /// Storage that a call writes into.
 ///
 /// A `len` of 0 is an empty buffer, and `ptr` may then be null.
@@ -45,7 +57,7 @@ pub struct BytesMut {
 
 /// A range of bytes, as an offset from the start of your request buffer.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Span {
     /// The offset of the first byte.
     pub start: usize,
@@ -64,7 +76,7 @@ pub struct Span {
 /// pointed into, or into the error body that you passed. It is valid until you
 /// release or reuse that storage.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct MaybeBytes {
     /// Whether the head carried this value.
     pub present: bool,
@@ -74,7 +86,7 @@ pub struct MaybeBytes {
 
 /// A number that a response head may not carry.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct MaybeU64 {
     /// Whether the head carried this number.
     pub present: bool,
@@ -88,7 +100,7 @@ pub struct MaybeU64 {
 /// value inside it. A `code` of 0 means that nothing failed. Both numbers are
 /// append-only: a value defined today keeps its meaning.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Status {
     /// The kind of failure, or 0 if there is none.
     pub code: u16,
@@ -346,7 +358,7 @@ pub struct DeleteShape {
 
 /// One request header, as two ranges of the request buffer.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct RequestHeader {
     /// The range that holds the header name.
     pub name: Span,
@@ -356,7 +368,7 @@ pub struct RequestHeader {
 
 /// A request head, as ranges of the buffer that holds it.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct RequestHead {
     /// Whether the head was written, and what stopped it.
     ///
@@ -404,7 +416,7 @@ pub struct HeaderRef {
 /// Every field points into the storage that the `borink_header_ref`s pointed
 /// into, and is valid until you release or reuse it.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct ObjectMeta {
     /// The size of the whole object.
     pub size: MaybeU64,
@@ -420,7 +432,7 @@ pub struct ObjectMeta {
 
 /// Where the bytes of the response body belong in the object.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct BodyWindow {
     /// The offset in the object of the first byte of the response body.
     pub object_offset: u64,
@@ -444,7 +456,7 @@ pub struct BodyWindow {
 /// `request_id` points into the storage that the `borink_header_ref`s pointed
 /// into. Copy it if you keep this value past that storage.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Failure {
     /// The HTTP status code.
     pub status: u16,
@@ -470,7 +482,7 @@ pub struct Failure {
 /// Everything that this value borrows is valid until you release or reuse the
 /// storage that the `borink_header_ref`s pointed into.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Outcome {
     /// Which outcome this is, as a `borink_outcome_kind`.
     pub kind: u16,

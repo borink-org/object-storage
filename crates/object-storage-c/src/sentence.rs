@@ -3,45 +3,24 @@
 //! Writing keeps counting after the buffer is full, so a caller that wants the
 //! whole sentence learns its length and calls again.
 
+#![forbid(unsafe_code)]
+
 use core::fmt::{self, Write as _};
 
 use crate::{convert::*, types::*};
 
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{Error, GetHeadOutcome};
+use borink_object_storage_proto::{Error, GetHeadOutcome, ServiceErrorKind};
 
-// ---------------------------------------------------------------- sentences
-
-pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
-    Some(match value {
-        1 => OutcomeKind::Body,
-        2 => OutcomeKind::Complete,
-        3 => OutcomeKind::NotModified,
-        4 => OutcomeKind::PreconditionFailed,
-        5 => OutcomeKind::NotFound,
-        6 => OutcomeKind::RangeNotSatisfiable,
-        7 => OutcomeKind::Done,
-        8 => OutcomeKind::Accepted,
-        9 => OutcomeKind::NeedErrorBody,
-        10 => OutcomeKind::ServiceFailure,
-        11 => OutcomeKind::Invalid,
-        12 => OutcomeKind::Unsupported,
-        _ => return None,
-    })
-}
-
-// # Safety
-//
-// Every borrowed field of `outcome` must still address its stated bytes.
-pub(crate) unsafe fn describe(outcome: &Outcome, into: &mut [u8]) -> usize {
+// `request_id` is the bytes that `outcome.failure.request_id` addresses.
+pub(crate) fn describe(outcome: &Outcome, request_id: Option<&[u8]>, into: &mut [u8]) -> usize {
     match outcome_kind_of(outcome.kind) {
         Some(OutcomeKind::Invalid) => describe_status(outcome.error, into),
         // The core crate wrote the sentence for a failure and for an
         // unsatisfiable range, and both carry numbers that no table holds.
         // The twin carries every field of them, so the sentence is borrowed.
         Some(OutcomeKind::NeedErrorBody | OutcomeKind::ServiceFailure) => {
-            // SAFETY: the caller states that the identifier is readable.
-            match unsafe { failure_of(&outcome.failure) } {
+            match failure_of(&outcome.failure, request_id) {
                 Some(failure) => say(into, &failure),
                 None => say(
                     into,
@@ -57,10 +36,12 @@ pub(crate) unsafe fn describe(outcome: &Outcome, into: &mut [u8]) -> usize {
         ),
         // A missing object names an error and carries nothing else, so the
         // error is the whole sentence.
-        Some(OutcomeKind::NotFound) => match kind_of(outcome.failure.kind) {
-            Some(kind) => say(into, &kind),
-            None => say(into, &"the object or its container does not exist"),
-        },
+        Some(OutcomeKind::NotFound) => {
+            match ServiceErrorKind::from_discriminant(outcome.failure.kind) {
+                Some(kind) => say(into, &kind),
+                None => say(into, &"the object or its container does not exist"),
+            }
+        }
         // One literal per remaining kind. They say less than the core
         // crate's own sentences, which name the operation: one outcome type
         // crosses for all three operations, so the sentence names none.
@@ -93,9 +74,8 @@ pub(crate) fn describe_status(status: Status, into: &mut [u8]) -> usize {
 }
 
 // Writes what `reason` says into `into`, and returns the length of the whole
-// sentence. Writing keeps counting after the buffer is full, so a caller that
-// wants all of it learns the size and calls again.
-pub(crate) fn say(into: &mut [u8], reason: &dyn fmt::Display) -> usize {
+// sentence.
+fn say(into: &mut [u8], reason: &dyn fmt::Display) -> usize {
     let mut sentence = Sentence { into, used: 0 };
     // Display for these types never fails, and a full buffer is not a failure
     // here: the count is the answer.
@@ -103,6 +83,8 @@ pub(crate) fn say(into: &mut [u8], reason: &dyn fmt::Display) -> usize {
     sentence.used
 }
 
+// Keeps counting after the buffer is full, so a caller that wants all of the
+// sentence learns the size and calls again.
 struct Sentence<'a> {
     into: &'a mut [u8],
     used: usize,

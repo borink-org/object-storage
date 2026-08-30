@@ -4,18 +4,27 @@
 //! same bytes rather than copying them. Going inwards, a number that names no
 //! variant is refused rather than read as another one.
 
-use crate::{ptr::*, step::*, types::*};
+#![forbid(unsafe_code)]
+
+use crate::types::*;
 
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{DeleteHeadOutcome, GetHeadOutcome, PutHeadOutcome};
+use borink_object_storage_proto::{
+    DeleteHeadOutcome, Error, GetHeadOutcome, InvalidPlan, PutHeadOutcome, ServiceErrorKind,
+};
 
-// ---------------------------------------------------------- plans, both ways
+// A number that names no value of the core crate's enum. It is refused as an
+// invalid plan, and the plan is never read as the value that happens to be
+// oldest.
+pub(crate) const UNKNOWN: Error = Error::InvalidPlan(InvalidPlan::Unknown);
 
-pub(crate) fn get_shape(shape: &GetShape) -> Result<proto::GetShape, Status> {
+// ----------------------------------------------------------- inwards: plans
+
+pub(crate) fn get_shape(shape: &GetShape) -> proto::Result<proto::GetShape> {
     Ok(proto::GetShape {
-        kind: proto::GetKind::from_discriminant(shape.kind).ok_or_else(unknown)?,
+        kind: proto::GetKind::from_discriminant(shape.kind).ok_or(UNKNOWN)?,
         range: proto::RequestedRange::from_parts(
-            proto::RangeForm::from_discriminant(shape.range.form).ok_or_else(unknown)?,
+            proto::RangeForm::from_discriminant(shape.range.form).ok_or(UNKNOWN)?,
             shape.range.start,
             shape.range.end,
         ),
@@ -23,195 +32,142 @@ pub(crate) fn get_shape(shape: &GetShape) -> Result<proto::GetShape, Status> {
     })
 }
 
-pub(crate) fn put_shape(shape: &PutShape) -> Result<proto::PutShape, Status> {
+pub(crate) fn put_shape(shape: &PutShape) -> proto::Result<proto::PutShape> {
     Ok(proto::PutShape {
         condition: condition_kind(shape.condition)?,
     })
 }
 
-pub(crate) fn delete_shape(shape: &DeleteShape) -> Result<proto::DeleteShape, Status> {
+pub(crate) fn delete_shape(shape: &DeleteShape) -> proto::Result<proto::DeleteShape> {
     Ok(proto::DeleteShape {
-        kind: proto::DeleteKind::from_discriminant(shape.kind).ok_or_else(unknown)?,
+        kind: proto::DeleteKind::from_discriminant(shape.kind).ok_or(UNKNOWN)?,
         condition: condition_kind(shape.condition)?,
     })
 }
 
-pub(crate) fn condition_kind(condition: u16) -> Result<proto::ConditionKind, Status> {
-    proto::ConditionKind::from_discriminant(condition).ok_or_else(unknown)
+pub(crate) fn condition_kind(condition: u16) -> proto::Result<proto::ConditionKind> {
+    proto::ConditionKind::from_discriminant(condition).ok_or(UNKNOWN)
 }
 
-// ------------------------------------------------------- outcomes, both ways
+// ------------------------------------------------------- outwards: outcomes
 
-pub(crate) fn class_of(class: u16) -> Option<proto::FailureClass> {
-    proto::FailureClass::from_discriminant(class)
+pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
+    match *outcome {
+        GetHeadOutcome::Body { meta, body } => Outcome {
+            meta: meta_view(&meta),
+            body: body_view(&body),
+            ..only(OutcomeKind::Body)
+        },
+        GetHeadOutcome::Complete { meta } => Outcome {
+            meta: meta_view(&meta),
+            ..only(OutcomeKind::Complete)
+        },
+        GetHeadOutcome::NotModified { e_tag } => Outcome {
+            meta: ObjectMeta {
+                e_tag: maybe_bytes(e_tag),
+                ..Default::default()
+            },
+            ..only(OutcomeKind::NotModified)
+        },
+        GetHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        GetHeadOutcome::NotFound { kind } => not_found(kind),
+        GetHeadOutcome::RangeNotSatisfiable { object_size } => Outcome {
+            body: BodyWindow {
+                object_size: maybe_number(object_size),
+                ..Default::default()
+            },
+            ..only(OutcomeKind::RangeNotSatisfiable)
+        },
+        GetHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        GetHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        // The outcome is sealed, so a later version can add a variant. Report
+        // one that this crate does not know rather than guessing at it.
+        _ => only(OutcomeKind::Unsupported),
+    }
 }
 
-pub(crate) fn kind_view(kind: Option<proto::ServiceErrorKind>) -> u16 {
-    kind.map_or(0, |kind| kind as u16)
+pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
+    match *outcome {
+        PutHeadOutcome::Created { meta } => Outcome {
+            meta: meta_view(&meta),
+            ..only(OutcomeKind::Done)
+        },
+        PutHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        PutHeadOutcome::NotFound { kind } => not_found(kind),
+        PutHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        PutHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        _ => only(OutcomeKind::Unsupported),
+    }
 }
 
-pub(crate) fn kind_of(kind: u16) -> Option<proto::ServiceErrorKind> {
-    proto::ServiceErrorKind::from_discriminant(kind)
+pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
+    match *outcome {
+        // A removal returns no object, so Azure sends no metadata for one.
+        DeleteHeadOutcome::Accepted => only(OutcomeKind::Accepted),
+        DeleteHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        DeleteHeadOutcome::NotFound { kind } => not_found(kind),
+        DeleteHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        DeleteHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        _ => only(OutcomeKind::Unsupported),
+    }
 }
 
-pub(crate) fn failure_view(failure: &proto::Failure<'_>) -> Failure {
-    Failure {
-        status: failure.status,
-        class: failure.class as u16,
-        kind: kind_view(failure.kind),
-        request_id: maybe_bytes(failure.request_id),
+pub(crate) fn invalid(error: Error) -> Outcome {
+    Outcome {
+        error: status_of(&error),
+        ..only(OutcomeKind::Invalid)
+    }
+}
+
+// An outcome that says this and nothing else: every other field is absent.
+pub(crate) fn only(kind: OutcomeKind) -> Outcome {
+    Outcome {
+        kind: kind as u16,
+        ..Default::default()
+    }
+}
+
+fn failed(kind: OutcomeKind, failure: &proto::Failure<'_>) -> Outcome {
+    Outcome {
+        failure: Failure {
+            status: failure.status,
+            class: failure.class as u16,
+            kind: kind_view(failure.kind),
+            request_id: maybe_bytes(failure.request_id),
+        },
+        ..only(kind)
+    }
+}
+
+// A missing object is not a failure of the head. The core crate's variant
+// carries the error it named and nothing else, and so does this.
+fn not_found(kind: Option<ServiceErrorKind>) -> Outcome {
+    Outcome {
+        failure: Failure {
+            kind: kind_view(kind),
+            ..Default::default()
+        },
+        ..only(OutcomeKind::NotFound)
     }
 }
 
 // The failure that the twin carries, as the core crate's own record, so that
-// the sentence for it is the core crate's own too. It is `None` only for a
-// category that a later core crate defined and this crate cannot name.
-//
-// # Safety
-//
-// `failure.request_id` must still address its stated bytes.
-pub(crate) unsafe fn failure_of<'a>(failure: &Failure) -> Option<proto::Failure<'a>> {
+// the sentence for it is the core crate's own too. `request_id` is the bytes
+// that the twin's `request_id` addresses. It is `None` only for a category
+// that a later core crate defined and this crate cannot name.
+pub(crate) fn failure_of<'a>(
+    failure: &Failure,
+    request_id: Option<&'a [u8]>,
+) -> Option<proto::Failure<'a>> {
     Some(proto::Failure {
         status: failure.status,
-        class: class_of(failure.class)?,
-        kind: kind_of(failure.kind),
-        // SAFETY: the caller states that the identifier is readable.
-        request_id: unsafe { maybe_slice(failure.request_id) },
+        class: proto::FailureClass::from_discriminant(failure.class)?,
+        kind: ServiceErrorKind::from_discriminant(failure.kind),
+        request_id,
     })
 }
 
-// A named error and nothing else. A missing object is not a failure of the
-// head: the core crate's variant carries a kind alone, and so does this.
-pub(crate) fn named_error(kind: Option<proto::ServiceErrorKind>) -> Failure {
-    Failure {
-        status: 0,
-        class: 0,
-        kind: kind_view(kind),
-        request_id: absent_bytes(),
-    }
-}
-
-pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(OutcomeKind::Unsupported);
-    match *outcome {
-        GetHeadOutcome::Body { meta, body } => {
-            view.kind = OutcomeKind::Body as u16;
-            view.meta = meta_view(&meta);
-            view.body = body_view(&body);
-        }
-        GetHeadOutcome::Complete { meta } => {
-            view.kind = OutcomeKind::Complete as u16;
-            view.meta = meta_view(&meta);
-        }
-        GetHeadOutcome::NotModified { e_tag } => {
-            view.kind = OutcomeKind::NotModified as u16;
-            view.meta.e_tag = maybe_bytes(e_tag);
-        }
-        GetHeadOutcome::PreconditionFailed => {
-            view.kind = OutcomeKind::PreconditionFailed as u16;
-        }
-        GetHeadOutcome::NotFound { kind } => {
-            view.kind = OutcomeKind::NotFound as u16;
-            view.failure = named_error(kind);
-        }
-        GetHeadOutcome::RangeNotSatisfiable { object_size } => {
-            view.kind = OutcomeKind::RangeNotSatisfiable as u16;
-            view.body.object_size = maybe_number(object_size);
-        }
-        GetHeadOutcome::NeedErrorBody(failure) => {
-            view.kind = OutcomeKind::NeedErrorBody as u16;
-            view.failure = failure_view(&failure);
-        }
-        GetHeadOutcome::ServiceFailure(failure) => {
-            view.kind = OutcomeKind::ServiceFailure as u16;
-            view.failure = failure_view(&failure);
-        }
-        // The outcome is sealed, so a later version can add a variant. Report
-        // one that this crate does not know rather than guessing at it.
-        _ => {}
-    }
-    view
-}
-
-pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(OutcomeKind::Unsupported);
-    match *outcome {
-        PutHeadOutcome::Created { meta } => {
-            view.kind = OutcomeKind::Done as u16;
-            view.meta = meta_view(&meta);
-        }
-        PutHeadOutcome::PreconditionFailed => {
-            view.kind = OutcomeKind::PreconditionFailed as u16;
-        }
-        PutHeadOutcome::NotFound { kind } => {
-            view.kind = OutcomeKind::NotFound as u16;
-            view.failure = named_error(kind);
-        }
-        PutHeadOutcome::NeedErrorBody(failure) => {
-            view.kind = OutcomeKind::NeedErrorBody as u16;
-            view.failure = failure_view(&failure);
-        }
-        PutHeadOutcome::ServiceFailure(failure) => {
-            view.kind = OutcomeKind::ServiceFailure as u16;
-            view.failure = failure_view(&failure);
-        }
-        _ => {}
-    }
-    view
-}
-
-pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(OutcomeKind::Unsupported);
-    match *outcome {
-        // A removal returns no object, so Azure sends no metadata for one.
-        DeleteHeadOutcome::Accepted => view.kind = OutcomeKind::Accepted as u16,
-        DeleteHeadOutcome::PreconditionFailed => {
-            view.kind = OutcomeKind::PreconditionFailed as u16;
-        }
-        DeleteHeadOutcome::NotFound { kind } => {
-            view.kind = OutcomeKind::NotFound as u16;
-            view.failure = named_error(kind);
-        }
-        DeleteHeadOutcome::NeedErrorBody(failure) => {
-            view.kind = OutcomeKind::NeedErrorBody as u16;
-            view.failure = failure_view(&failure);
-        }
-        DeleteHeadOutcome::ServiceFailure(failure) => {
-            view.kind = OutcomeKind::ServiceFailure as u16;
-            view.failure = failure_view(&failure);
-        }
-        _ => {}
-    }
-    view
-}
-
-pub(crate) fn invalid(status: Status) -> Outcome {
-    let mut view = empty_outcome(OutcomeKind::Invalid);
-    view.error = status;
-    view
-}
-
-pub(crate) fn empty_outcome(kind: OutcomeKind) -> Outcome {
-    Outcome {
-        kind: kind as u16,
-        meta: ObjectMeta {
-            size: absent_number(),
-            e_tag: absent_bytes(),
-            last_modified: absent_bytes(),
-            version: absent_bytes(),
-            content_encoding: absent_bytes(),
-        },
-        body: BodyWindow {
-            object_offset: 0,
-            expected_len: absent_number(),
-            object_size: absent_number(),
-        },
-        failure: named_error(None),
-        error: Status { code: 0, detail: 0 },
-    }
-}
-
-pub(crate) fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
+fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
     ObjectMeta {
         size: maybe_number(meta.size),
         e_tag: maybe_bytes(meta.e_tag),
@@ -221,7 +177,7 @@ pub(crate) fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
     }
 }
 
-pub(crate) fn body_view(body: &proto::BodyWindow) -> BodyWindow {
+fn body_view(body: &proto::BodyWindow) -> BodyWindow {
     BodyWindow {
         object_offset: body.object_offset,
         expected_len: maybe_number(body.expected_len),
@@ -229,46 +185,56 @@ pub(crate) fn body_view(body: &proto::BodyWindow) -> BodyWindow {
     }
 }
 
-pub(crate) fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
-    match value {
-        Some(bytes) => MaybeBytes {
-            present: true,
-            bytes: Bytes {
-                ptr: bytes.as_ptr(),
-                len: bytes.len(),
-            },
-        },
-        None => absent_bytes(),
+// ------------------------------------------------------- numbers, both ways
+
+pub(crate) fn status_of(error: &Error) -> Status {
+    Status {
+        code: error.code() as u16,
+        detail: error.detail(),
     }
 }
 
-pub(crate) fn absent_bytes() -> MaybeBytes {
-    MaybeBytes {
-        present: false,
+pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
+    use OutcomeKind as D;
+    [
+        D::Body,
+        D::Complete,
+        D::NotModified,
+        D::PreconditionFailed,
+        D::NotFound,
+        D::RangeNotSatisfiable,
+        D::Done,
+        D::Accepted,
+        D::NeedErrorBody,
+        D::ServiceFailure,
+        D::Invalid,
+        D::Unsupported,
+    ]
+    .into_iter()
+    .find(|kind| *kind as u16 == value)
+}
+
+pub(crate) fn kind_view(kind: Option<ServiceErrorKind>) -> u16 {
+    kind.map_or(0, |kind| kind as u16)
+}
+
+fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
+    value.map_or_else(Default::default, |bytes| MaybeBytes {
+        present: true,
         bytes: Bytes {
-            ptr: core::ptr::null(),
-            len: 0,
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
         },
-    }
+    })
 }
 
-pub(crate) fn maybe_number(value: Option<u64>) -> MaybeU64 {
-    match value {
-        Some(value) => MaybeU64 {
-            present: true,
-            value,
-        },
-        None => absent_number(),
-    }
+fn maybe_number(value: Option<u64>) -> MaybeU64 {
+    value.map_or_else(Default::default, |value| MaybeU64 {
+        present: true,
+        value,
+    })
 }
 
 pub(crate) fn number(value: MaybeU64) -> Option<u64> {
     value.present.then_some(value.value)
-}
-
-pub(crate) fn absent_number() -> MaybeU64 {
-    MaybeU64 {
-        present: false,
-        value: 0,
-    }
 }
