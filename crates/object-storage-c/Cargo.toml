@@ -41,7 +41,7 @@ subdirectory = "borink"
 asset = [
     { from = "include/borink/object_storage.h", to = "borink/" },
     { from = "include/borink/object_storage.hpp", to = "borink/" },
-    { from = "include/borink/object_storage/vector.hpp", to = "borink/object_storage/" },
+    { from = "include/borink/object_storage/core.hpp", to = "borink/object_storage/" },
 ]
 
 [package.metadata.capi.library]

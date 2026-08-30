@@ -1,10 +1,10 @@
 // What a C++ program sees of this crate without an allocator.
 //
 // This test opens no socket and allocates nothing. It includes
-// `borink/object_storage.hpp` alone, so the helpers there stay usable by a
-// program that has no heap to give them. `borink/object_storage/vector.hpp`
-// is the file that may include an owning container, and `hosts/cxx-curl` is
-// what compiles it.
+// `borink/object_storage/core.hpp` alone, so the helpers there stay usable by
+// a program that has no heap to give them. `borink/object_storage.hpp` is the
+// file that may include an owning container, and `hosts/cxx-curl` is what
+// compiles it.
 
 #include <array>
 #include <cstdint>
@@ -14,7 +14,7 @@
 #include <span>
 #include <string_view>
 
-#include "borink/object_storage.hpp"
+#include "borink/object_storage/core.hpp"
 
 // Every allocation this program makes is one the header made, because it makes
 // none of its own. Replacing the operators turns one into a failure.
