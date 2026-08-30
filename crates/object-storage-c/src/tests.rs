@@ -130,7 +130,7 @@ fn every_read_outcome_crosses_whole() {
             object_size: Some(10),
         },
     });
-    assert_eq!(view.disposition, Disposition::Body as u16);
+    assert_eq!(view.kind, OutcomeKind::Body as u16);
     assert!(view.meta.size.present);
     assert_eq!(view.meta.size.value, 10);
     assert_eq!(view.meta.e_tag.bytes.ptr, e_tag().as_ptr());
@@ -156,25 +156,25 @@ fn every_read_outcome_crosses_whole() {
     assert!(!empty.body.expected_len.present);
 
     let complete = get_outcome(&GetHeadOutcome::Complete { meta: full_meta() });
-    assert_eq!(complete.disposition, Disposition::Complete as u16);
+    assert_eq!(complete.kind, OutcomeKind::Complete as u16);
     assert!(complete.meta.e_tag.present);
 
     for tag in [None, Some(e_tag())] {
         let view = get_outcome(&GetHeadOutcome::NotModified { e_tag: tag });
-        assert_eq!(view.disposition, Disposition::NotModified as u16);
+        assert_eq!(view.kind, OutcomeKind::NotModified as u16);
         assert_eq!(view.meta.e_tag.present, tag.is_some());
     }
 
     assert_eq!(
-        get_outcome(&GetHeadOutcome::PreconditionFailed).disposition,
-        Disposition::PreconditionFailed as u16
+        get_outcome(&GetHeadOutcome::PreconditionFailed).kind,
+        OutcomeKind::PreconditionFailed as u16
     );
 
     // A missing object carries the error it named, and no status and no
     // category that the head never stated.
     for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
         let view = get_outcome(&GetHeadOutcome::NotFound { kind });
-        assert_eq!(view.disposition, Disposition::NotFound as u16);
+        assert_eq!(view.kind, OutcomeKind::NotFound as u16);
         assert_eq!(kind_of(view.failure.kind), kind);
         assert_eq!(view.failure.status, 0);
         assert_eq!(view.failure.class, 0);
@@ -182,7 +182,7 @@ fn every_read_outcome_crosses_whole() {
 
     for object_size in [None, Some(10)] {
         let view = get_outcome(&GetHeadOutcome::RangeNotSatisfiable { object_size });
-        assert_eq!(view.disposition, Disposition::RangeNotSatisfiable as u16);
+        assert_eq!(view.kind, OutcomeKind::RangeNotSatisfiable as u16);
         assert_eq!(number(view.body.object_size), object_size);
         assert_eq!(
             text(&view),
@@ -194,15 +194,15 @@ fn every_read_outcome_crosses_whole() {
         for (outcome, expected) in [
             (
                 GetHeadOutcome::NeedErrorBody(failure),
-                Disposition::NeedErrorBody,
+                OutcomeKind::NeedErrorBody,
             ),
             (
                 GetHeadOutcome::ServiceFailure(failure),
-                Disposition::ServiceFailure,
+                OutcomeKind::ServiceFailure,
             ),
         ] {
             let view = get_outcome(&outcome);
-            assert_eq!(view.disposition, expected as u16);
+            assert_eq!(view.kind, expected as u16);
             assert_eq!(view.failure.status, failure.status);
             assert_eq!(class_of(view.failure.class), Some(failure.class));
             assert_eq!(kind_of(view.failure.kind), failure.kind);
@@ -215,12 +215,12 @@ fn every_read_outcome_crosses_whole() {
 #[test]
 fn every_write_and_removal_outcome_crosses_whole() {
     let created = put_outcome(&PutHeadOutcome::Created { meta: full_meta() });
-    assert_eq!(created.disposition, Disposition::Done as u16);
+    assert_eq!(created.kind, OutcomeKind::Done as u16);
     assert!(created.meta.e_tag.present);
 
     assert_eq!(
-        delete_outcome(&DeleteHeadOutcome::Accepted).disposition,
-        Disposition::Accepted as u16
+        delete_outcome(&DeleteHeadOutcome::Accepted).kind,
+        OutcomeKind::Accepted as u16
     );
 
     for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
@@ -261,7 +261,7 @@ fn every_write_and_removal_outcome_crosses_whole() {
 // is the core crate's own. A settled outcome gets a literal, which names no
 // operation because one twin answers all three.
 #[test]
-fn every_disposition_says_something_of_its_own() {
+fn every_outcome_kind_says_something_of_its_own() {
     for kind in [
         ServiceErrorKind::NotFound,
         ServiceErrorKind::NoSuchContainer,
@@ -277,26 +277,26 @@ fn every_disposition_says_something_of_its_own() {
     );
 
     let mut said = Vec::new();
-    for disposition in [
-        Disposition::Body,
-        Disposition::Complete,
-        Disposition::NotModified,
-        Disposition::PreconditionFailed,
-        Disposition::Done,
-        Disposition::Accepted,
+    for kind in [
+        OutcomeKind::Body,
+        OutcomeKind::Complete,
+        OutcomeKind::NotModified,
+        OutcomeKind::PreconditionFailed,
+        OutcomeKind::Done,
+        OutcomeKind::Accepted,
     ] {
-        let sentence = settled_sentence(Some(disposition));
+        let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());
-        assert_eq!(text(&empty_outcome(disposition)), sentence);
+        assert_eq!(text(&empty_outcome(kind)), sentence);
         said.push(sentence);
     }
     said.sort_unstable();
     said.dedup();
     assert_eq!(said.len(), 6);
 
-    // A disposition from a later version of this crate names nothing here.
-    let mut later = empty_outcome(Disposition::Body);
-    later.disposition = 4095;
+    // A kind from a later version of this crate names nothing here.
+    let mut later = empty_outcome(OutcomeKind::Body);
+    later.kind = 4095;
     assert_eq!(text(&later), settled_sentence(None));
 }
 
@@ -313,15 +313,15 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
             assert_eq!(class_of(class as u16), Some(class), "{class:?}");
         }
         assert_eq!(
-            disposition_of(repr).map(|disposition| disposition as u16),
-            disposition_of(repr).map(|_| repr)
+            outcome_kind_of(repr).map(|kind| kind as u16),
+            outcome_kind_of(repr).map(|_| repr)
         );
     }
     assert_eq!(kind_of(kind_view(None)), None);
     assert_eq!(kind_of(4095), None);
     assert_eq!(class_of(4095), None);
-    assert!(disposition_of(0).is_none());
-    assert!(disposition_of(13).is_none());
+    assert!(outcome_kind_of(0).is_none());
+    assert!(outcome_kind_of(13).is_none());
 
     // The plan side, which crosses inwards and must refuse.
     for (kind, expected) in [
@@ -423,7 +423,7 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
 
     // SAFETY: as above, with no headers.
     let outcome = unsafe { borink_accept_get_head(&session, &shape, 200, core::ptr::null(), 0) };
-    assert_eq!(outcome.disposition, Disposition::Invalid as u16);
+    assert_eq!(outcome.kind, OutcomeKind::Invalid as u16);
     assert_eq!(outcome.error, unknown());
     assert_eq!(
         text(&outcome),
@@ -670,7 +670,7 @@ fn a_head_crosses_as_slices_of_whatever_holds_it() {
             headers.len(),
         )
     };
-    assert_eq!(outcome.disposition, Disposition::Body as u16);
+    assert_eq!(outcome.kind, OutcomeKind::Body as u16);
     assert_eq!(outcome.meta.e_tag.bytes.ptr, e_tag().as_ptr());
     assert!(outcome.body.expected_len.present);
     assert_eq!(outcome.body.expected_len.value, 10);
@@ -692,7 +692,7 @@ fn the_error_body_finishes_what_the_head_left_open() {
             headers.len(),
         )
     };
-    assert_eq!(outcome.disposition, Disposition::NeedErrorBody as u16);
+    assert_eq!(outcome.kind, OutcomeKind::NeedErrorBody as u16);
     assert_eq!(outcome.failure.request_id.bytes.ptr, IDENTIFIER.as_ptr());
 
     // SAFETY: as above, and the body outlives the outcome it names.
@@ -703,7 +703,7 @@ fn the_error_body_finishes_what_the_head_left_open() {
             lent(b"<Error><Code>BlobAlreadyExists</Code></Error>"),
         )
     };
-    assert_eq!(finished.disposition, Disposition::ServiceFailure as u16);
+    assert_eq!(finished.kind, OutcomeKind::ServiceFailure as u16);
     assert_eq!(
         kind_of(finished.failure.kind),
         Some(ServiceErrorKind::AlreadyExists)
@@ -714,7 +714,7 @@ fn the_error_body_finishes_what_the_head_left_open() {
     // A body that never arrived leaves the outcome final and unnamed.
     // SAFETY: as above.
     let unnamed = unsafe { borink_finish_put_error_body(&session, &outcome.failure, lent(b"")) };
-    assert_eq!(unnamed.disposition, Disposition::ServiceFailure as u16);
+    assert_eq!(unnamed.kind, OutcomeKind::ServiceFailure as u16);
     assert_eq!(kind_of(unnamed.failure.kind), None);
 }
 
@@ -725,7 +725,7 @@ fn an_invalid_head_carries_the_error_of_the_core_crate() {
     // SAFETY: every pointer addresses a live value of this test.
     let outcome =
         unsafe { borink_accept_put_head(&session, &write_shape(), 412, core::ptr::null(), 0) };
-    assert_eq!(outcome.disposition, Disposition::Invalid as u16);
+    assert_eq!(outcome.kind, OutcomeKind::Invalid as u16);
     assert_eq!(outcome.error.code, ErrorCode::Response as u16);
     assert_eq!(outcome.error.detail, ResponseFault::Status as u16);
     assert_eq!(
@@ -778,7 +778,7 @@ fn a_session_that_cannot_be_used_says_which_value_is_wrong() {
         // SAFETY: as above.
         let outcome =
             unsafe { borink_accept_get_head(&session, &read_shape(), 200, core::ptr::null(), 0) };
-        assert_eq!(outcome.disposition, Disposition::Invalid as u16);
+        assert_eq!(outcome.kind, OutcomeKind::Invalid as u16);
         assert_eq!(outcome.error, status);
     }
     // SAFETY: the session addresses `const` bytes of this module.

@@ -236,10 +236,10 @@ pub enum ServiceError {
     Service = 9,
 }
 
-/// What a response tells you to do.
+/// Which outcome a response head became.
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Disposition {
+pub enum OutcomeKind {
     /// A body follows. Read it and put the bytes at `body`.
     Body = 1,
     /// No body follows and the read is complete.
@@ -472,8 +472,8 @@ pub struct Failure {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Outcome {
-    /// What to do with the response, as a `borink_disposition`.
-    pub disposition: u16,
+    /// Which outcome this is, as a `borink_outcome_kind`.
+    pub kind: u16,
     /// The metadata from the head.
     pub meta: ObjectMeta,
     /// Where the bytes of the body belong.

@@ -92,38 +92,38 @@ pub(crate) fn named_error(kind: Option<proto::ServiceErrorKind>) -> Failure {
 }
 
 pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Disposition::Unsupported);
+    let mut view = empty_outcome(OutcomeKind::Unsupported);
     match *outcome {
         GetHeadOutcome::Body { meta, body } => {
-            view.disposition = Disposition::Body as u16;
+            view.kind = OutcomeKind::Body as u16;
             view.meta = meta_view(&meta);
             view.body = body_view(&body);
         }
         GetHeadOutcome::Complete { meta } => {
-            view.disposition = Disposition::Complete as u16;
+            view.kind = OutcomeKind::Complete as u16;
             view.meta = meta_view(&meta);
         }
         GetHeadOutcome::NotModified { e_tag } => {
-            view.disposition = Disposition::NotModified as u16;
+            view.kind = OutcomeKind::NotModified as u16;
             view.meta.e_tag = maybe_bytes(e_tag);
         }
         GetHeadOutcome::PreconditionFailed => {
-            view.disposition = Disposition::PreconditionFailed as u16;
+            view.kind = OutcomeKind::PreconditionFailed as u16;
         }
         GetHeadOutcome::NotFound { kind } => {
-            view.disposition = Disposition::NotFound as u16;
+            view.kind = OutcomeKind::NotFound as u16;
             view.failure = named_error(kind);
         }
         GetHeadOutcome::RangeNotSatisfiable { object_size } => {
-            view.disposition = Disposition::RangeNotSatisfiable as u16;
+            view.kind = OutcomeKind::RangeNotSatisfiable as u16;
             view.body.object_size = maybe_number(object_size);
         }
         GetHeadOutcome::NeedErrorBody(failure) => {
-            view.disposition = Disposition::NeedErrorBody as u16;
+            view.kind = OutcomeKind::NeedErrorBody as u16;
             view.failure = failure_view(&failure);
         }
         GetHeadOutcome::ServiceFailure(failure) => {
-            view.disposition = Disposition::ServiceFailure as u16;
+            view.kind = OutcomeKind::ServiceFailure as u16;
             view.failure = failure_view(&failure);
         }
         // The outcome is sealed, so a later version can add a variant. Report
@@ -134,25 +134,25 @@ pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
 }
 
 pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Disposition::Unsupported);
+    let mut view = empty_outcome(OutcomeKind::Unsupported);
     match *outcome {
         PutHeadOutcome::Created { meta } => {
-            view.disposition = Disposition::Done as u16;
+            view.kind = OutcomeKind::Done as u16;
             view.meta = meta_view(&meta);
         }
         PutHeadOutcome::PreconditionFailed => {
-            view.disposition = Disposition::PreconditionFailed as u16;
+            view.kind = OutcomeKind::PreconditionFailed as u16;
         }
         PutHeadOutcome::NotFound { kind } => {
-            view.disposition = Disposition::NotFound as u16;
+            view.kind = OutcomeKind::NotFound as u16;
             view.failure = named_error(kind);
         }
         PutHeadOutcome::NeedErrorBody(failure) => {
-            view.disposition = Disposition::NeedErrorBody as u16;
+            view.kind = OutcomeKind::NeedErrorBody as u16;
             view.failure = failure_view(&failure);
         }
         PutHeadOutcome::ServiceFailure(failure) => {
-            view.disposition = Disposition::ServiceFailure as u16;
+            view.kind = OutcomeKind::ServiceFailure as u16;
             view.failure = failure_view(&failure);
         }
         _ => {}
@@ -161,23 +161,23 @@ pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
 }
 
 pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
-    let mut view = empty_outcome(Disposition::Unsupported);
+    let mut view = empty_outcome(OutcomeKind::Unsupported);
     match *outcome {
         // A removal returns no object, so Azure sends no metadata for one.
-        DeleteHeadOutcome::Accepted => view.disposition = Disposition::Accepted as u16,
+        DeleteHeadOutcome::Accepted => view.kind = OutcomeKind::Accepted as u16,
         DeleteHeadOutcome::PreconditionFailed => {
-            view.disposition = Disposition::PreconditionFailed as u16;
+            view.kind = OutcomeKind::PreconditionFailed as u16;
         }
         DeleteHeadOutcome::NotFound { kind } => {
-            view.disposition = Disposition::NotFound as u16;
+            view.kind = OutcomeKind::NotFound as u16;
             view.failure = named_error(kind);
         }
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            view.disposition = Disposition::NeedErrorBody as u16;
+            view.kind = OutcomeKind::NeedErrorBody as u16;
             view.failure = failure_view(&failure);
         }
         DeleteHeadOutcome::ServiceFailure(failure) => {
-            view.disposition = Disposition::ServiceFailure as u16;
+            view.kind = OutcomeKind::ServiceFailure as u16;
             view.failure = failure_view(&failure);
         }
         _ => {}
@@ -186,14 +186,14 @@ pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
 }
 
 pub(crate) fn invalid(status: Status) -> Outcome {
-    let mut view = empty_outcome(Disposition::Invalid);
+    let mut view = empty_outcome(OutcomeKind::Invalid);
     view.error = status;
     view
 }
 
-pub(crate) fn empty_outcome(disposition: Disposition) -> Outcome {
+pub(crate) fn empty_outcome(kind: OutcomeKind) -> Outcome {
     Outcome {
-        disposition: disposition as u16,
+        kind: kind as u16,
         meta: ObjectMeta {
             size: absent_number(),
             e_tag: absent_bytes(),

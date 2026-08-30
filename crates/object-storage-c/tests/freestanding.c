@@ -50,7 +50,7 @@ void board_main(void) {
     };
     const borink_outcome outcome = borink_accept_get_head(
         &session, &shape, 206, headers, sizeof headers / sizeof headers[0]);
-    sink = outcome.disposition;
+    sink = outcome.kind;
 
     static uint8_t sentence[256];
     sink = (unsigned)borink_describe(&outcome, (borink_bytes_mut){sentence, sizeof sentence});

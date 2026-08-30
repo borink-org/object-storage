@@ -12,20 +12,20 @@ use borink_object_storage_proto::{Error, GetHeadOutcome};
 
 // ---------------------------------------------------------------- sentences
 
-pub(crate) fn disposition_of(value: u16) -> Option<Disposition> {
+pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
     Some(match value {
-        1 => Disposition::Body,
-        2 => Disposition::Complete,
-        3 => Disposition::NotModified,
-        4 => Disposition::PreconditionFailed,
-        5 => Disposition::NotFound,
-        6 => Disposition::RangeNotSatisfiable,
-        7 => Disposition::Done,
-        8 => Disposition::Accepted,
-        9 => Disposition::NeedErrorBody,
-        10 => Disposition::ServiceFailure,
-        11 => Disposition::Invalid,
-        12 => Disposition::Unsupported,
+        1 => OutcomeKind::Body,
+        2 => OutcomeKind::Complete,
+        3 => OutcomeKind::NotModified,
+        4 => OutcomeKind::PreconditionFailed,
+        5 => OutcomeKind::NotFound,
+        6 => OutcomeKind::RangeNotSatisfiable,
+        7 => OutcomeKind::Done,
+        8 => OutcomeKind::Accepted,
+        9 => OutcomeKind::NeedErrorBody,
+        10 => OutcomeKind::ServiceFailure,
+        11 => OutcomeKind::Invalid,
+        12 => OutcomeKind::Unsupported,
         _ => return None,
     })
 }
@@ -34,12 +34,12 @@ pub(crate) fn disposition_of(value: u16) -> Option<Disposition> {
 //
 // Every borrowed field of `outcome` must still address its stated bytes.
 pub(crate) unsafe fn describe(outcome: &Outcome, into: &mut [u8]) -> usize {
-    match disposition_of(outcome.disposition) {
-        Some(Disposition::Invalid) => describe_status(outcome.error, into),
+    match outcome_kind_of(outcome.kind) {
+        Some(OutcomeKind::Invalid) => describe_status(outcome.error, into),
         // The core crate wrote the sentence for a failure and for an
         // unsatisfiable range, and both carry numbers that no table holds.
         // The twin carries every field of them, so the sentence is borrowed.
-        Some(Disposition::NeedErrorBody | Disposition::ServiceFailure) => {
+        Some(OutcomeKind::NeedErrorBody | OutcomeKind::ServiceFailure) => {
             // SAFETY: the caller states that the identifier is readable.
             match unsafe { failure_of(&outcome.failure) } {
                 Some(failure) => say(into, &failure),
@@ -49,7 +49,7 @@ pub(crate) unsafe fn describe(outcome: &Outcome, into: &mut [u8]) -> usize {
                 ),
             }
         }
-        Some(Disposition::RangeNotSatisfiable) => say(
+        Some(OutcomeKind::RangeNotSatisfiable) => say(
             into,
             &GetHeadOutcome::RangeNotSatisfiable {
                 object_size: number(outcome.body.object_size),
@@ -57,25 +57,25 @@ pub(crate) unsafe fn describe(outcome: &Outcome, into: &mut [u8]) -> usize {
         ),
         // A missing object names an error and carries nothing else, so the
         // error is the whole sentence.
-        Some(Disposition::NotFound) => match kind_of(outcome.failure.kind) {
+        Some(OutcomeKind::NotFound) => match kind_of(outcome.failure.kind) {
             Some(kind) => say(into, &kind),
             None => say(into, &"the object or its container does not exist"),
         },
-        // One literal per remaining disposition. They say less than the core
+        // One literal per remaining kind. They say less than the core
         // crate's own sentences, which name the operation: one outcome type
         // crosses for all three operations, so the sentence names none.
         settled => say(into, &settled_sentence(settled)),
     }
 }
 
-pub(crate) fn settled_sentence(disposition: Option<Disposition>) -> &'static str {
-    match disposition {
-        Some(Disposition::Body) => "the object follows in the response body",
-        Some(Disposition::Complete) => "the response carries no body and is complete",
-        Some(Disposition::NotModified) => "the object is not modified",
-        Some(Disposition::PreconditionFailed) => "the condition did not hold",
-        Some(Disposition::Done) => "the service stored the object",
-        Some(Disposition::Accepted) => "the service accepted the removal",
+pub(crate) fn settled_sentence(kind: Option<OutcomeKind>) -> &'static str {
+    match kind {
+        Some(OutcomeKind::Body) => "the object follows in the response body",
+        Some(OutcomeKind::Complete) => "the response carries no body and is complete",
+        Some(OutcomeKind::NotModified) => "the object is not modified",
+        Some(OutcomeKind::PreconditionFailed) => "the condition did not hold",
+        Some(OutcomeKind::Done) => "the service stored the object",
+        Some(OutcomeKind::Accepted) => "the service accepted the removal",
         _ => "the core crate returned an outcome that this crate does not know",
     }
 }

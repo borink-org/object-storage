@@ -325,9 +325,9 @@ typedef uint16_t borink_service_error;
 #endif // __cplusplus
 
 /**
- * What a response tells you to do.
+ * Which outcome a response head became.
  */
-enum borink_disposition
+enum borink_outcome_kind
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : uint16_t
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -335,63 +335,63 @@ enum borink_disposition
     /**
      * A body follows. Read it and put the bytes at `body`.
      */
-    BORINK_DISPOSITION_BODY = 1,
+    BORINK_OUTCOME_KIND_BODY = 1,
     /**
      * No body follows and the read is complete.
      */
-    BORINK_DISPOSITION_COMPLETE = 2,
+    BORINK_OUTCOME_KIND_COMPLETE = 2,
     /**
      * The `If-None-Match` condition held, so Azure sent no body.
      */
-    BORINK_DISPOSITION_NOT_MODIFIED = 3,
+    BORINK_OUTCOME_KIND_NOT_MODIFIED = 3,
     /**
      * The condition did not hold, so Azure changed nothing.
      */
-    BORINK_DISPOSITION_PRECONDITION_FAILED = 4,
+    BORINK_OUTCOME_KIND_PRECONDITION_FAILED = 4,
     /**
      * The object or its container does not exist. Read `failure.kind`.
      */
-    BORINK_DISPOSITION_NOT_FOUND = 5,
+    BORINK_OUTCOME_KIND_NOT_FOUND = 5,
     /**
      * Azure cannot serve the requested range. Read `body.object_size`.
      */
-    BORINK_DISPOSITION_RANGE_NOT_SATISFIABLE = 6,
+    BORINK_OUTCOME_KIND_RANGE_NOT_SATISFIABLE = 6,
     /**
      * Azure stored the object.
      */
-    BORINK_DISPOSITION_DONE = 7,
+    BORINK_OUTCOME_KIND_DONE = 7,
     /**
      * Azure accepted the removal.
      */
-    BORINK_DISPOSITION_ACCEPTED = 8,
+    BORINK_OUTCOME_KIND_ACCEPTED = 8,
     /**
      * The head reports a failure but names no error.
      *
      * Read the response body, cap what you read, and pass it with `failure`
      * to `borink_finish_get_error_body` or one of its two siblings.
      */
-    BORINK_DISPOSITION_NEED_ERROR_BODY = 9,
+    BORINK_OUTCOME_KIND_NEED_ERROR_BODY = 9,
     /**
      * Azure refused the request, or it failed to carry it out.
      */
-    BORINK_DISPOSITION_SERVICE_FAILURE = 10,
+    BORINK_OUTCOME_KIND_SERVICE_FAILURE = 10,
     /**
      * The call was refused, or the response cannot be read. Read `error`.
      *
      * `error.detail` names the part that was wrong, not the value. You still
      * hold the headers and the shape, so read those for the value itself.
      */
-    BORINK_DISPOSITION_INVALID = 11,
+    BORINK_OUTCOME_KIND_INVALID = 11,
     /**
      * The core crate returned a variant that this crate does not know.
      */
-    BORINK_DISPOSITION_UNSUPPORTED = 12,
+    BORINK_OUTCOME_KIND_UNSUPPORTED = 12,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
-typedef enum borink_disposition borink_disposition;
+typedef enum borink_outcome_kind borink_outcome_kind;
 #else
-typedef uint16_t borink_disposition;
+typedef uint16_t borink_outcome_kind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -741,9 +741,9 @@ typedef struct borink_failure {
  */
 typedef struct borink_outcome {
     /**
-     * What to do with the response, as a `borink_disposition`.
+     * Which outcome this is, as a `borink_outcome_kind`.
      */
-    uint16_t disposition;
+    uint16_t kind;
     /**
      * The metadata from the head.
      */

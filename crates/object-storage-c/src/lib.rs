@@ -22,7 +22,7 @@
 //!    offset and length into that buffer. Send them with your HTTP client.
 //! 4. Name each response header with a `borink_header_ref` and call
 //!    `borink_accept_get_head` with the same `borink_get_shape`. It returns a
-//!    `borink_outcome` whose `disposition` tells you what to do with the body.
+//!    `borink_outcome`, and its `kind` says which outcome that is.
 //!
 //! Pass the same shape to steps 3 and 4. The second call checks the response
 //! against the plan, so you never restate what the shape already holds.
@@ -32,7 +32,7 @@
 //! `borink_delete_shape`, `borink_encode_delete` and
 //! `borink_accept_delete_head`.
 //!
-//! An outcome whose disposition is `NeedErrorBody` is not final. Azure named
+//! An outcome whose kind is `NeedErrorBody` is not final. Azure named
 //! no error in the head, so read a bounded error body and pass it, with the
 //! `failure` of that outcome, to `borink_finish_get_error_body`.
 //!
@@ -53,7 +53,7 @@
 //!
 //! borink_outcome outcome =
 //!     borink_accept_get_head(&session, &shape, status, headers, header_count);
-//! if (outcome.disposition == BORINK_DISPOSITION_BODY) { /* read the body */ }
+//! if (outcome.kind == BORINK_OUTCOME_KIND_BODY) { /* read the body */ }
 //! ```
 //!
 //! # Sizing the buffer
@@ -92,8 +92,8 @@
 //! the value.
 //!
 //! A response that Azure sends in normal operation is not a failure. A missing
-//! object, a failed condition and a throttle each arrive as a disposition on
-//! the outcome.
+//! object, a failed condition and a throttle each arrive as an outcome
+//! kind.
 //!
 //! Every other enum crosses as the number the core crate gives it, in both
 //! directions. A number that this crate does not define is refused as

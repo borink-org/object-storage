@@ -31,7 +31,7 @@ include = [
     "DeleteKind",
     "FailureClass",
     "ServiceError",
-    "Disposition",
+    "OutcomeKind",
 ]
 renaming_overrides_prefixing = true
 
@@ -65,7 +65,7 @@ renaming_overrides_prefixing = true
 "DeleteKind" = "borink_delete_kind"
 "FailureClass" = "borink_failure_class"
 "ServiceError" = "borink_service_error"
-"Disposition" = "borink_disposition"
+"OutcomeKind" = "borink_outcome_kind"
 # `class` is a C++ keyword.
 "class" = "class_"
 

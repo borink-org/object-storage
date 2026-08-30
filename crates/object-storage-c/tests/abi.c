@@ -174,7 +174,7 @@ static void one_response_head_is_read_from_two_buffers(void) {
     const borink_outcome outcome = borink_accept_get_head(
         &session, &shape, 200, headers, sizeof headers / sizeof headers[0]);
 
-    CHECK(outcome.disposition == BORINK_DISPOSITION_BODY);
+    CHECK(outcome.kind == BORINK_OUTCOME_KIND_BODY);
     CHECK(outcome.meta.e_tag.present);
     CHECK(outcome.meta.e_tag.bytes.ptr == (const uint8_t *)tag);
     CHECK(outcome.body.expected_len.present);
