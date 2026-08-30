@@ -21,9 +21,13 @@
     {
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          # The Rust crates need only cargo. The rest is what
-          # `hosts/cxx-curl` builds and links: CMake drives the host, and
-          # libcurl is what it sends with.
+          # The Rust crates need only cargo. The rest is what the two C and
+          # C++ checks build and link: CMake drives the libcurl host, libcurl
+          # is what it sends with, and arm-none-eabi-gcc is what
+          # `crates/object-storage-c/tests/freestanding.sh` links a board
+          # image with. That toolchain carries no Rust target: the archive it
+          # links comes from a `cargo build --target thumbv7em-none-eabihf`
+          # made outside this shell.
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustc
@@ -31,6 +35,7 @@
             pkgs.rustfmt
             pkgs.cmake
             pkgs.pkg-config
+            pkgs.gcc-arm-embedded
           ];
           buildInputs = [
             pkgs.curl.dev
