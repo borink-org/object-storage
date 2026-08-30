@@ -3,8 +3,7 @@
 #
 # Takes an archive built for thumbv7em-none-eabihf. Compiles the header
 # against the compiler's own headers alone, links with no newlib and no heap,
-# and reports the flash and RAM the image takes. docs/PACKAGING.md says what
-# each of those establishes.
+# and reports the flash and RAM the image takes.
 #
 #     cargo cbuild --locked -p borink-object-storage-c --no-default-features \
 #         --release --target thumbv7em-none-eabihf --library-type staticlib

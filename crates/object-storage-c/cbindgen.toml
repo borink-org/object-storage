@@ -5,7 +5,7 @@ language = "C"
 # `usize` is `size_t`, which is what a C program spells it.
 usize_is_size_t = true
 # The three headers this one uses, rather than cbindgen's default list. All
-# three are freestanding; see docs/PACKAGING.md.
+# three are freestanding, so a board supplies them without a libc.
 no_includes = true
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
 # The same header serves a C++ program.

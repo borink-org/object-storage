@@ -26,10 +26,9 @@ borink-object-storage-proto = { path = "../object-storage-proto" }
 
 # There is no build script. `include/borink/object_storage.h` is committed, and
 # `generate-header.sh` rewrites it with the cbindgen that `flake.nix` pins.
-# docs/PACKAGING.md says why.
 
 # What `cargo cbuild` and `cargo cinstall` write. They are the only producer of
-# the C artifacts; docs/PACKAGING.md says why, and explains each setting below.
+# the C artifacts; docs/PACKAGING.md says what a consumer gets.
 [package.metadata.capi.header]
 # `generate-header.sh` writes the header, so cargo-c does not.
 generation = false
@@ -45,7 +44,7 @@ asset = [{ from = "include/borink/object_storage.h", to = "borink/" }]
 versioning = false
 
 # There is no `Requires` and no `Requires.private` here, and adding one would
-# make every consumer propagate it. See docs/PACKAGING.md.
+# make every consumer propagate it.
 [package.metadata.capi.pkg_config]
 # A consumer queries the file name, not `Name:`. Both say the same thing.
 filename = "borink-object-storage-c"

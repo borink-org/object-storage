@@ -40,8 +40,7 @@
 
           # These replace `buildRustPackage`'s own phases rather than
           # appending to them, so the crate compiles once. `--libdir` puts the
-          # pkg-config file where nixpkgs' setup hook looks. docs/PACKAGING.md
-          # covers both.
+          # pkg-config file where nixpkgs' setup hook looks.
           buildPhase = ''
             runHook preBuild
             ${pkgs.buildPackages.rust.envVars.setEnv} cargo cbuild \
@@ -117,7 +116,7 @@
           # same way the rest of this list is pinned.
           #
           # cargo-c builds and installs the C artifacts. Every consumer goes
-          # through it; docs/PACKAGING.md says why.
+          # through it; see docs/PACKAGING.md.
           nativeBuildInputs = [
             pkgs.cargo
             pkgs.rustc
