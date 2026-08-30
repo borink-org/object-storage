@@ -7,7 +7,7 @@
 
 use core::fmt::{self, Write as _};
 
-use crate::{convert::*, types::*};
+use crate::types::*;
 
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{Error, GetHeadOutcome, ServiceErrorKind};
@@ -99,4 +99,44 @@ impl fmt::Write for Sentence<'_> {
         self.used = end;
         Ok(())
     }
+}
+
+pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
+    use OutcomeKind as K;
+    [
+        K::Body,
+        K::Complete,
+        K::NotModified,
+        K::PreconditionFailed,
+        K::NotFound,
+        K::RangeNotSatisfiable,
+        K::Done,
+        K::Accepted,
+        K::NeedErrorBody,
+        K::ServiceFailure,
+        K::Invalid,
+        K::Unsupported,
+    ]
+    .into_iter()
+    .find(|kind| *kind as u16 == value)
+}
+
+// The failure that the twin carries, as the core crate's own record, so that
+// the sentence for it is the core crate's own too. `request_id` is the bytes
+// that the twin's `request_id` addresses. It is `None` only for a category
+// that a later core crate defined and this crate cannot name.
+pub(crate) fn failure_of<'a>(
+    failure: &Failure,
+    request_id: Option<&'a [u8]>,
+) -> Option<proto::Failure<'a>> {
+    Some(proto::Failure {
+        status: failure.status,
+        class: proto::FailureClass::from_discriminant(failure.class)?,
+        kind: ServiceErrorKind::from_discriminant(failure.kind),
+        request_id,
+    })
+}
+
+pub(crate) fn number(value: MaybeU64) -> Option<u64> {
+    value.present.then_some(value.value)
 }

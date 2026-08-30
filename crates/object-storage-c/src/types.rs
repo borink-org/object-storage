@@ -13,8 +13,6 @@
 /// the core crate raises it.
 pub const BORINK_MAX_HEADERS: usize = 6;
 
-// ---------------------------------------------------------------- primitives
-
 /// Bytes that your program owns and lends to a call.
 ///
 /// A `len` of 0 is an empty value, and `ptr` may then be null.
@@ -107,8 +105,6 @@ pub struct Status {
     /// The discriminant of the value inside, or 0 if there is none.
     pub detail: u16,
 }
-
-// --------------------------------------------------------------------- enums
 
 /// Which kind of failure a `borink_status` carries.
 ///
@@ -284,8 +280,6 @@ pub enum OutcomeKind {
     Unsupported = 12,
 }
 
-// ------------------------------------------------------------------- session
-
 /// One container, and the token that opens it.
 ///
 /// Fill one in per client and keep it. Your program owns the three values, and
@@ -304,8 +298,6 @@ pub struct Session {
     /// The Entra ID bearer token, without the `Bearer ` prefix.
     pub token: Bytes,
 }
-
-// --------------------------------------------------------------------- plans
 
 /// The byte range that a read requests.
 #[repr(C)]
@@ -354,8 +346,6 @@ pub struct DeleteShape {
     pub condition: u16,
 }
 
-// -------------------------------------------------------------- request head
-
 /// One request header, as two ranges of the request buffer.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -388,8 +378,6 @@ pub struct RequestHead {
     /// The headers, in the order that the core crate wrote them.
     pub headers: [RequestHeader; BORINK_MAX_HEADERS],
 }
-
-// ------------------------------------------------------- response and outcome
 
 /// One response header, as the bytes that you already hold.
 ///

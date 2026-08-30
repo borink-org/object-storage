@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::{convert::*, types::*};
+use crate::{outcome::status_of, plan::UNKNOWN, types::*};
 
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{Blobs, Container, Error, ResponseHead, WireRequest};

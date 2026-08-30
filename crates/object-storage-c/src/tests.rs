@@ -1,6 +1,6 @@
 //! Tests for the whole boundary, driven through the entry points.
 
-use crate::{convert::*, entry::*, layout::*, ptr::*, sentence::*, types::*};
+use crate::{entry::*, layout::*, outcome::*, plan::*, ptr::*, sentence::*, types::*};
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
     BodyWindow as CoreBodyWindow, DeleteHeadOutcome, Error, Failure as CoreFailure,

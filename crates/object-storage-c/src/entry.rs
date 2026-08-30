@@ -2,13 +2,12 @@
 //!
 //! Each one reads every pointer it was passed in one `unsafe` block, under
 //! the `# Safety` contract written above it, and hands Rust values to
-//! [`crate::step`] and [`crate::convert`]. Those modules forbid `unsafe`
-//! code, so what a pointer read needs is checked here and nowhere else.
+//! [`crate::step`], [`crate::plan`] and [`crate::outcome`]. Those modules
+//! forbid `unsafe` code, so what a pointer read needs is checked here and
+//! nowhere else.
 
-use crate::convert::{
-    delete_outcome, delete_shape, get_outcome, get_shape, invalid, put_outcome, put_shape,
-    status_of,
-};
+use crate::outcome::{delete_outcome, get_outcome, invalid, put_outcome, status_of};
+use crate::plan::{delete_shape, get_shape, put_shape};
 use crate::ptr;
 use crate::sentence::{describe, describe_status};
 use crate::step::{condition, finishing, head_of, open, ready, text, written};
