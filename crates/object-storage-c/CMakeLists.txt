@@ -83,7 +83,7 @@ if(PROJECT_IS_TOP_LEVEL)
   add_test(NAME borink_object_storage_abi COMMAND borink_object_storage_abi_test)
 
   # What a C++ program sees with no allocator. This is the only thing that
-  # compiles `object_storage.hpp` without `object_storage_growing.hpp`, which
+  # compiles `object_storage.hpp` without `object_storage/vector.hpp`, which
   # is what keeps an owning container out of the first file.
   enable_language(CXX)
   add_executable(borink_object_storage_cxx_test tests/cxx_no_allocator.cc)

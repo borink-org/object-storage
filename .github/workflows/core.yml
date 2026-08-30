@@ -113,7 +113,7 @@ jobs:
               --library-type staticlib --prefix=/usr --destdir="$install"
             find "$install" -type f
 
-            for header in object_storage.h object_storage.hpp object_storage_growing.hpp; do
+            for header in object_storage.h object_storage.hpp object_storage/vector.hpp; do
               diff -u "crates/object-storage-c/include/borink/$header" \
                       "$install/usr/include/borink/$header"
             done

@@ -25,7 +25,7 @@
 #include <string_view>
 #include <vector>
 
-#include "borink/object_storage_growing.hpp"
+#include "borink/object_storage/vector.hpp"
 
 namespace borink::host {
 

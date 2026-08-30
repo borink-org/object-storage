@@ -1,4 +1,4 @@
-// The C++ helpers that grow a buffer.
+// The C++ helpers that write into a `std::vector`.
 //
 // `borink/object_storage.hpp` writes into the room you give it and never grows
 // it. Each helper here calls again with the room the first answer asked for,

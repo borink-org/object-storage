@@ -2,7 +2,7 @@
 //
 // This test opens no socket and allocates nothing. It includes
 // `borink/object_storage.hpp` alone, so the helpers there stay usable by a
-// program that has no heap to give them. `borink/object_storage_growing.hpp`
+// program that has no heap to give them. `borink/object_storage/vector.hpp`
 // is the file that may include an owning container, and `hosts/cxx-curl` is
 // what compiles it.
 

@@ -5,7 +5,7 @@
 // C++ runtime library. Your program keeps the HTTP client, the buffers and the
 // clock. See `hosts/cxx-curl` for one written against libcurl.
 //
-// `borink/object_storage_growing.hpp` adds the helpers that grow a buffer. This
+// `borink/object_storage/vector.hpp` adds the helpers that resize a `std::vector`. This
 // file grows nothing, so a program with no allocator can include it.
 //
 // A C program includes `borink/object_storage.h` alone and needs none of this.
