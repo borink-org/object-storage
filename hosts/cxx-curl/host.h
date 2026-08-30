@@ -3,15 +3,15 @@
 // This is a host: it sends the requests that `borink::object_storage` builds,
 // with one HTTP client, and it is a consumer's code rather than the library's.
 // Everything here is shaped by libcurl. A program written against another HTTP
-// library writes its own `Client` over the same bridge, and includes
+// library writes its own `Client` over the same library, and includes
 // `borink/object_storage.hpp` alone.
 //
-// The bridge allocates nothing per request and throws nothing. This host
-// keeps every buffer on the `Client` that the application built, and reuses it
-// for the next request. It still allocates twice per request, and both are
-// libcurl's terms rather than the bridge's: `curl_slist_append` copies each
+// The library allocates nothing at all and throws nothing. This host keeps
+// every buffer on the `Client` that the application built, and reuses it for
+// the next request. It still allocates twice per request, and both are
+// libcurl's terms rather than the library's: `curl_slist_append` copies each
 // header line, and a failure builds a message. A host that will not pay for
-// the first chooses a different HTTP library, not a different bridge.
+// the first chooses a different HTTP library, not a different binding.
 
 #pragma once
 
@@ -32,7 +32,7 @@ namespace borink::host {
 // The name of the HTTP client that this host sends with.
 extern const std::string_view client;
 
-// The clock is the host's, not the bridge's: the bridge reads no clock and
+// The clock is the host's, not the library's: the library reads no clock and
 // takes the time as a number. <chrono> is what this costs, and it is paid
 // here rather than by everyone who includes `borink/object_storage.hpp`.
 inline std::uint64_t now_unix() {
@@ -63,17 +63,18 @@ struct Limits {
     std::size_t head_bytes = 8 * 1024;
 };
 
-// Where this host keeps the response head, and one `HeaderRef` per header.
+// Where this host keeps the response head, and one `HeaderRef` per
+// header.
 //
-// The bridge takes the head as borrowed bytes and dictates no layout for it. A
-// client whose HTTP library retains its own header buffer points straight into
-// that. libcurl retains none: it hands over one header at a time and keeps
-// nothing, so this host copies each into an arena. That is libcurl's fact, and
-// this class is where it stays.
+// The library takes the head as borrowed bytes and dictates no layout for it.
+// A client whose HTTP library retains its own header buffer points straight
+// into that. libcurl retains none: it hands over one header at a time and
+// keeps nothing, so this host copies each into an arena. That is libcurl's
+// fact, and this class is where it stays.
 //
-// The arena is reserved once and never grows, because every `HeaderRef` points
-// into it and a reallocation would leave them all dangling. A head that would
-// outgrow the reserve is refused: see `overflowed`.
+// The arena is reserved once and never grows, because every `HeaderRef`
+// points into it and a reallocation would leave them all dangling. A head that
+// would outgrow the reserve is refused: see `overflowed`.
 class CollectedHead {
   public:
     // Reserves the arena. Call once, before the first head.
@@ -96,7 +97,7 @@ class CollectedHead {
             overflowed_ = true;
             return;
         }
-        const rust::Slice<const std::uint8_t> stored_name = append(name);
+        const Bytes stored_name = append(name);
         headers_.push_back(HeaderRef{stored_name, append(value)});
     }
 
@@ -108,15 +109,16 @@ class CollectedHead {
 
     // The headers, as bytes that this client owns. They stay valid until the
     // next `restart`.
-    rust::Slice<const HeaderRef> refs() const {
-        return borrow(std::span<const HeaderRef>(headers_));
-    }
+    const HeaderRef *refs() const { return headers_.data(); }
+
+    // How many of them there are.
+    std::size_t count() const { return headers_.size(); }
 
   private:
-    rust::Slice<const std::uint8_t> append(std::string_view value) {
+    Bytes append(std::string_view value) {
         const std::size_t start = bytes_.size();
         bytes_.insert(bytes_.end(), value.begin(), value.end());
-        return rust::Slice<const std::uint8_t>(bytes_.data() + start, value.size());
+        return Bytes{bytes_.data() + start, value.size()};
     }
 
     std::uint16_t status_ = 0;
@@ -132,8 +134,9 @@ class CollectedHead {
 // that this client has made, up to `limits`, and stay that size.
 class Client {
   public:
-    Client(rust::Box<Session> session, Limits limits)
-        : session_(std::move(session)), limits_(limits) {
+    Client(std::string endpoint, std::string container, std::string token, Limits limits)
+        : endpoint_(std::move(endpoint)), container_(std::move(container)),
+          token_(std::move(token)), limits_(limits) {
         head_.reserve(limits_.head_bytes);
     }
 
@@ -165,7 +168,14 @@ class Client {
     // caller knows whether it meant to remove an object that is already gone.
     void remove(std::string_view key, const Removal &removal = {});
 
-    const Session &session() const { return *session_; }
+    // The session, built from this client's own strings.
+    //
+    // The three values point into them, so it is built where it is used rather
+    // than stored: moving this client would move the strings out from under a
+    // stored one. Refreshing the token is `token()` returning the new one.
+    Session session() const {
+        return borink::session(endpoint_, container_, token_);
+    }
 
     // The head of the response to the last request.
     const CollectedHead &head() const { return head_; }
@@ -184,14 +194,14 @@ class Client {
   private:
     // Writes one request head into this client's buffer.
     //
-    // `write` calls the bridge, which reports the size that the head needs.
+    // `encode` calls the library, which reports the size that the head needs.
     // The buffer grows to that size once and is reused from then on.
     template <typename Encode> const RequestHead &encode(Encode encode) {
         head_.restart(0);
         diagnostic_.clear();
         outcome_ = Outcome{};
         request_head_ = encode();
-        if (request_head_.status.code == static_cast<std::uint16_t>(ErrorCode::Capacity)) {
+        if (request_head_.status.code == ErrorCodeCapacity) {
             if (request_head_.required > limits_.request_bytes) {
                 throw std::runtime_error("the request head is larger than this client allows");
             }
@@ -199,15 +209,15 @@ class Client {
             request_head_ = encode();
         }
         if (request_head_.status.code != 0) {
-            throw std::runtime_error(std::string(describe_into(message_, request_head_.status)));
+            throw std::runtime_error(std::string(describe_whole(message_, request_head_.status)));
         }
         return request_head_;
     }
 
-    rust::Slice<std::uint8_t> request_buffer() { return into(request_); }
+    BytesMut request_buffer() { return into(request_); }
 
     // The diagnostic body that this client kept, capped by its limits.
-    rust::Slice<const std::uint8_t> kept_body() const {
+    Bytes kept_body() const {
         return borrow(std::span<const std::uint8_t>(diagnostic_));
     }
 
@@ -223,11 +233,13 @@ class Client {
     // `message_` is this client's room for such a sentence, and writing it is
     // the one place that a failing request allocates.
     [[noreturn]] void fail(std::string_view what) {
-        const std::string_view said = describe_into(message_, outcome_);
+        const std::string_view said = describe_whole(message_, outcome_);
         throw std::runtime_error(std::string(what) + ": " + std::string(said));
     }
 
-    rust::Box<Session> session_;
+    std::string endpoint_;
+    std::string container_;
+    std::string token_;
     Limits limits_;
     std::vector<std::uint8_t> request_;
     RequestHead request_head_{};

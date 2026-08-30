@@ -69,13 +69,25 @@ add_dependencies(borink_object_storage borink_object_storage_build)
 target_link_libraries(borink_object_storage INTERFACE PkgConfig::borink_object_storage_c)
 add_library(borink::object_storage ALIAS borink_object_storage)
 
-# The C program that checks this crate's ABI against what the C compiler
-# computes. It is built and run only when this project is the top of the build.
+# The two programs that check this crate from the languages it is for. They are
+# built and run only when this project is the top of the build, so a consumer
+# that adds this directory still needs no C++ compiler.
 if(PROJECT_IS_TOP_LEVEL)
   enable_testing()
+
+  # What a C program sees: every struct's layout, and one request each way.
   add_executable(borink_object_storage_abi_test tests/abi.c)
   target_compile_features(borink_object_storage_abi_test PRIVATE c_std_11)
   target_compile_options(borink_object_storage_abi_test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(borink_object_storage_abi_test PRIVATE borink::object_storage)
   add_test(NAME borink_object_storage_abi COMMAND borink_object_storage_abi_test)
+
+  # What a C++ program sees. That the headers reach no allocator is checked by
+  # `checks/freestanding`, which reads the symbols of a board image instead.
+  enable_language(CXX)
+  add_executable(borink_object_storage_cxx_test tests/cxx.cc)
+  target_compile_features(borink_object_storage_cxx_test PRIVATE cxx_std_23)
+  target_compile_options(borink_object_storage_cxx_test PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(borink_object_storage_cxx_test PRIVATE borink::object_storage)
+  add_test(NAME borink_object_storage_cxx COMMAND borink_object_storage_cxx_test)
 endif()

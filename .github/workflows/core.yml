@@ -39,9 +39,8 @@ jobs:
       - name: Link without a global allocator
         run: cargo build --locked --profile no-allocator --no-default-features --features link-check --manifest-path checks/no-allocator/Cargo.toml
 
-  # The binding itself is a workspace member, so the jobs above already
-  # format, lint, document and test it. This one builds the C++ host that
-  # links it, which is the only thing here that needs libcurl.
+  # The C++ host of the C ABI crate, which is the only thing here that needs
+  # libcurl. What it links is checked by the `c-abi` job below.
   cxx-host:
     runs-on: ubuntu-latest
     steps:
@@ -57,8 +56,8 @@ jobs:
             ctest --test-dir hosts/cxx-curl/build --output-on-failure
           '
 
-  # What the C ABI crate needs a C toolchain for. The jobs above already
-  # format, lint, document and test it. Every artifact here comes from
+  # What the C ABI crate needs a C and C++ toolchain for. The jobs above
+  # already format, lint, document and test it. Every artifact here comes from
   # cargo-c; see docs/PACKAGING.md.
   c-abi:
     runs-on: ubuntu-latest
@@ -93,9 +92,9 @@ jobs:
       # heap. The flash and RAM it takes go to the job summary.
       - name: Link a board image with no C library
         run: |
-          nix develop --command crates/object-storage-c/tests/freestanding.sh \
+          nix develop --command checks/freestanding/freestanding.sh \
             target/thumbv7em-none-eabihf/release/libborink_object_storage_c.a
-      - name: Test the ABI from C
+      - name: Test the ABI from C, and the header from C++
         run: |
           nix develop --command bash -c '
             cmake -S crates/object-storage-c -B crates/object-storage-c/build -DCMAKE_BUILD_TYPE=Debug
@@ -114,8 +113,10 @@ jobs:
               --library-type staticlib --prefix=/usr --destdir="$install"
             find "$install" -type f
 
-            diff -u crates/object-storage-c/include/borink/object_storage.h \
-                    "$install/usr/include/borink/object_storage.h"
+            for header in object_storage.h object_storage.hpp object_storage/core.hpp; do
+              diff -u "crates/object-storage-c/include/borink/$header" \
+                      "$install/usr/include/borink/$header"
+            done
 
             moved=$RUNNER_TEMP/moved
             cp -r "$install/usr" "$moved"

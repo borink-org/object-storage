@@ -35,9 +35,14 @@ generation = false
 name = "object_storage"
 subdirectory = "borink"
 
-# What puts the committed header under the install prefix.
+# What puts the committed headers under the install prefix. The C++ header is
+# beside the C one because a consumer includes it by the same `borink/` path.
 [package.metadata.capi.install.include]
-asset = [{ from = "include/borink/object_storage.h", to = "borink/" }]
+asset = [
+    { from = "include/borink/object_storage.h", to = "borink/" },
+    { from = "include/borink/object_storage.hpp", to = "borink/" },
+    { from = "include/borink/object_storage/core.hpp", to = "borink/object_storage/" },
+]
 
 [package.metadata.capi.library]
 # A static archive only, so there is no soname to version.

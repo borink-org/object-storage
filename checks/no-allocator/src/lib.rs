@@ -1,4 +1,4 @@
-//! Link-time proof that the Azure GET path does not require a global allocator.
+//! Link-time proof that the request path does not require a global allocator.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -17,7 +17,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 /// Exercises request construction and response interpretation in a reachable symbol.
 #[unsafe(no_mangle)]
-pub extern "C" fn azure_get_without_an_allocator() -> usize {
+pub extern "C" fn object_storage_without_an_allocator() -> usize {
     let Ok(container) = Container::new("https://account", "container") else {
         return 1;
     };

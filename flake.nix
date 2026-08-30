@@ -104,7 +104,7 @@
           # The Rust crates need only cargo. The rest is what the C and C++
           # checks build and link: CMake drives the libcurl host, libcurl is
           # what it sends with, and arm-none-eabi-gcc is what
-          # `crates/object-storage-c/tests/freestanding.sh` links a board
+          # `checks/freestanding/freestanding.sh` links a board
           # image with. Neither that toolchain nor this nixpkgs' rustc carries
           # a bare-metal Rust target. The archive it links comes from a
           # `cargo cbuild --target thumbv7em-none-eabihf` made outside this
