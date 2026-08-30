@@ -10,11 +10,12 @@
   outputs =
     { self, nixpkgs }:
     let
+      # The systems this shell is built and tested on. Every workflow runs on
+      # ubuntu-latest, so darwin was never exercised; add it back when
+      # something builds there.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
