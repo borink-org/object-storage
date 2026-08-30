@@ -11,8 +11,8 @@ namespace borink::host {
 Client Client::open(std::string_view endpoint, std::string_view container, std::string_view token,
                     Limits limits) {
     Client client{std::string(endpoint), std::string(container), std::string(token), limits};
-    const borink_session session = client.session();
-    const borink_status status = borink_validate(&session);
+    const Session session = client.session();
+    const Status status = borink_validate(&session);
     if (status.code != 0) {
         // The core crate names the value that cannot be used. This host writes
         // no second table of its own.

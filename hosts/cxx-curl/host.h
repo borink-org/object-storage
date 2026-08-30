@@ -63,7 +63,7 @@ struct Limits {
     std::size_t head_bytes = 8 * 1024;
 };
 
-// Where this host keeps the response head, and one `borink_header_ref` per
+// Where this host keeps the response head, and one `HeaderRef` per
 // header.
 //
 // The library takes the head as borrowed bytes and dictates no layout for it.
@@ -72,7 +72,7 @@ struct Limits {
 // keeps nothing, so this host copies each into an arena. That is libcurl's
 // fact, and this class is where it stays.
 //
-// The arena is reserved once and never grows, because every `borink_header_ref`
+// The arena is reserved once and never grows, because every `HeaderRef`
 // points into it and a reallocation would leave them all dangling. A head that
 // would outgrow the reserve is refused: see `overflowed`.
 class CollectedHead {
@@ -97,8 +97,8 @@ class CollectedHead {
             overflowed_ = true;
             return;
         }
-        const borink_bytes stored_name = append(name);
-        headers_.push_back(borink_header_ref{stored_name, append(value)});
+        const Bytes stored_name = append(name);
+        headers_.push_back(HeaderRef{stored_name, append(value)});
     }
 
     std::uint16_t status() const { return status_; }
@@ -109,23 +109,23 @@ class CollectedHead {
 
     // The headers, as bytes that this client owns. They stay valid until the
     // next `restart`.
-    const borink_header_ref *refs() const { return headers_.data(); }
+    const HeaderRef *refs() const { return headers_.data(); }
 
     // How many of them there are.
     std::size_t count() const { return headers_.size(); }
 
   private:
-    borink_bytes append(std::string_view value) {
+    Bytes append(std::string_view value) {
         const std::size_t start = bytes_.size();
         bytes_.insert(bytes_.end(), value.begin(), value.end());
-        return borink_bytes{bytes_.data() + start, value.size()};
+        return Bytes{bytes_.data() + start, value.size()};
     }
 
     std::uint16_t status_ = 0;
     std::size_t capacity_ = 0;
     bool overflowed_ = false;
     std::vector<std::uint8_t> bytes_;
-    std::vector<borink_header_ref> headers_;
+    std::vector<HeaderRef> headers_;
 };
 
 // One session, and the memory that every request through it reuses.
@@ -173,7 +173,7 @@ class Client {
     // The three values point into them, so it is built where it is used rather
     // than stored: moving this client would move the strings out from under a
     // stored one. Refreshing the token is `token()` returning the new one.
-    borink_session session() const {
+    Session session() const {
         return borink::session(endpoint_, container_, token_);
     }
 
@@ -184,10 +184,10 @@ class Client {
     //
     // Everything it borrows points into `head()`, and stays valid until the
     // next request through this client. Read `bytes_of` for one such value.
-    const borink_outcome &outcome() const { return outcome_; }
+    const Outcome &outcome() const { return outcome_; }
 
     // Reads one range of the request buffer, such as the URL or a header.
-    std::string_view part(const borink_span &range) const {
+    std::string_view part(const Span &range) const {
         return {reinterpret_cast<const char *>(request_.data()) + range.start, range.len};
     }
 
@@ -196,12 +196,12 @@ class Client {
     //
     // `encode` calls the library, which reports the size that the head needs.
     // The buffer grows to that size once and is reused from then on.
-    template <typename Encode> const borink_request_head &encode(Encode encode) {
+    template <typename Encode> const RequestHead &encode(Encode encode) {
         head_.restart(0);
         diagnostic_.clear();
-        outcome_ = borink_outcome{};
+        outcome_ = Outcome{};
         request_head_ = encode();
-        if (request_head_.status.code == BORINK_ERROR_CODE_CAPACITY) {
+        if (request_head_.status.code == ErrorCodeCapacity) {
             if (request_head_.required > limits_.request_bytes) {
                 throw std::runtime_error("the request head is larger than this client allows");
             }
@@ -214,10 +214,10 @@ class Client {
         return request_head_;
     }
 
-    borink_bytes_mut request_buffer() { return into(request_); }
+    BytesMut request_buffer() { return into(request_); }
 
     // The diagnostic body that this client kept, capped by its limits.
-    borink_bytes kept_body() const {
+    Bytes kept_body() const {
         return borrow(std::span<const std::uint8_t>(diagnostic_));
     }
 
@@ -242,11 +242,11 @@ class Client {
     std::string token_;
     Limits limits_;
     std::vector<std::uint8_t> request_;
-    borink_request_head request_head_{};
+    RequestHead request_head_{};
     std::vector<std::uint8_t> message_;
     CollectedHead head_;
     std::vector<std::uint8_t> diagnostic_;
-    borink_outcome outcome_{};
+    Outcome outcome_{};
 };
 
 } // namespace borink::host

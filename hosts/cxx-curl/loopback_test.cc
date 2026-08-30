@@ -178,7 +178,7 @@ void reads_a_range_of_an_object() {
         [&](std::span<const std::uint8_t> part) {
             object.insert(object.end(), part.begin(), part.end());
         },
-        borink::Read{BORINK_GET_KIND_BYTES, borink::bounded(2, 6), BORINK_CONDITION_NONE, {}});
+        borink::Read{borink::GetKindBytes, borink::bounded(2, 6), borink::ConditionNone, {}});
 
     CHECK(std::string(object.begin(), object.end()) == "part");
     CHECK(lowercase(std::string(server.head())).find("range: bytes=2-5\r\n") !=
@@ -197,14 +197,14 @@ void reads_an_object_only_if_it_changed() {
     try {
         client.get(
             "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-            borink::Read{BORINK_GET_KIND_BYTES, borink::whole(), BORINK_CONDITION_IF_NONE_MATCH,
+            borink::Read{borink::GetKindBytes, borink::whole(), borink::ConditionIfNoneMatch,
                          "\"tag\""});
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
     }
     CHECK(reported.find("not modified") != std::string::npos);
-    CHECK(client.outcome().disposition == BORINK_DISPOSITION_NOT_MODIFIED);
+    CHECK(client.outcome().kind == borink::OutcomeKindNotModified);
     CHECK(lowercase(std::string(server.head())).find("if-none-match: \"tag\"\r\n") !=
           std::string::npos);
 }
@@ -216,10 +216,10 @@ void reads_the_metadata_of_an_object() {
     borink::host::Client client = open(server);
     client.get(
         "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-        borink::Read{BORINK_GET_KIND_METADATA, borink::whole(), BORINK_CONDITION_NONE, {}});
+        borink::Read{borink::GetKindMetadata, borink::whole(), borink::ConditionNone, {}});
 
     CHECK(server.head().starts_with("HEAD /container/a%20key HTTP/1.1\r\n"));
-    CHECK(client.outcome().disposition == BORINK_DISPOSITION_COMPLETE);
+    CHECK(client.outcome().kind == borink::OutcomeKindComplete);
     CHECK(client.outcome().meta.size.value == 10);
     CHECK(borink::text_of(client.outcome().meta.e_tag) == "\"tag\"");
 }
@@ -249,8 +249,8 @@ void removes_an_object() {
 // A removal says what it takes with it, and Azure refuses to guess.
 void removes_an_object_and_its_snapshots() {
     Server server("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    open(server).remove("a key", borink::Removal{BORINK_DELETE_KIND_OBJECT_AND_SNAPSHOTS,
-                                                 BORINK_CONDITION_NONE, {}});
+    open(server).remove("a key", borink::Removal{borink::DeleteKindObjectAndSnapshots,
+                                                 borink::ConditionNone, {}});
 
     CHECK(lowercase(std::string(server.head())).find("x-ms-delete-snapshots: include\r\n") !=
           std::string::npos);
@@ -293,9 +293,9 @@ void names_an_error_that_only_a_read_body_carries() {
     }
     CHECK(reported.find("throttled") != std::string::npos);
     CHECK(reported.find("request-123") != std::string::npos);
-    CHECK(client.outcome().disposition == BORINK_DISPOSITION_SERVICE_FAILURE);
-    CHECK(client.outcome().failure.kind == BORINK_SERVICE_ERROR_THROTTLED);
-    CHECK(client.outcome().failure.class_ == BORINK_FAILURE_CLASS_THROTTLED);
+    CHECK(client.outcome().kind == borink::OutcomeKindServiceFailure);
+    CHECK(client.outcome().failure.kind == borink::ServiceErrorThrottled);
+    CHECK(client.outcome().failure.class_ == borink::FailureClassThrottled);
 }
 
 void reports_a_missing_object() {
@@ -336,20 +336,20 @@ void refuses_a_request_over_the_limit() {
 void reads_a_head_that_lives_in_two_buffers() {
     const std::string first = "\"tag\"";
     const std::string second = "request-123";
-    const borink_session session =
+    const borink::Session session =
         borink::session("https://account.example", "container", "token");
     CHECK(borink_validate(&session).code == 0);
 
-    const borink_header_ref headers[] = {
-        borink_header_ref{borink::as_bytes("ETag"), borink::as_bytes(first)},
-        borink_header_ref{borink::as_bytes("x-ms-request-id"), borink::as_bytes(second)},
-        borink_header_ref{borink::as_bytes("Content-Length"), borink::as_bytes("10")},
+    const borink::HeaderRef headers[] = {
+        borink::HeaderRef{borink::as_bytes("ETag"), borink::as_bytes(first)},
+        borink::HeaderRef{borink::as_bytes("x-ms-request-id"), borink::as_bytes(second)},
+        borink::HeaderRef{borink::as_bytes("Content-Length"), borink::as_bytes("10")},
     };
-    const borink_get_shape shape = borink::Read{}.shape();
-    const borink_outcome outcome = borink_accept_get_head(
+    const borink::GetShape shape = borink::Read{}.shape();
+    const borink::Outcome outcome = borink_accept_get_head(
         &session, &shape, 200, headers, sizeof headers / sizeof headers[0]);
 
-    CHECK(outcome.disposition == BORINK_DISPOSITION_BODY);
+    CHECK(outcome.kind == borink::OutcomeKindBody);
     CHECK(borink::text_of(outcome.meta.e_tag) == first);
     CHECK(borink::bytes_of(outcome.meta.e_tag).data() ==
           reinterpret_cast<const std::uint8_t *>(first.data()));
@@ -386,7 +386,7 @@ void refuses_an_overflowed_head_on_a_read_with_no_body() {
     try {
         client.get(
             "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-            borink::Read{BORINK_GET_KIND_METADATA, borink::whole(), BORINK_CONDITION_NONE, {}});
+            borink::Read{borink::GetKindMetadata, borink::whole(), borink::ConditionNone, {}});
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();

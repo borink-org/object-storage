@@ -99,7 +99,7 @@ class Handle {
 };
 
 // Gives libcurl the URL and the headers that the library named.
-void apply(Handle &handle, const Client &client, const borink_request_head &request) {
+void apply(Handle &handle, const Client &client, const RequestHead &request) {
     handle.url(client.part(request.url));
     for (std::size_t index = 0; index < request.header_count; index += 1) {
         handle.header(client.part(request.headers[index].name),
@@ -158,13 +158,13 @@ std::size_t keep(std::vector<std::uint8_t> &bytes, std::size_t cap, const char *
 
 // A read, which has to know what the head means before the body arrives.
 struct Reading {
-    const borink_session &session;
-    borink_get_shape shape;
+    const Session &session;
+    GetShape shape;
     const Sink &sink;
     const CollectedHead &head;
     std::vector<std::uint8_t> &diagnostic;
     std::size_t error_bytes;
-    std::optional<borink_outcome> outcome;
+    std::optional<Outcome> outcome;
     // A callback may not let an exception reach libcurl, so it stops the
     // transfer and keeps the exception for the caller to rethrow.
     std::exception_ptr failure;
@@ -183,14 +183,14 @@ struct Reading {
             }
             decide();
         }
-        switch (outcome->disposition) {
-        case BORINK_DISPOSITION_BODY:
+        switch (outcome->kind) {
+        case OutcomeKindBody:
             // The object never lands in a buffer of this host. It goes
             // straight from libcurl to whoever asked for it.
             sink(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(data),
                                                length));
             return length;
-        case BORINK_DISPOSITION_NEED_ERROR_BODY:
+        case OutcomeKindNeedErrorBody:
             return keep(diagnostic, error_bytes, data, length);
         default:
             return length;
@@ -241,9 +241,9 @@ const std::string_view client = "libcurl";
 
 void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     const std::uint64_t now = now_unix();
-    const borink_session session = this->session();
-    const borink_get_shape shape = read.shape();
-    const borink_request_head &request = encode([&] {
+    const Session session = this->session();
+    const GetShape shape = read.shape();
+    const RequestHead &request = encode([&] {
         return borink_encode_get(&session, &shape, as_bytes(key),
                                  as_bytes(read.condition_value), request_buffer(), now);
     });
@@ -253,7 +253,7 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     Handle handle;
     apply(handle, *this, request);
     // A metadata read sends HEAD, which carries no body at all.
-    if (request.method == BORINK_METHOD_HEAD) {
+    if (request.method == MethodHead) {
         handle.set(CURLOPT_NOBODY, 1L);
     }
     handle.set(CURLOPT_HEADERFUNCTION, collect_head);
@@ -283,12 +283,12 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     outcome_ = *reading.outcome;
     // Azure names the error in the head when it can. When it did not, the
     // diagnostic body names it, and the library finishes the outcome from it.
-    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
         outcome_ = borink_finish_get_error_body(&session, &outcome_.failure, kept_body());
     }
-    switch (outcome_.disposition) {
-    case BORINK_DISPOSITION_BODY:
-    case BORINK_DISPOSITION_COMPLETE:
+    switch (outcome_.kind) {
+    case OutcomeKindBody:
+    case OutcomeKindComplete:
         return;
     default:
         fail("Azure returned no object");
@@ -299,9 +299,9 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
                  const Write &write) {
     const std::uint64_t now = now_unix();
     const std::uint64_t length = content.size();
-    const borink_session session = this->session();
-    const borink_put_shape shape = write.shape();
-    const borink_request_head &request = encode([&] {
+    const Session session = this->session();
+    const PutShape shape = write.shape();
+    const RequestHead &request = encode([&] {
         return borink_encode_put(&session, &shape, as_bytes(key),
                                  as_bytes(write.condition_value), request_buffer(), length, now);
     });
@@ -323,19 +323,19 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     checked_head();
     outcome_ = borink_accept_put_head(&session, &shape, head_.status(), head_.refs(),
                                       head_.count());
-    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
         outcome_ = borink_finish_put_error_body(&session, &outcome_.failure, kept_body());
     }
-    if (outcome_.disposition != BORINK_DISPOSITION_DONE) {
+    if (outcome_.kind != OutcomeKindDone) {
         fail("Azure stored no object");
     }
 }
 
 void Client::remove(std::string_view key, const Removal &removal) {
     const std::uint64_t now = now_unix();
-    const borink_session session = this->session();
-    const borink_delete_shape shape = removal.shape();
-    const borink_request_head &request = encode([&] {
+    const Session session = this->session();
+    const DeleteShape shape = removal.shape();
+    const RequestHead &request = encode([&] {
         return borink_encode_delete(&session, &shape, as_bytes(key),
                                     as_bytes(removal.condition_value), request_buffer(), now);
     });
@@ -353,10 +353,10 @@ void Client::remove(std::string_view key, const Removal &removal) {
     checked_head();
     outcome_ = borink_accept_delete_head(&session, &shape, head_.status(), head_.refs(),
                                          head_.count());
-    if (outcome_.disposition == BORINK_DISPOSITION_NEED_ERROR_BODY) {
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
         outcome_ = borink_finish_delete_error_body(&session, &outcome_.failure, kept_body());
     }
-    if (outcome_.disposition != BORINK_DISPOSITION_ACCEPTED) {
+    if (outcome_.kind != OutcomeKindAccepted) {
         fail("Azure removed no object");
     }
 }
