@@ -7,11 +7,9 @@
 #ifndef BORINK_OBJECT_STORAGE_H
 #define BORINK_OBJECT_STORAGE_H
 
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 
 /**
  * The most headers that one request head carries.
