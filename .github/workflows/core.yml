@@ -70,9 +70,10 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       # No standard library, no allocator, and the target spec's `panic =
-      # "abort"`. This is the build a board links.
+      # "abort"`. Release, because that is the archive a board flashes and the
+      # one whose size the next step reports.
       - name: Build for a bare-metal board
-        run: cargo build --locked -p borink-object-storage-c --no-default-features --target thumbv7em-none-eabihf
+        run: cargo build --locked -p borink-object-storage-c --no-default-features --release --target thumbv7em-none-eabihf
       # `build.rs` writes the header from the Rust source. A committed header
       # that differs means the two declarations disagree.
       - name: Check the generated header
@@ -84,11 +85,12 @@ jobs:
       # image with no newlib and no heap. The header is compiled against the
       # freestanding headers alone, so a hosted-only include is a compile
       # error, and the linked image is refused if any symbol is undefined or
-      # any allocator reached it.
+      # any allocator reached it. The flash and RAM it takes go to the job
+      # summary.
       - name: Link a board image with no C library
         run: |
           nix develop --command crates/object-storage-c/tests/freestanding.sh \
-            target/thumbv7em-none-eabihf/debug/libborink_object_storage_c.a
+            target/thumbv7em-none-eabihf/release/libborink_object_storage_c.a
       - name: Test the ABI from C
         run: |
           nix develop --command bash -c '
