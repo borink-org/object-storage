@@ -113,8 +113,10 @@ jobs:
               --library-type staticlib --prefix=/usr --destdir="$install"
             find "$install" -type f
 
-            diff -u crates/object-storage-c/include/borink/object_storage.h \
-                    "$install/usr/include/borink/object_storage.h"
+            for header in object_storage.h object_storage.hpp; do
+              diff -u "crates/object-storage-c/include/borink/$header" \
+                      "$install/usr/include/borink/$header"
+            done
 
             moved=$RUNNER_TEMP/moved
             cp -r "$install/usr" "$moved"
