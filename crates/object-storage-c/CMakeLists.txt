@@ -1,13 +1,12 @@
 # The C ABI crate, as a target that a consumer links.
 #
 # `cargo cbuild` produces the archive, the header directory and a pkg-config
-# file describing both; this file wraps what it produced as
-# `borink::object_storage`. Add it with `add_subdirectory` or `FetchContent`
-# and link that target; nothing here needs an HTTP library, and a C program
-# needs no C++ compiler.
+# file describing both. This file wraps them as `borink::object_storage`. Add
+# it with `add_subdirectory` or `FetchContent` and link that target; nothing
+# here needs an HTTP library, and a C program needs no C++ compiler.
 #
-# There is no install rule. `cargo cinstall --prefix=...` is the install path,
-# and what it writes is found with pkg-config rather than with this file.
+# There is no install rule. `cargo cinstall --prefix=...` installs, and
+# pkg-config finds what it wrote. See docs/PACKAGING.md.
 
 cmake_minimum_required(VERSION 3.25)
 project(borink-object-storage-c LANGUAGES C)
@@ -16,9 +15,9 @@ find_package(PkgConfig REQUIRED)
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_program(RUSTC_EXECUTABLE rustc REQUIRED)
 
-# cargo-c names its output directory after the profile, and this project
-# follows the CMake build type into it. It writes under the target triple even
-# for a host build, so the triple is asked of the compiler rather than guessed.
+# cargo-c names its output directory after the profile, and writes under the
+# target triple even for a host build. This project follows the CMake build
+# type into it, and asks the compiler for the triple.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(cargo_arguments "")
   set(cargo_directory debug)
@@ -43,7 +42,7 @@ set(cbuild_command ${CARGO_EXECUTABLE} cbuild --locked
                    --library-type staticlib ${cargo_arguments})
 
 # Once at configure time, because the pkg-config file read below is something
-# the build produces, and once as a build rule, so editing the Rust source
+# the build produces. Once again as a build rule, so editing the Rust source
 # rebuilds the archive.
 execute_process(
   COMMAND ${cbuild_command}
@@ -59,10 +58,8 @@ add_custom_command(
   VERBATIM)
 add_custom_target(borink_object_storage_build DEPENDS ${abi_archive})
 
-# What a consumer links, as the compiler computed it: the archive, the header
-# directory beside it, and the native libraries rustc says a static Rust
-# library needs. Nothing here is a hand-maintained guess, which is the point of
-# going through cargo-c.
+# What a consumer links: the archive, the header directory beside it, and the
+# native libraries rustc reported. All three come out of the pkg-config file.
 set(ENV{PKG_CONFIG_PATH} ${cargo_output_directory})
 pkg_check_modules(borink_object_storage_c REQUIRED IMPORTED_TARGET
                   borink-object-storage-c-uninstalled)

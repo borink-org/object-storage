@@ -3,8 +3,7 @@ name = "borink-object-storage-c"
 version = "0.0.0"
 edition = "2024"
 publish = false
-# cargo-c copies this into the pkg-config file's `Description:`, which comes
-# out empty without it.
+# cargo-c copies this into the pkg-config file's `Description:`.
 description = "Azure Blob Storage for a C or C++ program that owns its memory and its I/O"
 
 # The staticlib is what C and C++ link; the rlib is what another Rust crate
@@ -14,8 +13,7 @@ crate-type = ["staticlib", "rlib"]
 
 [features]
 default = ["std"]
-# cargo-c looks for this feature to find the C ABI package in the workspace.
-# It enables nothing.
+# How cargo-c finds this package in the workspace. It enables nothing.
 capi = []
 # Links the Rust standard library, for the panic handler and the unwinder that
 # a static archive carries on a hosted target. The crate itself is `no_std`
@@ -31,49 +29,31 @@ borink-object-storage-proto = { path = "../object-storage-proto" }
 # build that generated it would write outside OUT_DIR, and every consumer would
 # vendor and compile cbindgen to reproduce a file they already have.
 
-# How `cargo cbuild` and `cargo cinstall` produce the archive, the header and
-# the pkg-config file. They are the only path: the CMake project, CI and the
-# nix derivation all go through them, so no second producer can rot unnoticed.
+# What `cargo cbuild` and `cargo cinstall` write. They are the only producer of
+# the C artifacts; docs/PACKAGING.md says why, and explains each setting below.
 [package.metadata.capi.header]
-# The header is committed and `generate-header.sh` writes it. cargo-c would
-# run its own cbindgen, which adds `*_MAJOR/_MINOR/_PATCH` macros and drops the
-# C23 enum typedefs ours carries.
+# `generate-header.sh` writes the header, so cargo-c does not.
 generation = false
 name = "object_storage"
 subdirectory = "borink"
 
-# With generation off, this is what puts the committed header under the
-# install prefix.
+# What puts the committed header under the install prefix.
 [package.metadata.capi.install.include]
 asset = [{ from = "include/borink/object_storage.h", to = "borink/" }]
 
 [package.metadata.capi.library]
-# A static archive only, so there is no soname and nothing to promise about
-# it.
+# A static archive only, so there is no soname to version.
 versioning = false
 
-# What a packager reads. There is no `Requires` and no `Requires.private`,
-# because this library has no pkg-config dependency: its Rust dependencies are
-# linked into the archive, and the header includes <stdbool.h>, <stddef.h> and
-# <stdint.h> and nothing else. No type from another package crosses the public
-# API, so a nix derivation for this library needs no `propagatedBuildInputs`
-# and a consumer needs nothing on `PKG_CONFIG_PATH` but this file.
-#
-# `Libs` and `Libs.private` both carry the native libraries rustc reports.
-# That is right for a static-only package rather than a duplication to work
-# around: there is no shared object to record them, so a plain `--libs` that
-# omitted them would not link. Every path derives from `${prefix}`, so
-# rewriting that one line relocates the install — which is what makes a nix
-# store path work.
+# There is no `Requires` and no `Requires.private` here, and adding one would
+# make every consumer propagate it. See docs/PACKAGING.md.
 [package.metadata.capi.pkg_config]
-# The module name a consumer queries is the file name, not `Name:`, so both
-# are set to the same thing.
+# A consumer queries the file name, not `Name:`. Both say the same thing.
 filename = "borink-object-storage-c"
 name = "borink-object-storage-c"
 description = "Azure Blob Storage for a C or C++ program that owns its memory and its I/O"
-# The header is included as `borink/object_storage.h`, so `Cflags` has to name
-# the directory above `borink/`. cargo-c points it at the subdirectory by
-# default, which would only answer to `#include <object_storage.h>`.
+# Puts `${includedir}` in `Cflags` rather than `${includedir}/borink`, which is
+# what `#include "borink/object_storage.h"` needs.
 strip_include_path_components = 1
 
 [lints.rust]

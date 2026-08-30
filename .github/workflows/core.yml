@@ -57,6 +57,7 @@ jobs:
             ctest --test-dir hosts/cxx-curl/build --output-on-failure
           '
 
+// review: this explanation doesn't need to be so long, most of it is obvious from the code
   # The C ABI crate is a workspace member, so the jobs above format, lint,
   # document and test it. This one builds it for the bare-metal target it also
   # serves, links a board image that has no C library at all, checks that the
@@ -64,10 +65,7 @@ jobs:
   # compares both compilers' idea of every struct, and installs the library to
   # a prefix and builds against it the way a packager would.
   #
-  # Every C artifact here comes from cargo-c. There is no second producer to
-  # rot: `cargo cbuild` is what the CMake project below runs too, and
-  # `cargo cinstall` writes the archive, the header and the pkg-config file
-  # that the packaged consumer finds.
+  # Every C artifact here comes from cargo-c; see docs/PACKAGING.md.
   c-abi:
     runs-on: ubuntu-latest
     steps:
@@ -76,16 +74,15 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-      # The board build needs a rustc carrying `thumbv7em-none-eabihf`, which
-      # the development shell's does not, so the pinned cargo-c goes on PATH
-      # beside the toolchain above rather than being run inside the shell.
+      # The development shell's rustc carries no bare-metal target, so this
+      # build cannot run inside it. The pinned cargo-c goes on PATH beside the
+      # toolchain above instead.
       - name: Put the pinned cargo-c on PATH
         run: echo "$(nix build --no-link --print-out-paths .#cargo-c)/bin" >> "$GITHUB_PATH"
       # No standard library, no allocator, and the target spec's `panic =
       # "abort"`. Release, because that is the archive a board flashes and the
-      # one whose size the next step reports. The pkg-config file cargo-c
-      # writes beside it must claim no native libraries at all: a board has no
-      # libc to link against, so anything in `Libs.private` would be a bug.
+      # one whose size the next step reports. A board has no libc, so the
+      # pkg-config file beside the archive must claim no native libraries.
       - name: Build for a bare-metal board
         run: |
           cargo cbuild --locked -p borink-object-storage-c --no-default-features \
@@ -120,13 +117,11 @@ jobs:
             cmake --build crates/object-storage-c/build
             ctest --test-dir crates/object-storage-c/build --output-on-failure
           '
-      # The packaged path, which is the one a distribution and the nix
-      # derivation take. `cargo cinstall` writes a prefix; pkg-config is then
-      # the only thing that says where anything is. The prefix is queried
-      # somewhere other than where it was installed, because that relocation
-      # is what makes a nix store path work. The header comparison is what
-      # proves `generation = false`: the installed header is the committed one,
-      # not something cargo-c's own cbindgen wrote.
+      # The packaged path, which a distribution and the nix derivation take.
+      # `cargo cinstall` writes a prefix, and pkg-config then says where
+      # everything is. The prefix is queried somewhere other than where it was
+      # installed, which is the relocation a nix store path depends on. The
+      # header comparison checks that `generation = false` held.
       - name: Install to a prefix and build against it
         run: |
           nix develop --command bash -c '
@@ -151,10 +146,9 @@ jobs:
               -o "$RUNNER_TEMP/abi_from_prefix"
             "$RUNNER_TEMP/abi_from_prefix"
           '
-      # The same packaged path, as nix takes it. `nix build .#default` runs
-      # `cargo cinstall` into a store path, and the check compiles the ABI
-      # test against it knowing only what pkg-config said — the library is a
-      # plain `buildInputs` entry with nothing propagated.
+      # The same packaged path, as nix takes it. The check compiles the ABI
+      # test against the store path knowing only what pkg-config reported,
+      # with the library a plain `buildInputs` entry.
       - name: Package the library and consume it from nix
         run: |
           nix build --no-link .#default
