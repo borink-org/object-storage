@@ -25,7 +25,7 @@
 #include <string_view>
 #include <vector>
 
-#include "borink/object_storage.hpp"
+#include "borink/object_storage_growing.hpp"
 
 namespace borink::host {
 
@@ -209,7 +209,7 @@ class Client {
             request_head_ = encode();
         }
         if (request_head_.status.code != 0) {
-            throw std::runtime_error(std::string(describe_into(message_, request_head_.status)));
+            throw std::runtime_error(std::string(describe_whole(message_, request_head_.status)));
         }
         return request_head_;
     }
@@ -233,7 +233,7 @@ class Client {
     // `message_` is this client's room for such a sentence, and writing it is
     // the one place that a failing request allocates.
     [[noreturn]] void fail(std::string_view what) {
-        const std::string_view said = describe_into(message_, outcome_);
+        const std::string_view said = describe_whole(message_, outcome_);
         throw std::runtime_error(std::string(what) + ": " + std::string(said));
     }
 

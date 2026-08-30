@@ -1,11 +1,12 @@
-// The C++ side of the boundary: what a request asks for, and how to read what
-// the answer said.
+// C++ helpers over the declarations in `borink/object_storage.h`.
 //
-// Include this and link `borink::object_storage`. Everything here is an inline
-// helper over the declarations in `borink/object_storage.h`: it holds no
-// state, opens no socket, allocates only where it is said to, and needs no C++
-// runtime library. The HTTP client, the buffers and the clock stay in your
-// program — see `hosts/cxx-curl` for one written against libcurl.
+// Include this and link `borink::object_storage`. Every declaration here is
+// inline. It holds no state, opens no socket, allocates nothing, and needs no
+// C++ runtime library. Your program keeps the HTTP client, the buffers and the
+// clock. See `hosts/cxx-curl` for one written against libcurl.
+//
+// `borink/object_storage_growing.hpp` adds the helpers that grow a buffer. This
+// file grows nothing, so a program with no allocator can include it.
 //
 // A C program includes `borink/object_storage.h` alone and needs none of this.
 
@@ -15,22 +16,17 @@
 #include <cstdint>
 #include <span>
 #include <string_view>
-#include <vector>
 
 #include "borink/object_storage.h"
 
 namespace borink {
 
-// The C names, spelled the way C++ spells them.
+// Names every generated type and constant inside `borink`.
 //
-// C has no namespaces, so every generated name carries a `borink_` prefix.
-// These aliases put the same types and constants in `borink`, so a C++ caller
-// writes `borink::HeaderRef` rather than `borink_header_ref`. They rename
-// nothing: each one is the declaration in `borink/object_storage.h` under a
-// second name, and the two are the same type to the compiler.
+// `borink::HeaderRef` and `borink_header_ref` are the same type. Write either.
 //
-// A type or a variant added to the ABI belongs here as well as in
-// `cbindgen.toml`'s `[export.rename]` table. Both lists are written by hand.
+// Add a type or a variant here when you add it to `cbindgen.toml`'s
+// `[export.rename]` table. Both lists are written by hand.
 
 using Bytes         = borink_bytes;
 using BytesMut      = borink_bytes_mut;
@@ -123,35 +119,37 @@ inline constexpr OutcomeKind OutcomeKindServiceFailure      = BORINK_OUTCOME_KIN
 inline constexpr OutcomeKind OutcomeKindUnsupported         = BORINK_OUTCOME_KIND_UNSUPPORTED;
 inline constexpr OutcomeKind OutcomeKindInvalid             = BORINK_OUTCOME_KIND_INVALID;
 
-// Every byte of the object.
+// Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }
 
-// The half-open interval `start..end`.
+// Returns the half-open interval `start..end`.
 inline Range bounded(std::uint64_t start, std::uint64_t end) {
     return Range{RangeFormBounded, start, end};
 }
 
-// Every byte from `start` to the end of the object.
+// Returns every byte from `start` to the end of the object.
 inline Range from(std::uint64_t start) {
     return Range{RangeFormOffset, start, 0};
 }
 
-// Reads text as the bytes that a call takes.
+// Reads text as the bytes a call takes.
 inline Bytes as_bytes(std::string_view value) {
     return Bytes{reinterpret_cast<const std::uint8_t *>(value.data()), value.size()};
 }
 
-// Reads a span as the bytes that a call takes.
+// Reads a span as the bytes a call takes.
 inline Bytes borrow(std::span<const std::uint8_t> items) {
     return Bytes{items.data(), items.size()};
 }
 
-// A buffer that a call writes into, safe to hand over when it is empty.
-inline BytesMut into(std::vector<std::uint8_t> &bytes) {
+// Reads a span as the buffer a call writes into.
+//
+// An empty span is safe to hand over.
+inline BytesMut into(std::span<std::uint8_t> bytes) {
     return BytesMut{bytes.empty() ? nullptr : bytes.data(), bytes.size()};
 }
 
-// One container, and the token that opens it.
+// Returns a session for one container, with the token that opens it.
 //
 // The three values stay where you put them. Keep them for as long as you make
 // requests through this session.
@@ -160,7 +158,9 @@ inline Session session(std::string_view endpoint, std::string_view container,
     return Session{as_bytes(endpoint), as_bytes(container), as_bytes(token)};
 }
 
-// One read, and everything that decides what it asks for.
+// The settings of one read.
+//
+// The defaults ask for every byte of the object, with no precondition.
 struct Read {
     // Whether the read asks for bytes or for metadata.
     GetKind kind = GetKindBytes;
@@ -174,24 +174,29 @@ struct Read {
     GetShape shape() const { return GetShape{kind, range, condition}; }
 };
 
-// One write, and the precondition that it carries.
+// The settings of one write.
 struct Write {
+    // The precondition that the write carries.
     Condition condition = ConditionNone;
+    // The entity tag that the precondition compares against.
     std::string_view condition_value;
 
     PutShape shape() const { return PutShape{condition}; }
 };
 
-// One removal, what it takes with it, and the precondition that it carries.
+// The settings of one removal.
 struct Removal {
+    // What the removal takes with it.
     DeleteKind kind = DeleteKindObject;
+    // The precondition that the removal carries.
     Condition condition = ConditionNone;
+    // The entity tag that the precondition compares against.
     std::string_view condition_value;
 
     DeleteShape shape() const { return DeleteShape{kind, condition}; }
 };
 
-// The bytes of a value that the response head may not have carried.
+// Returns the bytes of a value, or nothing when the head did not carry it.
 //
 // The span points into the head that you collected, and is valid for as long
 // as that head is. Copy what you keep.
@@ -202,39 +207,46 @@ inline std::span<const std::uint8_t> bytes_of(const MaybeBytes &value) {
     return std::span<const std::uint8_t>(value.bytes.ptr, value.bytes.len);
 }
 
-// The same bytes as text, for a value that is one.
+// Returns the same bytes as text, for a value that is text.
 inline std::string_view text_of(const MaybeBytes &value) {
     const std::span<const std::uint8_t> bytes = bytes_of(value);
     return std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size());
 }
 
-// Writes a sentence into `room`, and returns it as text.
+// What a describe call wrote into a room.
 //
-// The library writes no message of its own accord and never allocates: it
-// fills the room it is given and reports what the whole sentence needed. This
-// grows `room` to that size and asks once more, so the text is complete, and
-// it points into `room` until the next call that writes there.
+// The library writes no message of its own accord. It fills the room it is
+// given and reports what a whole sentence takes. Call again with `needed`
+// bytes of room to read the rest.
+struct Sentence {
+    // The part of the sentence that fitted. It points into the room until the
+    // next call that writes there.
+    std::string_view text;
+    // The number of bytes a whole sentence takes.
+    std::size_t needed;
+
+    // Returns whether `text` holds the whole sentence.
+    bool complete() const { return needed <= text.size(); }
+};
+
+// Writes a sentence into `room` and returns what fitted.
 template <typename Describe>
-std::string_view sentence(std::vector<std::uint8_t> &room, Describe describe) {
-    std::size_t length = describe(into(room));
-    if (length > room.size()) {
-        room.resize(length);
-        length = describe(into(room));
-    }
-    return std::string_view(reinterpret_cast<const char *>(room.data()),
-                            length < room.size() ? length : room.size());
+Sentence sentence(std::span<std::uint8_t> room, Describe describe) {
+    const std::size_t needed = describe(into(room));
+    const std::size_t fitted = needed < room.size() ? needed : room.size();
+    return Sentence{fitted == 0 ? std::string_view()
+                                : std::string_view(reinterpret_cast<const char *>(room.data()),
+                                                   fitted),
+                    needed};
 }
 
-// What an outcome says, in the words of the core crate.
-inline std::string_view describe_into(std::vector<std::uint8_t> &room,
-                                      const Outcome &outcome) {
-    return sentence(room, [&](BytesMut writable) {
-        return borink_describe(&outcome, writable);
-    });
+// Writes what an outcome says into `room`.
+inline Sentence describe_into(std::span<std::uint8_t> room, const Outcome &outcome) {
+    return sentence(room, [&](BytesMut writable) { return borink_describe(&outcome, writable); });
 }
 
-// What a status says, in the words of the core crate.
-inline std::string_view describe_into(std::vector<std::uint8_t> &room, Status status) {
+// Writes what a status says into `room`.
+inline Sentence describe_into(std::span<std::uint8_t> room, Status status) {
     return sentence(room,
                     [&](BytesMut writable) { return borink_describe_status(status, writable); });
 }

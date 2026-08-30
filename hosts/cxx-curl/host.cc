@@ -17,7 +17,7 @@ Client Client::open(std::string_view endpoint, std::string_view container, std::
         // The core crate names the value that cannot be used. This host writes
         // no second table of its own.
         std::vector<std::uint8_t> message(128);
-        throw std::runtime_error(std::string(describe_into(message, status)));
+        throw std::runtime_error(std::string(describe_whole(message, status)));
     }
     return client;
 }
