@@ -47,3 +47,7 @@ lengths this crate reports would no longer describe the bytes you receive.
 
 - Currently only ASCII endpoints are supported. Object keys may contain Unicode and are percent-encoded for the request. If you have a use case for internationalized endpoints, please let us know and we'll enable them as an optional feature.
 - The only authorization currently supported is a Microsoft Entra ID OAuth 2.0 bearer token. In the future we will also include code for creating these tokens based on other secrets or even a managed identity.
+
+## LLM disclaimer
+
+This project is heavily AI-assisted. It is a carefully reconstructed and reviewed version of a private, fully AI-generated implementation. The core Rust code is considerably better reviewed than the tests and the C/C++ bindings. Note that care was taken for the API docs to be nice to read and not contain too much slop. Apologies if some stuff slipped through review.
