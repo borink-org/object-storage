@@ -2,10 +2,10 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
-    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
+    FailureClass, Fill, GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -940,13 +940,23 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
     assert_eq!(walk(&fixture, false, 1), whole);
 }
 
-/// A listing lists a container; a container that is not there is the one thing
-/// it does not find.
+/// Settles what a listing of a container this credential was not granted
+/// answers, which is not what the container's existence would suggest.
+///
+/// The role assignment is scoped to one container, so Azure refuses the
+/// request before it says whether any other container is there: the answer is
+/// 403, not the 404 that `ListHeadOutcome::NotFound` describes. A credential
+/// scoped to one container therefore cannot observe `NotFound` at all, and a
+/// caller that treats "not found" as the way a listing fails would never see
+/// this.
+///
+/// If the grant is ever widened to the storage account, this becomes the 404
+/// instead, and the assertion below is what will say so.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn listing_a_container_that_is_not_there_reports_that() {
+fn listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for() {
     let fixture = Fixture::from_env();
-    let absent = Fixture {
+    let outside = Fixture {
         container: format!("{}-absent", fixture.container),
         ..clone(&fixture)
     };
@@ -956,7 +966,7 @@ fn listing_a_container_that_is_not_there_reports_that() {
             .unwrap()
             .as_secs(),
     );
-    let blobs = absent.blobs();
+    let blobs = outside.blobs();
     let plan = PhysicalList::new("");
     let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
     let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
@@ -977,23 +987,37 @@ fn listing_a_container_that_is_not_there_reports_that() {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_bytes())),
     );
-    assert_eq!(
-        blobs.accept_list_head(head).unwrap(),
-        ListHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
+    let outcome = blobs.accept_list_head(head).unwrap();
+    let ListHeadOutcome::ServiceFailure(failure) = outcome else {
+        panic!(
+            "a container outside the grant is refused, not reported absent; \
+             if this is now NotFound the grant was widened, and the \
+             documentation on this test must say so: {outcome:?}"
+        );
+    };
+    assert_eq!(failure.status, 403);
+    assert_eq!(failure.class, FailureClass::Auth);
+    assert_eq!(failure.kind, Some(ServiceErrorKind::Unauthorized));
+    // The refusal is decisive from the head alone, as every other one is.
+    assert!(failure.request_id.is_some());
 }
 
 /// Settles what an entity tag from a listing is worth as a condition, which is
-/// the whole reason [`layered::quoted_etag`] exists.
+/// what [`layered::quoted_etag`] rests on.
 ///
-/// A listing writes the tag without the quotes that the `ETag` header carries.
-/// If this test ever shows Azure accepting the unquoted form, `quoted_etag`
-/// stops being necessary and its documentation must say so.
+/// A listing writes the tag without the quotes that the `ETag` header carries,
+/// and Azure accepts it that way: the unquoted tag conditions a read exactly
+/// as the quoted one does. So `quoted_etag` is not a workaround for a service
+/// that refuses the listed form, and its documentation must not claim to be
+/// one.
+///
+/// The assertion that matters is the last: an unquoted tag that does not match
+/// must still refuse the read. If it does not, Azure is discarding a header it
+/// cannot parse rather than reading it, a condition written that way has no
+/// effect at all, and quoting becomes required rather than merely correct.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn an_entity_tag_from_a_listing_conditions_a_read_only_once_it_is_quoted() {
+fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
     let entry = walk(&fixture, false, 1000).remove(0);
@@ -1015,12 +1039,28 @@ fn an_entity_tag_from_a_listing_conditions_a_read_only_once_it_is_quoted() {
     assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, b"01234567");
 
+    // Measured: Azure reads the listed tag as it stands.
+    let result = read(&owner, shape, Some(listed.as_bytes())).unwrap();
     assert_eq!(
-        read(&owner, shape, Some(listed.as_bytes()))
-            .unwrap()
-            .outcome,
-        Outcome::PreconditionFailed,
-        "an unquoted tag is no entity tag; if this passes the read, \
-         correct the documentation on layered::quoted_etag"
+        result.outcome,
+        Outcome::Body,
+        "Azure accepts the tag as the listing writes it; if this ever refuses \
+         the read, quoted_etag becomes required and its documentation must \
+         say so"
     );
+    assert_eq!(result.body, b"01234567");
+
+    // And reads it rather than discarding it: a tag that does not match still
+    // refuses, whichever form it is written in.
+    for stale in [b"\"0x0\"".as_slice(), b"0x0"] {
+        assert_eq!(
+            read(&owner, shape, Some(stale)).unwrap().outcome,
+            Outcome::PreconditionFailed,
+            "an unquoted tag that does not match must still refuse the read; \
+             if this returns the body, Azure is discarding the condition \
+             rather than reading it, and quoted_etag is required for a \
+             condition to have any effect: {}",
+            String::from_utf8_lossy(stale)
+        );
+    }
 }

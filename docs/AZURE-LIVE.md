@@ -29,3 +29,9 @@ A pull request from a fork is given no `id-token` permission however it is appro
 The suite is serial by design: the write tests overwrite one key, and the listing tests empty one prefix, so two of them at once would read what the other wrote.
 
 The listing tests own everything under `AZURE_LIST_PREFIX` and delete it before each test. `borink-object-storage/azure-list-scratch/` holds nothing else.
+
+## What the suite measured
+
+Azure conditions a request on an entity tag written the way a listing writes it, without quotes, exactly as it does on the quoted form. `layered::quoted_etag` is therefore not a workaround for a service that refuses the listed form; it writes the spelling HTTP defines. `an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not` holds that, and also holds the part that would change the answer: an unquoted tag that does not match must still refuse the read, because a service that discarded the header instead would leave the condition with no effect at all.
+
+A listing of a container this credential was not granted answers 403, not 404. The role assignment is scoped to one container, so Azure refuses before it says whether another one exists, and `ListHeadOutcome::NotFound` is unreachable for this credential. Widening the grant to the storage account would turn that into the 404, and `listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for` is what would say so.

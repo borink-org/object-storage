@@ -86,13 +86,17 @@ pub fn list_requirements(
     required(blobs.encode_list(&mut [], list, now).map(drop))
 }
 
-/// Writes an entity tag from a listing in the form that a condition takes.
+/// Writes an entity tag from a listing in the form that HTTP defines.
 ///
 /// Azure lists an entity tag without the quotes that the `ETag` header carries,
-/// and a condition takes the quoted form. This copies `listed` into `into`,
-/// adding the quotes unless it already carries them or is a weak tag, and
-/// returns what it wrote. Returns [`None`] if `into` is too small, which takes
-/// two bytes more than `listed`.
+/// and the live suite measures that Azure conditions a request on the listed
+/// form just as readily. So this is not a workaround for a service that
+/// refuses that form: an entity tag is a quoted string, and this writes the one
+/// spelling that every service and everything on the way to it reads alike.
+///
+/// This copies `listed` into `into`, adding the quotes unless it already
+/// carries them or is a weak tag, and returns what it wrote. Returns [`None`]
+/// if `into` is too small, which takes two bytes more than `listed`.
 ///
 /// Use it on [`ListEntry::e_tag`](crate::ListEntry::e_tag) to turn an entry of
 /// a listing into a

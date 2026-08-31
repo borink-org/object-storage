@@ -569,7 +569,8 @@ pub struct ListEntry<'b> {
     /// The entity tag, as the listing wrote it.
     ///
     /// Azure lists an entity tag without the quotes that the `ETag` header
-    /// carries. To use one as a condition, quote it with
+    /// carries, and conditions a request on either form. To write the one that
+    /// HTTP defines, quote it with
     /// [`layered::quoted_etag`](crate::layered::quoted_etag).
     pub e_tag: Option<&'b [u8]>,
     /// The value that the listing gave for the last modification, in the form
