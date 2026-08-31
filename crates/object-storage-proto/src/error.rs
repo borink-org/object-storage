@@ -58,6 +58,17 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
+    // 8, 9 and 13 name the part operations, which this crate does not write
+    // yet. Every number here is assigned once, so the holes stay open.
+    /// The listing prefix is longer than an object key may be.
+    Prefix = 10,
+    /// The listing marker is empty.
+    ///
+    /// A page that starts at the beginning of the container carries no marker
+    /// at all.
+    Marker = 11,
+    /// The listing asks for zero entries.
+    MaxResults = 12,
 }
 
 impl InvalidPlan {
@@ -74,6 +85,9 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
+            Self::Prefix => "invalid listing prefix",
+            Self::Marker => "invalid listing marker",
+            Self::MaxResults => "a listing cannot ask for zero entries",
         }
     }
 
@@ -89,6 +103,9 @@ impl InvalidPlan {
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
+            10 => Self::Prefix,
+            11 => Self::Marker,
+            12 => Self::MaxResults,
             _ => return None,
         })
     }
@@ -105,7 +122,7 @@ impl fmt::Display for InvalidPlan {
 /// Azure sends none of these. Each one means that the response was changed on
 /// the way to you, or that the service did not behave as it documents. This
 /// crate cannot recover from any of them, and neither can you: retry the
-/// request, or report it. These three values are for the message you write.
+/// request, or report it. These four values are for the message you write.
 ///
 /// # Reading the exact value that was wrong
 ///
@@ -148,6 +165,8 @@ pub enum ResponseFault {
     Status = 2,
     /// The service served a range other than the one that the plan requested.
     Range = 3,
+    /// The response body is not the document that the head announced.
+    Body = 4,
 }
 
 impl ResponseFault {
@@ -158,6 +177,7 @@ impl ResponseFault {
             Self::Head => "the response head is unreadable, or it contradicts itself",
             Self::Status => "the status does not answer the request",
             Self::Range => "the service served another range than the plan requested",
+            Self::Body => "the response body is not the document that the head announced",
         }
     }
 
@@ -169,6 +189,7 @@ impl ResponseFault {
             1 => Self::Head,
             2 => Self::Status,
             3 => Self::Range,
+            4 => Self::Body,
             _ => return None,
         })
     }

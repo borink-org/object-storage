@@ -2,9 +2,10 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, GetHeadOutcome,
-    GetKind, GetShape, Method, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
-    PutShape, RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
+    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -18,6 +19,9 @@ struct Fixture {
     key: String,
     // The write tests own this key. It is never the read reference above.
     put_key: String,
+    // The listing tests own everything under this prefix, and empty it before
+    // each test so that what a page holds is what the test wrote.
+    list_prefix: String,
     token: String,
 }
 
@@ -28,6 +32,7 @@ impl Fixture {
             container: env::var("AZURE_STORAGE_CONTAINER").unwrap(),
             key: env::var("AZURE_BLOB_KEY").unwrap(),
             put_key: env::var("AZURE_PUT_KEY").unwrap(),
+            list_prefix: env::var("AZURE_LIST_PREFIX").unwrap(),
             token: env::var("AZURE_STORAGE_ACCESS_TOKEN").unwrap(),
         }
     }
@@ -325,6 +330,7 @@ fn read_put_key(fixture: &Fixture, shape: GetShape) -> ReadResult {
         container: fixture.container.clone(),
         key: fixture.put_key.clone(),
         put_key: fixture.put_key.clone(),
+        list_prefix: fixture.list_prefix.clone(),
         token: fixture.token.clone(),
     };
     read(&swapped, shape, None).unwrap()
@@ -660,5 +666,361 @@ fn removing_only_the_snapshots_keeps_the_object() {
     assert_eq!(
         remove(&fixture, DeleteShape::default(), None).unwrap(),
         RemoveOutcome::Accepted
+    );
+}
+
+// The listing half of the suite. These tests own everything under
+// `AZURE_LIST_PREFIX`, and empty it first, so a page holds exactly what the
+// test wrote and nothing a previous run left behind.
+
+// One page: what it held, and where the next one starts.
+type Page = (Vec<Entry>, Option<Vec<u8>>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    kind: EntryKind,
+    key: String,
+    size: Option<u64>,
+    e_tag: Option<String>,
+    last_modified: Option<u64>,
+}
+
+// One page, read into an array of `room` entries at a time. `room` is what
+// proves the resuming path against a real body: a page that does not fit is
+// read in as many rounds as it takes, and no round asks the service again.
+fn page(
+    fixture: &Fixture,
+    plan: &PhysicalList<'_>,
+    room: usize,
+) -> Result<Page, Box<dyn std::error::Error>> {
+    let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+    let blobs = fixture.blobs();
+    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now)?];
+    let request = blobs.encode_list(&mut buf, plan, &now)?;
+    assert_eq!(request.method(), Method::Get);
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()?;
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        incoming.status().as_u16(),
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    let expected_len = match blobs.accept_list_head(head)? {
+        ListHeadOutcome::Page { expected_len } => expected_len,
+        outcome => panic!("unexpected outcome {outcome:?}"),
+    };
+    let mut body = incoming.body_mut().read_to_vec()?;
+    if let Some(len) = expected_len {
+        assert_eq!(body.len() as u64, len, "the head sized the body");
+    }
+
+    let mut entries = Vec::new();
+    let mut resume = None;
+    loop {
+        let mut into = vec![Default::default(); room];
+        let fill = match resume {
+            None => blobs.fill_listing(&mut body, &mut into)?,
+            Some(at) => blobs.resume_listing(&mut body, at, &mut into)?,
+        };
+        let (filled, done) = match fill {
+            Fill::Partial { filled, resume: at } => {
+                resume = Some(at);
+                (filled, None)
+            }
+            Fill::Page(page) => (page.filled, Some(page.next_marker.map(<[u8]>::to_vec))),
+        };
+        entries.extend(into[..filled].iter().map(|entry| {
+            Entry {
+                kind: entry.kind,
+                key: entry.key.to_owned(),
+                size: entry.size,
+                e_tag: entry
+                    .e_tag
+                    .map(|value| String::from_utf8(value.to_vec()).unwrap()),
+                last_modified: entry.last_modified.and_then(layered::http_date_ms),
+            }
+        }));
+        if let Some(marker) = done {
+            return Ok((entries, marker));
+        }
+    }
+}
+
+// Every key under the prefix, page by page, the way a caller walks a listing.
+fn walk(fixture: &Fixture, delimited: bool, room: usize) -> Vec<Entry> {
+    let mut marker: Option<Vec<u8>> = None;
+    let mut all = Vec::new();
+    loop {
+        let plan = PhysicalList {
+            marker: marker.as_deref(),
+            delimited,
+            ..PhysicalList::new(&fixture.list_prefix)
+        };
+        let (entries, next) = page(fixture, &plan, room).unwrap();
+        all.extend(entries);
+        match next {
+            Some(next) => marker = Some(next),
+            None => return all,
+        }
+    }
+}
+
+// Writes one object under the listing prefix.
+fn place(fixture: &Fixture, suffix: &str, content: &[u8]) {
+    let owner = Fixture {
+        put_key: format!("{}{suffix}", fixture.list_prefix),
+        ..clone(fixture)
+    };
+    assert_eq!(
+        write(&owner, PutShape::default(), None, content)
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+}
+
+fn clone(fixture: &Fixture) -> Fixture {
+    Fixture {
+        endpoint: fixture.endpoint.clone(),
+        container: fixture.container.clone(),
+        key: fixture.key.clone(),
+        put_key: fixture.put_key.clone(),
+        list_prefix: fixture.list_prefix.clone(),
+        token: fixture.token.clone(),
+    }
+}
+
+// Removes whatever is under the prefix, so the tests below start from nothing.
+fn empty(fixture: &Fixture) {
+    for entry in walk(fixture, false, 1000) {
+        let owner = Fixture {
+            put_key: entry.key.clone(),
+            ..clone(fixture)
+        };
+        assert_eq!(
+            remove(&owner, DeleteShape::default(), None).unwrap(),
+            RemoveOutcome::Accepted,
+            "{}",
+            entry.key
+        );
+    }
+    assert_eq!(walk(fixture, false, 1000), []);
+}
+
+// The three objects that the listing tests read.
+fn seed_listing(fixture: &Fixture) {
+    empty(fixture);
+    place(fixture, "a.txt", b"01234567");
+    place(fixture, "b.txt", b"0123456789");
+    place(fixture, "nested/c.txt", b"0");
+}
+
+/// The undelimited page: every key under the prefix, with what the listing
+/// says about each one.
+///
+/// This is also what settles that the last page of a real listing is read at
+/// all. Azure closes it with an empty `<NextMarker />`, written with a space
+/// before the slash, and a reader that matches the tag byte for byte faults on
+/// every listing that ends.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn lists_every_key_under_the_prefix() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+
+    let entries = walk(&fixture, false, 1000);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.kind, entry.key.as_str(), entry.size))
+            .collect::<Vec<_>>(),
+        [
+            (
+                EntryKind::Object,
+                format!("{}a.txt", fixture.list_prefix).as_str(),
+                Some(8)
+            ),
+            (
+                EntryKind::Object,
+                format!("{}b.txt", fixture.list_prefix).as_str(),
+                Some(10)
+            ),
+            (
+                EntryKind::Object,
+                format!("{}nested/c.txt", fixture.list_prefix).as_str(),
+                Some(1)
+            ),
+        ]
+    );
+    // Every object carries the two values that a listing is read for besides
+    // the key, so a caller need not head each one.
+    for entry in &entries {
+        assert!(entry.e_tag.is_some(), "{}", entry.key);
+        assert!(entry.last_modified.is_some(), "{}", entry.key);
+    }
+}
+
+/// A delimited listing walks one level at a time: the objects at this level,
+/// and the groups below it reported once each.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_delimited_listing_reports_the_level_below_as_a_group() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+
+    let entries = walk(&fixture, true, 1000);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.kind, entry.key.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                EntryKind::Object,
+                format!("{}a.txt", fixture.list_prefix).as_str()
+            ),
+            (
+                EntryKind::Object,
+                format!("{}b.txt", fixture.list_prefix).as_str()
+            ),
+            (
+                EntryKind::Prefix,
+                format!("{}nested/", fixture.list_prefix).as_str()
+            ),
+        ]
+    );
+    // A group is not an object: the service states no length for it.
+    assert_eq!(entries[2].size, None);
+}
+
+/// The two ways a listing is split, against the same three objects: the
+/// service splitting it into pages, and the caller's array splitting each page
+/// into rounds. Neither may lose a key or report one twice.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+    let whole = walk(&fixture, false, 1000);
+    assert_eq!(whole.len(), 3);
+
+    // One entry per page, so the service names a next page twice.
+    let mut marker: Option<Vec<u8>> = None;
+    let mut paged = Vec::new();
+    let mut pages = 0;
+    loop {
+        let plan = PhysicalList {
+            marker: marker.as_deref(),
+            max_results: Some(1),
+            ..PhysicalList::new(&fixture.list_prefix)
+        };
+        let (entries, next) = page(&fixture, &plan, 1000).unwrap();
+        pages += 1;
+        paged.extend(entries);
+        match next {
+            Some(next) => marker = Some(next),
+            None => break,
+        }
+        assert!(pages < 10, "a page of one is not making progress");
+    }
+    assert_eq!(paged, whole);
+    assert!(pages >= 3, "three objects, one per page: {pages} pages");
+
+    // One entry per round, against whole pages. The body is read once and the
+    // service is asked nothing extra.
+    assert_eq!(walk(&fixture, false, 1), whole);
+}
+
+/// A listing lists a container; a container that is not there is the one thing
+/// it does not find.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn listing_a_container_that_is_not_there_reports_that() {
+    let fixture = Fixture::from_env();
+    let absent = Fixture {
+        container: format!("{}-absent", fixture.container),
+        ..clone(&fixture)
+    };
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = absent.blobs();
+    let plan = PhysicalList::new("");
+    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        incoming.status().as_u16(),
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    assert_eq!(
+        blobs.accept_list_head(head).unwrap(),
+        ListHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NoSuchContainer)
+        }
+    );
+}
+
+/// Settles what an entity tag from a listing is worth as a condition, which is
+/// the whole reason [`layered::quoted_etag`] exists.
+///
+/// A listing writes the tag without the quotes that the `ETag` header carries.
+/// If this test ever shows Azure accepting the unquoted form, `quoted_etag`
+/// stops being necessary and its documentation must say so.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_entity_tag_from_a_listing_conditions_a_read_only_once_it_is_quoted() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+    let entry = walk(&fixture, false, 1000).remove(0);
+    let listed = entry.e_tag.unwrap();
+    assert!(
+        !listed.starts_with('"'),
+        "a listing quotes nothing: {listed}"
+    );
+
+    let owner = Fixture {
+        key: entry.key.clone(),
+        ..clone(&fixture)
+    };
+    let shape = conditional(ConditionKind::IfMatch);
+
+    let mut quoted = [0; 64];
+    let quoted = layered::quoted_etag(listed.as_bytes(), &mut quoted).unwrap();
+    let result = read(&owner, shape, Some(quoted)).unwrap();
+    assert_eq!(result.outcome, Outcome::Body);
+    assert_eq!(result.body, b"01234567");
+
+    assert_eq!(
+        read(&owner, shape, Some(listed.as_bytes()))
+            .unwrap()
+            .outcome,
+        Outcome::PreconditionFailed,
+        "an unquoted tag is no entity tag; if this passes the read, \
+         correct the documentation on layered::quoted_etag"
     );
 }

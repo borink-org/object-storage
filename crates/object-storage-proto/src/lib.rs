@@ -35,8 +35,9 @@
 //!
 //! ```
 //! use borink_object_storage_proto::{
-//!     Blobs, Container, GetHeadOutcome, Method, Payload, PhysicalGet, PhysicalPut,
-//!     PutHeadOutcome, ResponseHead, Timestamps, layered,
+//!     Blobs, Container, Fill, GetHeadOutcome, ListEntry, ListHeadOutcome, Method, Payload,
+//!     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps,
+//!     layered,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,6 +66,41 @@
 //!     other => panic!("unexpected outcome: {other:?}"),
 //! }
 //!
+//! // A listing reads its result out of the response body.
+//! let list = PhysicalList {
+//!     delimited: true,
+//!     max_results: Some(2),
+//!     ..PhysicalList::new("directory/")
+//! };
+//! let mut buffer = vec![0; layered::list_requirements(&blobs, &list, &now)?];
+//! let request = blobs.encode_list(&mut buffer, &list, &now)?;
+//! assert_eq!(
+//!     request.url(),
+//!     "https://account.blob.core.windows.net/objects\
+//!      ?restype=container&comp=list&prefix=directory%2F&delimiter=%2F&maxresults=2"
+//! );
+//!
+//! match blobs.accept_list_head(ResponseHead::new(200))? {
+//!     ListHeadOutcome::Page { .. } => {}
+//!     other => panic!("unexpected outcome: {other:?}"),
+//! }
+//!
+//! // The body is yours: read it whole, then read the entries out of it.
+//! let mut body = Vec::from(
+//!     b"<EnumerationResults><Blobs><Blob><Name>directory/a.txt</Name>\
+//!       <Properties><Content-Length>8</Content-Length></Properties></Blob>\
+//!       </Blobs><NextMarker/></EnumerationResults>"
+//!         .as_slice(),
+//! );
+//! let mut entries = vec![ListEntry::default(); 2];
+//! let Fill::Page(page) = blobs.fill_listing(&mut body, &mut entries)? else {
+//!     // Only an array with less room than the page holds says otherwise.
+//!     panic!("the array holds the page");
+//! };
+//! assert_eq!(page.filled, 1);
+//! assert_eq!(entries[0].key, "directory/a.txt");
+//! assert_eq!(page.next_marker, None);
+//!
 //! // A write follows the same three steps.
 //! let put = PhysicalPut::new("directory/object.txt");
 //! let content = Payload::Slice(b"contents");
@@ -88,8 +124,11 @@
 //!
 //! The encoding methods refuse a buffer that is too small and state the exact
 //! number of bytes that they need. You can grow the buffer and call again, or
-//! call [`layered::get_requirements`] or [`layered::put_requirements`] first,
-//! as the example does.
+//! call [`layered::get_requirements`], [`layered::put_requirements`] or
+//! [`layered::list_requirements`] first, as the example does.
+//!
+//! A listing needs a second buffer for the response body, which
+//! [`ListHeadOutcome::Page`] sizes.
 //!
 //! # Host requirements
 //!
@@ -118,12 +157,13 @@ pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,
-    ObjectMeta, PutHeadOutcome, ServiceErrorKind,
+    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, Fill, GetHeadOutcome,
+    ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, Resume, ServiceErrorKind,
 };
 pub use request::{MAX_HEADERS, Method, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    ConditionKind, DeleteKind, DeleteShape, GetKind, GetShape, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, PutShape, RangeForm, RequestedRange,
+    ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind, GetShape, ListEntry, ListShape,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutShape, RangeForm,
+    RequestedRange,
 };

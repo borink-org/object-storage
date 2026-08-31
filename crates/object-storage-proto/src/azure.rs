@@ -1,10 +1,10 @@
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
-    Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
-    PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
-    WireRequest,
+    DeleteShape, Error, Failure, FailureClass, Fill, GetHeadOutcome, GetKind, GetShape,
+    InvalidPlan, ListEntry, ListHeadOutcome, Method, ObjectMeta, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
+    ResponseFault, ResponseHead, Result, Resume, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -164,13 +164,34 @@ impl<'a> Blobs<'a> {
     // The parts that every request head carries, in the order that they are
     // written into the caller's buffer. Each part is one range of that buffer.
     fn build(&self, head: &mut HeadWriter<'_>, key: &str, range: RequestedRange, now: &Timestamps) {
+        self.build_with_query(head, Some(key), &[], range, now);
+    }
+
+    // The same, for a request that names a query. `key` is `None` for a
+    // request that addresses the container rather than one object in it.
+    fn build_with_query(
+        &self,
+        head: &mut HeadWriter<'_>,
+        key: Option<&str>,
+        query: &[(&str, QueryValue<'_>)],
+        range: RequestedRange,
+        now: &Timestamps,
+    ) {
         head.url(|out| {
             out.push(self.container.endpoint.as_bytes());
             out.push(b"/");
             out.push(self.container.name.as_bytes());
-            out.push(b"/");
-            for part in crate::path::encode_object_key(key) {
-                out.push(part.as_bytes());
+            if let Some(key) = key {
+                out.push(b"/");
+                for part in crate::path::encode_object_key(key) {
+                    out.push(part.as_bytes());
+                }
+            }
+            for (index, (name, value)) in query.iter().enumerate() {
+                out.push(if index == 0 { b"?" } else { b"&" });
+                out.push(name.as_bytes());
+                out.push(b"=");
+                value.write(out);
             }
         });
         head.header("authorization", |out| {
@@ -440,6 +461,207 @@ impl<'a> Blobs<'a> {
         match status {
             404 => PutHeadOutcome::NotFound { kind },
             status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        }
+    }
+
+    /// Writes the request head for one page of `list` into `buf`.
+    ///
+    /// The request addresses the container rather than one object, and names
+    /// the page in its query. The response carries the page as a document in
+    /// its body: read it whole and pass it to [`Self::fill_listing`].
+    ///
+    /// This crate performs no I/O and cannot read the clock, so pass the
+    /// current time in `now`. This method copies the date into `buf` with the
+    /// rest of the head, so `now` can be a temporary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure
+    /// request. This method validates the plan before it writes any byte, so
+    /// it never reports an invalid plan as a capacity error.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
+    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// method again, or call
+    /// [`layered::list_requirements`](crate::layered::list_requirements)
+    /// first.
+    pub fn encode_list<'r>(
+        &self,
+        buf: &'r mut [u8],
+        list: &PhysicalList<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_list(list)?;
+        let available = buf.len();
+        // The query is written in this order every time, so a caller can
+        // compare the URL byte for byte. Azure signs none of it.
+        let mut query = [("", QueryValue::Literal("")); MAX_LIST_QUERY];
+        let mut count = 0;
+        let mut push = |name, value| {
+            query[count] = (name, value);
+            count += 1;
+        };
+        push("restype", QueryValue::Literal("container"));
+        push("comp", QueryValue::Literal("list"));
+        if !list.prefix.is_empty() {
+            push("prefix", QueryValue::Encoded(list.prefix.as_bytes()));
+        }
+        if list.delimited {
+            push("delimiter", QueryValue::Encoded(DELIMITER));
+        }
+        if let Some(marker) = list.marker {
+            push("marker", QueryValue::Encoded(marker));
+        }
+        if let Some(max_results) = list.max_results {
+            push("maxresults", QueryValue::Number(max_results));
+        }
+
+        let mut head = HeadWriter::new(buf);
+        self.build_with_query(&mut head, None, &query[..count], RequestedRange::Whole, now);
+        encoded(head, available, Method::Get, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a listing and reports what Azure did.
+    ///
+    /// This method takes no shape. Nothing in a listing plan changes what a
+    /// head means: a page is a page whatever was asked for, and the entries
+    /// are in the body.
+    ///
+    /// Every head that Azure sends becomes a [`ListHeadOutcome`], including
+    /// the heads that report a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status that a listing never returns is [`ResponseFault::Status`].
+    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+        match head.status {
+            200 => Ok(ListHeadOutcome::Page {
+                expected_len: decimal_header(head.content_length)?,
+            }),
+            404 if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(ListHeadOutcome::NotFound { kind: named(&head) }),
+            201..=299 => Err(ResponseFault::Status.into()),
+            status if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(ListHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
+        }
+    }
+
+    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_error_body`] for a listing, and reads the body
+    /// the same way.
+    pub fn accept_list_error_body<'h>(
+        &self,
+        status: u16,
+        request_id: Option<&'h [u8]>,
+        body: &[u8],
+    ) -> ListHeadOutcome<'h> {
+        let kind = body_kind(body);
+        match status {
+            404 => ListHeadOutcome::NotFound { kind },
+            status => ListHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        }
+    }
+
+    /// Reads a page out of the response body of a listing.
+    ///
+    /// Pass the whole body, which [`ListHeadOutcome::Page`] announced, and an
+    /// array to write the entries into. The entries borrow `body`: the text in
+    /// it is decoded where it stands, so no byte is copied and no scratch
+    /// buffer exists.
+    ///
+    /// Your array is the budget, and a page that does not fit in it loses
+    /// nothing. Reading stops at the entry that would not fit, before that
+    /// entry is touched, and [`Fill::Partial`] hands back the [`Resume`] that
+    /// reads the rest of the same body with [`Self::resume_listing`]. Size the
+    /// array to the `max_results` that the plan asked for and one call always
+    /// holds the page.
+    ///
+    /// Every byte that has been read is decoded where it stood, so `body` is
+    /// no longer a document there. Only [`Self::resume_listing`] reads it
+    /// again, and only from where this call stopped.
+    ///
+    /// A listing of any size is read one page at a time. Copy the marker that
+    /// [`Listing`](crate::Listing) reports into your own storage, plan the
+    /// next page with it, and stop when a page reports none. A
+    /// [`Fill::Partial`] names no marker, so a loop that asks for the next
+    /// page cannot step over entries that it has not read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+    /// not a listing page: it is not UTF-8, it is not well formed, it is
+    /// another document, or an entry in it is missing what an entry must have.
+    pub fn fill_listing<'b>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [ListEntry<'b>],
+    ) -> Result<Fill<'b>> {
+        crate::xml::fill_listing(body, into)
+    }
+
+    /// Reads the rest of a page that [`Fill::Partial`] stopped in.
+    ///
+    /// Pass the same `body`, unchanged, and the [`Resume`] that came with the
+    /// entries you have finished with. Reading continues from where it
+    /// stopped, so no entry is read twice and none is lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] as
+    /// [`Self::fill_listing`] does. A [`Resume`] from another body describes
+    /// nothing in this one, and is refused the same way or reads what it
+    /// points at; keep each one with the buffer it came from.
+    pub fn resume_listing<'b>(
+        &self,
+        body: &'b mut [u8],
+        resume: Resume,
+        into: &mut [ListEntry<'b>],
+    ) -> Result<Fill<'b>> {
+        crate::xml::resume_listing(body, resume, into)
+    }
+}
+
+// Both providers group keys at `/` and at nothing else, so the delimiter is
+// what a plan turns on rather than a byte that it carries.
+const DELIMITER: &[u8] = b"/";
+
+// `restype`, `comp`, and the four that a plan turns on.
+const MAX_LIST_QUERY: usize = 6;
+
+// One query value, in the form that the URL writer needs it.
+#[derive(Clone, Copy)]
+enum QueryValue<'q> {
+    // Text of this crate's own, which is already usable in a URL.
+    Literal(&'q str),
+    // Bytes of the caller's or the service's, which are not.
+    Encoded(&'q [u8]),
+    Number(u32),
+}
+
+impl QueryValue<'_> {
+    fn write(self, out: &mut Writer<'_>) {
+        match self {
+            Self::Literal(value) => out.push(value.as_bytes()),
+            Self::Encoded(value) => {
+                for part in crate::path::encode_query_value(value) {
+                    out.push(part.as_bytes());
+                }
+            }
+            Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),
         }
     }
 }
@@ -751,6 +973,21 @@ fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
     validate_condition(put.condition, put.condition_value)
+}
+
+fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+    // A prefix is the start of a key, so it is bounded like one. An empty
+    // prefix lists the whole container and is valid.
+    if list.prefix.chars().count() > MAX_BLOB_NAME_CHARS {
+        return Err(InvalidPlan::Prefix.into());
+    }
+    if list.marker.is_some_and(<[u8]>::is_empty) {
+        return Err(InvalidPlan::Marker.into());
+    }
+    if list.max_results == Some(0) {
+        return Err(InvalidPlan::MaxResults.into());
+    }
+    Ok(())
 }
 
 fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {

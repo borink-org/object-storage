@@ -281,6 +281,115 @@ pub enum DeleteHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
+/// The result of reading the response head of a listing.
+///
+/// Every head that Azure sends becomes one of these values, including the
+/// heads that report a failure.
+///
+/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) returns an
+/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListHeadOutcome<'h> {
+    /// The page follows in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing), which reads the
+    /// entries out of it.
+    Page {
+        /// The exact length of the response body, if the head states it.
+        ///
+        /// Size the body buffer from this. The body is a document, not object
+        /// bytes, so there is no offset into an object to report with it.
+        expected_len: Option<u64>,
+    },
+    /// The container does not exist, so there was nothing to list.
+    NotFound {
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Read the response body and pass it, with the
+    /// status and the request identifier of this failure, to
+    /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
+    /// That call returns the final outcome. If you cannot read the body, pass
+    /// an empty one and the error stays unnamed.
+    ///
+    /// The `kind` of this failure is always [`None`].
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the listing, or it failed to serve it.
+    ServiceFailure(Failure<'h>),
+}
+
+/// What one call to [`Blobs::fill_listing`](crate::Blobs::fill_listing) read.
+///
+/// Your array is the budget. A page that does not fit in it is not an error
+/// and loses nothing: the call stops at the entry that would not fit, leaving
+/// the rest of the body as it found it, and hands back the token that reads
+/// the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill<'b> {
+    /// The page was read to its end.
+    Page(Listing<'b>),
+    /// The array filled before the page ended.
+    ///
+    /// Use the entries that were written, and then read the rest of the same
+    /// body with
+    /// [`Blobs::resume_listing`](crate::Blobs::resume_listing). The entries
+    /// borrow the body, so the compiler will not let you do it the other way
+    /// round.
+    ///
+    /// An array with no room at all reports this with `filled` of zero and
+    /// makes no progress.
+    Partial {
+        /// The number of entries written into your array.
+        filled: usize,
+        /// Where the rest of the page starts.
+        ///
+        /// This describes the body it came from and no other.
+        resume: Resume,
+    },
+}
+
+/// Where a page was left off.
+///
+/// [`Fill::Partial`] hands this out and
+/// [`Blobs::resume_listing`](crate::Blobs::resume_listing) takes it back. It
+/// holds no borrow, so it can sit beside the buffer it describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resume {
+    // Where the walk stopped: the next entry, or the tag that closes them.
+    pub(crate) at: usize,
+    // Whether that point is still inside the entries.
+    pub(crate) within: bool,
+    // The text of the next marker, as a range of the body. It lies past the
+    // entries, so it is still untouched whenever the walk stops.
+    pub(crate) marker: Option<(usize, usize)>,
+}
+
+/// What one page of a listing held.
+///
+/// [`Fill::Page`] carries this once the page has been read to its end.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Listing<'b> {
+    /// The number of entries that this call wrote into your array.
+    ///
+    /// The entries after these are untouched.
+    pub filled: usize,
+    /// Where the next page starts, or [`None`] when the listing is complete.
+    ///
+    /// Copy these bytes into your own storage and pass them as
+    /// [`PhysicalList::marker`](crate::PhysicalList::marker). They borrow the
+    /// body, which the next page overwrites.
+    ///
+    /// This is how a listing of any size is read: one page at a time, with the
+    /// service naming where to continue. A page reports a marker whenever more
+    /// keys follow, even if this page reported fewer entries than it asked
+    /// for.
+    pub next_marker: Option<&'b [u8]>,
+}
+
 /// The result of [`classify_error`](crate::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -419,6 +528,18 @@ impl fmt::Display for DeleteHeadOutcome<'_> {
             Self::Accepted => f.write_str("the service accepted the removal"),
             Self::PreconditionFailed => f.write_str("the condition on the removal did not hold"),
             Self::NotFound { .. } => f.write_str(ServiceErrorKind::NotFound.as_str()),
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                fmt::Display::fmt(failure, f)
+            }
+        }
+    }
+}
+
+impl fmt::Display for ListHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Page { .. } => f.write_str("the page follows in the response body"),
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 fmt::Display::fmt(failure, f)
             }
