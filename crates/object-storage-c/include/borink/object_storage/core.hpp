@@ -148,9 +148,9 @@ inline Range from(std::uint64_t start) {
     return Range{RangeFormOffset, start, 0};
 }
 
-// Returns a count of entries as the number a listing plan carries.
+// Returns the number of entries that one page of a listing reports.
 //
-// A default-built number is absent, which asks for the service's maximum.
+// A default-built `MaybeU32` is absent, and asks for the service's maximum.
 inline MaybeU32 at_most(std::uint32_t entries) { return MaybeU32{true, entries}; }
 
 // Reads text as the bytes a call takes.
@@ -214,7 +214,8 @@ struct List {
     bool delimited = false;
     // The most entries that one page reports.
     MaybeU32 max_results = {};
-    // Where the previous page ended. Empty asks for the first page.
+    // The text that the last page gave for the next one. Empty asks for the
+    // first page.
     std::string_view marker;
 
     ListShape shape() const { return ListShape{delimited, max_results}; }
@@ -257,15 +258,15 @@ inline std::span<const std::uint8_t> bytes_of(const Bytes &value) {
     return std::span<const std::uint8_t>(value.ptr, value.len);
 }
 
-// Returns the same bytes as text, for a value that is text, such as the key of
-// a listing entry.
+// Returns the same bytes as text, such as the key of a listing entry.
 inline std::string_view text_of(const Bytes &value) {
     return std::string_view(reinterpret_cast<const char *>(value.ptr), value.len);
 }
 
-// Returns the entries that a fill wrote, as the part of your array it filled.
-inline std::span<const ListEntry> entries_of(std::span<const ListEntry> into, const Fill &fill) {
-    return into.subspan(0, fill.filled);
+// Returns the part of `entries` that a fill wrote.
+inline std::span<const ListEntry> entries_of(std::span<const ListEntry> entries,
+                                             const Fill &fill) {
+    return entries.subspan(0, fill.filled);
 }
 
 // What a describe call wrote into a room.

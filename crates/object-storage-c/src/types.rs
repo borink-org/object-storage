@@ -102,11 +102,11 @@ pub struct MaybeU32 {
     pub value: u32,
 }
 
-/// A range of a buffer that a value may not name.
+/// A range of a response body that a page may not name.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct MaybeSpan {
-    /// Whether the value names a range.
+    /// Whether the page named a range.
     pub present: bool,
     /// The range.
     pub span: Span,
@@ -222,7 +222,7 @@ pub enum EntryKind {
     /// A group of keys that a delimited listing did not report one by one.
     Prefix = 2,
     /// A directory that the service keeps as its own entry. Only an Azure
-    /// account with a hierarchical namespace reports these.
+    /// account with a hierarchical namespace reports one.
     Directory = 3,
 }
 
@@ -230,10 +230,10 @@ pub enum EntryKind {
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FillKind {
-    /// The page was read to its end. Read `next_marker` for the page after it.
+    /// The page was read to its end. `next_marker` names the page after it.
     Page = 1,
     /// The array filled before the page ended. Read the rest of the same body
-    /// with `borink_resume_listing` and the `resume` beside this.
+    /// with `borink_resume_listing`, passing the `resume` beside this number.
     Partial = 2,
 }
 
@@ -325,9 +325,8 @@ pub enum OutcomeKind {
     /// The page of a listing follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// `borink_fill_listing`. The length of the body is `body.expected_len`;
-    /// the rest of `body` is absent, because a page is a document and not part
-    /// of an object.
+    /// `borink_fill_listing`. `body.expected_len` is the length of that body,
+    /// and the other two values of `body` are absent.
     Page = 13,
 }
 
@@ -406,8 +405,10 @@ pub struct ListShape {
     /// A delimited listing reports each group once, as an entry of kind
     /// `Prefix`, instead of reporting every key in it.
     pub delimited: bool,
-    /// The most entries that one page reports. An absent number asks for the
-    /// service's maximum.
+    /// The most entries that one page reports.
+    ///
+    /// An absent number asks for the service's maximum. The service may report
+    /// fewer entries than you asked for and still name a next page.
     pub max_results: MaybeU32,
 }
 
@@ -562,7 +563,8 @@ pub struct ListEntry {
     /// What this entry names, as a `borink_entry_kind`.
     pub kind: u16,
     /// The object key, the shared start of the group, or the directory path.
-    /// The bytes are text.
+    ///
+    /// The bytes are UTF-8 text.
     pub key: Bytes,
     /// The size of the object. Absent for a group and for a directory.
     pub size: MaybeU64,
@@ -576,21 +578,22 @@ pub struct ListEntry {
     pub last_modified: MaybeBytes,
 }
 
-/// Where a page was left off.
+/// Where a fill stopped in a page.
 ///
-/// `borink_fill_listing` reports one of these when your array fills before the
-/// page ends, and `borink_resume_listing` takes it back. The numbers are this
-/// crate's own: store the value and pass it back unchanged.
+/// `borink_fill_listing` reports one when your array fills before the page
+/// ends, and `borink_resume_listing` takes it back. Store it and pass it back
+/// unchanged.
 ///
-/// A value describes one body. Applied to another body it names no entry.
+/// One value describes one body. Passed with another body, it names no entry
+/// of it.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Resume {
-    /// Where the reading stopped, as an offset into the body.
+    /// The offset into the body that reading continues from.
     pub at: usize,
-    /// Whether that offset is still inside the entries.
+    /// Whether that offset stands inside the entries of the page.
     pub within: bool,
-    /// Where the text that names the next page stands in the body.
+    /// The range of the body that holds the text naming the next page.
     pub marker: MaybeSpan,
 }
 
@@ -617,9 +620,9 @@ pub struct Fill {
     pub filled: usize,
     /// Where the rest of the page starts, for a `Partial` fill.
     pub resume: Resume,
-    /// Where the next page starts, for a `Page` fill.
+    /// The text that names the next page, for a `Page` fill.
     ///
-    /// Absent when the listing is complete. Copy these bytes into your own
+    /// Absent when the listing is complete. Copy the bytes into your own
     /// storage and pass them as the marker of the next request.
     pub next_marker: MaybeBytes,
 }

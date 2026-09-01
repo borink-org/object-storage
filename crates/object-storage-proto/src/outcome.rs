@@ -360,17 +360,15 @@ pub struct Resume {
 }
 
 impl Resume {
-    /// Creates a position from the three numbers that describe one.
+    /// Creates a position from the values that [`Self::at`], [`Self::within`]
+    /// and [`Self::marker`] returned.
     ///
-    /// This is for a caller that stores the numbers of a position rather than
-    /// the value, such as a binding for another language. Pass back what
-    /// [`Self::at`], [`Self::within`] and [`Self::marker`] reported for the
-    /// same body.
+    /// Use it to rebuild a position that you kept as those three values, and
+    /// read the body it came from with it.
     ///
-    /// A position built from other numbers names no entry of the body it is
-    /// used on. Reading it reports
-    /// [`ResponseFault::Body`](crate::ResponseFault::Body), or it reports
-    /// entries that the service did not send.
+    /// A position from another body names no entry of the body you read. That
+    /// read reports [`ResponseFault::Body`](crate::ResponseFault::Body), or it
+    /// reports entries that the service did not send.
     pub const fn from_parts(at: usize, within: bool, marker: Option<Span>) -> Self {
         Self {
             at,
@@ -382,19 +380,19 @@ impl Resume {
         }
     }
 
-    /// Returns where the reading stopped, as an offset into the body.
+    /// Returns the offset into the body that reading continues from.
     pub const fn at(self) -> usize {
         self.at
     }
 
-    /// Returns whether that offset is still inside the entries.
+    /// Returns whether the position stands inside the entries of the page.
     pub const fn within(self) -> bool {
         self.within
     }
 
-    /// Returns where the text of the next marker stands in the body.
+    /// Returns the range of the body that holds the text naming the next page.
     ///
-    /// Returns [`None`] if the page named no next one.
+    /// Returns [`None`] if the page named none.
     pub const fn marker(self) -> Option<Span> {
         match self.marker {
             Some((start, end)) => Some(Span {

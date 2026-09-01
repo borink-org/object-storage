@@ -176,10 +176,10 @@ fn not_removed(outcome: DeleteHeadOutcome<'_>) -> Box<dyn std::error::Error> {
 
 /// Builds and executes one listing request, and reads the page it answered.
 ///
-/// The page is read into `body`, and the entries that `into` receives borrow
-/// it. An array of `max_results` entries always holds the whole page; a
-/// smaller one fills and reports where to resume, which
-/// [`Blobs::resume_listing`] reads from.
+/// This function reads the page into `body`, and the entries it writes into
+/// `into` borrow those bytes. An array of `max_results` entries always holds a
+/// whole page. A smaller one fills and reports where to resume, which
+/// [`Blobs::resume_listing`] reads the rest from.
 ///
 /// # Errors
 ///

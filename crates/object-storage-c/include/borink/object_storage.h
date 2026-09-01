@@ -390,9 +390,8 @@ enum borink_outcome_kind
      * The page of a listing follows in the response body.
      *
      * Read the whole body into one buffer and pass it to
-     * `borink_fill_listing`. The length of the body is `body.expected_len`;
-     * the rest of `body` is absent, because a page is a document and not part
-     * of an object.
+     * `borink_fill_listing`. `body.expected_len` is the length of that body,
+     * and the other two values of `body` are absent.
      */
     BORINK_OUTCOME_KIND_PAGE = 13,
 };
@@ -422,7 +421,7 @@ enum borink_entry_kind
     BORINK_ENTRY_KIND_PREFIX = 2,
     /**
      * A directory that the service keeps as its own entry. Only an Azure
-     * account with a hierarchical namespace reports these.
+     * account with a hierarchical namespace reports one.
      */
     BORINK_ENTRY_KIND_DIRECTORY = 3,
 };
@@ -443,12 +442,12 @@ enum borink_fill_kind
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * The page was read to its end. Read `next_marker` for the page after it.
+     * The page was read to its end. `next_marker` names the page after it.
      */
     BORINK_FILL_KIND_PAGE = 1,
     /**
      * The array filled before the page ended. Read the rest of the same body
-     * with `borink_resume_listing` and the `resume` beside this.
+     * with `borink_resume_listing`, passing the `resume` beside this number.
      */
     BORINK_FILL_KIND_PARTIAL = 2,
 };
@@ -875,18 +874,20 @@ typedef struct borink_list_shape {
      */
     bool delimited;
     /**
-     * The most entries that one page reports. An absent number asks for the
-     * service's maximum.
+     * The most entries that one page reports.
+     *
+     * An absent number asks for the service's maximum. The service may report
+     * fewer entries than you asked for and still name a next page.
      */
     struct borink_maybe_u32 max_results;
 } borink_list_shape;
 
 /**
- * A range of a buffer that a value may not name.
+ * A range of a response body that a page may not name.
  */
 typedef struct borink_maybe_span {
     /**
-     * Whether the value names a range.
+     * Whether the page named a range.
      */
     bool present;
     /**
@@ -896,25 +897,26 @@ typedef struct borink_maybe_span {
 } borink_maybe_span;
 
 /**
- * Where a page was left off.
+ * Where a fill stopped in a page.
  *
- * `borink_fill_listing` reports one of these when your array fills before the
- * page ends, and `borink_resume_listing` takes it back. The numbers are this
- * crate's own: store the value and pass it back unchanged.
+ * `borink_fill_listing` reports one when your array fills before the page
+ * ends, and `borink_resume_listing` takes it back. Store it and pass it back
+ * unchanged.
  *
- * A value describes one body. Applied to another body it names no entry.
+ * One value describes one body. Passed with another body, it names no entry
+ * of it.
  */
 typedef struct borink_resume {
     /**
-     * Where the reading stopped, as an offset into the body.
+     * The offset into the body that reading continues from.
      */
     size_t at;
     /**
-     * Whether that offset is still inside the entries.
+     * Whether that offset stands inside the entries of the page.
      */
     bool within;
     /**
-     * Where the text that names the next page stands in the body.
+     * The range of the body that holds the text naming the next page.
      */
     struct borink_maybe_span marker;
 } borink_resume;
@@ -951,9 +953,9 @@ typedef struct borink_fill {
      */
     struct borink_resume resume;
     /**
-     * Where the next page starts, for a `Page` fill.
+     * The text that names the next page, for a `Page` fill.
      *
-     * Absent when the listing is complete. Copy these bytes into your own
+     * Absent when the listing is complete. Copy the bytes into your own
      * storage and pass them as the marker of the next request.
      */
     struct borink_maybe_bytes next_marker;
@@ -975,7 +977,8 @@ typedef struct borink_list_entry {
     uint16_t kind;
     /**
      * The object key, the shared start of the group, or the directory path.
-     * The bytes are text.
+     *
+     * The bytes are UTF-8 text.
      */
     struct borink_bytes key;
     /**
@@ -1283,8 +1286,8 @@ struct borink_request_head borink_encode_list(const struct borink_session *sessi
 /**
  * Reads the response head of a listing.
  *
- * This call takes no shape. A listing means the same whatever page was asked
- * for, so nothing in the response is checked against the plan.
+ * This call takes no shape: it checks nothing in the response against the
+ * plan.
  *
  * # Safety
  *
@@ -1325,9 +1328,9 @@ struct borink_outcome borink_finish_list_error_body(const struct borink_session 
  * is no longer a document.
  *
  * Your array is the budget. A page that does not fit fills the array and
- * reports `Partial`, whose `resume` reads the rest with
- * `borink_resume_listing`. An array of `max_results` entries always holds the
- * whole page.
+ * reports `Partial`. Read the rest of that page with `borink_resume_listing`
+ * and the `resume` it reported. An array of `max_results` entries always
+ * holds a whole page.
  *
  * # Safety
  *

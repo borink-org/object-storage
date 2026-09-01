@@ -380,8 +380,8 @@ pub unsafe extern "C" fn borink_encode_list(
 
 /// Reads the response head of a listing.
 ///
-/// This call takes no shape. A listing means the same whatever page was asked
-/// for, so nothing in the response is checked against the plan.
+/// This call takes no shape: it checks nothing in the response against the
+/// plan.
 ///
 /// # Safety
 ///
@@ -443,9 +443,9 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
 /// is no longer a document.
 ///
 /// Your array is the budget. A page that does not fit fills the array and
-/// reports `Partial`, whose `resume` reads the rest with
-/// `borink_resume_listing`. An array of `max_results` entries always holds the
-/// whole page.
+/// reports `Partial`. Read the rest of that page with `borink_resume_listing`
+/// and the `resume` it reported. An array of `max_results` entries always
+/// holds a whole page.
 ///
 /// # Safety
 ///

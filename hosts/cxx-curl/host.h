@@ -135,19 +135,20 @@ class CollectedHead {
 
 // What one call of a listing read.
 //
-// The entries are the part of your array that the call filled. A page too
-// large for the array is not lost: `complete` is then false, and `resume`
-// reads the rest of the same page.
+// A page too large for your array leaves `complete` false, and `more` reads
+// the rest of it from `resume`. No entry is lost or read twice.
 struct Page {
-    // The entries that this call read.
+    // The part of your array that this call filled.
     std::span<const ListEntry> entries;
     // Whether the page was read to its end.
     bool complete = false;
     // Where the rest of the page starts, when it was not read to its end.
     Resume resume{};
-    // Where the next page of the listing starts, or empty when the listing is
-    // complete. It points into the client's page buffer, so copy it before
-    // the next request.
+    // The text that names the next page of the listing, or empty when the
+    // listing is complete.
+    //
+    // It points into the client's page buffer, so copy it before the next
+    // request.
     std::string_view next_marker;
 };
 
@@ -191,7 +192,7 @@ class Client {
     // caller knows whether it meant to remove an object that is already gone.
     void remove(std::string_view key, const Removal &removal = {});
 
-    // Reads one page of the keys under `prefix` into `into`.
+    // Reads one page of the keys under `prefix` into `entries`.
     //
     // The entries point into this client's page buffer, and stay valid until
     // the next request through it. Copy what you keep.
