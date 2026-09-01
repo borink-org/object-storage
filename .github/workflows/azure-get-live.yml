@@ -1,6 +1,13 @@
 name: azure-live
 on:
   workflow_dispatch:
+# A run waiting for its reviewer counts as in progress, so without
+# `cancel-in-progress` every new run on a branch would queue behind the last
+# one. With it, a new run cancels the branch's earlier run, approved or not,
+# and leaves one run for the newest commit.
+concurrency:
+  group: azure-live-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
   id-token: write
