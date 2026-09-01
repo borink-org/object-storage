@@ -386,6 +386,48 @@ fn a_name_is_decoded_where_it_stands() {
     assert_eq!(entries[0].key, "a%20b");
 }
 
+/// The keys that lean on a separator, read back out of a page.
+///
+/// The live suite settles that Azure stores each of these under the name it
+/// was given; this settles that a page carrying one is read back the same way.
+/// Together they are the round trip.
+#[test]
+fn a_key_that_leans_on_a_separator_is_read_back_whole() {
+    let keys = [
+        "directory/trailing/",
+        "directory/double//slash",
+        "directory/space /x",
+        "directory/a.b/c",
+        "directory/..leading",
+    ];
+    let mut body = page(
+        &keys.iter().map(|key| object(key, 1)).collect::<String>(),
+        "",
+    );
+    let mut entries = [ListEntry::default(); 5];
+    let listing = fill(&mut body, &mut entries);
+
+    assert_eq!(listing.filled, 5);
+    assert_eq!(entries.map(|entry| entry.key), keys);
+}
+
+/// A page of one key with as many separators as a key can hold. The live suite
+/// settles that Azure takes such a name; this settles that reading one back
+/// costs the reader nothing it does not have.
+#[test]
+fn a_key_of_many_segments_is_one_entry_like_any_other() {
+    // A separator and a segment cost two UTF-16 code units, and a key holds
+    // 1024 of them.
+    let key = vec!["s"; 512].join("/");
+    assert_eq!(key.encode_utf16().count(), 1023);
+    assert_eq!(key.matches('/').count() + 1, 512);
+
+    let mut body = page(&object(&key, 1), "");
+    let mut entries = [ListEntry::default(); 1];
+    assert_eq!(fill(&mut body, &mut entries).filled, 1);
+    assert_eq!(entries[0].key, key);
+}
+
 #[test]
 fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
     let mut body = page(&object("a.txt", 1), "2!72!MDAwMDI4");

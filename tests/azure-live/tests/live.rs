@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
-    GetHeadOutcome, GetKind, GetShape, ListEntry, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
     ServiceErrorKind, Timestamps, layered,
 };
@@ -1105,35 +1105,24 @@ fn a_name_that_xml_cannot_carry_is_refused_or_says_how_it_is_encoded() {
         }
     }
 
-    let Some((forbidden, key)) = stored.first() else {
-        // Nothing to encode, so nothing encodes. That is the answer.
-        return;
-    };
-
-    let plan = PhysicalList::new(&fixture.list_prefix);
-    let mut body = fetch(&fixture, &plan).unwrap();
-    let xml = String::from_utf8_lossy(&body).into_owned();
-    assert!(
-        xml.contains("Encoded=\"true\""),
-        "{forbidden:?} is in a name XML cannot carry, so the listing must \
-         encode it: {xml}"
-    );
-    assert!(
-        xml.contains("100%25-"),
-        "Azure encodes the whole name, so a `%` in an encoded name is always \
-         written `%25` and xml::decode_percent may refuse a lone one. If this \
-         fails it encodes only what XML refuses, a literal `%` can reach a \
-         listed key, and decode_percent must stay lenient: {xml}"
-    );
-
-    // Whatever it encoded, the key comes back as it was written.
-    let blobs = fixture.blobs();
-    let mut entries = vec![ListEntry::default(); 8];
-    let Fill::Page(read) = blobs.fill_listing(&mut body, &mut entries).unwrap() else {
-        panic!("eight entries hold these");
-    };
-    let keys: Vec<&str> = entries[..read.filled].iter().map(|e| e.key).collect();
-    assert!(keys.contains(&key.as_str()), "{keys:?}");
+    // Passing says the encoded form is unreachable through this crate, which
+    // is what keeps `decode_percent` lenient. It must not say that by saying
+    // nothing, so the answer is asserted rather than returned from.
+    if !stored.is_empty() {
+        let plan = PhysicalList::new(&fixture.list_prefix);
+        let body = fetch(&fixture, &plan).unwrap();
+        let xml = String::from_utf8_lossy(&body).into_owned();
+        empty(&fixture);
+        panic!(
+            "Azure stored {stored:?}, so a listed name can carry \
+             `Encoded=\"true\"` after all and the question is open again. This \
+             listing says how much of the name was encoded: if the `100%-` in \
+             it is written `100%25-`, the whole name is encoded, a `%` in an \
+             encoded name is always an escape, and xml::decode_percent may \
+             refuse a lone one. If it is written `100%-`, only what XML \
+             refuses is encoded and decode_percent must stay lenient.\n{xml}"
+        );
+    }
 
     empty(&fixture);
 }
