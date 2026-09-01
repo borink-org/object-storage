@@ -221,6 +221,28 @@ std::size_t collect_diagnostic(char *data, std::size_t size, std::size_t count, 
     return keep(diagnostic.bytes, diagnostic.cap, data, size * count);
 }
 
+// A body that this host keeps whole, which the page of a listing is: the
+// entries are read out of it after the transfer.
+struct Collected {
+    std::vector<std::uint8_t> &bytes;
+    std::size_t cap;
+    bool overflowed = false;
+};
+
+std::size_t collect_page(char *data, std::size_t size, std::size_t count, void *user) {
+    Collected &page = *static_cast<Collected *>(user);
+    const std::size_t length = size * count;
+    if (page.bytes.size() + length > page.cap) {
+        // A page read in part is not a document, so it is refused after the
+        // transfer rather than parsed. Taking the rest ends the transfer
+        // normally, which keeps the connection usable.
+        page.overflowed = true;
+        return length;
+    }
+    page.bytes.insert(page.bytes.end(), data, data + length);
+    return length;
+}
+
 // The content of a write, which stays where the caller put it.
 struct Content {
     std::span<const std::uint8_t> bytes;
@@ -329,6 +351,60 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     if (outcome_.kind != OutcomeKindDone) {
         fail("Azure stored no object");
     }
+}
+
+Page Client::list(std::string_view prefix, std::span<ListEntry> entries, const List &plan) {
+    const std::uint64_t now = now_unix();
+    const Session session = this->session();
+    const ListShape shape = plan.shape();
+    const RequestHead &request = encode([&] {
+        return borink_encode_list(&session, &shape, as_bytes(prefix), as_bytes(plan.marker),
+                                  request_buffer(), now);
+    });
+
+    page_.clear();
+    Collected page{page_, limits_.page_bytes};
+    Handle handle;
+    apply(handle, *this, request);
+    handle.set(CURLOPT_HEADERFUNCTION, collect_head);
+    handle.set(CURLOPT_HEADERDATA, &head_);
+    handle.set(CURLOPT_WRITEFUNCTION, collect_page);
+    handle.set(CURLOPT_WRITEDATA, &page);
+    handle.send();
+
+    checked_head();
+    outcome_ = borink_accept_list_head(&session, head_.status(), head_.refs(), head_.count());
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
+        // The page buffer holds the error body too. Only the first bytes of it
+        // name the error, so the library reads no more than a diagnostic.
+        const std::size_t kept = std::min(page_.size(), limits_.error_bytes);
+        outcome_ = borink_finish_list_error_body(
+            &session, &outcome_.failure,
+            borrow(std::span<const std::uint8_t>(page_.data(), kept)));
+    }
+    if (outcome_.kind != OutcomeKindPage) {
+        fail("Azure listed no keys");
+    }
+    if (page.overflowed) {
+        throw std::runtime_error("the listing page is larger than this client allows");
+    }
+    return read(borink_fill_listing(&session, page_buffer(), entries.data(), entries.size()),
+                entries);
+}
+
+Page Client::more(const Resume &resume, std::span<ListEntry> entries) {
+    const Session session = this->session();
+    return read(
+        borink_resume_listing(&session, page_buffer(), &resume, entries.data(), entries.size()),
+        entries);
+}
+
+Page Client::read(const Fill &fill, std::span<ListEntry> entries) {
+    if (fill.status.code != 0) {
+        throw std::runtime_error(std::string(describe_whole(message_, fill.status)));
+    }
+    return Page{entries_of(entries, fill), fill.kind == FillKindPage, fill.resume,
+                text_of(fill.next_marker)};
 }
 
 void Client::remove(std::string_view key, const Removal &removal) {

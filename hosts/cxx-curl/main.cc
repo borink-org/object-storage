@@ -3,9 +3,10 @@
 // This program is the same for every host in this directory. Which HTTP client
 // sends the request is decided by which host it is linked with.
 //
-//     borink-azure-curl get    <key>   writes the object to standard output
-//     borink-azure-curl put    <key>   stores standard input as the object
-//     borink-azure-curl delete <key>   removes the object
+//     borink-azure-curl get    <key>      writes the object to standard output
+//     borink-azure-curl put    <key>      stores standard input as the object
+//     borink-azure-curl delete <key>      removes the object
+//     borink-azure-curl list   <prefix>   writes every key under the prefix
 
 #include <cstdint>
 #include <cstdio>
@@ -47,12 +48,39 @@ void write_all(std::span<const std::uint8_t> part) {
     }
 }
 
+// Writes every key under `prefix`, one page and one array at a time.
+//
+// The array is this program's budget. A page larger than it is read in as many
+// rounds as it takes, and the marker of the last page asks for the next one.
+void list(borink::host::Client &client, std::string_view prefix) {
+    std::vector<borink::ListEntry> entries(1000);
+    std::string marker;
+    for (;;) {
+        borink::host::Page page = client.list(
+            prefix, entries, borink::List{false, borink::at_most(1000), marker});
+        for (;;) {
+            for (const borink::ListEntry &entry : page.entries) {
+                std::cout << borink::text_of(entry.key) << "\n";
+            }
+            if (page.complete) {
+                break;
+            }
+            page = client.more(page.resume, entries);
+        }
+        if (page.next_marker.empty()) {
+            return;
+        }
+        // The next request overwrites the page these bytes point into.
+        marker = std::string(page.next_marker);
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
     try {
         if (argc != 3) {
-            std::cerr << "usage: " << argv[0] << " get|put|delete <key>\n";
+            std::cerr << "usage: " << argv[0] << " get|put|delete <key> | list <prefix>\n";
             return 2;
         }
         const std::string_view command = argv[1];
@@ -72,6 +100,8 @@ int main(int argc, char **argv) {
             client.put(key, content);
         } else if (command == "delete") {
             client.remove(key);
+        } else if (command == "list") {
+            list(client, key);
         } else {
             std::cerr << "unknown command " << command << "\n";
             return 2;

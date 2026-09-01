@@ -61,6 +61,11 @@ struct Limits {
     // reserves once at this size. A head that would outgrow it is refused
     // rather than served, exactly as an oversized request head is.
     std::size_t head_bytes = 8 * 1024;
+    // The most of one listing page to hold. libcurl hands the body over in
+    // parts and keeps none of it, so this host holds the whole page while it
+    // reads the entries out of it. A page that does not fit is refused rather
+    // than read in part.
+    std::size_t page_bytes = 1024 * 1024;
 };
 
 // Where this host keeps the response head, and one `HeaderRef` per
@@ -128,6 +133,24 @@ class CollectedHead {
     std::vector<HeaderRef> headers_;
 };
 
+// What one call of a listing read.
+//
+// The entries are the part of your array that the call filled. A page too
+// large for the array is not lost: `complete` is then false, and `resume`
+// reads the rest of the same page.
+struct Page {
+    // The entries that this call read.
+    std::span<const ListEntry> entries;
+    // Whether the page was read to its end.
+    bool complete = false;
+    // Where the rest of the page starts, when it was not read to its end.
+    Resume resume{};
+    // Where the next page of the listing starts, or empty when the listing is
+    // complete. It points into the client's page buffer, so copy it before
+    // the next request.
+    std::string_view next_marker;
+};
+
 // One session, and the memory that every request through it reuses.
 //
 // Build one per client and keep it. Its buffers grow to the largest request
@@ -167,6 +190,20 @@ class Client {
     // Reports a missing object rather than treating it as success: only the
     // caller knows whether it meant to remove an object that is already gone.
     void remove(std::string_view key, const Removal &removal = {});
+
+    // Reads one page of the keys under `prefix` into `into`.
+    //
+    // The entries point into this client's page buffer, and stay valid until
+    // the next request through it. Copy what you keep.
+    //
+    // Throws std::runtime_error if Azure listed nothing, or if the page is
+    // larger than this client allows.
+    Page list(std::string_view prefix, std::span<ListEntry> entries, const List &plan = {});
+
+    // Reads the rest of the page that the last call left unread.
+    //
+    // Pass the `resume` of the page it returned, and an array to read into.
+    Page more(const Resume &resume, std::span<ListEntry> entries);
 
     // The session, built from this client's own strings.
     //
@@ -216,6 +253,10 @@ class Client {
 
     BytesMut request_buffer() { return into(request_); }
 
+    // The page of the last listing, as the buffer that the entries are read
+    // out of. Reading decodes the text where it stands, so it is writable.
+    BytesMut page_buffer() { return into(page_); }
+
     // The diagnostic body that this client kept, capped by its limits.
     Bytes kept_body() const {
         return borrow(std::span<const std::uint8_t>(diagnostic_));
@@ -246,7 +287,11 @@ class Client {
     std::vector<std::uint8_t> message_;
     CollectedHead head_;
     std::vector<std::uint8_t> diagnostic_;
+    std::vector<std::uint8_t> page_;
     Outcome outcome_{};
+
+    // Turns what one fill read into the page that the caller reads.
+    Page read(const Fill &fill, std::span<ListEntry> entries);
 };
 
 } // namespace borink::host
