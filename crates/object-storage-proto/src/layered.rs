@@ -14,8 +14,7 @@ const MONTHS: [&[u8; 3]; 12] = [
 
 /// Returns the number of bytes that [`Blobs::encode_get`] needs for this plan.
 ///
-/// Call this to size a buffer before you encode. This function encodes into an
-/// empty buffer and reads the capacity error, so the answer is exact.
+/// Call this to size a buffer before you encode; the answer is exact.
 ///
 /// # Errors
 ///
@@ -53,8 +52,7 @@ pub fn put_requirements(
 /// Returns the number of bytes that [`Blobs::encode_delete`] needs for this
 /// plan.
 ///
-/// Call this to size a buffer before you encode. This function encodes into an
-/// empty buffer and reads the capacity error, so the answer is exact.
+/// Call this to size a buffer before you encode; the answer is exact.
 ///
 /// # Errors
 ///
@@ -71,8 +69,7 @@ pub fn delete_requirements(
 /// Returns the number of bytes that [`Blobs::encode_list`] needs for this
 /// plan.
 ///
-/// Call this to size a buffer before you encode. This function encodes into an
-/// empty buffer and reads the capacity error, so the answer is exact.
+/// Call this to size a buffer before you encode; the answer is exact.
 ///
 /// # Errors
 ///

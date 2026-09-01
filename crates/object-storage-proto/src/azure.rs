@@ -51,6 +51,9 @@ impl<'a> Container<'a> {
 ///
 /// This is a small borrowed value. Create it again whenever the token
 /// changes.
+///
+/// Every method that encodes a request takes the current time in `now`,
+/// because this crate never reads the clock.
 #[derive(Clone, Copy)]
 pub struct Blobs<'a> {
     container: Container<'a>,
@@ -84,10 +87,6 @@ impl<'a> Blobs<'a> {
     ///
     /// This method allocates nothing. It writes the URL and the header values
     /// into `buf`, and returns a [`WireRequest`] that borrows them.
-    ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
     ///
     /// # Errors
     ///
@@ -123,10 +122,6 @@ impl<'a> Blobs<'a> {
     /// [`Payload::Slice`], the returned request borrows those bytes and copies
     /// none of them. If you pass [`Payload::Streamed`], the request carries no
     /// content and you send the stated number of bytes yourself.
-    ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
     ///
     /// # Errors
     ///
@@ -298,10 +293,6 @@ impl<'a> Blobs<'a> {
     ///
     /// The request has no content. Azure removes the object it names and
     /// nothing else: see [`PhysicalDelete`] for what that excludes.
-    ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
     ///
     /// # Errors
     ///
