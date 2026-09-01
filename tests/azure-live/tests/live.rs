@@ -1315,3 +1315,113 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     // be listed but not addressed would be just as bad.
     empty(&fixture);
 }
+
+// Writes one object under a key already percent-encoded by the caller, and
+// reports the status. `addressable` refuses the keys below, so this crate
+// cannot encode them and the URL is written here, the way `snapshot` writes
+// its own. The headers come from a plan this crate does encode.
+fn raw_put(fixture: &Fixture, escaped: &str) -> u16 {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalPut::new(&fixture.put_key);
+    let content = Payload::Slice(b"x");
+    let mut buf = vec![0; layered::put_requirements(&blobs, &plan, content, &now).unwrap()];
+    let request = blobs.encode_put(&mut buf, &plan, content, &now).unwrap();
+
+    let mut outgoing = ureq::put(&format!(
+        "{}/{}/{escaped}",
+        fixture.endpoint, fixture.container
+    ));
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(b"x".as_slice())
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+// The same for the removal, so a name this crate cannot encode cannot be left
+// behind either.
+fn raw_delete(fixture: &Fixture, escaped: &str) -> u16 {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalDelete::new(&fixture.put_key);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
+
+    let mut outgoing = ureq::delete(&format!(
+        "{}/{}/{escaped}",
+        fixture.endpoint, fixture.container
+    ));
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// Draws the line `addressable` draws around control characters in a key.
+///
+/// Measured before: Azure refuses `U+0001`, `U+000B`, `U+000C` and `U+000E`
+/// with 400. This crate refuses every byte below a space on that evidence,
+/// which is a wider claim than the measurement, so this checks the rest of the
+/// class — including the three that XML itself allows, which are where a
+/// narrower rule would have to stop.
+///
+/// It also checks the two just outside the class, so the rule is no wider than
+/// the service's.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
+    let fixture = Fixture::from_env();
+
+    for escaped in ["%01", "%09", "%0A", "%0D", "%1F"] {
+        let key = format!("{}c-{escaped}.txt", fixture.list_prefix);
+        let status = raw_put(&fixture, &key);
+        if (200..300).contains(&status) {
+            assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
+        }
+        assert_eq!(
+            status, 400,
+            "Azure took {escaped} in a name, so `addressable` refuses a key it \\
+             would have accepted and the rule must stop short of this byte"
+        );
+    }
+
+    // Just outside the class: a delete and a C1 control, whose bytes are all
+    // above a space. This crate allows both.
+    for escaped in ["%7F", "%C2%85"] {
+        let key = format!("{}c-{escaped}.txt", fixture.list_prefix);
+        let status = raw_put(&fixture, &key);
+        if (200..300).contains(&status) {
+            assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
+        }
+        assert!(
+            (200..300).contains(&status),
+            "Azure refused {escaped}, which is outside the class this crate \\
+             refuses, so the rule is narrower than the service's and has to \\
+             grow: status {status}"
+        );
+    }
+}

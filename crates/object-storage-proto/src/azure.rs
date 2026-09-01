@@ -903,6 +903,13 @@ fn addressable(key: &str) -> bool {
     if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
         return false;
     }
+    // Azure refuses a control character in a name, with 400. Measured for
+    // U+0001, U+000B, U+000C and U+000E, and the live suite checks the rest of
+    // the class. A byte below a space is always one of them: every byte of a
+    // character outside ASCII is 0x80 or above.
+    if key.bytes().any(|byte| byte < 0x20) {
+        return false;
+    }
     // Azure drops a dot from the end of every segment of a name: `dot.` is
     // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
     // suite.

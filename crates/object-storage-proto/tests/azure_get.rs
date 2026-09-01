@@ -292,6 +292,21 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
         );
     }
 
+    // Azure refuses a control character in a name, so a key holding one is a
+    // key that cannot become a request.
+    for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}"] {
+        assert_eq!(
+            refused(key),
+            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            "{key:?}"
+        );
+    }
+    // A character outside ASCII is not a control character, whatever its
+    // bytes look like one at a time.
+    for key in ["café", "🦀", "\u{7f}", "\u{85}"] {
+        assert!(refused(key).is_ok(), "{key:?}");
+    }
+
     // A host resolves these out of the URL before sending it, so the request
     // would name another object entirely.
     for key in ["a/../b", "a/./b", "../b", "./b", "a/.."] {

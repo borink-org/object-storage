@@ -182,10 +182,12 @@ pub struct PhysicalGet<'h> {
     /// The object key, before percent-encoding.
     ///
     /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice. A key that ends in `.`, or that holds a `.` or `..`
-    /// between separators, is refused: the first is stored without the dot,
-    /// and the others are resolved out of the URL before the request is sent,
-    /// so neither would name the object the caller asked for.
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
@@ -263,10 +265,12 @@ pub struct PhysicalPut<'h> {
     /// The object key, within the container.
     ///
     /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice. A key that ends in `.`, or that holds a `.` or `..`
-    /// between separators, is refused: the first is stored without the dot,
-    /// and the others are resolved out of the URL before the request is sent,
-    /// so neither would name the object the caller asked for.
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// The condition that the write carries.
     pub condition: ConditionKind,
@@ -409,10 +413,12 @@ pub struct PhysicalDelete<'h> {
     /// The object key, within the container.
     ///
     /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice. A key that ends in `.`, or that holds a `.` or `..`
-    /// between separators, is refused: the first is stored without the dot,
-    /// and the others are resolved out of the URL before the request is sent,
-    /// so neither would name the object the caller asked for.
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// What the removal takes with it.
     pub kind: DeleteKind,

@@ -48,6 +48,8 @@ The documented maximum of 254 `/`-delimited path segments is not what the servic
 
 A listed name that says `Encoded="true"` is encoded **whole**, down to the separators between its segments: `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`. So every `%` in an encoded name begins an escape, and `xml::decode_percent` refuses one that does not. Azure refuses the C0 controls in a name outright, with 400, but holds `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to carry; those are what make it write the encoded form.
 
+Azure refuses a control character in a name with 400, measured for `U+0001`, `U+000B`, `U+000C` and `U+000E`. `addressable` refuses every byte below a space, which is wider than the measurement, and `the_control_characters_azure_refuses_are_the_ones_this_crate_refuses` checks the rest of the class — including tab, line feed and carriage return, which XML itself allows and where a narrower rule would have to stop — and the two just outside it, `U+007F` and `U+0085`, which this crate allows.
+
 Azure drops a dot from the end of **every segment** of a name, not just the end of the name: `dot.` is stored as `dot` and `dotseg./x` as `dotseg/x`. A `.` or `..` segment is resolved out of the URL by the host before the request is sent, as the standard for URLs requires, so `dots/../up` writes `up`. Both are refused by `addressable` rather than stored under a name the caller did not write.
 
 ## What the suite is still measuring
