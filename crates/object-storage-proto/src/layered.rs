@@ -118,6 +118,27 @@ fn required(result: Result<()>) -> Result<usize> {
     }
 }
 
+/// Writes the text of a listed value with its references resolved.
+///
+/// Use this on a value that
+/// [`ListEntry::property`](crate::ListEntry::property) returned, which holds
+/// the bytes that the service wrote. XML writes an `&` as `&amp;`, and a
+/// character that the document cannot carry as `&#233;`. This writes what
+/// those stand for.
+///
+/// Copies `value` into `into` and returns what it wrote, which is never longer
+/// than `value`. Returns [`None`] if `into` is shorter than `value`, and for a
+/// reference that no listing declares.
+///
+/// The values that an entry carries need none of this. Reading the page
+/// decoded them where they stood.
+pub fn decode_into<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
+    let into = into.get_mut(..value.len())?;
+    into.copy_from_slice(value);
+    let len = crate::xml::decode_text(into, false).ok()?;
+    Some(&into[..len])
+}
+
 /// Reads an HTTP date as milliseconds since the Unix epoch.
 ///
 /// Use this on [`ObjectMeta::last_modified`], which holds the bytes that Azure

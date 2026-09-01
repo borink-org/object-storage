@@ -599,6 +599,83 @@ pub struct ListEntry<'b> {
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
     pub last_modified: Option<&'b [u8]>,
+    /// This entry as the service wrote it, from its opening tag to its closing
+    /// one.
+    ///
+    /// Read a value that the fields above do not carry with [`Self::property`]
+    /// or [`Self::properties`], which read these bytes.
+    pub raw: &'b [u8],
+}
+
+impl<'b> ListEntry<'b> {
+    /// Returns the value that this entry gave for one property.
+    ///
+    /// The name is matched exactly, against the elements of the entry and of
+    /// its properties element: `AccessTier` and `Creation-Time` on Azure,
+    /// `StorageClass` on S3. Returns [`None`] if the entry gave no such
+    /// property.
+    ///
+    /// Each call reads the entry again, so read more than one or two with
+    /// [`Self::properties`], which reads it once.
+    ///
+    /// The value is the bytes between the two tags, as the service wrote them.
+    /// A value that holds `&amp;` or another reference is decoded by
+    /// [`layered::decode_into`](crate::layered::decode_into).
+    ///
+    /// The three values that this entry already carries are not read back this
+    /// way. Reading the page decoded them where they stood, so the element
+    /// that held one now holds the decoded text and what the decoding left
+    /// behind. Read `key`, `e_tag` and `last_modified` from the fields.
+    pub fn property(&self, name: &str) -> Option<&'b [u8]> {
+        self.properties()
+            .find(|(found, _)| *found == name.as_bytes())
+            .map(|(_, value)| value)
+    }
+
+    /// Returns every property of this entry, in the order it wrote them.
+    ///
+    /// One walk reads the entry once, whatever it holds. The values are the
+    /// bytes between the tags, under the rules that [`Self::property`] states.
+    /// An element that holds other elements, such as the metadata of a blob,
+    /// reports those bytes as its value.
+    pub fn properties(&self) -> Properties<'b> {
+        Properties::of(self.raw)
+    }
+}
+
+/// The properties of one entry, as the service wrote them.
+///
+/// [`ListEntry::properties`] hands this out. It reads the entry as it goes and
+/// keeps only where it stopped. One walk is therefore one pass over the entry,
+/// and copying this value starts a second walk from the same place.
+#[derive(Debug, Clone, Copy)]
+pub struct Properties<'b> {
+    // What is left of the entry: the next element, or its closing tag.
+    rest: &'b [u8],
+    // Whether the walk stands inside the properties element.
+    within: bool,
+}
+
+impl<'b> Properties<'b> {
+    // The walk over one entry, from just after its own opening tag.
+    fn of(raw: &'b [u8]) -> Self {
+        let rest = match crate::xml::after_tag(raw) {
+            Some(rest) => rest,
+            None => &[],
+        };
+        Self {
+            rest,
+            within: false,
+        }
+    }
+}
+
+impl<'b> Iterator for Properties<'b> {
+    type Item = (&'b [u8], &'b [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        crate::xml::next_property(&mut self.rest, &mut self.within)
+    }
 }
 
 #[cfg(test)]
