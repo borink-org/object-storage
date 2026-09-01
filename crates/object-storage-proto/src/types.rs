@@ -180,6 +180,14 @@ pub struct GetShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalGet<'h> {
     /// The object key, before percent-encoding.
+    ///
+    /// At most 1024 UTF-16 code units, so a character outside the basic plane
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
@@ -255,6 +263,14 @@ pub struct PutShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalPut<'h> {
     /// The object key, within the container.
+    ///
+    /// At most 1024 UTF-16 code units, so a character outside the basic plane
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// The condition that the write carries.
     pub condition: ConditionKind,
@@ -395,6 +411,14 @@ pub struct DeleteShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalDelete<'h> {
     /// The object key, within the container.
+    ///
+    /// At most 1024 UTF-16 code units, so a character outside the basic plane
+    /// counts twice, and no control character: Azure refuses those.
+    ///
+    /// A segment that ends in `.` is refused as well, because Azure stores the
+    /// name without that dot, and so is a `.` or `..` segment, because a host
+    /// resolves those out of the URL before it sends the request. Each would
+    /// name an object other than the one asked for.
     pub key: &'h str,
     /// What the removal takes with it.
     pub kind: DeleteKind,
@@ -434,9 +458,152 @@ impl<'h> PhysicalDelete<'h> {
     }
 }
 
+/// How a listing groups the keys it reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u16)]
+pub enum EntryKind {
+    /// One object.
+    #[default]
+    Object = 1,
+    /// A group of keys that a delimited listing did not report one by one.
+    ///
+    /// The listing reports the shared start of those keys once, and you list
+    /// again with it as the prefix to see what is under it.
+    Prefix = 2,
+    /// A directory that the service keeps as its own entry.
+    ///
+    /// Only an Azure account with a hierarchical namespace reports these. A
+    /// flat account reports a group of keys as [`Self::Prefix`] instead.
+    Directory = 3,
+}
+
+impl EntryKind {
+    /// Returns the kind with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Object,
+            2 => Self::Prefix,
+            3 => Self::Directory,
+            _ => return None,
+        })
+    }
+}
+
+/// The part of a listing plan that holds no borrows.
+///
+/// Store it while the request is in flight, then pass it back to
+/// [`PhysicalList::from_shape`] with the prefix and the marker to plan the
+/// next page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListShape {
+    /// Whether the listing groups keys at each `/` after the prefix.
+    pub delimited: bool,
+    /// The most entries that one page reports.
+    pub max_results: Option<u32>,
+}
+
+/// One page of a listing.
+///
+/// A page is one request. The response names where the next page starts, and
+/// you plan that page with the same shape and that marker.
+///
+/// Because the fields are public and unchecked,
+/// [`Blobs::encode_list`](crate::Blobs::encode_list) validates the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalList<'h> {
+    /// The keys to list under. An empty prefix lists the whole container.
+    ///
+    /// The prefix is matched byte for byte and is not a path: this crate adds
+    /// no `/` to it. To list one directory of a delimited listing, end the
+    /// prefix with the delimiter yourself.
+    pub prefix: &'h str,
+    /// Where the previous page ended.
+    ///
+    /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
+    /// previous page reported. The first page carries [`None`]. The bytes are
+    /// the service's, and mean nothing to this crate.
+    pub marker: Option<&'h [u8]>,
+    /// Whether to group the keys at each `/` after the prefix.
+    ///
+    /// A delimited listing reports each group once, as an
+    /// [`EntryKind::Prefix`] entry, instead of reporting every key in it. This
+    /// is how a listing walks one level of a hierarchy at a time.
+    pub delimited: bool,
+    /// The most entries that this page reports.
+    ///
+    /// [`None`] asks for the service's maximum, which Azure also applies to
+    /// any larger number. The service may report fewer entries than this and
+    /// still name a next page.
+    pub max_results: Option<u32>,
+}
+
+impl<'h> PhysicalList<'h> {
+    /// Creates a plan for the first page of an undelimited listing.
+    pub fn new(prefix: &'h str) -> Self {
+        Self {
+            prefix,
+            marker: None,
+            delimited: false,
+            max_results: None,
+        }
+    }
+
+    /// Creates a plan from a stored shape and the bytes that it needs.
+    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h [u8]>) -> Self {
+        Self {
+            prefix,
+            marker,
+            delimited: shape.delimited,
+            max_results: shape.max_results,
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub fn shape(&self) -> ListShape {
+        ListShape {
+            delimited: self.delimited,
+            max_results: self.max_results,
+        }
+    }
+}
+
+/// One entry of a listing page.
+///
+/// Every slice points into the body that
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
+/// until you reuse that buffer.
+///
+/// The fields hold the bytes that the service sent, as [`ObjectMeta`] does.
+/// Read `last_modified` with
+/// [`layered::http_date_ms`](crate::layered::http_date_ms).
+///
+/// [`ObjectMeta`]: crate::ObjectMeta
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListEntry<'b> {
+    /// Whether this entry is an object, a group of keys, or a directory.
+    pub kind: EntryKind,
+    /// The object key, the shared start of the group, or the directory path.
+    pub key: &'b str,
+    /// The size of the object. [`None`] for a group and for a directory.
+    pub size: Option<u64>,
+    /// The entity tag, as the listing wrote it.
+    ///
+    /// Azure lists an entity tag without the quotes that the `ETag` header
+    /// carries, and conditions a request on either form. To write the one that
+    /// HTTP defines, quote it with
+    /// [`layered::quoted_etag`](crate::layered::quoted_etag).
+    pub e_tag: Option<&'b [u8]>,
+    /// The value that the listing gave for the last modification, in the form
+    /// that the `Last-Modified` header uses.
+    pub last_modified: Option<&'b [u8]>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConditionKind, DeleteKind, GetKind, RangeForm, RequestedRange};
+    use super::{ConditionKind, DeleteKind, EntryKind, GetKind, RangeForm, RequestedRange};
 
     // The tables are hand-written, so a number that names the wrong value is
     // the bug worth checking for.
@@ -476,10 +643,15 @@ mod tests {
             assert_eq!(DeleteKind::from_discriminant(kind as u16), Some(kind));
         }
 
+        for kind in [EntryKind::Object, EntryKind::Prefix, EntryKind::Directory] {
+            assert_eq!(EntryKind::from_discriminant(kind as u16), Some(kind));
+        }
+
         // 0 is the twins' "absent", so no plan value may claim it.
         assert_eq!(GetKind::from_discriminant(0), None);
         assert_eq!(ConditionKind::from_discriminant(0), None);
         assert_eq!(DeleteKind::from_discriminant(0), None);
         assert_eq!(RangeForm::from_discriminant(0), None);
+        assert_eq!(EntryKind::from_discriminant(0), None);
     }
 }

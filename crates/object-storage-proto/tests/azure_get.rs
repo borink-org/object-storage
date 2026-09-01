@@ -249,3 +249,94 @@ fn refuses_invalid_plans_before_writing_anything() {
         );
     }
 }
+
+/// The keys a plan may name, and the ones it may not because they would name
+/// something else by the time the request arrives.
+///
+/// Each refusal here is a measurement from the live suite, not a rule read off
+/// a specification: a name is refused where storing it would store it under a
+/// name the caller did not write.
+#[test]
+fn a_key_that_would_not_survive_the_journey_is_refused() {
+    let refused = |key: &str| {
+        borink_object_storage_proto::layered::get_requirements(
+            &blobs(),
+            &PhysicalGet::new(key),
+            &now(),
+        )
+        .map(drop)
+    };
+
+    // Azure counts a name in UTF-16 code units, so a character outside the
+    // basic plane counts twice. 512 of them is the limit, and 1024 of a
+    // character inside it is too.
+    assert!(refused(&"a".repeat(1024)).is_ok());
+    assert!(refused(&"é".repeat(1024)).is_ok());
+    assert!(refused(&"🦀".repeat(512)).is_ok());
+    for over in ["a".repeat(1025), "é".repeat(1025), "🦀".repeat(513)] {
+        assert_eq!(
+            refused(&over),
+            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            "{} UTF-16 code units",
+            over.encode_utf16().count()
+        );
+    }
+
+    // Azure drops a dot from the end of every segment, so a key with one
+    // names an object that will not be there.
+    for key in ["dot.", "a/dot.", "dotseg./x", "a./b", "..", ".", "a/../"] {
+        assert_eq!(
+            refused(key),
+            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            "{key:?}"
+        );
+    }
+
+    // Azure refuses a control character in a name, so a key holding one is a
+    // key that cannot become a request.
+    for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}", "a\u{7f}b"] {
+        assert_eq!(
+            refused(key),
+            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            "{key:?}"
+        );
+    }
+    // A character outside ASCII is not a control character, whatever its
+    // bytes look like one at a time.
+    for key in ["café", "🦀", "\u{85}", "\u{a0}"] {
+        assert!(refused(key).is_ok(), "{key:?}");
+    }
+
+    // A host resolves these out of the URL before sending it, so the request
+    // would name another object entirely.
+    for key in ["a/../b", "a/./b", "../b", "./b", "a/.."] {
+        assert_eq!(
+            refused(key),
+            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            "{key:?}"
+        );
+    }
+
+    // Azure takes 255 `/`-delimited segments and refuses 256.
+    assert!(refused(&vec!["s"; 255].join("/")).is_ok());
+    assert_eq!(
+        refused(&vec!["s"; 256].join("/")),
+        Err(Error::InvalidPlan(InvalidPlan::Key))
+    );
+
+    // A dot that is not the whole segment and not at the end is ordinary text,
+    // and so is a slash wherever it falls but the cases above.
+    for key in [
+        "a.b",
+        "..a",
+        "a..b",
+        "a/b",
+        "a//b",
+        "trailing/",
+        "/leading",
+        "..leading",
+        "a.b/c",
+    ] {
+        assert!(refused(key).is_ok(), "{key:?}");
+    }
+}

@@ -1,6 +1,15 @@
 name: azure-live
+# This suite spends the storage account, so opening a pull request must not be
+# enough to run it. The `azure-live` environment requires a reviewer: a run
+# waits for that approval before it holds a token, and until then it is a
+# pending check, which is what stops the merge.
+#
+# A pull request from a fork is given no `id-token` permission whatever the
+# reviewer says, so the job fails there rather than passing untested. Push the
+# branch to this repository to have it run.
 on:
   workflow_dispatch:
+  pull_request:
 # A run waiting for its reviewer counts as in progress, so without
 # `cancel-in-progress` every new run on a branch would queue behind the last
 # one. With it, a new run cancels the branch's earlier run, approved or not,
@@ -21,6 +30,9 @@ env:
   # The write tests own this key and overwrite it on every run. It must never
   # be the read reference above, whose contents the read tests assert.
   AZURE_PUT_KEY: borink-object-storage/azure-put-scratch/a key+é.bin
+  # The listing tests own everything under this prefix and empty it before
+  # each test. It must not contain either key above.
+  AZURE_LIST_PREFIX: borink-object-storage/azure-list-scratch/
 jobs:
   test:
     runs-on: ubuntu-latest

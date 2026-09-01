@@ -1,10 +1,10 @@
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
-    Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome,
-    PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
-    WireRequest,
+    DeleteShape, Error, Failure, FailureClass, Fill, GetHeadOutcome, GetKind, GetShape,
+    InvalidPlan, ListEntry, ListHeadOutcome, Method, ObjectMeta, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
+    ResponseFault, ResponseHead, Result, Resume, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -13,7 +13,15 @@ use crate::{
 pub const VERSION: &str = "2026-04-06";
 
 // Azure limits blob names to 1,024 characters.
-const MAX_BLOB_NAME_CHARS: usize = 1024;
+// Azure counts a blob name in UTF-16 code units, so a character outside the
+// basic plane counts twice. Measured: a name of 1024 two-byte characters is
+// taken and one of 541 four-byte characters, which is 1041 code units, is
+// refused with 400. See the live suite.
+const MAX_BLOB_NAME_UNITS: usize = 1024;
+
+// The most `/`-delimited segments Azure takes in a name. Its documentation
+// gives 254; measurement gives this.
+const MAX_BLOB_NAME_SEGMENTS: usize = 255;
 
 /// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +59,9 @@ impl<'a> Container<'a> {
 ///
 /// This is a small borrowed value. Create it again whenever the token
 /// changes.
+///
+/// Every method that encodes a request takes the current time in `now`,
+/// because this crate never reads the clock.
 #[derive(Clone, Copy)]
 pub struct Blobs<'a> {
     container: Container<'a>,
@@ -85,10 +96,6 @@ impl<'a> Blobs<'a> {
     /// This method allocates nothing. It writes the URL and the header values
     /// into `buf`, and returns a [`WireRequest`] that borrows them.
     ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
-    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure
@@ -108,7 +115,7 @@ impl<'a> Blobs<'a> {
         validate_get(get)?;
         let available = buf.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, get.key, get.range, now);
+        self.build(&mut head, Some(get.key), &[], get.range, now);
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
@@ -123,10 +130,6 @@ impl<'a> Blobs<'a> {
     /// [`Payload::Slice`], the returned request borrows those bytes and copies
     /// none of them. If you pass [`Payload::Streamed`], the request carries no
     /// content and you send the stated number of bytes yourself.
-    ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
     ///
     /// # Errors
     ///
@@ -150,7 +153,7 @@ impl<'a> Blobs<'a> {
         let available = buf.len();
         let length = content.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, put.key, RequestedRange::Whole, now);
+        self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
         head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
@@ -163,14 +166,31 @@ impl<'a> Blobs<'a> {
 
     // The parts that every request head carries, in the order that they are
     // written into the caller's buffer. Each part is one range of that buffer.
-    fn build(&self, head: &mut HeadWriter<'_>, key: &str, range: RequestedRange, now: &Timestamps) {
+    // `key` is `None` for a request that names the container alone, and the
+    // query is written in the order it is given.
+    fn build(
+        &self,
+        head: &mut HeadWriter<'_>,
+        key: Option<&str>,
+        query: &[Option<(&str, QueryValue<'_>)>],
+        range: RequestedRange,
+        now: &Timestamps,
+    ) {
         head.url(|out| {
             out.push(self.container.endpoint.as_bytes());
             out.push(b"/");
             out.push(self.container.name.as_bytes());
-            out.push(b"/");
-            for part in crate::path::encode_object_key(key) {
-                out.push(part.as_bytes());
+            if let Some(key) = key {
+                out.push(b"/");
+                for part in crate::path::encode_object_key(key) {
+                    out.push(part.as_bytes());
+                }
+            }
+            for (index, (name, value)) in query.iter().flatten().enumerate() {
+                out.push(if index == 0 { b"?" } else { b"&" });
+                out.push(name.as_bytes());
+                out.push(b"=");
+                value.write(out);
             }
         });
         head.header("authorization", |out| {
@@ -282,10 +302,6 @@ impl<'a> Blobs<'a> {
     /// The request has no content. Azure removes the object it names and
     /// nothing else: see [`PhysicalDelete`] for what that excludes.
     ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
-    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure
@@ -306,7 +322,7 @@ impl<'a> Blobs<'a> {
         validate_delete(delete)?;
         let available = buf.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, delete.key, RequestedRange::Whole, now);
+        self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
             head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
         }
@@ -440,6 +456,178 @@ impl<'a> Blobs<'a> {
         match status {
             404 => PutHeadOutcome::NotFound { kind },
             status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        }
+    }
+
+    /// Writes the request head for one page of `list` into `buf`.
+    ///
+    /// The response carries the page as a document in its body: read it whole
+    /// and pass it to [`Self::fill_listing`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure
+    /// request. This method validates the plan before it writes any byte, so
+    /// it never reports an invalid plan as a capacity error.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
+    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// method again, or call
+    /// [`layered::list_requirements`](crate::layered::list_requirements)
+    /// first.
+    pub fn encode_list<'r>(
+        &self,
+        buf: &'r mut [u8],
+        list: &PhysicalList<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_list(list)?;
+        let available = buf.len();
+        // The query is written in this order every time, so a caller can
+        // compare the URL byte for byte. Azure signs none of it.
+        let query = [
+            Some(("restype", QueryValue::Literal("container"))),
+            Some(("comp", QueryValue::Literal("list"))),
+            (!list.prefix.is_empty())
+                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
+            list.delimited
+                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            list.marker
+                .map(|marker| ("marker", QueryValue::Encoded(marker))),
+            list.max_results
+                .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
+        ];
+
+        let mut head = HeadWriter::new(buf);
+        self.build(&mut head, None, &query, RequestedRange::Whole, now);
+        encoded(head, available, Method::Get, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a listing and reports what Azure did.
+    ///
+    /// A head that reports a failure is an outcome too, so it returns [`Ok`].
+    /// Only a head that cannot be read is an [`Err`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status that a listing never returns is [`ResponseFault::Status`].
+    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+        match head.status {
+            200 => Ok(ListHeadOutcome::Page {
+                expected_len: decimal_header(head.content_length)?,
+            }),
+            404 if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(ListHeadOutcome::NotFound { kind: named(&head) }),
+            201..=299 => Err(ResponseFault::Status.into()),
+            status if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(ListHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
+        }
+    }
+
+    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_error_body`] for a listing, and reads the body
+    /// the same way.
+    pub fn accept_list_error_body<'h>(
+        &self,
+        status: u16,
+        request_id: Option<&'h [u8]>,
+        body: &[u8],
+    ) -> ListHeadOutcome<'h> {
+        let kind = body_kind(body);
+        match status {
+            404 => ListHeadOutcome::NotFound { kind },
+            status => ListHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        }
+    }
+
+    /// Reads a page out of the response body of a listing.
+    ///
+    /// Pass the whole body that [`ListHeadOutcome::Page`] announced and an
+    /// array to write the entries into. Reading is destructive: a body that
+    /// has been read is no longer a document.
+    ///
+    /// Your array is the budget. A page that does not fit fills the array and
+    /// returns [`Fill::Partial`], which carries the [`Resume`] that reads the
+    /// rest with [`Self::resume_listing`]; no entry is lost or read twice. An
+    /// array of `max_results` entries always holds the whole page.
+    ///
+    /// Only [`Fill::Page`] reports a marker, so continuing on the marker
+    /// cannot step over entries that were not read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+    /// not a listing page. This reads the grammar that Azure writes, not XML
+    /// at large: a namespace prefix, a reference to an entity no listing
+    /// declares, an entry tag spelled with an attribute, and anything else
+    /// Azure does not write are refused rather than guessed at.
+    pub fn fill_listing<'b>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [ListEntry<'b>],
+    ) -> Result<Fill<'b>> {
+        crate::xml::fill_listing(body, into)
+    }
+
+    /// Reads the rest of a page that [`Fill::Partial`] stopped in.
+    ///
+    /// Pass the same `body`, unchanged, and the [`Resume`] that came with the
+    /// entries you have finished with. Reading continues from where it
+    /// stopped, so no entry is read twice and none is lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] as
+    /// [`Self::fill_listing`] does. A [`Resume`] describes one body: keep each
+    /// with the buffer it came from.
+    pub fn resume_listing<'b>(
+        &self,
+        body: &'b mut [u8],
+        resume: Resume,
+        into: &mut [ListEntry<'b>],
+    ) -> Result<Fill<'b>> {
+        crate::xml::resume_listing(body, resume, into)
+    }
+}
+
+// Both providers group keys at `/` and at nothing else, so the delimiter is
+// what a plan turns on rather than a byte that it carries.
+const DELIMITER: &[u8] = b"/";
+
+// One query value, in the form that the URL writer needs it.
+#[derive(Clone, Copy)]
+enum QueryValue<'q> {
+    // Text of this crate's own, which is already usable in a URL.
+    Literal(&'q str),
+    // Bytes of the caller's or the service's, which are not.
+    Encoded(&'q [u8]),
+    Number(u32),
+}
+
+impl QueryValue<'_> {
+    fn write(self, out: &mut Writer<'_>) {
+        match self {
+            Self::Literal(value) => out.push(value.as_bytes()),
+            Self::Encoded(value) => {
+                for part in crate::path::encode_query_value(value) {
+                    out.push(part.as_bytes());
+                }
+            }
+            Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),
         }
     }
 }
@@ -707,8 +895,44 @@ fn condition_header(kind: ConditionKind) -> Option<&'static str> {
     }
 }
 
+// The length of a name as Azure counts it.
+fn name_units(value: &str) -> usize {
+    value.chars().map(char::len_utf16).sum()
+}
+
+// Whether a key names one object and goes on naming it. Each rule here is a
+// name that would otherwise be stored, silently, under a name the caller did
+// not ask for.
+fn addressable(key: &str) -> bool {
+    if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
+        return false;
+    }
+    // Azure refuses an ASCII control character in a name, with 400. Measured
+    // for U+0001, U+000B, U+000C, U+000E and U+007F. Testing the bytes is
+    // testing the characters: every byte of a character outside ASCII is 0x80
+    // or above, and none of those is an ASCII control.
+    if key.bytes().any(|byte| byte.is_ascii_control()) {
+        return false;
+    }
+    // Azure takes a name of 255 `/`-delimited segments and refuses 256,
+    // whatever the 254 in its documentation says. Measured by bisection; see
+    // the live suite.
+    if key.matches('/').count() + 1 > MAX_BLOB_NAME_SEGMENTS {
+        return false;
+    }
+    // Azure drops a dot from the end of every segment of a name: `dot.` is
+    // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
+    // suite.
+    //
+    // The same test covers a segment that is only dots. A host resolves `.`
+    // and `..` out of the URL before it sends it, as the standard for URLs
+    // requires, so those would name another object entirely; measured, as
+    // `dots/../up` wrote `up`.
+    !key.split('/').any(|segment| segment.ends_with('.'))
+}
+
 fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
-    if get.key.is_empty() || get.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(get.key) {
         return Err(InvalidPlan::Key.into());
     }
     match get.range {
@@ -744,7 +968,7 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
 fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
-    if put.key.is_empty() || put.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(put.key) {
         return Err(InvalidPlan::Key.into());
     }
     if len > MAX_PUT_LEN {
@@ -753,8 +977,27 @@ fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
     validate_condition(put.condition, put.condition_value)
 }
 
+fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+    // A prefix is the start of a key, so it is bounded like one. An empty
+    // prefix lists the whole container and is valid.
+    // A prefix is the start of a key, so it is bounded like one. The rest of
+    // `addressable` does not apply: a prefix is written into the query, where
+    // nothing resolves a `..` and nothing drops a trailing dot, and `dir.` is
+    // an honest prefix of `dir.txt`.
+    if name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
+        return Err(InvalidPlan::Prefix.into());
+    }
+    if list.marker.is_some_and(<[u8]>::is_empty) {
+        return Err(InvalidPlan::Marker.into());
+    }
+    if list.max_results == Some(0) {
+        return Err(InvalidPlan::MaxResults.into());
+    }
+    Ok(())
+}
+
 fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {
-    if delete.key.is_empty() || delete.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(delete.key) {
         return Err(InvalidPlan::Key.into());
     }
     validate_condition(delete.condition, delete.condition_value)

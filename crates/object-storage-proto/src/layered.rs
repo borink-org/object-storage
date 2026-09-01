@@ -3,7 +3,10 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
-use crate::{Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, Result, Timestamps};
+use crate::{
+    Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Result,
+    Timestamps,
+};
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
@@ -11,8 +14,7 @@ const MONTHS: [&[u8; 3]; 12] = [
 
 /// Returns the number of bytes that [`Blobs::encode_get`] needs for this plan.
 ///
-/// Call this to size a buffer before you encode. This function encodes into an
-/// empty buffer and reads the capacity error, so the answer is exact.
+/// Call this to size a buffer before you encode; the answer is exact.
 ///
 /// # Errors
 ///
@@ -50,8 +52,7 @@ pub fn put_requirements(
 /// Returns the number of bytes that [`Blobs::encode_delete`] needs for this
 /// plan.
 ///
-/// Call this to size a buffer before you encode. This function encodes into an
-/// empty buffer and reads the capacity error, so the answer is exact.
+/// Call this to size a buffer before you encode; the answer is exact.
 ///
 /// # Errors
 ///
@@ -63,6 +64,50 @@ pub fn delete_requirements(
     now: &Timestamps,
 ) -> Result<usize> {
     required(blobs.encode_delete(&mut [], delete, now).map(drop))
+}
+
+/// Returns the number of bytes that [`Blobs::encode_list`] needs for this
+/// plan.
+///
+/// Call this to size a buffer before you encode; the answer is exact.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure request,
+/// unchanged from [`Blobs::encode_list`].
+pub fn list_requirements(
+    blobs: &Blobs<'_>,
+    list: &PhysicalList<'_>,
+    now: &Timestamps,
+) -> Result<usize> {
+    required(blobs.encode_list(&mut [], list, now).map(drop))
+}
+
+/// Writes an entity tag from a listing in the quoted form that HTTP defines.
+///
+/// A listing writes an entity tag without the quotes that the `ETag` header
+/// carries. Azure conditions a request on either form; this writes the quoted
+/// one.
+///
+/// Copies `listed` into `into`, adding the quotes unless it already carries
+/// them or is a weak tag, and returns what it wrote. Returns [`None`] if
+/// `into` is too small; it needs at most two bytes more than `listed`.
+///
+/// Use it on [`ListEntry::e_tag`](crate::ListEntry::e_tag) to turn an entry of
+/// a listing into a
+/// [`PhysicalGet::condition_value`](crate::PhysicalGet::condition_value).
+pub fn quoted_etag<'a>(listed: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
+    let quoted = listed.starts_with(b"\"") && listed.ends_with(b"\"") && listed.len() >= 2;
+    if quoted || listed.starts_with(b"W/") {
+        let into = into.get_mut(..listed.len())?;
+        into.copy_from_slice(listed);
+        return Some(into);
+    }
+    let into = into.get_mut(..listed.len() + 2)?;
+    into[0] = b'"';
+    into[1..listed.len() + 1].copy_from_slice(listed);
+    into[listed.len() + 1] = b'"';
+    Some(into)
 }
 
 fn required(result: Result<()>) -> Result<usize> {
@@ -133,7 +178,7 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::http_date_ms;
+    use super::{http_date_ms, quoted_etag};
 
     #[test]
     fn reads_an_azure_last_modified_header() {
@@ -143,5 +188,23 @@ mod tests {
         );
         assert_eq!(http_date_ms(b"not an HTTP date"), None);
         assert_eq!(http_date_ms(b"Fri, 24 Xxx 2013 00:00:00 GMT"), None);
+    }
+
+    #[test]
+    fn quotes_a_listed_etag_once() {
+        let mut into = [0; 32];
+        assert_eq!(
+            quoted_etag(b"0x8DF0046E8E555AF", &mut into),
+            Some(b"\"0x8DF0046E8E555AF\"".as_slice())
+        );
+        assert_eq!(
+            quoted_etag(b"\"already\"", &mut into),
+            Some(b"\"already\"".as_slice())
+        );
+        assert_eq!(
+            quoted_etag(b"W/\"weak\"", &mut into),
+            Some(b"W/\"weak\"".as_slice())
+        );
+        assert_eq!(quoted_etag(b"0x8DF", &mut [0; 6]), None);
     }
 }

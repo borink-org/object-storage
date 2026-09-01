@@ -281,6 +281,102 @@ pub enum DeleteHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
+/// The result of reading the response head of a listing.
+///
+/// A head that reports a failure is one of these too;
+/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) returns an
+/// [`Err`] only for a head it cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListHeadOutcome<'h> {
+    /// The page follows in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing), which reads the
+    /// entries out of it.
+    Page {
+        /// The exact length of the response body, if the head states it.
+        ///
+        /// Size the body buffer from this.
+        expected_len: Option<u64>,
+    },
+    /// The container does not exist, so there was nothing to list.
+    NotFound {
+        /// The specific error, if the head names one.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Read the response body and pass it, with the
+    /// status and the request identifier of this failure, to
+    /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
+    /// That call returns the final outcome. If you cannot read the body, pass
+    /// an empty one and the error stays unnamed.
+    ///
+    /// The `kind` of this failure is always [`None`].
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the listing, or it failed to serve it.
+    ServiceFailure(Failure<'h>),
+}
+
+/// What one call to [`Blobs::fill_listing`](crate::Blobs::fill_listing) read.
+///
+/// A page too large for your array is not an error and loses nothing: what did
+/// not fit is read by [`Blobs::resume_listing`](crate::Blobs::resume_listing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill<'b> {
+    /// The page was read to its end.
+    Page(Listing<'b>),
+    /// The array filled before the page ended.
+    ///
+    /// Use the entries that were written, then read the rest of the same body
+    /// with [`Blobs::resume_listing`](crate::Blobs::resume_listing).
+    ///
+    /// An array with no room reports `filled` of zero and makes no progress.
+    Partial {
+        /// The number of entries written into your array.
+        filled: usize,
+        /// Where the rest of the page starts.
+        resume: Resume,
+    },
+}
+
+/// Where a page was left off.
+///
+/// [`Fill::Partial`] hands this out and
+/// [`Blobs::resume_listing`](crate::Blobs::resume_listing) takes it back. It
+/// describes one body, and means nothing applied to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resume {
+    // Where the walk stopped: the next entry, or the tag that closes them.
+    pub(crate) at: usize,
+    // Whether that point is still inside the entries.
+    pub(crate) within: bool,
+    // The text of the next marker, as a range of the body. It lies past the
+    // entries, so it is still untouched whenever the walk stops.
+    pub(crate) marker: Option<(usize, usize)>,
+}
+
+/// What one page of a listing held.
+///
+/// [`Fill::Page`] carries this once the page has been read to its end.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Listing<'b> {
+    /// The number of entries that this call wrote into your array.
+    ///
+    /// The entries after these are untouched.
+    pub filled: usize,
+    /// Where the next page starts, or [`None`] when the listing is complete.
+    ///
+    /// Copy these bytes into your own storage and pass them as
+    /// [`PhysicalList::marker`](crate::PhysicalList::marker); the next page
+    /// overwrites the body they borrow.
+    ///
+    /// A page names a next one whenever more keys follow, even if it reported
+    /// fewer entries than it asked for.
+    pub next_marker: Option<&'b [u8]>,
+}
+
 /// The result of [`classify_error`](crate::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -419,6 +515,18 @@ impl fmt::Display for DeleteHeadOutcome<'_> {
             Self::Accepted => f.write_str("the service accepted the removal"),
             Self::PreconditionFailed => f.write_str("the condition on the removal did not hold"),
             Self::NotFound { .. } => f.write_str(ServiceErrorKind::NotFound.as_str()),
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                fmt::Display::fmt(failure, f)
+            }
+        }
+    }
+}
+
+impl fmt::Display for ListHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Page { .. } => f.write_str("the page follows in the response body"),
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 fmt::Display::fmt(failure, f)
             }
