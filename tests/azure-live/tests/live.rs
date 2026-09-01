@@ -2,10 +2,10 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
-    FailureClass, Fill, GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
+    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -940,23 +940,20 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
     assert_eq!(walk(&fixture, false, 1), whole);
 }
 
-/// Settles what a listing of a container this credential was not granted
-/// answers, which is not what the container's existence would suggest.
+/// A listing lists a container; a container that is not there is the one thing
+/// it does not find.
 ///
-/// The role assignment is scoped to one container, so Azure refuses the
-/// request before it says whether any other container is there: the answer is
-/// 403, not the 404 that `ListHeadOutcome::NotFound` describes. A credential
-/// scoped to one container therefore cannot observe `NotFound` at all, and a
-/// caller that treats "not found" as the way a listing fails would never see
-/// this.
-///
-/// If the grant is ever widened to the storage account, this becomes the 404
-/// instead, and the assertion below is what will say so.
+/// Reaching this at all takes a grant that encloses the container being named.
+/// A credential scoped to one container is refused with 403 before Azure says
+/// whether any other container exists, which is deliberate: a 404 there would
+/// tell an unauthorized caller which containers are real. The test principal
+/// therefore holds `Storage Blob Data Reader` on `blobServices/default` rather
+/// than on the one container; writes stay scoped to the container.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for() {
+fn listing_a_container_that_is_not_there_reports_that() {
     let fixture = Fixture::from_env();
-    let outside = Fixture {
+    let absent = Fixture {
         container: format!("{}-absent", fixture.container),
         ..clone(&fixture)
     };
@@ -966,7 +963,7 @@ fn listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for() {
             .unwrap()
             .as_secs(),
     );
-    let blobs = outside.blobs();
+    let blobs = absent.blobs();
     let plan = PhysicalList::new("");
     let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
     let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
@@ -987,19 +984,14 @@ fn listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for() {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_bytes())),
     );
-    let outcome = blobs.accept_list_head(head).unwrap();
-    let ListHeadOutcome::ServiceFailure(failure) = outcome else {
-        panic!(
-            "a container outside the grant is refused, not reported absent; \
-             if this is now NotFound the grant was widened, and the \
-             documentation on this test must say so: {outcome:?}"
-        );
-    };
-    assert_eq!(failure.status, 403);
-    assert_eq!(failure.class, FailureClass::Auth);
-    assert_eq!(failure.kind, Some(ServiceErrorKind::Unauthorized));
-    // The refusal is decisive from the head alone, as every other one is.
-    assert!(failure.request_id.is_some());
+    assert_eq!(
+        blobs.accept_list_head(head).unwrap(),
+        ListHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NoSuchContainer)
+        },
+        "a 403 here means the grant no longer encloses the container: the \
+         principal needs Storage Blob Data Reader on blobServices/default"
+    );
 }
 
 /// Settles what an entity tag from a listing is worth as a condition, which is

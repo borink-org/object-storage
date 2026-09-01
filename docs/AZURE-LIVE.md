@@ -6,7 +6,9 @@ The manual workflow uses a short-lived GitHub OIDC token; no Azure credential is
 
 `az ad app create` and `az ad sp create` created `borink-object-storage-github-read` (`36916623-6d73-4698-9944-8efcb70537ec`; service-principal object ID `bdc02a8f-4712-41fa-8103-69a1a5aaf96b`).
 `az ad app federated-credential create` added issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`, and the immutable-ID subject emitted by GitHub: `repo:borink-org@319807983/object-storage@1342734194:environment:azure-live`.
-`az role assignment create` granted `Storage Blob Data Reader` only on `/subscriptions/f6706ae1-d259-498d-8302-cacf4634d368/resourceGroups/borink-storage-test/providers/Microsoft.Storage/storageAccounts/borinkstoragetest/blobServices/default/containers/borink-object-test`.
+`az role assignment create` granted `Storage Blob Data Reader` and `Storage Blob Data Contributor` on `/subscriptions/f6706ae1-d259-498d-8302-cacf4634d368/resourceGroups/borink-storage-test/providers/Microsoft.Storage/storageAccounts/borinkstoragetest/blobServices/default/containers/borink-object-test`.
+
+A second `Storage Blob Data Reader`, on the enclosing `blobServices/default`, is what lets a listing of a container that does not exist answer 404 rather than 403; see below. It widens reading to every container in the account and leaves writing scoped to the one. The account holds no other container.
 The `Borink Infra` identity (`infra@borink.com`; object ID `9ec695e1-f992-4295-9281-2755486d8772`) has container-scoped `Storage Blob Data Contributor` for local tests. Its subscription `Owner` role covers the management plane but does not grant blob data-plane access.
 
 ## GitHub
@@ -34,4 +36,4 @@ The listing tests own everything under `AZURE_LIST_PREFIX` and delete it before 
 
 Azure conditions a request on an entity tag written the way a listing writes it, without quotes, exactly as it does on the quoted form. `layered::quoted_etag` is therefore not a workaround for a service that refuses the listed form; it writes the spelling HTTP defines. `an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not` holds that, and also holds the part that would change the answer: an unquoted tag that does not match must still refuse the read, because a service that discarded the header instead would leave the condition with no effect at all.
 
-A listing of a container this credential was not granted answers 403, not 404. The role assignment is scoped to one container, so Azure refuses before it says whether another one exists, and `ListHeadOutcome::NotFound` is unreachable for this credential. Widening the grant to the storage account would turn that into the 404, and `listing_a_container_outside_the_grant_is_refused_before_it_is_looked_for` is what would say so.
+A listing of a container that is not there answers 404 `ContainerNotFound` only when the grant encloses the container being named. A credential scoped to one container is refused with 403 first, before Azure says whether any other container exists — deliberate, since a 404 there would tell an unauthorized caller which containers are real. That is why the read grant sits on `blobServices/default`: `listing_a_container_that_is_not_there_reports_that` cannot observe the 404 otherwise, and says so if it sees the 403 again.
