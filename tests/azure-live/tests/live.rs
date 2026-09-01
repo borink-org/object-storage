@@ -1251,12 +1251,16 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     empty(&fixture);
 
     let mut created = Vec::new();
+    // `dotseg./x` is the one that says whether the dot Azure drops goes from
+    // the end of a name or from the end of every segment. Only the first was
+    // measured, and `addressable` refuses only the first.
     for edge in [
         "trailing/",
         "double//slash",
         "space /x",
         "a.b/c",
         "..leading",
+        "dotseg./x",
     ] {
         let key = format!("{}{edge}", fixture.list_prefix);
         let owner = Fixture {
