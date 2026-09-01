@@ -502,6 +502,24 @@ fn an_array_smaller_than_the_page_reads_the_rest_of_it_afterwards() {
     assert_eq!(listing.next_marker, Some(b"next".as_slice()));
 }
 
+// A caller that cannot hold a Rust value stores the three numbers of a
+// position instead, and reading continues from what those numbers rebuild.
+#[test]
+fn a_position_stored_as_its_numbers_reads_the_same_rest() {
+    let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "next");
+    let mut entries = [ListEntry::default(); 1];
+    let (filled, at) = partial(&mut body, &mut entries);
+    assert_eq!(filled, 1);
+
+    let stored = Resume::from_parts(at.at(), at.within(), at.marker());
+    assert_eq!(stored, at);
+
+    let mut entries = [ListEntry::default(); 1];
+    let listing = resume(&mut body, stored, &mut entries);
+    assert_eq!((listing.filled, entries[0].key), (1, "b.txt"));
+    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
+}
+
 #[test]
 fn an_array_that_holds_the_page_exactly_is_not_partial() {
     let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "");
