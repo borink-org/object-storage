@@ -34,9 +34,23 @@ For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `exter
 
 ## Development status and roadmap
 
-The goal is a full-featured object storage library that supports both Azure Blob Storage and S3 (including S3-compatible services). The goal is to also include a lot of useful functionality around the basic operations, in particular authentication/authorization features (as usually the SDK's and existing libraries can be quite heavy). 
+The goal is a full-featured object storage library that supports both Azure Blob Storage and S3 (including S3-compatible services). The goal is to also include a lot of useful functionality around the basic operations, in particular authentication/authorization features (as usually the SDK's and existing libraries can be quite heavy). This includes things like AssumeRoleWithWebIdentity and OIDC token exchange (e.g. exchanging your GitHub Actions identity token for a short-lived Azure one).
 
-The core library functionality is not expected to change a lot, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) will target Azure only, S3 will come in 0.0.2. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
+The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) will target Azure only, S3 will come in 0.0.2. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
+
+Roadmap:
+- Azure multipart support (Put Block List) -> 0.0.1 release
+- S3 PUT, GET, DELETE (so lands SigV4 support and crypto primitives)
+- S3 LIST
+- S3 multipart -> 0.0.2 release
+- S3 directory buckets, S3 Express One Zone, Azure HNS compatibility -> 0.0.3 release
+- Refine API, performance improvements
+- 0.1 release (with promise to try and keep API stable from now on, no guarantee)
+- ... support for various AWS and Azure authorization schemes -> 0.2 release
+- Convenience layer and API -> 0.3 release
+- 1.0 release (API stability)
+- ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings)
+- ... various improvements to the convenience layer and API and CLI that implements various non-core features that are coupled to the transport
 
 ## Library notes
 
