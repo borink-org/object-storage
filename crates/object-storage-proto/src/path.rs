@@ -40,6 +40,8 @@ pub(crate) fn encode_object_key(value: &str) -> PercentEncode<'_> {
     utf8_percent_encode(value, OBJECT_KEY_ESCAPE)
 }
 
+// review: where is this from; as in what requires us to define precisely this? i find the explanation very vague
+// "so no byte of them may be structural"; use plainer language please
 // Everything but the unreserved bytes of RFC 3986. That is stricter than a
 // query needs, and it is what an opaque marker or a delimiter requires: those
 // values are the service's own bytes, so no byte of them may be structural.
