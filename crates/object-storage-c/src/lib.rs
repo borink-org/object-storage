@@ -32,6 +32,14 @@
 //! `borink_delete_shape`, `borink_encode_delete` and
 //! `borink_accept_delete_head`.
 //!
+//! A listing has one step more. Fill in a `borink_list_shape` and call
+//! `borink_encode_list` with the prefix and the marker of the page you want.
+//! Read the head with `borink_accept_list_head`. Its kind is `Page`, so read
+//! the whole response body into one buffer, and pass that buffer to
+//! `borink_fill_listing`. It writes the entries of the page into your array
+//! and names the page after this one. A page too large for the array reports
+//! `Partial`, and `borink_resume_listing` reads the rest of the same body.
+//!
 //! An outcome whose kind is `NeedErrorBody` is not final. Azure named
 //! no error in the head, so read a bounded error body and pass it, with the
 //! `failure` of that outcome, to `borink_finish_get_error_body`.

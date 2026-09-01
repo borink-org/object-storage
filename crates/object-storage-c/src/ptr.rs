@@ -31,6 +31,22 @@ pub(crate) unsafe fn slice<'a>(bytes: Bytes) -> &'a [u8] {
     unsafe { items(bytes.ptr, bytes.len) }
 }
 
+/// Reads `len` items at `ptr` as a slice that a call writes into.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `len` reads and writes of `T`, aligned, and reached
+/// through no other reference for the lifetime `'a`. Any `ptr` is accepted
+/// when `len` is 0.
+pub(crate) unsafe fn items_mut<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
+    if len == 0 {
+        return &mut [];
+    }
+    // SAFETY: the caller states that `ptr` addresses `len` items and that
+    // nothing else reaches them.
+    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
 /// Reads a writable buffer as a slice.
 ///
 /// # Safety

@@ -7,6 +7,7 @@ use borink_object_storage_proto::{
     FailureClass as CoreFailureClass, GetHeadOutcome, InvalidPlan, ObjectMeta as CoreObjectMeta,
     PutHeadOutcome, RequestedRange, ResponseFault, ServiceErrorKind,
 };
+use std::format;
 use std::string::{String, ToString};
 use std::vec;
 use std::vec::Vec;
@@ -80,6 +81,47 @@ fn write_shape() -> PutShape {
     PutShape {
         condition: Condition::None as u16,
     }
+}
+
+fn list_shape_of(max_results: Option<u32>) -> ListShape {
+    ListShape {
+        delimited: false,
+        max_results: max_results.map_or_else(Default::default, |value| MaybeU32 {
+            present: true,
+            value,
+        }),
+    }
+}
+
+// One page, as Azure writes it: `count` objects, then the marker that names
+// the page after it.
+fn page(count: usize, next_marker: &str) -> Vec<u8> {
+    let mut body = String::from("<EnumerationResults><Blobs>");
+    for index in 0..count {
+        body.push_str(&format!(
+            "<Blob><Name>key-{index}</Name><Properties>\
+             <Last-Modified>Wed, 26 Aug 2026 12:00:00 GMT</Last-Modified>\
+             <Etag>0x{index}</Etag><Content-Length>{index}</Content-Length>\
+             </Properties></Blob>"
+        ));
+    }
+    body.push_str(&format!(
+        "</Blobs><NextMarker>{next_marker}</NextMarker></EnumerationResults>"
+    ));
+    body.into_bytes()
+}
+
+// The entries of a fill, as the keys they name.
+fn keys(entries: &[ListEntry], fill: &Fill) -> Vec<String> {
+    entries[..fill.filled]
+        .iter()
+        .map(|entry| {
+            // SAFETY: every caller passes entries that point into a body of
+            // the test that is still live.
+            let key = unsafe { slice(entry.key) };
+            String::from_utf8(key.to_vec()).unwrap()
+        })
+        .collect()
 }
 
 fn header(name: &'static str, value: &'static [u8]) -> HeaderRef {
@@ -296,6 +338,7 @@ fn every_outcome_kind_says_something_of_its_own() {
         OutcomeKind::PreconditionFailed,
         OutcomeKind::Done,
         OutcomeKind::Accepted,
+        OutcomeKind::Page,
     ] {
         let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());
@@ -304,7 +347,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     }
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 6);
+    assert_eq!(said.len(), 7);
 
     // A kind from a later version of this crate names nothing here.
     let mut later = only(OutcomeKind::Body);
@@ -333,7 +376,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     assert_eq!(kind_of(4095), None);
     assert_eq!(class_of(4095), None);
     assert!(outcome_kind_of(0).is_none());
-    assert!(outcome_kind_of(13).is_none());
+    assert!(outcome_kind_of(14).is_none());
 
     // The plan side, which crosses inwards and must refuse.
     for (kind, expected) in [
@@ -405,6 +448,34 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
             condition: Condition::None as u16,
         };
         assert_eq!(delete_shape(&shape).map(|shape| shape.kind).ok(), expected);
+    }
+    for kind in [
+        proto::EntryKind::Object,
+        proto::EntryKind::Prefix,
+        proto::EntryKind::Directory,
+    ] {
+        let entry = proto::ListEntry {
+            kind,
+            ..Default::default()
+        };
+        assert_eq!(
+            proto::EntryKind::from_discriminant(entry_view(&entry).kind),
+            Some(kind)
+        );
+    }
+    // A listing plan carries no enum, and an absent count is not a zero one.
+    for max_results in [None, Some(1000)] {
+        let shape = ListShape {
+            delimited: true,
+            max_results: max_results.map_or_else(Default::default, |value| MaybeU32 {
+                present: true,
+                value,
+            }),
+        };
+        assert_eq!(
+            list_shape(&shape).map(|shape| shape.max_results).ok(),
+            Some(max_results)
+        );
     }
 }
 
@@ -526,6 +597,49 @@ fn a_null_pointer_is_refused_rather_than_read() {
         );
         assert_eq!(
             borink_finish_delete_error_body(&session, core::ptr::null(), lent(b"")).error,
+            unknown()
+        );
+        assert_eq!(
+            borink_encode_list(
+                &session,
+                core::ptr::null(),
+                lent(b"prefix/"),
+                lent(b""),
+                writable(&mut buf),
+                0,
+            )
+            .status,
+            unknown()
+        );
+        assert_eq!(
+            borink_accept_list_head(core::ptr::null(), 200, core::ptr::null(), 0).error,
+            unknown()
+        );
+        assert_eq!(
+            borink_finish_list_error_body(&session, core::ptr::null(), lent(b"")).error,
+            unknown()
+        );
+        assert_eq!(
+            borink_fill_listing(
+                core::ptr::null(),
+                writable(&mut buf),
+                core::ptr::null_mut(),
+                0
+            )
+            .status,
+            unknown()
+        );
+        // A position that was never filled in is refused rather than read as
+        // the start of the body.
+        assert_eq!(
+            borink_resume_listing(
+                &session,
+                writable(&mut buf),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                0,
+            )
+            .status,
             unknown()
         );
         // A sentence for nothing is no sentence, not a guess at one.
@@ -835,4 +949,233 @@ fn the_layout_check_answers_for_the_layout_it_is_given() {
             size_of::<Layout>() / size_of::<usize>()
         );
     }
+}
+
+// A listing asks for one page, and the head says that the page follows.
+#[test]
+fn a_listing_plan_reaches_the_wire_and_its_head_announces_the_page() {
+    let session = session();
+    let shape = ListShape {
+        delimited: true,
+        max_results: MaybeU32 {
+            present: true,
+            value: 2,
+        },
+    };
+    let mut buf = vec![0; 512];
+    // SAFETY: every pointer below addresses a live value of this test.
+    let head = unsafe {
+        borink_encode_list(
+            &session,
+            &shape,
+            lent(b"directory/"),
+            lent(b"marker-1"),
+            writable(&mut buf),
+            1_787_400_000,
+        )
+    };
+    assert_eq!(head.status, Status::default());
+    assert_eq!(head.method, Method::Get as u16);
+    let url =
+        String::from_utf8(buf[head.url.start..head.url.start + head.url.len].to_vec()).unwrap();
+    assert_eq!(
+        url,
+        "https://account.blob.core.windows.net/container\
+         ?restype=container&comp=list&prefix=directory%2F&delimiter=%2F\
+         &marker=marker-1&maxresults=2"
+    );
+
+    let headers = [header("Content-Length", b"120")];
+    // SAFETY: the headers are live, and the call takes no shape.
+    let outcome = unsafe { borink_accept_list_head(&session, 200, headers.as_ptr(), 1) };
+    assert_eq!(outcome.kind, OutcomeKind::Page as u16);
+    assert!(outcome.body.expected_len.present);
+    assert_eq!(outcome.body.expected_len.value, 120);
+    assert_eq!(text(&outcome), "the page follows in the response body");
+}
+
+// The entries of a page point into the body that the fill read, and the
+// values of each one cross whole.
+#[test]
+fn a_page_crosses_as_entries_that_point_into_the_body() {
+    let session = session();
+    let mut body = page(2, "next");
+    let mut entries = [ListEntry::default(); 4];
+    // SAFETY: the body and the array are live for the whole call, and nothing
+    // else reaches them.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 4) };
+
+    assert_eq!(fill.status, Status::default());
+    assert_eq!(fill.kind, FillKind::Page as u16);
+    assert_eq!(fill.filled, 2);
+    assert_eq!(keys(&entries, &fill), ["key-0", "key-1"]);
+    assert_eq!(entries[0].kind, EntryKind::Object as u16);
+    assert!(entries[0].size.present);
+    assert_eq!(entries[1].size.value, 1);
+    assert_eq!(borrowed(entries[1].e_tag), Some(b"0x1".as_slice()));
+    assert_eq!(
+        borrowed(entries[0].last_modified),
+        Some(b"Wed, 26 Aug 2026 12:00:00 GMT".as_slice())
+    );
+    // The key is bytes of the body, not a copy of them.
+    let start = entries[0].key.ptr as usize - body.as_ptr() as usize;
+    assert_eq!(&body[start..start + entries[0].key.len], b"key-0");
+    // SAFETY: the marker points into the body, which is still live.
+    assert_eq!(
+        unsafe { maybe_slice(fill.next_marker) },
+        Some(b"next".as_slice())
+    );
+    // The entries after the ones it filled are untouched.
+    assert_eq!(entries[2].key.len, 0);
+}
+
+// The array is the budget. A page larger than it is read in as many calls as
+// the caller has room for, and no entry is lost or read twice.
+#[test]
+fn an_array_smaller_than_the_page_reads_the_rest_of_it_afterwards() {
+    let session = session();
+    // More entries than one round of the fill reads, so the rounds inside one
+    // call are exercised as well as the calls.
+    let mut body = page(40, "");
+    let mut entries = [ListEntry::default(); 25];
+    // SAFETY: the body and the array are live, and nothing else reaches them.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 25) };
+    assert_eq!(fill.kind, FillKind::Partial as u16);
+    assert_eq!(fill.filled, 25);
+    assert_eq!(keys(&entries, &fill)[24], "key-24");
+    assert!(!fill.next_marker.present);
+
+    let mut rest = [ListEntry::default(); 25];
+    // SAFETY: the same body, unread past where the first call stopped.
+    let fill = unsafe {
+        borink_resume_listing(
+            &session,
+            writable(&mut body),
+            &fill.resume,
+            rest.as_mut_ptr(),
+            25,
+        )
+    };
+    assert_eq!(fill.kind, FillKind::Page as u16);
+    assert_eq!(fill.filled, 15);
+    assert_eq!(keys(&rest, &fill)[0], "key-25");
+    assert_eq!(keys(&rest, &fill)[14], "key-39");
+    // The page named no next one, so the listing is complete.
+    assert!(!fill.next_marker.present);
+}
+
+// An array with no room reads nothing and keeps the page, so a caller that
+// sized it wrongly loses no entry.
+#[test]
+fn an_array_with_no_room_reads_nothing_and_keeps_the_page() {
+    let session = session();
+    let mut body = page(1, "next");
+    // SAFETY: the body is live, and no array is passed.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), core::ptr::null_mut(), 0) };
+    assert_eq!(fill.kind, FillKind::Partial as u16);
+    assert_eq!(fill.filled, 0);
+
+    let mut entries = [ListEntry::default(); 1];
+    // SAFETY: as above, with room for the one entry.
+    let fill = unsafe {
+        borink_resume_listing(
+            &session,
+            writable(&mut body),
+            &fill.resume,
+            entries.as_mut_ptr(),
+            1,
+        )
+    };
+    assert_eq!(fill.filled, 1);
+    assert_eq!(keys(&entries, &fill), ["key-0"]);
+}
+
+// A body that is not a page reports the fault of the core crate, and no
+// entry of the array is reported.
+#[test]
+fn a_body_that_is_not_a_page_is_refused() {
+    let session = session();
+    let mut body = Vec::from(b"<Error><Code>ServerBusy</Code></Error>".as_slice());
+    let mut entries = [ListEntry::default(); 2];
+    // SAFETY: the body and the array are live, and nothing else reaches them.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 2) };
+
+    assert_eq!(fill.status.code, ErrorCode::Response as u16);
+    assert_eq!(fill.status.detail, ResponseFault::Body as u16);
+    assert_eq!(fill.filled, 0);
+    let mut into = [0; 128];
+    // SAFETY: the buffer is live and nothing else reaches it.
+    let length = unsafe { borink_describe_status(fill.status, writable(&mut into)) };
+    assert_eq!(
+        String::from_utf8(into[..length].to_vec()).unwrap(),
+        Error::Response(ResponseFault::Body).to_string()
+    );
+}
+
+// A listing whose head named no error is finished by the body, exactly as a
+// read is.
+#[test]
+fn a_listing_failure_is_finished_by_the_body() {
+    let session = session();
+    // SAFETY: the header bytes are static, and the session is live.
+    let outcome = unsafe {
+        let headers = [header("x-ms-request-id", IDENTIFIER)];
+        borink_accept_list_head(&session, 404, headers.as_ptr(), 1)
+    };
+    assert_eq!(outcome.kind, OutcomeKind::NeedErrorBody as u16);
+
+    let body = b"<Error><Code>ContainerNotFound</Code></Error>";
+    // SAFETY: the failure and the body are live for the call.
+    let finished = unsafe { borink_finish_list_error_body(&session, &outcome.failure, lent(body)) };
+    assert_eq!(finished.kind, OutcomeKind::NotFound as u16);
+    assert_eq!(
+        kind_of(finished.failure.kind),
+        Some(ServiceErrorKind::NoSuchContainer)
+    );
+}
+
+// A listing plan is checked before any byte is written, and the reason names
+// the field that was wrong.
+#[test]
+fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
+    let session = session();
+    let mut buf = vec![0; 512];
+    let shape = list_shape_of(Some(0));
+    // SAFETY: every pointer below addresses a live value of this test.
+    let refused = unsafe {
+        borink_encode_list(
+            &session,
+            &shape,
+            lent(b"prefix/"),
+            lent(b""),
+            writable(&mut buf),
+            0,
+        )
+    };
+    assert_eq!(refused.status.code, ErrorCode::InvalidPlan as u16);
+    assert_eq!(refused.status.detail, InvalidPlan::MaxResults as u16);
+
+    // An empty buffer states the size that the head needs, as every encode
+    // call does.
+    let shape = list_shape_of(None);
+    // SAFETY: as above, with no buffer at all.
+    let refused = unsafe {
+        borink_encode_list(
+            &session,
+            &shape,
+            lent(b"prefix/"),
+            lent(b""),
+            BytesMut {
+                ptr: core::ptr::null_mut(),
+                len: 0,
+            },
+            0,
+        )
+    };
+    assert_eq!(refused.status.code, ErrorCode::Capacity as u16);
+    assert!(refused.required > 0);
 }

@@ -92,6 +92,26 @@ pub struct MaybeU64 {
     pub value: u64,
 }
 
+/// A number that a plan may not carry.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MaybeU32 {
+    /// Whether the plan carries this number.
+    pub present: bool,
+    /// The number.
+    pub value: u32,
+}
+
+/// A range of a buffer that a value may not name.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MaybeSpan {
+    /// Whether the value names a range.
+    pub present: bool,
+    /// The range.
+    pub span: Span,
+}
+
 /// A failure, as the two numbers that describe every error of the core crate.
 ///
 /// `code` is a `borink_error_code`, and `detail` is the discriminant of the
@@ -193,6 +213,30 @@ pub enum DeleteKind {
     SnapshotsOnly = 3,
 }
 
+/// What one entry of a listing page names.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum EntryKind {
+    /// One object.
+    Object = 1,
+    /// A group of keys that a delimited listing did not report one by one.
+    Prefix = 2,
+    /// A directory that the service keeps as its own entry. Only an Azure
+    /// account with a hierarchical namespace reports these.
+    Directory = 3,
+}
+
+/// How much of a page one fill read.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FillKind {
+    /// The page was read to its end. Read `next_marker` for the page after it.
+    Page = 1,
+    /// The array filled before the page ended. Read the rest of the same body
+    /// with `borink_resume_listing` and the `resume` beside this.
+    Partial = 2,
+}
+
 /// The category of a service failure.
 ///
 /// These are the numbers that the core crate's failure class uses. A number
@@ -278,6 +322,13 @@ pub enum OutcomeKind {
     Invalid = 11,
     /// The core crate returned a variant that this crate does not know.
     Unsupported = 12,
+    /// The page of a listing follows in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// `borink_fill_listing`. The length of the body is `body.expected_len`;
+    /// the rest of `body` is absent, because a page is a document and not part
+    /// of an object.
+    Page = 13,
 }
 
 /// One container, and the token that opens it.
@@ -344,6 +395,20 @@ pub struct DeleteShape {
     pub kind: u16,
     /// The precondition that the removal carries, as a `borink_condition`.
     pub condition: u16,
+}
+
+/// The part of a listing plan that holds no borrows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ListShape {
+    /// Whether the listing groups the keys at each `/` after the prefix.
+    ///
+    /// A delimited listing reports each group once, as an entry of kind
+    /// `Prefix`, instead of reporting every key in it.
+    pub delimited: bool,
+    /// The most entries that one page reports. An absent number asks for the
+    /// service's maximum.
+    pub max_results: MaybeU32,
 }
 
 /// One request header, as two ranges of the request buffer.
@@ -482,4 +547,79 @@ pub struct Outcome {
     pub failure: Failure,
     /// Why the call was refused, for `Invalid`.
     pub error: Status,
+}
+
+/// One entry of a listing page.
+///
+/// # Lifetime
+///
+/// `key`, `e_tag` and `last_modified` point into the body that
+/// `borink_fill_listing` read. They are valid until you release or reuse that
+/// buffer, or until the next call that reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ListEntry {
+    /// What this entry names, as a `borink_entry_kind`.
+    pub kind: u16,
+    /// The object key, the shared start of the group, or the directory path.
+    /// The bytes are text.
+    pub key: Bytes,
+    /// The size of the object. Absent for a group and for a directory.
+    pub size: MaybeU64,
+    /// The entity tag, as the listing wrote it.
+    ///
+    /// Azure lists an entity tag without the quotes that the `ETag` header
+    /// carries. Both forms condition a request.
+    pub e_tag: MaybeBytes,
+    /// The value that the listing gave for the last modification, in the form
+    /// that the `Last-Modified` header uses.
+    pub last_modified: MaybeBytes,
+}
+
+/// Where a page was left off.
+///
+/// `borink_fill_listing` reports one of these when your array fills before the
+/// page ends, and `borink_resume_listing` takes it back. The numbers are this
+/// crate's own: store the value and pass it back unchanged.
+///
+/// A value describes one body. Applied to another body it names no entry.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Resume {
+    /// Where the reading stopped, as an offset into the body.
+    pub at: usize,
+    /// Whether that offset is still inside the entries.
+    pub within: bool,
+    /// Where the text that names the next page stands in the body.
+    pub marker: MaybeSpan,
+}
+
+/// What one call to `borink_fill_listing` read.
+///
+/// # Lifetime
+///
+/// `next_marker` points into the body that the call read, and is valid until
+/// you release or reuse that buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Fill {
+    /// Whether the page could be read, and what stopped it.
+    ///
+    /// A `code` of 0 means that the entries are in your array. Every other
+    /// field is absent when it is not 0.
+    pub status: Status,
+    /// Whether the page ended or the array filled first, as a
+    /// `borink_fill_kind`.
+    pub kind: u16,
+    /// The number of entries written into your array.
+    ///
+    /// The entries after these are untouched.
+    pub filled: usize,
+    /// Where the rest of the page starts, for a `Partial` fill.
+    pub resume: Resume,
+    /// Where the next page starts, for a `Page` fill.
+    ///
+    /// Absent when the listing is complete. Copy these bytes into your own
+    /// storage and pass them as the marker of the next request.
+    pub next_marker: MaybeBytes,
 }
