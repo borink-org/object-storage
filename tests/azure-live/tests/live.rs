@@ -1067,138 +1067,145 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     }
 }
 
-/// Settles how much of a name Azure percent-encodes when it writes
-/// `Encoded="true"`, which is what decides whether a `%` that is not an escape
-/// can reach a listed key.
+/// Settles whether a name this crate can write ever makes Azure percent-encode
+/// one, which is what decides whether `xml::decode_percent` may refuse a `%`
+/// that is not an escape.
 ///
-/// A blob name may hold characters XML cannot carry, and Azure encodes the name
-/// rather than write them. If it encodes the whole name, then `%` is always
-/// written `%25`, a bare one is malformed, and `xml::decode_percent` could
-/// refuse it. If it encodes only the characters XML refuses, a literal `%`
-/// reaches the reader and refusing it would fault a real page.
+/// Azure sets `Encoded="true"` on a listed name that holds characters XML
+/// cannot carry. Measured: it refuses `U+0001` in a name outright, with 400,
+/// so the obvious way to produce such a name is closed. This tries the rest of
+/// what XML 1.0 forbids and asks whether any of them can be stored at all.
 ///
-/// The keys must come back exactly as written either way, and must still name
-/// the object well enough to remove it.
+/// If none can, the encoded form is unreachable for a name written through
+/// this crate, and `decode_percent` stays lenient because nothing measured
+/// says a `%` in a name is ever an escape. If one can, the listing says how
+/// much of the name was encoded, and a `%` in it settles the rest.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_name_that_xml_cannot_carry_says_how_much_of_it_is_encoded() {
+fn a_name_that_xml_cannot_carry_is_refused_or_says_how_it_is_encoded() {
     let fixture = Fixture::from_env();
     empty(&fixture);
 
-    // A percent on its own, and a percent beside a character that XML has no
-    // way to write.
-    let plain_suffix = "100%-plain.txt";
-    let control_suffix = "100%-\u{1}-control.txt";
-    place(&fixture, plain_suffix, b"x");
-    place(&fixture, control_suffix, b"x");
-    let plain = format!("{}{plain_suffix}", fixture.list_prefix);
-    let control = format!("{}{control_suffix}", fixture.list_prefix);
-
-    let plan = PhysicalList::new(&fixture.list_prefix);
-    let mut body = fetch(&fixture, &plan).unwrap();
-    let xml = String::from_utf8_lossy(&body).into_owned();
-
-    // The name XML cannot carry is the one that gets encoded, and the name
-    // that is only unusual is not.
-    assert!(xml.contains("Encoded=\"true\""), "{xml}");
-    assert!(
-        xml.contains("%01"),
-        "the control character is encoded: {xml}"
-    );
-    assert!(
-        xml.contains("100%25-%01"),
-        "Azure encodes the whole name, so a `%` in an encoded name is always \
-         written `%25`. If this fails it encodes only what XML refuses, a \
-         literal `%` can reach a listed key, and xml::decode_percent must stay \
-         lenient about one: {xml}"
-    );
-
-    // Whatever it encodes, both keys come back as they were written.
-    let blobs = fixture.blobs();
-    let mut entries = vec![ListEntry::default(); 8];
-    let Fill::Page(read) = blobs.fill_listing(&mut body, &mut entries).unwrap() else {
-        panic!("eight entries hold two");
-    };
-    let keys: Vec<&str> = entries[..read.filled].iter().map(|e| e.key).collect();
-    assert_eq!(keys.len(), 2, "{keys:?}");
-    assert!(keys.contains(&plain.as_str()), "{keys:?}");
-    assert!(keys.contains(&control.as_str()), "{keys:?}");
-
-    // Removing each one by the key the listing reported is what proves the key
-    // came back whole rather than merely looking right.
-    for key in [control.as_str(), plain.as_str()] {
-        let owner = Fixture {
-            put_key: key.to_owned(),
-            ..clone(&fixture)
-        };
-        assert_eq!(
-            remove(&owner, DeleteShape::default(), None).unwrap(),
-            RemoveOutcome::Accepted,
-            "{key:?}"
-        );
-    }
-}
-
-/// Settles the unit that Azure counts a key's length in, which this crate
-/// guesses at: it accepts 1024 Unicode scalar values, and Azure documents
-/// "1024 characters" without saying what a character is.
-///
-/// Two probes separate the three candidates. Both keys are ones this crate
-/// accepts, so Azure refusing either means `InvalidPlan::Key` is a weaker
-/// claim than it makes: it says a key cannot become an Azure request, and
-/// these would be keys that pass it and still cannot.
-///
-/// | probe             | scalars | UTF-16 | bytes | Azure takes it if |
-/// |-------------------|---------|--------|-------|-------------------|
-/// | 1024 × `é`        |    1024 |   1024 |  ~2007| scalars or UTF-16 |
-/// | 500 × `🦀`        |    ~541 |  ~1041 |  ~2041| scalars only      |
-#[test]
-#[ignore = "requires Azure credentials"]
-fn the_length_this_crate_allows_is_a_length_azure_allows() {
-    let fixture = Fixture::from_env();
-    empty(&fixture);
-
-    let prefix = fixture.list_prefix.chars().count();
-    // Exactly the 1024 scalar values this crate allows.
-    let two_byte = "é".repeat(1024 - prefix);
-    // Fewer scalar values, but more than 1024 UTF-16 code units.
-    let four_byte = "🦀".repeat(500);
-
-    for (label, tail) in [("two-byte", two_byte), ("four-byte", four_byte)] {
-        let key = format!("{}{tail}", fixture.list_prefix);
-        assert!(
-            key.chars().count() <= 1024,
-            "the probe must be one this crate accepts"
-        );
+    // Every kind of character XML 1.0 forbids that a Rust string can hold: a
+    // C0 control, the two others below a space, and the two non-characters.
+    // Each one carries a percent, which is the byte in question.
+    let mut stored = Vec::new();
+    for forbidden in ['\u{1}', '\u{B}', '\u{C}', '\u{E}', '\u{FFFE}', '\u{FFFF}'] {
+        let key = format!("{}100%-{forbidden}-name.txt", fixture.list_prefix);
         let owner = Fixture {
             put_key: key.clone(),
             ..clone(&fixture)
         };
-        let result = write(&owner, PutShape::default(), None, b"x").unwrap();
-        assert_eq!(
-            result.outcome,
-            WriteOutcome::Created,
-            "{label}: {} scalar values, {} UTF-16 code units, {} bytes. Azure \
-             refused a key this crate accepts, so it counts a shorter unit \
-             than scalar values and validate_put must count that unit too. A \
-             refusal of the four-byte probe alone means UTF-16 code units; of \
-             both, bytes. Check the status: a URI-too-long refusal instead \
-             means the limit is on the encoded URL, not the name",
-            key.chars().count(),
-            key.encode_utf16().count(),
-            key.len(),
-        );
+        if write(&owner, PutShape::default(), None, b"x")
+            .unwrap()
+            .outcome
+            == WriteOutcome::Created
+        {
+            stored.push((forbidden, key));
+        }
     }
+
+    let Some((forbidden, key)) = stored.first() else {
+        // Nothing to encode, so nothing encodes. That is the answer.
+        return;
+    };
+
+    let plan = PhysicalList::new(&fixture.list_prefix);
+    let mut body = fetch(&fixture, &plan).unwrap();
+    let xml = String::from_utf8_lossy(&body).into_owned();
+    assert!(
+        xml.contains("Encoded=\"true\""),
+        "{forbidden:?} is in a name XML cannot carry, so the listing must \
+         encode it: {xml}"
+    );
+    assert!(
+        xml.contains("100%25-"),
+        "Azure encodes the whole name, so a `%` in an encoded name is always \
+         written `%25` and xml::decode_percent may refuse a lone one. If this \
+         fails it encodes only what XML refuses, a literal `%` can reach a \
+         listed key, and decode_percent must stay lenient: {xml}"
+    );
+
+    // Whatever it encoded, the key comes back as it was written.
+    let blobs = fixture.blobs();
+    let mut entries = vec![ListEntry::default(); 8];
+    let Fill::Page(read) = blobs.fill_listing(&mut body, &mut entries).unwrap() else {
+        panic!("eight entries hold these");
+    };
+    let keys: Vec<&str> = entries[..read.filled].iter().map(|e| e.key).collect();
+    assert!(keys.contains(&key.as_str()), "{keys:?}");
 
     empty(&fixture);
 }
 
-/// Settles where Azure's limit on path segments falls. This crate does not
-/// count them, so a key with too many is a service failure rather than an
-/// [`InvalidPlan`](borink_object_storage_proto::InvalidPlan).
+/// Holds the boundary that `validate_put` was corrected to: Azure counts a
+/// key in UTF-16 code units, so a character outside the basic plane counts
+/// twice.
+///
+/// Measured. A name of 1024 two-byte characters is 1024 code units and is
+/// taken; one of 541 four-byte characters is 1041 code units and is refused
+/// with 400, though it is only 541 scalar values. A byte limit would have had
+/// to fall between 2007 and 2041, which no limit does.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_key_of_many_segments_is_refused_where_azure_says_it_is() {
+fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
+    let fixture = Fixture::from_env();
+    empty(&fixture);
+
+    let units = |key: &str| key.encode_utf16().count();
+    let prefix = units(&fixture.list_prefix);
+
+    // Exactly the limit, spelled two ways: all two-byte characters, and
+    // four-byte characters that reach it in half as many.
+    let widest = format!("{}{}", fixture.list_prefix, "é".repeat(1024 - prefix));
+    let deepest = format!(
+        "{}a{}",
+        fixture.list_prefix,
+        "🦀".repeat((1023 - prefix) / 2)
+    );
+    for key in [&widest, &deepest] {
+        assert_eq!(units(key), 1024, "{key:?}");
+        let owner = Fixture {
+            put_key: key.clone(),
+            ..clone(&fixture)
+        };
+        assert_eq!(
+            write(&owner, PutShape::default(), None, b"x")
+                .unwrap()
+                .outcome,
+            WriteOutcome::Created,
+            "1024 UTF-16 code units is the limit, and {} scalar values reach \
+             it here",
+            key.chars().count()
+        );
+    }
+
+    // One code unit more, and this crate refuses it rather than the service:
+    // a plan that cannot become a request is an invalid plan.
+    let over = format!("{}{}", fixture.list_prefix, "🦀".repeat(1024));
+    let owner = Fixture {
+        put_key: over,
+        ..clone(&fixture)
+    };
+    let refused = write(&owner, PutShape::default(), None, b"x").unwrap_err();
+    assert!(
+        refused.to_string().contains("key"),
+        "a key past the limit is refused before it is sent: {refused}"
+    );
+
+    empty(&fixture);
+}
+
+/// Settles whether the documented maximum of 254 `/`-delimited path segments
+/// is one this crate has to check. It is not.
+///
+/// Measured: a name of 255 segments is taken, so the documented limit is not
+/// enforced on a write. This asks for the most segments a key can hold at all,
+/// since a segment costs at least two code units and a key has 1024 of them,
+/// and that is taken too. There is nothing here for `validate_put` to refuse.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_key_holds_as_many_segments_as_its_length_allows() {
     let fixture = Fixture::from_env();
     empty(&fixture);
 
@@ -1210,34 +1217,27 @@ fn a_key_of_many_segments_is_refused_where_azure_says_it_is() {
     };
     let count = |key: &str| key.matches('/').count() + 1;
 
-    let allowed = of_segments(254);
-    assert_eq!(count(&allowed), 254);
-    let owner = Fixture {
-        put_key: allowed.clone(),
-        ..clone(&fixture)
-    };
-    assert_eq!(
-        write(&owner, PutShape::default(), None, b"x")
-            .unwrap()
-            .outcome,
-        WriteOutcome::Created,
-        "254 segments is the documented maximum"
-    );
-
-    let refused = of_segments(255);
-    assert_eq!(count(&refused), 255);
-    let owner = Fixture {
-        put_key: refused,
-        ..clone(&fixture)
-    };
-    let outcome = write(&owner, PutShape::default(), None, b"x")
-        .unwrap()
-        .outcome;
-    assert!(
-        !matches!(outcome, WriteOutcome::Created),
-        "255 segments is past the documented maximum of 254, and Azure took \
-         it: the limit is higher or gone, and the note on it should say so"
-    );
+    // Past the documented maximum, and then as far past it as a key of 1024
+    // code units can reach.
+    let longest = (1024 - fixture.list_prefix.len()).div_ceil(2) + 2;
+    for total in [255, longest] {
+        let key = of_segments(total);
+        assert_eq!(count(&key), total);
+        assert!(key.encode_utf16().count() <= 1024, "{}", key.len());
+        let owner = Fixture {
+            put_key: key,
+            ..clone(&fixture)
+        };
+        assert_eq!(
+            write(&owner, PutShape::default(), None, b"x")
+                .unwrap()
+                .outcome,
+            WriteOutcome::Created,
+            "{total} segments. The documentation gives 254 as the maximum; if \
+             this refuses, the limit is real and falls between 255 and \
+             {longest}, and validate_put has to count segments after all"
+        );
+    }
 
     empty(&fixture);
 }
@@ -1249,6 +1249,12 @@ fn a_key_of_many_segments_is_refused_where_azure_says_it_is() {
 /// them under the name it was given. A service that quietly folded `a//b` into
 /// `a/b` would leave a caller naming an object that does not exist, and a
 /// listing is the only thing that shows the stored name.
+///
+/// Measured: a trailing separator, a doubled one, a space before one, a dot
+/// inside a segment and a leading pair of them all survive. The two that did
+/// not are refused by `validate_put` now and cannot reach here: `dot.` was
+/// stored as `dot`, and `dots/../up` wrote `up`, because a host resolves the
+/// path before it sends it.
 #[test]
 #[ignore = "requires Azure credentials"]
 fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
@@ -1259,9 +1265,9 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     for edge in [
         "trailing/",
         "double//slash",
-        "dot.",
-        "dots/../up",
         "space /x",
+        "a.b/c",
+        "..leading",
     ] {
         let key = format!("{}{edge}", fixture.list_prefix);
         let owner = Fixture {
@@ -1286,10 +1292,8 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     for key in &created {
         assert!(
             listed.contains(key),
-            "{key:?} was taken and stored under another name. Either Azure \
-             folded the name, or the host resolved the path before sending it \
-             — a `..` between separators is the one a URL library rewrites. \
-             The listing reports {listed:?}"
+            "{key:?} was taken and stored under another name, so `addressable` \
+             has a case it does not know about. The listing reports {listed:?}"
         );
     }
 

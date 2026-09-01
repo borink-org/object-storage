@@ -13,7 +13,11 @@ use crate::{
 pub const VERSION: &str = "2026-04-06";
 
 // Azure limits blob names to 1,024 characters.
-const MAX_BLOB_NAME_CHARS: usize = 1024;
+// Azure counts a blob name in UTF-16 code units, so a character outside the
+// basic plane counts twice. Measured: a name of 1024 two-byte characters is
+// taken and one of 541 four-byte characters, which is 1041 code units, is
+// refused with 400. See the live suite.
+const MAX_BLOB_NAME_UNITS: usize = 1024;
 
 /// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
@@ -887,8 +891,32 @@ fn condition_header(kind: ConditionKind) -> Option<&'static str> {
     }
 }
 
+// The length of a name as Azure counts it.
+fn name_units(value: &str) -> usize {
+    value.chars().map(char::len_utf16).sum()
+}
+
+// Whether a key names one object and goes on naming it. Each rule here is a
+// name that would otherwise be stored, silently, under a name the caller did
+// not ask for.
+fn addressable(key: &str) -> bool {
+    if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
+        return false;
+    }
+    // Azure drops a dot from the end of a name: `dot.` is stored as `dot`, and
+    // a listing reports it that way. Measured; see the live suite.
+    if key.ends_with('.') {
+        return false;
+    }
+    // A host resolves these out of the URL before it sends it, as the standard
+    // for a URL says it must, so the request would name another object
+    // entirely. Measured: `dots/../up` wrote `up`.
+    !key.split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
 fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
-    if get.key.is_empty() || get.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(get.key) {
         return Err(InvalidPlan::Key.into());
     }
     match get.range {
@@ -924,7 +952,7 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
 fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
-    if put.key.is_empty() || put.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(put.key) {
         return Err(InvalidPlan::Key.into());
     }
     if len > MAX_PUT_LEN {
@@ -936,7 +964,11 @@ fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
 fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     // A prefix is the start of a key, so it is bounded like one. An empty
     // prefix lists the whole container and is valid.
-    if list.prefix.chars().count() > MAX_BLOB_NAME_CHARS {
+    // A prefix is the start of a key, so it is bounded like one. The rest of
+    // `addressable` does not apply: a prefix is written into the query, where
+    // nothing resolves a `..` and nothing drops a trailing dot, and `dir.` is
+    // an honest prefix of `dir.txt`.
+    if name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::Prefix.into());
     }
     if list.marker.is_some_and(<[u8]>::is_empty) {
@@ -949,7 +981,7 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
 }
 
 fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {
-    if delete.key.is_empty() || delete.key.chars().count() > MAX_BLOB_NAME_CHARS {
+    if !addressable(delete.key) {
         return Err(InvalidPlan::Key.into());
     }
     validate_condition(delete.condition, delete.condition_value)

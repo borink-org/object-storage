@@ -38,12 +38,16 @@ Azure conditions a request on an entity tag written the way a listing writes it,
 
 A listing of a container that is not there answers 404 `ContainerNotFound` only when the grant encloses the container being named. A credential scoped to one container is refused with 403 first, before Azure says whether any other container exists — deliberate, since a 404 there would tell an unauthorized caller which containers are real. That is why the read grant sits on `blobServices/default`: `listing_a_container_that_is_not_there_reports_that` cannot observe the 404 otherwise, and says so if it sees the 403 again.
 
+## What the suite measured about object keys
+
+Azure counts a key's length in **UTF-16 code units**, not characters or bytes. A name of 1024 two-byte characters is taken; one of 541 four-byte characters, which is 1041 code units, is refused with 400. `validate_put` counted Unicode scalar values and accepted the second, so `InvalidPlan::Key` claimed a key could become a request when it could not; it now counts the same unit Azure does.
+
+Two keys are stored under a name the caller did not write, so they are refused before they are sent. `dot.` is stored as `dot`: Azure drops a dot from the end of a name. `dots/../up` writes `up`: a host resolves dot segments out of the URL before sending it, as the standard for URLs requires. A trailing separator, a doubled separator, a space before one, a dot inside a segment and a leading pair of dots all survive unchanged.
+
+The documented maximum of 254 `/`-delimited path segments is not enforced on a write: 255 is taken. Since a segment costs at least two code units and a key holds 1024, no key this crate accepts can reach a segment limit, and there is nothing to check.
+
+Azure refuses `U+0001` in a name with 400, so the obvious way to make it write `Encoded="true"` is closed. Whether any name this crate can write reaches the encoded form is still open, and `a_name_that_xml_cannot_carry_is_refused_or_says_how_it_is_encoded` tries the rest of what XML 1.0 forbids. Until one of them can be stored, `xml::decode_percent` stays lenient about a `%` that is not an escape, because nothing measured says such a `%` is ever an escape.
+
 ## What the suite is still measuring
 
-Three questions about object keys are open, and the tests that settle them assert the answer this crate currently assumes, so a failure names the correction rather than just failing.
-
-`the_length_this_crate_allows_is_a_length_azure_allows` asks what unit Azure counts a key's 1024 characters in. This crate counts Unicode scalar values; Azure documents "characters" without saying which. Two probes separate the candidates: 1024 `é` is 1024 scalar values and 1024 UTF-16 code units but ~2007 bytes, while 500 `🦀` is 541 scalar values but 1041 UTF-16 code units. If Azure refuses the second alone it counts UTF-16 code units; if it refuses both it counts bytes; and `validate_put` should then count the same unit, because `InvalidPlan::Key` claims a key that passes it can become a request.
-
-`a_key_of_many_segments_is_refused_where_azure_says_it_is` pins the documented maximum of 254 `/`-delimited segments, which this crate does not check at all.
-
-`a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given` asks what becomes of the slashes this crate deliberately leaves literal, so that a hierarchical-namespace path works. A trailing separator, a doubled one, a trailing dot and a `..` between separators are each written and then listed: the point is not whether Azure accepts them but whether it stores them under the name it was given, since a folded name would leave a caller addressing an object that is not there. A `..` is also the case a URL library may resolve before the request is sent, so a failure there may be the host rather than the service.
+Whether any name this crate can write makes Azure percent-encode a listed one; see the paragraph above. That is the only open question about keys.
