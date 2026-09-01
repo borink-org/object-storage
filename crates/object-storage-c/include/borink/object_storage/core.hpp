@@ -33,12 +33,18 @@ using BytesMut      = borink_bytes_mut;
 using Span          = borink_span;
 using MaybeBytes    = borink_maybe_bytes;
 using MaybeU64      = borink_maybe_u64;
+using MaybeU32      = borink_maybe_u32;
+using MaybeSpan     = borink_maybe_span;
 using Status        = borink_status;
 using Session       = borink_session;
 using Range         = borink_range;
 using GetShape      = borink_get_shape;
 using PutShape      = borink_put_shape;
 using DeleteShape   = borink_delete_shape;
+using ListShape     = borink_list_shape;
+using ListEntry     = borink_list_entry;
+using Resume        = borink_resume;
+using Fill          = borink_fill;
 using RequestHeader = borink_request_header;
 using RequestHead   = borink_request_head;
 using HeaderRef     = borink_header_ref;
@@ -56,6 +62,8 @@ using DeleteKind    = borink_delete_kind;
 using FailureClass  = borink_failure_class;
 using ServiceError  = borink_service_error;
 using OutcomeKind   = borink_outcome_kind;
+using EntryKind     = borink_entry_kind;
+using FillKind      = borink_fill_kind;
 
 inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
 
@@ -118,6 +126,14 @@ inline constexpr OutcomeKind OutcomeKindNeedErrorBody       = BORINK_OUTCOME_KIN
 inline constexpr OutcomeKind OutcomeKindServiceFailure      = BORINK_OUTCOME_KIND_SERVICE_FAILURE;
 inline constexpr OutcomeKind OutcomeKindUnsupported         = BORINK_OUTCOME_KIND_UNSUPPORTED;
 inline constexpr OutcomeKind OutcomeKindInvalid             = BORINK_OUTCOME_KIND_INVALID;
+inline constexpr OutcomeKind OutcomeKindPage                = BORINK_OUTCOME_KIND_PAGE;
+
+inline constexpr EntryKind EntryKindObject    = BORINK_ENTRY_KIND_OBJECT;
+inline constexpr EntryKind EntryKindPrefix    = BORINK_ENTRY_KIND_PREFIX;
+inline constexpr EntryKind EntryKindDirectory = BORINK_ENTRY_KIND_DIRECTORY;
+
+inline constexpr FillKind FillKindPage    = BORINK_FILL_KIND_PAGE;
+inline constexpr FillKind FillKindPartial = BORINK_FILL_KIND_PARTIAL;
 
 // Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }
@@ -131,6 +147,11 @@ inline Range bounded(std::uint64_t start, std::uint64_t end) {
 inline Range from(std::uint64_t start) {
     return Range{RangeFormOffset, start, 0};
 }
+
+// Returns a count of entries as the number a listing plan carries.
+//
+// A default-built number is absent, which asks for the service's maximum.
+inline MaybeU32 at_most(std::uint32_t entries) { return MaybeU32{true, entries}; }
 
 // Reads text as the bytes a call takes.
 inline Bytes as_bytes(std::string_view value) {
@@ -184,6 +205,21 @@ struct Write {
     PutShape shape() const { return PutShape{condition}; }
 };
 
+// The settings of one page of a listing.
+//
+// The defaults ask for every key under the prefix, in pages of the size that
+// the service chooses.
+struct List {
+    // Whether the listing groups the keys at each `/` after the prefix.
+    bool delimited = false;
+    // The most entries that one page reports.
+    MaybeU32 max_results = {};
+    // Where the previous page ended. Empty asks for the first page.
+    std::string_view marker;
+
+    ListShape shape() const { return ListShape{delimited, max_results}; }
+};
+
 // The settings of one removal.
 struct Removal {
     // What the removal takes with it.
@@ -211,6 +247,25 @@ inline std::span<const std::uint8_t> bytes_of(const MaybeBytes &value) {
 inline std::string_view text_of(const MaybeBytes &value) {
     const std::span<const std::uint8_t> bytes = bytes_of(value);
     return std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+// Returns the bytes of a value that a call lent back.
+//
+// The span points into the storage that the call read, and is valid for as
+// long as that storage is. Copy what you keep.
+inline std::span<const std::uint8_t> bytes_of(const Bytes &value) {
+    return std::span<const std::uint8_t>(value.ptr, value.len);
+}
+
+// Returns the same bytes as text, for a value that is text, such as the key of
+// a listing entry.
+inline std::string_view text_of(const Bytes &value) {
+    return std::string_view(reinterpret_cast<const char *>(value.ptr), value.len);
+}
+
+// Returns the entries that a fill wrote, as the part of your array it filled.
+inline std::span<const ListEntry> entries_of(std::span<const ListEntry> into, const Fill &fill) {
+    return into.subspan(0, fill.filled);
 }
 
 // What a describe call wrote into a room.
