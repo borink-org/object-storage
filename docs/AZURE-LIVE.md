@@ -44,14 +44,14 @@ Azure counts a key's length in **UTF-16 code units**, not characters or bytes. A
 
 Two keys are stored under a name the caller did not write, so they are refused before they are sent. `dot.` is stored as `dot`: Azure drops a dot from the end of a name. `dots/../up` writes `up`: a host resolves dot segments out of the URL before sending it, as the standard for URLs requires. A trailing separator, a doubled separator, a space before one, a dot inside a segment and a leading pair of dots all survive unchanged.
 
-The documented maximum of 254 `/`-delimited path segments is not what the service enforces: 255 is taken and 494 is refused with 400. `a_key_holds_the_segments_azure_says_it_may` bisects for the real boundary and holds it.
+The documented maximum of 254 `/`-delimited path segments is off by one: bisection puts the boundary at **255**, so 255 segments is taken and 256 is refused with 400. `addressable` holds that number, and `a_key_holds_the_segments_azure_says_it_may` re-bisects for it.
 
 A listed name that says `Encoded="true"` is encoded **whole**, down to the separators between its segments: `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`. So every `%` in an encoded name begins an escape, and `xml::decode_percent` refuses one that does not. Azure refuses the C0 controls in a name outright, with 400, but holds `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to carry; those are what make it write the encoded form.
 
-Azure refuses a control character in a name with 400, measured for `U+0001`, `U+000B`, `U+000C` and `U+000E`. `addressable` refuses every byte below a space, which is wider than the measurement, and `the_control_characters_azure_refuses_are_the_ones_this_crate_refuses` checks the rest of the class — including tab, line feed and carriage return, which XML itself allows and where a narrower rule would have to stop — and the two just outside it, `U+007F` and `U+0085`, which this crate allows.
+Azure refuses an ASCII control character in a name with 400, measured for `U+0001`, `U+000B`, `U+000C`, `U+000E` and `U+007F`. `addressable` refuses the whole class, which is wider than the measurement, and `the_control_characters_azure_refuses_are_the_ones_this_crate_refuses` checks the rest of it — including tab, line feed and carriage return, which XML itself allows and where a narrower rule would have to stop — and `U+0085` just outside it, a control character that is not an ASCII one.
 
 Azure drops a dot from the end of **every segment** of a name, not just the end of the name: `dot.` is stored as `dot` and `dotseg./x` as `dotseg/x`. A `.` or `..` segment is resolved out of the URL by the host before the request is sent, as the standard for URLs requires, so `dots/../up` writes `up`. Both are refused by `addressable` rather than stored under a name the caller did not write.
 
 ## What the suite is still measuring
 
-Where the limit on path segments falls. It is somewhere between 256 and 493; the bisection names it, and `addressable` has to refuse past it once it is named.
+Whether Azure refuses control characters that are not ASCII ones. `U+0085` is the probe; `addressable` allows it, and the test says so if the service does not.

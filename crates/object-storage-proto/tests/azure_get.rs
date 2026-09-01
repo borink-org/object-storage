@@ -294,7 +294,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
 
     // Azure refuses a control character in a name, so a key holding one is a
     // key that cannot become a request.
-    for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}"] {
+    for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}", "a\u{7f}b"] {
         assert_eq!(
             refused(key),
             Err(Error::InvalidPlan(InvalidPlan::Key)),
@@ -303,7 +303,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     }
     // A character outside ASCII is not a control character, whatever its
     // bytes look like one at a time.
-    for key in ["café", "🦀", "\u{7f}", "\u{85}"] {
+    for key in ["café", "🦀", "\u{85}", "\u{a0}"] {
         assert!(refused(key).is_ok(), "{key:?}");
     }
 
@@ -316,6 +316,13 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
             "{key:?}"
         );
     }
+
+    // Azure takes 255 `/`-delimited segments and refuses 256.
+    assert!(refused(&vec!["s"; 255].join("/")).is_ok());
+    assert_eq!(
+        refused(&vec!["s"; 256].join("/")),
+        Err(Error::InvalidPlan(InvalidPlan::Key))
+    );
 
     // A dot that is not the whole segment and not at the end is ordinary text,
     // and so is a slash wherever it falls but the cases above.

@@ -19,6 +19,10 @@ pub const VERSION: &str = "2026-04-06";
 // refused with 400. See the live suite.
 const MAX_BLOB_NAME_UNITS: usize = 1024;
 
+// The most `/`-delimited segments Azure takes in a name. Its documentation
+// gives 254; measurement gives this.
+const MAX_BLOB_NAME_SEGMENTS: usize = 255;
+
 /// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct Container<'a> {
@@ -903,11 +907,17 @@ fn addressable(key: &str) -> bool {
     if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
         return false;
     }
-    // Azure refuses a control character in a name, with 400. Measured for
-    // U+0001, U+000B, U+000C and U+000E, and the live suite checks the rest of
-    // the class. A byte below a space is always one of them: every byte of a
-    // character outside ASCII is 0x80 or above.
-    if key.bytes().any(|byte| byte < 0x20) {
+    // Azure refuses an ASCII control character in a name, with 400. Measured
+    // for U+0001, U+000B, U+000C, U+000E and U+007F. Testing the bytes is
+    // testing the characters: every byte of a character outside ASCII is 0x80
+    // or above, and none of those is an ASCII control.
+    if key.bytes().any(|byte| byte.is_ascii_control()) {
+        return false;
+    }
+    // Azure takes a name of 255 `/`-delimited segments and refuses 256,
+    // whatever the 254 in its documentation says. Measured by bisection; see
+    // the live suite.
+    if key.matches('/').count() + 1 > MAX_BLOB_NAME_SEGMENTS {
         return false;
     }
     // Azure drops a dot from the end of every segment of a name: `dot.` is

@@ -1082,27 +1082,13 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     let fixture = Fixture::from_env();
     empty(&fixture);
 
-    // What XML 1.0 forbids and Azure refuses to hold at all.
-    for control in ['\u{1}', '\u{B}', '\u{C}', '\u{E}'] {
-        let key = format!("{}c-{control}.txt", fixture.list_prefix);
-        let owner = Fixture {
-            put_key: key,
-            ..clone(&fixture)
-        };
-        assert!(
-            !matches!(
-                write(&owner, PutShape::default(), None, b"x")
-                    .unwrap()
-                    .outcome,
-                WriteOutcome::Created
-            ),
-            "Azure took {control:?} in a name; it refused one before, and a \
-             name it holds is one this test should list"
-        );
-    }
-
-    // What it forbids and Azure does hold. The percent is the byte in
-    // question: in an encoded name it must be written `%25`.
+    // What XML forbids and Azure does hold. The control characters it forbids
+    // and Azure does not hold are
+    // `the_control_characters_azure_refuses_are_the_ones_this_crate_refuses`,
+    // which can still send them because it writes its own request.
+    //
+    // The percent is the byte in question: in an encoded name it must be
+    // written `%25`.
     let key = format!("{}100%-{}-name.txt", fixture.list_prefix, '\u{fffe}');
     let owner = Fixture {
         put_key: key.clone(),
@@ -1249,8 +1235,8 @@ fn a_key_holds_the_segments_azure_says_it_may() {
     empty(&fixture);
 }
 
-// Measured by the bisection above.
-const MAX_SEGMENTS: usize = 256;
+// Measured by the bisection above, and the number `addressable` holds.
+const MAX_SEGMENTS: usize = 255;
 
 /// Settles what Azure does with the slashes this crate leaves literal in the
 /// URL path, which is what makes a hierarchical-namespace path work.
@@ -1272,16 +1258,12 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     empty(&fixture);
 
     let mut created = Vec::new();
-    // `dotseg./x` is the one that says whether the dot Azure drops goes from
-    // the end of a name or from the end of every segment. Only the first was
-    // measured, and `addressable` refuses only the first.
     for edge in [
         "trailing/",
         "double//slash",
         "space /x",
         "a.b/c",
         "..leading",
-        "dotseg./x",
     ] {
         let key = format!("{}{edge}", fixture.list_prefix);
         let owner = Fixture {
@@ -1383,20 +1365,21 @@ fn raw_delete(fixture: &Fixture, escaped: &str) -> u16 {
 
 /// Draws the line `addressable` draws around control characters in a key.
 ///
-/// Measured before: Azure refuses `U+0001`, `U+000B`, `U+000C` and `U+000E`
-/// with 400. This crate refuses every byte below a space on that evidence,
-/// which is a wider claim than the measurement, so this checks the rest of the
-/// class — including the three that XML itself allows, which are where a
-/// narrower rule would have to stop.
+/// Measured: Azure refuses `U+0001`, `U+000B`, `U+000C`, `U+000E` and
+/// `U+007F` with 400. This crate refuses every ASCII control character on that
+/// evidence, which is a wider claim than the measurement, so this checks the
+/// rest of the class — including the three that XML itself allows, which are
+/// where a narrower rule would have to stop.
 ///
-/// It also checks the two just outside the class, so the rule is no wider than
-/// the service's.
+/// It also checks one just outside the class, so the rule is no wider than the
+/// service's. `U+0085` is a control character that is not an ASCII one, and
+/// neither of its bytes is.
 #[test]
 #[ignore = "requires Azure credentials"]
 fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
     let fixture = Fixture::from_env();
 
-    for escaped in ["%01", "%09", "%0A", "%0D", "%1F"] {
+    for escaped in ["%01", "%09", "%0A", "%0D", "%1F", "%7F"] {
         let key = format!("{}c-{escaped}.txt", fixture.list_prefix);
         let status = raw_put(&fixture, &key);
         if (200..300).contains(&status) {
@@ -1409,19 +1392,18 @@ fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
         );
     }
 
-    // Just outside the class: a delete and a C1 control, whose bytes are all
-    // above a space. This crate allows both.
-    for escaped in ["%7F", "%C2%85"] {
-        let key = format!("{}c-{escaped}.txt", fixture.list_prefix);
-        let status = raw_put(&fixture, &key);
-        if (200..300).contains(&status) {
-            assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
-        }
-        assert!(
-            (200..300).contains(&status),
-            "Azure refused {escaped}, which is outside the class this crate \\
-             refuses, so the rule is narrower than the service's and has to \\
-             grow: status {status}"
-        );
+    // Just outside the class: a C1 control, whose bytes are both above a
+    // space, so no byte of it is an ASCII control. This crate allows it.
+    let escaped = "%C2%85";
+    let key = format!("{}c-{escaped}.txt", fixture.list_prefix);
+    let status = raw_put(&fixture, &key);
+    if (200..300).contains(&status) {
+        assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
     }
+    assert!(
+        (200..300).contains(&status),
+        "Azure refused {escaped}, which is outside the class this crate \
+         refuses, so the rule is narrower than the service's and has to \
+         grow: status {status}"
+    );
 }
