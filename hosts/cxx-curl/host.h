@@ -47,6 +47,13 @@ inline std::uint64_t now_unix() {
 // keeps none of it, so the application decides what an object costs it.
 using Sink = std::function<void(std::span<const std::uint8_t>)>;
 
+// Where the entries of a listing go as they are read.
+//
+// A listing calls this once per arrayful of entries, for the same reason: the
+// application decides what a listing costs it. The entries are valid for the
+// call alone.
+using EntrySink = std::function<void(std::span<const ListEntry>)>;
+
 // How much memory one client may use.
 struct Limits {
     // The most that one request head may take. A request that needs more is
@@ -192,14 +199,25 @@ class Client {
     // caller knows whether it meant to remove an object that is already gone.
     void remove(std::string_view key, const Removal &removal = {});
 
+    // Reads every key under `prefix`, passing the entries to `sink`.
+    //
+    // This client asks for one page after another, and reads each page in as
+    // many rounds as `entries` takes. `entries` is your budget: no more of a
+    // listing is in memory at once, however many keys the container holds.
+    //
+    // Throws std::runtime_error if Azure listed nothing, or if a page is
+    // larger than this client allows.
+    void list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
+              const List &plan = {});
+
     // Reads one page of the keys under `prefix` into `entries`.
     //
-    // The entries point into this client's page buffer, and stay valid until
-    // the next request through it. Copy what you keep.
+    // Use this instead of `list` to hold a page across other work, or to ask
+    // for one page and stop. The entries point into this client's page buffer,
+    // and stay valid until the next request through it. Copy what you keep.
     //
-    // Throws std::runtime_error if Azure listed nothing, or if the page is
-    // larger than this client allows.
-    Page list(std::string_view prefix, std::span<ListEntry> entries, const List &plan = {});
+    // Throws what `list` throws.
+    Page page(std::string_view prefix, std::span<ListEntry> entries, const List &plan = {});
 
     // Reads the rest of the page that the last call left unread.
     //
@@ -289,6 +307,9 @@ class Client {
     CollectedHead head_;
     std::vector<std::uint8_t> diagnostic_;
     std::vector<std::uint8_t> page_;
+    // The text that names the page after the one in `page_`. A listing keeps
+    // it here because the next request overwrites the bytes it came from.
+    std::string marker_;
     Outcome outcome_{};
 
     // Turns what one fill read into the page that the caller reads.

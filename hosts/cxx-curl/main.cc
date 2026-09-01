@@ -48,30 +48,9 @@ void write_all(std::span<const std::uint8_t> part) {
     }
 }
 
-// Writes every key under `prefix`, one page and one array at a time.
-//
-// The array is this program's budget. A page larger than it is read in as many
-// rounds as it takes, and the marker of the last page asks for the next one.
-void list(borink::host::Client &client, std::string_view prefix) {
-    std::vector<borink::ListEntry> entries(1000);
-    std::string marker;
-    for (;;) {
-        borink::host::Page page = client.list(
-            prefix, entries, borink::List{false, borink::at_most(1000), marker});
-        for (;;) {
-            for (const borink::ListEntry &entry : page.entries) {
-                std::cout << borink::text_of(entry.key) << "\n";
-            }
-            if (page.complete) {
-                break;
-            }
-            page = client.more(page.resume, entries);
-        }
-        if (page.next_marker.empty()) {
-            return;
-        }
-        // The next request overwrites the page these bytes point into.
-        marker = std::string(page.next_marker);
+void write_keys(std::span<const borink::ListEntry> entries) {
+    for (const borink::ListEntry &entry : entries) {
+        std::cout << borink::text_of(entry.key) << "\n";
     }
 }
 
@@ -101,7 +80,10 @@ int main(int argc, char **argv) {
         } else if (command == "delete") {
             client.remove(key);
         } else if (command == "list") {
-            list(client, key);
+            // The array is this program's budget: the client reads every page
+            // into it, an arrayful at a time, and holds no more than that.
+            std::vector<borink::ListEntry> entries(1000);
+            client.list(key, entries, write_keys, borink::List{false, borink::at_most(1000), {}});
         } else {
             std::cerr << "unknown command " << command << "\n";
             return 2;

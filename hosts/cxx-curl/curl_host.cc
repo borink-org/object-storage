@@ -353,7 +353,29 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     }
 }
 
-Page Client::list(std::string_view prefix, std::span<ListEntry> entries, const List &plan) {
+void Client::list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
+                  const List &plan) {
+    List asking = plan;
+    marker_.assign(plan.marker);
+    for (;;) {
+        asking.marker = marker_;
+        Page current = page(prefix, entries, asking);
+        for (;;) {
+            sink(current.entries);
+            if (current.complete) {
+                break;
+            }
+            current = more(current.resume, entries);
+        }
+        if (current.next_marker.empty()) {
+            return;
+        }
+        // The next request overwrites the buffer these bytes point into.
+        marker_.assign(current.next_marker);
+    }
+}
+
+Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const List &plan) {
     const std::uint64_t now = now_unix();
     const Session session = this->session();
     const ListShape shape = plan.shape();
@@ -363,13 +385,13 @@ Page Client::list(std::string_view prefix, std::span<ListEntry> entries, const L
     });
 
     page_.clear();
-    Collected page{page_, limits_.page_bytes};
+    Collected collected{page_, limits_.page_bytes};
     Handle handle;
     apply(handle, *this, request);
     handle.set(CURLOPT_HEADERFUNCTION, collect_head);
     handle.set(CURLOPT_HEADERDATA, &head_);
     handle.set(CURLOPT_WRITEFUNCTION, collect_page);
-    handle.set(CURLOPT_WRITEDATA, &page);
+    handle.set(CURLOPT_WRITEDATA, &collected);
     handle.send();
 
     checked_head();
@@ -385,7 +407,7 @@ Page Client::list(std::string_view prefix, std::span<ListEntry> entries, const L
     if (outcome_.kind != OutcomeKindPage) {
         fail("Azure listed no keys");
     }
-    if (page.overflowed) {
+    if (collected.overflowed) {
         throw std::runtime_error("the listing page is larger than this client allows");
     }
     return read(borink_fill_listing(&session, page_buffer(), entries.data(), entries.size()),
