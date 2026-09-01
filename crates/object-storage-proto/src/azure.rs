@@ -108,7 +108,7 @@ impl<'a> Blobs<'a> {
         validate_get(get)?;
         let available = buf.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, get.key, get.range, now);
+        self.build(&mut head, Some(get.key), &[], get.range, now);
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
@@ -150,7 +150,7 @@ impl<'a> Blobs<'a> {
         let available = buf.len();
         let length = content.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, put.key, RequestedRange::Whole, now);
+        self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
         head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
@@ -163,17 +163,13 @@ impl<'a> Blobs<'a> {
 
     // The parts that every request head carries, in the order that they are
     // written into the caller's buffer. Each part is one range of that buffer.
-    fn build(&self, head: &mut HeadWriter<'_>, key: &str, range: RequestedRange, now: &Timestamps) {
-        self.build_with_query(head, Some(key), &[], range, now);
-    }
-
-    // The same, for a request that names a query. `key` is `None` for a
-    // request that addresses the container rather than one object in it.
-    fn build_with_query(
+    // `key` is `None` for a request that names the container alone, and the
+    // query is written in the order it is given.
+    fn build(
         &self,
         head: &mut HeadWriter<'_>,
         key: Option<&str>,
-        query: &[(&str, QueryValue<'_>)],
+        query: &[Option<(&str, QueryValue<'_>)>],
         range: RequestedRange,
         now: &Timestamps,
     ) {
@@ -187,7 +183,7 @@ impl<'a> Blobs<'a> {
                     out.push(part.as_bytes());
                 }
             }
-            for (index, (name, value)) in query.iter().enumerate() {
+            for (index, (name, value)) in query.iter().flatten().enumerate() {
                 out.push(if index == 0 { b"?" } else { b"&" });
                 out.push(name.as_bytes());
                 out.push(b"=");
@@ -327,7 +323,7 @@ impl<'a> Blobs<'a> {
         validate_delete(delete)?;
         let available = buf.len();
         let mut head = HeadWriter::new(buf);
-        self.build(&mut head, delete.key, RequestedRange::Whole, now);
+        self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
             head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
         }
@@ -466,13 +462,8 @@ impl<'a> Blobs<'a> {
 
     /// Writes the request head for one page of `list` into `buf`.
     ///
-    /// The request addresses the container rather than one object, and names
-    /// the page in its query. The response carries the page as a document in
-    /// its body: read it whole and pass it to [`Self::fill_listing`].
-    ///
-    /// This crate performs no I/O and cannot read the clock, so pass the
-    /// current time in `now`. This method copies the date into `buf` with the
-    /// rest of the head, so `now` can be a temporary.
+    /// The response carries the page as a document in its body: read it whole
+    /// and pass it to [`Self::fill_listing`].
     ///
     /// # Errors
     ///
@@ -495,40 +486,28 @@ impl<'a> Blobs<'a> {
         let available = buf.len();
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
-        let mut query = [("", QueryValue::Literal("")); MAX_LIST_QUERY];
-        let mut count = 0;
-        let mut push = |name, value| {
-            query[count] = (name, value);
-            count += 1;
-        };
-        push("restype", QueryValue::Literal("container"));
-        push("comp", QueryValue::Literal("list"));
-        if !list.prefix.is_empty() {
-            push("prefix", QueryValue::Encoded(list.prefix.as_bytes()));
-        }
-        if list.delimited {
-            push("delimiter", QueryValue::Encoded(DELIMITER));
-        }
-        if let Some(marker) = list.marker {
-            push("marker", QueryValue::Encoded(marker));
-        }
-        if let Some(max_results) = list.max_results {
-            push("maxresults", QueryValue::Number(max_results));
-        }
+        let query = [
+            Some(("restype", QueryValue::Literal("container"))),
+            Some(("comp", QueryValue::Literal("list"))),
+            (!list.prefix.is_empty())
+                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
+            list.delimited
+                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            list.marker
+                .map(|marker| ("marker", QueryValue::Encoded(marker))),
+            list.max_results
+                .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
+        ];
 
         let mut head = HeadWriter::new(buf);
-        self.build_with_query(&mut head, None, &query[..count], RequestedRange::Whole, now);
+        self.build(&mut head, None, &query, RequestedRange::Whole, now);
         encoded(head, available, Method::Get, Payload::Slice(&[]))
     }
 
     /// Reads the response head of a listing and reports what Azure did.
     ///
-    /// This method takes no shape. Nothing in a listing plan changes what a
-    /// head means: a page is a page whatever was asked for, and the entries
-    /// are in the body.
-    ///
-    /// Every head that Azure sends becomes a [`ListHeadOutcome`], including
-    /// the heads that report a failure.
+    /// A head that reports a failure is an outcome too, so it returns [`Ok`].
+    /// Only a head that cannot be read is an [`Err`].
     ///
     /// # Errors
     ///
@@ -578,33 +557,22 @@ impl<'a> Blobs<'a> {
 
     /// Reads a page out of the response body of a listing.
     ///
-    /// Pass the whole body, which [`ListHeadOutcome::Page`] announced, and an
-    /// array to write the entries into. The entries borrow `body`: the text in
-    /// it is decoded where it stands, so no byte is copied and no scratch
-    /// buffer exists.
+    /// Pass the whole body that [`ListHeadOutcome::Page`] announced and an
+    /// array to write the entries into. Reading is destructive: a body that
+    /// has been read is no longer a document.
     ///
-    /// Your array is the budget, and a page that does not fit in it loses
-    /// nothing. Reading stops at the entry that would not fit, before that
-    /// entry is touched, and [`Fill::Partial`] hands back the [`Resume`] that
-    /// reads the rest of the same body with [`Self::resume_listing`]. Size the
-    /// array to the `max_results` that the plan asked for and one call always
-    /// holds the page.
+    /// Your array is the budget. A page that does not fit fills the array and
+    /// returns [`Fill::Partial`], which carries the [`Resume`] that reads the
+    /// rest with [`Self::resume_listing`]; no entry is lost or read twice. An
+    /// array of `max_results` entries always holds the whole page.
     ///
-    /// Every byte that has been read is decoded where it stood, so `body` is
-    /// no longer a document there. Only [`Self::resume_listing`] reads it
-    /// again, and only from where this call stopped.
-    ///
-    /// A listing of any size is read one page at a time. Copy the marker that
-    /// [`Listing`](crate::Listing) reports into your own storage, plan the
-    /// next page with it, and stop when a page reports none. A
-    /// [`Fill::Partial`] names no marker, so a loop that asks for the next
-    /// page cannot step over entries that it has not read.
+    /// Only [`Fill::Page`] reports a marker, so continuing on the marker
+    /// cannot step over entries that were not read.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a listing page: it is not UTF-8, it is not well formed, it is
-    /// another document, or an entry in it is missing what an entry must have.
+    /// not a listing page.
     pub fn fill_listing<'b>(
         &self,
         body: &'b mut [u8],
@@ -622,9 +590,8 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] as
-    /// [`Self::fill_listing`] does. A [`Resume`] from another body describes
-    /// nothing in this one, and is refused the same way or reads what it
-    /// points at; keep each one with the buffer it came from.
+    /// [`Self::fill_listing`] does. A [`Resume`] describes one body: keep each
+    /// with the buffer it came from.
     pub fn resume_listing<'b>(
         &self,
         body: &'b mut [u8],
@@ -638,9 +605,6 @@ impl<'a> Blobs<'a> {
 // Both providers group keys at `/` and at nothing else, so the delimiter is
 // what a plan turns on rather than a byte that it carries.
 const DELIMITER: &[u8] = b"/";
-
-// `restype`, `comp`, and the four that a plan turns on.
-const MAX_LIST_QUERY: usize = 6;
 
 // One query value, in the form that the URL writer needs it.
 #[derive(Clone, Copy)]

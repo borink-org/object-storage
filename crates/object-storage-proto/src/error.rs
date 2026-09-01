@@ -165,7 +165,8 @@ pub enum ResponseFault {
     Status = 2,
     /// The service served a range other than the one that the plan requested.
     Range = 3,
-    /// The response body is not the document that the head announced.
+    /// The response body is not well formed, or it is not the document that
+    /// answers the request.
     Body = 4,
 }
 
@@ -177,7 +178,7 @@ impl ResponseFault {
             Self::Head => "the response head is unreadable, or it contradicts itself",
             Self::Status => "the status does not answer the request",
             Self::Range => "the service served another range than the plan requested",
-            Self::Body => "the response body is not the document that the head announced",
+            Self::Body => "the response body is not the document that answers the request",
         }
     }
 

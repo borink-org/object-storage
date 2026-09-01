@@ -470,9 +470,9 @@ impl EntryKind {
 
 /// The part of a listing plan that holds no borrows.
 ///
-/// This is [`Copy`] and has no lifetime, so you can store it while the request
-/// is in flight. Pass it back to [`PhysicalList::from_shape`] with the prefix
-/// and the marker to plan the next page.
+/// Store it while the request is in flight, then pass it back to
+/// [`PhysicalList::from_shape`] with the prefix and the marker to plan the
+/// next page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListShape {
     /// Whether the listing groups keys at each `/` after the prefix.
@@ -548,10 +548,9 @@ impl<'h> PhysicalList<'h> {
 
 /// One entry of a listing page.
 ///
-/// Every slice borrows the response body that you passed to
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing), which decoded the text
-/// where it stood. The body is no longer a document afterwards, and these
-/// slices are valid until you reuse it.
+/// Every slice points into the body that
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
+/// until you reuse that buffer.
 ///
 /// The fields hold the bytes that the service sent, as [`ObjectMeta`] does.
 /// Read `last_modified` with

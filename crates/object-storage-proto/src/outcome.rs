@@ -283,11 +283,9 @@ pub enum DeleteHeadOutcome<'h> {
 
 /// The result of reading the response head of a listing.
 ///
-/// Every head that Azure sends becomes one of these values, including the
-/// heads that report a failure.
-///
+/// A head that reports a failure is one of these too;
 /// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) returns an
-/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+/// [`Err`] only for a head it cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListHeadOutcome<'h> {
@@ -299,8 +297,7 @@ pub enum ListHeadOutcome<'h> {
     Page {
         /// The exact length of the response body, if the head states it.
         ///
-        /// Size the body buffer from this. The body is a document, not object
-        /// bytes, so there is no offset into an object to report with it.
+        /// Size the body buffer from this.
         expected_len: Option<u64>,
     },
     /// The container does not exist, so there was nothing to list.
@@ -324,30 +321,22 @@ pub enum ListHeadOutcome<'h> {
 
 /// What one call to [`Blobs::fill_listing`](crate::Blobs::fill_listing) read.
 ///
-/// Your array is the budget. A page that does not fit in it is not an error
-/// and loses nothing: the call stops at the entry that would not fit, leaving
-/// the rest of the body as it found it, and hands back the token that reads
-/// the rest.
+/// A page too large for your array is not an error and loses nothing: what did
+/// not fit is read by [`Blobs::resume_listing`](crate::Blobs::resume_listing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fill<'b> {
     /// The page was read to its end.
     Page(Listing<'b>),
     /// The array filled before the page ended.
     ///
-    /// Use the entries that were written, and then read the rest of the same
-    /// body with
-    /// [`Blobs::resume_listing`](crate::Blobs::resume_listing). The entries
-    /// borrow the body, so the compiler will not let you do it the other way
-    /// round.
+    /// Use the entries that were written, then read the rest of the same body
+    /// with [`Blobs::resume_listing`](crate::Blobs::resume_listing).
     ///
-    /// An array with no room at all reports this with `filled` of zero and
-    /// makes no progress.
+    /// An array with no room reports `filled` of zero and makes no progress.
     Partial {
         /// The number of entries written into your array.
         filled: usize,
         /// Where the rest of the page starts.
-        ///
-        /// This describes the body it came from and no other.
         resume: Resume,
     },
 }
@@ -356,7 +345,7 @@ pub enum Fill<'b> {
 ///
 /// [`Fill::Partial`] hands this out and
 /// [`Blobs::resume_listing`](crate::Blobs::resume_listing) takes it back. It
-/// holds no borrow, so it can sit beside the buffer it describes.
+/// describes one body, and means nothing applied to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resume {
     // Where the walk stopped: the next entry, or the tag that closes them.
@@ -380,13 +369,11 @@ pub struct Listing<'b> {
     /// Where the next page starts, or [`None`] when the listing is complete.
     ///
     /// Copy these bytes into your own storage and pass them as
-    /// [`PhysicalList::marker`](crate::PhysicalList::marker). They borrow the
-    /// body, which the next page overwrites.
+    /// [`PhysicalList::marker`](crate::PhysicalList::marker); the next page
+    /// overwrites the body they borrow.
     ///
-    /// This is how a listing of any size is read: one page at a time, with the
-    /// service naming where to continue. A page reports a marker whenever more
-    /// keys follow, even if this page reported fewer entries than it asked
-    /// for.
+    /// A page names a next one whenever more keys follow, even if it reported
+    /// fewer entries than it asked for.
     pub next_marker: Option<&'b [u8]>,
 }
 

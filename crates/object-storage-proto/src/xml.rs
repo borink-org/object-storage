@@ -60,8 +60,11 @@ const PREFIX_OPEN: &[u8] = b"<BlobPrefix>";
 const PREFIX_CLOSE: &[u8] = b"</BlobPrefix>";
 
 pub(crate) fn fill_listing<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Result<Fill<'b>> {
+    // Both tokeniser passes read `&str`, so the bytes are checked here and
+    // again per entry. Neither check can be dropped without `unsafe`, and
+    // both are one linear pass over bytes the passes then read anyway.
     let page = locate_page(str::from_utf8(body).map_err(|_| fault())?)?;
-    walk(body, page, into)
+    read_page(body, page, into)
 }
 
 pub(crate) fn resume_listing<'b>(
@@ -69,13 +72,12 @@ pub(crate) fn resume_listing<'b>(
     resume: Resume,
     into: &mut [ListEntry<'b>],
 ) -> Result<Fill<'b>> {
-    walk(body, resume, into)
+    read_page(body, resume, into)
 }
 
-// The second pass. It starts where the first pass said the entries do, or
-// where a previous call stopped, and reads until the array is full or the page
-// ends.
-fn walk<'b>(body: &'b mut [u8], page: Resume, into: &mut [ListEntry<'b>]) -> Result<Fill<'b>> {
+// The second pass. It starts where `locate_page` said the entries do, or where
+// a previous call stopped, and reads until the array is full or the page ends.
+fn read_page<'b>(body: &'b mut [u8], page: Resume, into: &mut [ListEntry<'b>]) -> Result<Fill<'b>> {
     let total = body.len();
     if page.at > total {
         return Err(fault());
