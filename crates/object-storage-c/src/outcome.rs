@@ -215,7 +215,7 @@ pub(crate) fn kind_view(kind: Option<ServiceErrorKind>) -> u16 {
     kind.map_or(0, |kind| kind as u16)
 }
 
-fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
+pub(crate) fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
     value.map_or_else(Default::default, |value| MaybeBytes {
         present: true,
         bytes: bytes(value),
@@ -229,7 +229,7 @@ fn bytes(value: &[u8]) -> Bytes {
     }
 }
 
-fn maybe_number(value: Option<u64>) -> MaybeU64 {
+pub(crate) fn maybe_number(value: Option<u64>) -> MaybeU64 {
     value.map_or_else(Default::default, |value| MaybeU64 {
         present: true,
         value,

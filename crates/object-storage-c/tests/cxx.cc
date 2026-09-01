@@ -165,6 +165,37 @@ void reads_the_rest_of_a_page_that_did_not_fit() {
     CHECK(fill.next_marker.present == false);
 }
 
+// An entry's entity tag and date are read by the helpers beside them.
+void reads_the_values_an_entry_lends() {
+    std::string body = "<EnumerationResults><Blobs>"
+                       "<Blob><Name>a.txt</Name><Properties>"
+                       "<Last-Modified>Wed, 26 Aug 2026 12:00:00 GMT</Last-Modified>"
+                       "<Etag>0x8DF0</Etag>"
+                       "<Content-Length>4</Content-Length></Properties></Blob>"
+                       "</Blobs><NextMarker /></EnumerationResults>";
+    const borink::Session session = a_session();
+    const borink::BytesMut page =
+        borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(body.data()),
+                                             body.size()));
+    std::array<borink::ListEntry, 1> entries{};
+    const borink::Fill fill =
+        borink_fill_listing(&session, page, entries.data(), entries.size());
+    CHECK(fill.filled == 1);
+
+    // The listed tag carries no quotes; a condition takes the quoted form.
+    CHECK(borink::text_of(entries[0].e_tag) == "0x8DF0");
+    std::array<std::uint8_t, 32> room{};
+    CHECK(borink::quoted_etag(entries[0].e_tag, room) == "\"0x8DF0\"");
+    // A room too small for the quotes writes nothing.
+    CHECK(borink::quoted_etag(entries[0].e_tag, std::span(room).first(6)).empty());
+
+    const borink::MaybeU64 modified = borink::http_date_ms(entries[0].last_modified);
+    CHECK(modified.present);
+    CHECK(modified.value == 1787745600000ULL);
+    // A value the entry did not carry is not a date.
+    CHECK(!borink::http_date_ms(borink::MaybeBytes{}).present);
+}
+
 // A range read reports where the bytes sit, and lends back what the head said.
 void reads_the_values_a_head_lent_back() {
     const borink::Session session = a_session();
@@ -256,6 +287,7 @@ int main() {
     reads_the_shape_a_listing_carries();
     reads_a_page_out_of_a_body();
     reads_the_rest_of_a_page_that_did_not_fit();
+    reads_the_values_an_entry_lends();
     reads_the_values_a_head_lent_back();
     writes_a_sentence_into_a_room_that_fits();
     reports_the_room_a_whole_sentence_takes();

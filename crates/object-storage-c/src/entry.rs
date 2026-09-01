@@ -7,7 +7,8 @@
 //! nowhere else.
 
 use crate::outcome::{
-    delete_outcome, get_outcome, invalid, list_outcome, put_outcome, refused_fill, status_of,
+    delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, put_outcome,
+    refused_fill, status_of,
 };
 use crate::plan::{delete_shape, get_shape, list_shape, put_shape, resume};
 use crate::ptr;
@@ -17,6 +18,7 @@ use crate::types::*;
 
 use borink_object_storage_proto::{
     InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Timestamps,
+    layered,
 };
 
 /// Reports what is wrong with `session`, if anything.
@@ -513,6 +515,44 @@ pub unsafe extern "C" fn borink_resume_listing(
             filling(&blobs, body, Some(resume(from)), into)
         })
         .unwrap_or_else(|error| refused_fill(&error))
+}
+
+/// Writes an entity tag from a listing in the quoted form that HTTP defines.
+///
+/// A listing writes an entity tag without the quotes that the `ETag` header
+/// carries. Pass `borink_list_entry.e_tag` here to get the form that a
+/// condition takes. `into` needs at most two bytes more than `listed`, and a
+/// shorter one writes nothing and returns an absent value.
+///
+/// # Safety
+///
+/// `listed` must address its stated length. `into` must address its stated
+/// length and be reached through nothing else during the call.
+///
+/// # Lifetime
+///
+/// The bytes returned are `into`, so they are valid until you release or
+/// reuse it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_quoted_etag(listed: Bytes, into: BytesMut) -> MaybeBytes {
+    // SAFETY: the caller states the contract of this function.
+    let (listed, into) = unsafe { (ptr::slice(listed), ptr::slice_mut(into)) };
+    maybe_bytes(layered::quoted_etag(listed, into))
+}
+
+/// Reads an HTTP date as milliseconds since the Unix epoch.
+///
+/// Pass `borink_list_entry.last_modified`, or the same value of a
+/// `borink_object_meta`. A value that is not an RFC 1123 date is absent.
+///
+/// # Safety
+///
+/// `value` must address its stated length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_http_date_ms(value: Bytes) -> MaybeU64 {
+    // SAFETY: the caller states the contract of this function.
+    let value = unsafe { ptr::slice(value) };
+    maybe_number(layered::http_date_ms(value))
 }
 
 /// Writes one sentence naming what `outcome` says.

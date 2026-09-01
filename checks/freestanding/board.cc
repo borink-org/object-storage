@@ -77,6 +77,13 @@ extern "C" void board_cxx(void) {
                                  borink::bytes_of(entries[0].key).size() +
                                  borink::text_of(fill.next_marker).size());
 
+    // What a listing lends back, read by the two helpers that read it.
+    static std::uint8_t quoted[64];
+    sink = static_cast<unsigned>(
+        borink::quoted_etag(entries[0].e_tag, std::span<std::uint8_t>(quoted, sizeof quoted))
+            .size());
+    sink = static_cast<unsigned>(borink::http_date_ms(entries[0].last_modified).value);
+
     // Both sentences, and the room a whole one takes.
     static std::uint8_t room[256];
     const std::span<std::uint8_t> paper(room, sizeof room);

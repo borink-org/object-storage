@@ -151,6 +151,8 @@ inline Range from(std::uint64_t start) {
 // Returns the number of entries that one page of a listing reports.
 //
 // A default-built `MaybeU32` is absent, and asks for the service's maximum.
+// Azure applies that maximum to any larger number too: 6,000 asks for 6,000
+// and is answered with 5,000 and a marker.
 inline MaybeU32 at_most(std::uint32_t entries) { return MaybeU32{true, entries}; }
 
 // Reads text as the bytes a call takes.
@@ -261,6 +263,24 @@ inline std::span<const std::uint8_t> bytes_of(const Bytes &value) {
 // Returns the same bytes as text, such as the key of a listing entry.
 inline std::string_view text_of(const Bytes &value) {
     return std::string_view(reinterpret_cast<const char *>(value.ptr), value.len);
+}
+
+// Returns an entity tag from a listing in the quoted form that HTTP defines.
+//
+// A listing writes an entity tag without the quotes that a condition takes.
+// This writes the quoted form into `room`, which needs at most two bytes more
+// than the tag, and returns it. The text points into `room` until the next
+// call that writes there, and is empty when `room` was too small.
+inline std::string_view quoted_etag(const MaybeBytes &listed, std::span<std::uint8_t> room) {
+    return text_of(borink_quoted_etag(listed.bytes, into(room)));
+}
+
+// Returns an HTTP date as milliseconds since the Unix epoch.
+//
+// Reads the `last_modified` of a listing entry or of object metadata. A value
+// that is not an RFC 1123 date is absent.
+inline MaybeU64 http_date_ms(const MaybeBytes &value) {
+    return borink_http_date_ms(value.bytes);
 }
 
 // Returns the part of `entries` that a fill wrote.

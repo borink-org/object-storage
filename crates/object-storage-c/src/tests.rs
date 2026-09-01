@@ -1179,3 +1179,42 @@ fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
     assert_eq!(refused.status.code, ErrorCode::Capacity as u16);
     assert!(refused.required > 0);
 }
+
+// A listing writes an entity tag without the quotes that a condition takes,
+// and a date that only a parser reads. Both cross as the helpers that read
+// them, so a C program writes neither itself.
+#[test]
+fn the_values_a_listing_lends_are_read_by_the_calls_beside_it() {
+    let mut room = [0; 32];
+    // SAFETY: both values are live for the call, and nothing else reaches the
+    // buffer while it is written.
+    let quoted = unsafe { borink_quoted_etag(lent(b"0x8DF0"), writable(&mut room)) };
+    assert_eq!(borrowed(quoted), Some(b"\"0x8DF0\"".as_slice()));
+
+    // A tag that already carries them crosses unchanged.
+    // SAFETY: as above.
+    let quoted = unsafe { borink_quoted_etag(lent(b"\"0x8DF0\""), writable(&mut room)) };
+    assert_eq!(borrowed(quoted), Some(b"\"0x8DF0\"".as_slice()));
+
+    // A buffer that cannot hold the quotes writes nothing.
+    let mut short = [0; 6];
+    // SAFETY: as above.
+    let refused = unsafe { borink_quoted_etag(lent(b"0x8DF0"), writable(&mut short)) };
+    assert!(!refused.present);
+
+    // SAFETY: the date is live for the call.
+    let read = unsafe { borink_http_date_ms(lent(b"Wed, 26 Aug 2026 12:00:00 GMT")) };
+    assert!(read.present);
+    assert_eq!(read.value, 1_787_745_600_000);
+
+    // A value that is not a date, and one the head did not carry.
+    // SAFETY: as above.
+    let (bad, none) = unsafe {
+        (
+            borink_http_date_ms(lent(b"yesterday")),
+            borink_http_date_ms(lent(b"")),
+        )
+    };
+    assert!(!bad.present);
+    assert!(!none.present);
+}

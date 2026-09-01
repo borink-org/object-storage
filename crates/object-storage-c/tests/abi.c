@@ -288,6 +288,27 @@ static void a_body_that_is_not_a_page_is_refused(void) {
     CHECK(fill.filled == 0);
 }
 
+// What a listing lends back is read by the two calls beside it, so a C program
+// writes neither the quoting nor the date parser itself.
+static void the_helpers_read_what_a_listing_lends(void) {
+    uint8_t room[32];
+    const borink_maybe_bytes quoted =
+        borink_quoted_etag(as_bytes("0x8DF0"), (borink_bytes_mut){room, sizeof room});
+    CHECK(quoted.present);
+    CHECK(quoted.bytes.len == strlen("\"0x8DF0\""));
+    CHECK(memcmp(quoted.bytes.ptr, "\"0x8DF0\"", quoted.bytes.len) == 0);
+
+    // Two bytes more than the tag is what it needs, and less writes nothing.
+    const borink_maybe_bytes refused =
+        borink_quoted_etag(as_bytes("0x8DF0"), (borink_bytes_mut){room, 6});
+    CHECK(!refused.present);
+
+    const borink_maybe_u64 read = borink_http_date_ms(as_bytes("Wed, 26 Aug 2026 12:00:00 GMT"));
+    CHECK(read.present);
+    CHECK(read.value == 1787745600000u);
+    CHECK(!borink_http_date_ms(as_bytes("yesterday")).present);
+}
+
 int main(void) {
     the_two_compilers_agree_on_every_struct();
     one_request_head_is_written_into_a_stack_buffer();
@@ -296,6 +317,7 @@ int main(void) {
     an_unknown_number_is_refused();
     one_page_is_read_out_of_a_body();
     a_body_that_is_not_a_page_is_refused();
+    the_helpers_read_what_a_listing_lends();
 
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);

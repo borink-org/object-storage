@@ -407,8 +407,10 @@ pub struct ListShape {
     pub delimited: bool,
     /// The most entries that one page reports.
     ///
-    /// An absent number asks for the service's maximum. The service may report
-    /// fewer entries than you asked for and still name a next page.
+    /// An absent number asks for the service's maximum, which Azure also
+    /// applies to any larger number: it answers 5,000 entries and a marker
+    /// rather than refusing. The service may also report fewer entries than
+    /// you asked for and still name a next page.
     pub max_results: MaybeU32,
 }
 

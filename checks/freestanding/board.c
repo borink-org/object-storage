@@ -80,6 +80,13 @@ void board_main(void) {
     fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
     sink = (unsigned)(fill.filled + entries[0].key.len + fill.next_marker.bytes.len);
 
+    // What a listing lends back, read by the two calls that read it.
+    static uint8_t quoted[64];
+    sink = (unsigned)borink_quoted_etag(entries[0].e_tag.bytes,
+                                        (borink_bytes_mut){quoted, sizeof quoted})
+               .bytes.len;
+    sink = (unsigned)borink_http_date_ms(entries[0].last_modified.bytes).value;
+
     board_cxx();
 
     // A board's entry point never returns.

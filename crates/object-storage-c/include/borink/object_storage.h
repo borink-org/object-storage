@@ -876,8 +876,10 @@ typedef struct borink_list_shape {
     /**
      * The most entries that one page reports.
      *
-     * An absent number asks for the service's maximum. The service may report
-     * fewer entries than you asked for and still name a next page.
+     * An absent number asks for the service's maximum, which Azure also
+     * applies to any larger number: it answers 5,000 entries and a marker
+     * rather than refusing. The service may also report fewer entries than
+     * you asked for and still name a next page.
      */
     struct borink_maybe_u32 max_results;
 } borink_list_shape;
@@ -1368,6 +1370,39 @@ struct borink_fill borink_resume_listing(const struct borink_session *session,
                                          const struct borink_resume *from,
                                          struct borink_list_entry *into,
                                          size_t capacity);
+
+/**
+ * Writes an entity tag from a listing in the quoted form that HTTP defines.
+ *
+ * A listing writes an entity tag without the quotes that the `ETag` header
+ * carries. Pass `borink_list_entry.e_tag` here to get the form that a
+ * condition takes. `into` needs at most two bytes more than `listed`, and a
+ * shorter one writes nothing and returns an absent value.
+ *
+ * # Safety
+ *
+ * `listed` must address its stated length. `into` must address its stated
+ * length and be reached through nothing else during the call.
+ *
+ * # Lifetime
+ *
+ * The bytes returned are `into`, so they are valid until you release or
+ * reuse it.
+ */
+struct borink_maybe_bytes borink_quoted_etag(struct borink_bytes listed,
+                                             struct borink_bytes_mut into);
+
+/**
+ * Reads an HTTP date as milliseconds since the Unix epoch.
+ *
+ * Pass `borink_list_entry.last_modified`, or the same value of a
+ * `borink_object_meta`. A value that is not an RFC 1123 date is absent.
+ *
+ * # Safety
+ *
+ * `value` must address its stated length.
+ */
+struct borink_maybe_u64 borink_http_date_ms(struct borink_bytes value);
 
 /**
  * Writes one sentence naming what `outcome` says.
