@@ -1138,3 +1138,162 @@ fn a_name_that_xml_cannot_carry_says_how_much_of_it_is_encoded() {
         );
     }
 }
+
+/// Settles the unit that Azure counts a key's length in, which this crate
+/// guesses at: it accepts 1024 Unicode scalar values, and Azure documents
+/// "1024 characters" without saying what a character is.
+///
+/// Two probes separate the three candidates. Both keys are ones this crate
+/// accepts, so Azure refusing either means `InvalidPlan::Key` is a weaker
+/// claim than it makes: it says a key cannot become an Azure request, and
+/// these would be keys that pass it and still cannot.
+///
+/// | probe             | scalars | UTF-16 | bytes | Azure takes it if |
+/// |-------------------|---------|--------|-------|-------------------|
+/// | 1024 × `é`        |    1024 |   1024 |  ~2007| scalars or UTF-16 |
+/// | 500 × `🦀`        |    ~541 |  ~1041 |  ~2041| scalars only      |
+#[test]
+#[ignore = "requires Azure credentials"]
+fn the_length_this_crate_allows_is_a_length_azure_allows() {
+    let fixture = Fixture::from_env();
+    empty(&fixture);
+
+    let prefix = fixture.list_prefix.chars().count();
+    // Exactly the 1024 scalar values this crate allows.
+    let two_byte = "é".repeat(1024 - prefix);
+    // Fewer scalar values, but more than 1024 UTF-16 code units.
+    let four_byte = "🦀".repeat(500);
+
+    for (label, tail) in [("two-byte", two_byte), ("four-byte", four_byte)] {
+        let key = format!("{}{tail}", fixture.list_prefix);
+        assert!(
+            key.chars().count() <= 1024,
+            "the probe must be one this crate accepts"
+        );
+        let owner = Fixture {
+            put_key: key.clone(),
+            ..clone(&fixture)
+        };
+        let result = write(&owner, PutShape::default(), None, b"x").unwrap();
+        assert_eq!(
+            result.outcome,
+            WriteOutcome::Created,
+            "{label}: {} scalar values, {} UTF-16 code units, {} bytes. Azure \
+             refused a key this crate accepts, so it counts a shorter unit \
+             than scalar values and validate_put must count that unit too. A \
+             refusal of the four-byte probe alone means UTF-16 code units; of \
+             both, bytes. Check the status: a URI-too-long refusal instead \
+             means the limit is on the encoded URL, not the name",
+            key.chars().count(),
+            key.encode_utf16().count(),
+            key.len(),
+        );
+    }
+
+    empty(&fixture);
+}
+
+/// Settles where Azure's limit on path segments falls. This crate does not
+/// count them, so a key with too many is a service failure rather than an
+/// [`InvalidPlan`](borink_object_storage_proto::InvalidPlan).
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_key_of_many_segments_is_refused_where_azure_says_it_is() {
+    let fixture = Fixture::from_env();
+    empty(&fixture);
+
+    // The prefix carries two segments of its own, so `total - 2` more of them
+    // joined by the separator make a name of exactly `total`.
+    let of_segments = |total: usize| {
+        let tail = vec!["s"; total - 2].join("/");
+        format!("{}{tail}", fixture.list_prefix)
+    };
+    let count = |key: &str| key.matches('/').count() + 1;
+
+    let allowed = of_segments(254);
+    assert_eq!(count(&allowed), 254);
+    let owner = Fixture {
+        put_key: allowed.clone(),
+        ..clone(&fixture)
+    };
+    assert_eq!(
+        write(&owner, PutShape::default(), None, b"x")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created,
+        "254 segments is the documented maximum"
+    );
+
+    let refused = of_segments(255);
+    assert_eq!(count(&refused), 255);
+    let owner = Fixture {
+        put_key: refused,
+        ..clone(&fixture)
+    };
+    let outcome = write(&owner, PutShape::default(), None, b"x")
+        .unwrap()
+        .outcome;
+    assert!(
+        !matches!(outcome, WriteOutcome::Created),
+        "255 segments is past the documented maximum of 254, and Azure took \
+         it: the limit is higher or gone, and the note on it should say so"
+    );
+
+    empty(&fixture);
+}
+
+/// Settles what Azure does with the slashes this crate leaves literal in the
+/// URL path, which is what makes a hierarchical-namespace path work.
+///
+/// The question is not whether Azure takes these keys but whether it stores
+/// them under the name it was given. A service that quietly folded `a//b` into
+/// `a/b` would leave a caller naming an object that does not exist, and a
+/// listing is the only thing that shows the stored name.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
+    let fixture = Fixture::from_env();
+    empty(&fixture);
+
+    let mut created = Vec::new();
+    for edge in [
+        "trailing/",
+        "double//slash",
+        "dot.",
+        "dots/../up",
+        "space /x",
+    ] {
+        let key = format!("{}{edge}", fixture.list_prefix);
+        let owner = Fixture {
+            put_key: key.clone(),
+            ..clone(&fixture)
+        };
+        // A refusal is an answer too: it says Azure will not hold the name.
+        if write(&owner, PutShape::default(), None, b"x")
+            .unwrap()
+            .outcome
+            == WriteOutcome::Created
+        {
+            created.push(key);
+        }
+    }
+    assert!(!created.is_empty(), "Azure took none of the slash edges");
+
+    let listed: Vec<String> = walk(&fixture, false, 1000)
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    for key in &created {
+        assert!(
+            listed.contains(key),
+            "{key:?} was taken and stored under another name. Either Azure \
+             folded the name, or the host resolved the path before sending it \
+             — a `..` between separators is the one a URL library rewrites. \
+             The listing reports {listed:?}"
+        );
+    }
+
+    // Removing them by their listed names is the other half: a name that can
+    // be listed but not addressed would be just as bad.
+    empty(&fixture);
+}
