@@ -28,14 +28,8 @@ For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `exter
 - Object delete (DELETE request)
   - Conditional (If-Match, If-None-Match)
   - Takes the object alone, the object and its snapshots, or the snapshots alone
-- Listing (GET request on the container, one page at a time)
-  - Prefix, and a continuation marker that names the next page
-  - Delimited at `/`, so a listing walks one level of a hierarchy at a time; a flat account
-    reports a group of keys, a hierarchical-namespace account reports a directory
-  - Each entry carries the key, the size, the entity tag and the last modification
-  - The page is read out of your body buffer with no scratch: the text is decoded where it
-    stands, and your array of entries is the budget. A page too large for it is read in as
-    many rounds as it takes, without asking the service again
+- Object listing (GET request on the container, one page at a time)
+  - Supports delimiters, prefixes
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 
 ## Compressed objects
