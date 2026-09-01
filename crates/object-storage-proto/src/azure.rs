@@ -563,7 +563,10 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a listing page.
+    /// not a listing page. This reads the grammar that Azure writes, not XML
+    /// at large: a namespace prefix, a reference to an entity no listing
+    /// declares, an entry tag spelled with an attribute, and anything else
+    /// Azure does not write are refused rather than guessed at.
     pub fn fill_listing<'b>(
         &self,
         body: &'b mut [u8],

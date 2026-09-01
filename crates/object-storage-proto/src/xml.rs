@@ -132,7 +132,7 @@ fn read_page<'b>(body: &'b mut [u8], page: Resume, into: &mut [ListEntry<'b>]) -
                 let at = total - rest.len();
                 slice(mem::take(&mut rest), shift(span, at)?)?
             };
-            let len = decode_text(text, false);
+            let len = decode_text(text, false)?;
             let text: &'b [u8] = text;
             // An empty marker is how the service says that the listing is
             // complete, so it names no next page rather than an empty one.
@@ -167,8 +167,13 @@ fn locate_page(text: &str) -> Result<Resume> {
         // Everything the walk reads byte for byte stands here.
         let entries = entries_at.is_some();
         match token {
-            Token::ElementStart { local, .. } => {
-                let depth = open.start(local.as_str())?;
+            Token::ElementStart { prefix, local, .. } => {
+                // The marker names the page to ask for next, so it holds text
+                // and nothing else.
+                if marker_at.is_some() {
+                    return Err(fault());
+                }
+                let depth = open.start(prefix.as_str(), local.as_str())?;
                 match local.as_str() {
                     name if depth == 1 && name != ROOT => return Err(fault()),
                     // A service can answer a listing with an error document
@@ -256,7 +261,13 @@ impl<'t> Open<'t> {
     }
 
     // Opens one element and returns the depth that it sits at.
-    fn start(&mut self, local: &'t str) -> Result<usize> {
+    fn start(&mut self, prefix: &str, local: &'t str) -> Result<usize> {
+        // A listing carries no namespace prefix. One that does is not this
+        // document however its names would resolve, and resolving them is
+        // what this crate would then have to do.
+        if !prefix.is_empty() {
+            return Err(fault());
+        }
         // The array is what lets this pass check the nesting without a heap.
         // A document deeper than it is not a listing.
         *self.names.get_mut(self.depth).ok_or_else(fault)? = local;
@@ -269,7 +280,8 @@ impl<'t> Open<'t> {
         let closed = match end {
             ElementEnd::Open => return Ok(()),
             ElementEnd::Empty => None,
-            ElementEnd::Close(_, local) => Some(local.as_str()),
+            ElementEnd::Close(prefix, local) if prefix.as_str().is_empty() => Some(local.as_str()),
+            ElementEnd::Close(..) => return Err(fault()),
         };
         self.depth = self.depth.checked_sub(1).ok_or_else(fault)?;
         match closed {
@@ -324,13 +336,15 @@ fn read_entry(raw: &mut [u8], prefix: bool) -> Result<ListEntry<'_>> {
         (false, false) => EntryKind::Object,
     };
 
-    let name = decode_span(raw, name, fields.name_encoded);
+    let name = decode_span(raw, name, fields.name_encoded)?;
     let e_tag = fields
         .e_tag
-        .map(|span| decode_span(raw, trim(raw, span), false));
+        .map(|span| decode_span(raw, trim(raw, span), false))
+        .transpose()?;
     let last_modified = fields
         .last_modified
-        .map(|span| decode_span(raw, trim(raw, span), false));
+        .map(|span| decode_span(raw, trim(raw, span), false))
+        .transpose()?;
 
     let raw: &[u8] = raw;
     Ok(ListEntry {
@@ -345,8 +359,12 @@ fn read_entry(raw: &mut [u8], prefix: bool) -> Result<ListEntry<'_>> {
 }
 
 // Decodes one span where it stands and returns what is left of it.
-fn decode_span(raw: &mut [u8], (start, end): (usize, usize), percent: bool) -> (usize, usize) {
-    (start, start + decode_text(&mut raw[start..end], percent))
+fn decode_span(
+    raw: &mut [u8],
+    (start, end): (usize, usize),
+    percent: bool,
+) -> Result<(usize, usize)> {
+    Ok((start, start + decode_text(&mut raw[start..end], percent)?))
 }
 
 // The tokeniser pass over one entry. The properties are read only under
@@ -357,14 +375,19 @@ fn scan_entry(text: &str, prefix: bool) -> Result<Fields> {
     let mut open = Open::new();
     let mut properties = false;
     let mut slot = None;
+    let mut encoded = None;
     for token in Tokenizer::from_fragment(text, 0..text.len()) {
         match token.map_err(|_| fault())? {
-            Token::ElementStart { local, .. } => {
+            Token::ElementStart {
+                prefix: namespace,
+                local,
+                ..
+            } => {
                 // An element that this pass reads holds text and nothing else.
                 if slot.is_some() {
                     return Err(fault());
                 }
-                let depth = open.start(local.as_str())?;
+                let depth = open.start(namespace.as_str(), local.as_str())?;
                 let name = local.as_str();
                 properties |= depth == 2 && name == "Properties";
                 slot = match (depth, name) {
@@ -382,7 +405,17 @@ fn scan_entry(text: &str, prefix: bool) -> Result<Fields> {
             }
             Token::Attribute { local, value, .. } => {
                 if slot == Some(Slot::Name) && local.as_str() == "Encoded" {
-                    fields.name_encoded = value.as_str() == "true";
+                    // Azure writes this once, and writes a boolean in it. A
+                    // second one would leave which of them was meant to a
+                    // rule this crate would be inventing.
+                    if encoded.is_some() {
+                        return Err(fault());
+                    }
+                    encoded = Some(match value.as_str() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(fault()),
+                    });
                 }
             }
             Token::Text { text } => {
@@ -420,6 +453,7 @@ fn scan_entry(text: &str, prefix: bool) -> Result<Fields> {
     if open.depth() != 0 {
         return Err(fault());
     }
+    fields.name_encoded = encoded.unwrap_or(false);
     Ok(fields)
 }
 
@@ -429,21 +463,23 @@ fn scan_entry(text: &str, prefix: bool) -> Result<Fields> {
 /// Both only ever shorten the text, so both run left to right within the span,
 /// and the bytes that they free at the end keep whatever they held. Returns
 /// what is left of the text.
-pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> usize {
-    let len = decode_references(bytes);
-    if percent {
+pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
+    let len = decode_references(bytes)?;
+    Ok(if percent {
         decode_percent(&mut bytes[..len])
     } else {
         len
-    }
+    })
 }
 
-fn decode_references(bytes: &mut [u8]) -> usize {
+fn decode_references(bytes: &mut [u8]) -> Result<usize> {
     let (mut read, mut write) = (0, 0);
     while read < bytes.len() {
-        if bytes[read] == b'&'
-            && let Some((decoded, consumed)) = reference(&bytes[read..])
-        {
+        if bytes[read] == b'&' {
+            // XML gives `&` one meaning. This document declares no entity and
+            // may declare none, so the references below are the only ones it
+            // can spell, and anything else is neither a reference nor text.
+            let (decoded, consumed) = reference(&bytes[read..]).ok_or_else(fault)?;
             let mut buffer = [0; 4];
             let decoded = decoded.encode_utf8(&mut buffer).as_bytes();
             bytes[write..write + decoded.len()].copy_from_slice(decoded);
@@ -455,13 +491,11 @@ fn decode_references(bytes: &mut [u8]) -> usize {
         write += 1;
         read += 1;
     }
-    write
+    Ok(write)
 }
 
 // The five references that XML defines, and the numeric form, with the number
-// of bytes that each one occupies. Anything else is left as it stands: the
-// service does not write it, and rewriting it would lose bytes that the caller
-// may still want.
+// of bytes that each one occupies.
 fn reference(bytes: &[u8]) -> Option<(char, usize)> {
     for (name, decoded) in [
         (b"&amp;".as_slice(), '&'),
@@ -489,7 +523,18 @@ fn reference(bytes: &[u8]) -> Option<(char, usize)> {
     })?;
     // `&#`, the `x` of the hexadecimal form, the digits and the `;`. Every
     // reference is longer than the character it stands for.
-    Some((char::from_u32(code)?, bytes.len() - digits.len() + end + 1))
+    let decoded = char::from_u32(code).filter(|_| xml_char(code))?;
+    Some((decoded, bytes.len() - digits.len() + end + 1))
+}
+
+// The characters that XML 1.0 lets a document hold. A reference to any other
+// number is not a character reference, whatever it would decode to: taking it
+// would put a byte in a key that no key may carry.
+fn xml_char(code: u32) -> bool {
+    matches!(
+        code,
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
 }
 
 fn decode_percent(bytes: &mut [u8]) -> usize {
@@ -593,8 +638,13 @@ mod tests {
 
     fn decoded(text: &str, percent: bool) -> String {
         let mut bytes = Vec::from(text.as_bytes());
-        let len = decode_text(&mut bytes, percent);
+        let len = decode_text(&mut bytes, percent).expect(text);
         String::from_utf8(Vec::from(&bytes[..len])).unwrap()
+    }
+
+    fn refused(text: &str, percent: bool) -> bool {
+        let mut bytes = Vec::from(text.as_bytes());
+        decode_text(&mut bytes, percent).is_err()
     }
 
     #[test]
@@ -615,13 +665,33 @@ mod tests {
     }
 
     #[test]
-    fn leaves_alone_what_it_does_not_recognize() {
-        // Not one of the five, no number, or no code point: the bytes are the
-        // caller's, and rewriting them would lose what the service sent.
-        assert_eq!(decoded("a&nbsp;b", false), "a&nbsp;b");
-        assert_eq!(decoded("a&#;b", false), "a&#;b");
-        assert_eq!(decoded("a&#xD800;b", false), "a&#xD800;b");
-        assert_eq!(decoded("100% &", false), "100% &");
+    fn refuses_what_is_not_a_reference() {
+        // A listing declares no entity and may declare none, so `&` can only
+        // begin one of the references above. Passing anything else through
+        // would hand back a key that is not the object's.
+        for text in ["a&nbsp;b", "a&#;b", "100% &", "a&b", "a&amp"] {
+            assert!(refused(text, false), "{text}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_number_that_names_no_character_of_a_document() {
+        // A surrogate is no character at all, and the control codes and the
+        // two non-characters are ones XML 1.0 forbids a document to hold.
+        for text in [
+            "a&#xD800;b",
+            "a&#0;b",
+            "a&#x8;b",
+            "a&#xB;b",
+            "a&#x1F;b",
+            "a&#xFFFE;b",
+            "a&#xFFFF;b",
+            "a&#x110000;b",
+        ] {
+            assert!(refused(text, false), "{text}");
+        }
+        // The three that XML does allow below a space.
+        assert_eq!(decoded("a&#x9;&#xA;&#xD;b", false), "a\t\n\rb");
     }
 
     #[test]

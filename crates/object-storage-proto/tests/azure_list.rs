@@ -375,6 +375,15 @@ fn a_name_is_decoded_where_it_stands() {
 
     assert_eq!(entries[0].key, "a&b/café.txt");
     assert_eq!(entries[1].key, "a b/cé");
+
+    // Written out, `false` says what leaving the attribute off says.
+    let mut body = page(
+        "<Blob><Name Encoded=\"false\">a%20b</Name><Properties>         <Content-Length>1</Content-Length></Properties></Blob>",
+        "",
+    );
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+    assert_eq!(entries[0].key, "a%20b");
 }
 
 #[test]
@@ -620,6 +629,43 @@ fn a_body_that_is_not_a_page_is_a_fault() {
         ),
         // A document cut short leaves elements open.
         b"<EnumerationResults><Blobs><Blob><Name>a</Name></Blob>".to_vec(),
+        // A namespace prefix. This crate reads the names Azure writes, and
+        // would have to resolve prefixes to know these are the same names.
+        b"<a:EnumerationResults><Blobs/><NextMarker/></a:EnumerationResults>".to_vec(),
+        b"<EnumerationResults><Blobs/><NextMarker/></b:EnumerationResults>".to_vec(),
+        page("<Blob><ns:Name>a.txt</ns:Name></Blob>", ""),
+        // A reference to no entity. A listing declares none and may declare
+        // none, so this is neither a reference nor text.
+        page(&object("a&nbsp;b", 1), ""),
+        page(&object("a&b", 1), ""),
+        document(&object("a.txt", 1), "<NextMarker>a&nbsp;b</NextMarker>"),
+        // A number that names no character a document may hold. Taking it
+        // would put a byte in a key that no key can carry.
+        page(&object("a&#0;b", 1), ""),
+        page(&object("a&#xFFFE;b", 1), ""),
+        page(&object("a&#xD800;b", 1), ""),
+        // The marker names the next request, so it holds text and nothing
+        // else.
+        document(
+            &object("a.txt", 1),
+            "<NextMarker><Unexpected/>next</NextMarker>",
+        ),
+        document(
+            &object("a.txt", 1),
+            "<NextMarker>ne<Unexpected/>xt</NextMarker>",
+        ),
+        // The one attribute this crate reads, written twice or written with
+        // something that is not a boolean.
+        page(
+            "<Blob><Name Encoded=\"true\" Encoded=\"false\">a</Name><Properties>\
+             <Content-Length>1</Content-Length></Properties></Blob>",
+            "",
+        ),
+        page(
+            "<Blob><Name Encoded=\"yes\">a</Name><Properties>\
+             <Content-Length>1</Content-Length></Properties></Blob>",
+            "",
+        ),
     ] {
         let document = String::from_utf8_lossy(&body).into_owned();
         assert_eq!(
