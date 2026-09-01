@@ -68,11 +68,10 @@ struct Limits {
     // reserves once at this size. A head that would outgrow it is refused
     // rather than served, exactly as an oversized request head is.
     std::size_t head_bytes = 8 * 1024;
-    // The most of one listing page to hold. libcurl hands the body over in
-    // parts and keeps none of it, so this host holds the whole page while it
-    // reads the entries out of it. A page that does not fit is refused rather
-    // than read in part.
-    std::size_t page_bytes = 1024 * 1024;
+    // There is no limit on a listing page. libcurl keeps none of the body, so
+    // this client holds the whole page while it reads the entries out of it,
+    // and how large that is follows from `List::max_results`: the service
+    // sends no more entries than you asked for. Ask for fewer to hold less.
 };
 
 // Where this host keeps the response head, and one `HeaderRef` per
@@ -202,11 +201,12 @@ class Client {
     // Reads every key under `prefix`, passing the entries to `sink`.
     //
     // This client asks for one page after another, and reads each page in as
-    // many rounds as `entries` takes. `entries` is your budget: no more of a
-    // listing is in memory at once, however many keys the container holds.
+    // many rounds as `entries` takes. `entries` is your budget for the entries
+    // themselves, however many keys the container holds. The page they are
+    // read out of is one buffer of this client, and `List::max_results` is
+    // what decides how large it grows.
     //
-    // Throws std::runtime_error if Azure listed nothing, or if a page is
-    // larger than this client allows.
+    // Throws std::runtime_error if Azure listed nothing.
     void list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
               const List &plan = {});
 

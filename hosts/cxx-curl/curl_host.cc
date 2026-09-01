@@ -222,24 +222,12 @@ std::size_t collect_diagnostic(char *data, std::size_t size, std::size_t count, 
 }
 
 // A body that this host keeps whole, which the page of a listing is: the
-// entries are read out of it after the transfer.
-struct Collected {
-    std::vector<std::uint8_t> &bytes;
-    std::size_t cap;
-    bool overflowed = false;
-};
-
+// entries are read out of it after the transfer. A page read in part is not a
+// document, so there is nothing to cap it at short of what was asked for.
 std::size_t collect_page(char *data, std::size_t size, std::size_t count, void *user) {
-    Collected &page = *static_cast<Collected *>(user);
+    std::vector<std::uint8_t> &page = *static_cast<std::vector<std::uint8_t> *>(user);
     const std::size_t length = size * count;
-    if (page.bytes.size() + length > page.cap) {
-        // A page read in part is not a document, so it is refused after the
-        // transfer rather than parsed. Taking the rest ends the transfer
-        // normally, which keeps the connection usable.
-        page.overflowed = true;
-        return length;
-    }
-    page.bytes.insert(page.bytes.end(), data, data + length);
+    page.insert(page.end(), data, data + length);
     return length;
 }
 
@@ -385,13 +373,12 @@ Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const L
     });
 
     page_.clear();
-    Collected collected{page_, limits_.page_bytes};
     Handle handle;
     apply(handle, *this, request);
     handle.set(CURLOPT_HEADERFUNCTION, collect_head);
     handle.set(CURLOPT_HEADERDATA, &head_);
     handle.set(CURLOPT_WRITEFUNCTION, collect_page);
-    handle.set(CURLOPT_WRITEDATA, &collected);
+    handle.set(CURLOPT_WRITEDATA, &page_);
     handle.send();
 
     checked_head();
@@ -406,9 +393,6 @@ Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const L
     }
     if (outcome_.kind != OutcomeKindPage) {
         fail("Azure listed no keys");
-    }
-    if (collected.overflowed) {
-        throw std::runtime_error("the listing page is larger than this client allows");
     }
     return read(borink_fill_listing(&session, page_buffer(), entries.data(), entries.size()),
                 entries);

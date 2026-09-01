@@ -382,29 +382,6 @@ void reports_a_container_that_is_not_there() {
     CHECK(client.outcome().failure.kind == borink::ServiceErrorNoSuchContainer);
 }
 
-// A client says how much of a page it will hold, and a page that would
-// outgrow it is refused rather than read in part.
-void refuses_a_page_over_the_limit() {
-    const std::string body = "<EnumerationResults><Blobs>"
-                             "<Blob><Name>a.txt</Name><Properties>"
-                             "<Content-Length>4</Content-Length></Properties></Blob>"
-                             "</Blobs><NextMarker /></EnumerationResults>";
-    Server server("HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
-                  "\r\nConnection: close\r\n\r\n" + body);
-    borink::host::Client client = borink::host::Client::open(
-        server.endpoint(), "container", "token", borink::host::Limits{8192, 8192, 8192, 16});
-
-    std::vector<borink::ListEntry> entries(4);
-    std::string reported;
-    try {
-        client.page("", entries);
-        CHECK(false);
-    } catch (const std::exception &failure) {
-        reported = failure.what();
-    }
-    CHECK(reported.find("listing page is larger") != std::string::npos);
-}
-
 // Azure names an error in the head when it can, and in the body when it
 // cannot. A host that stops at the head would report neither.
 void names_an_error_that_only_the_body_carries() {
@@ -558,7 +535,6 @@ int main() {
         reads_the_rest_of_a_page_that_did_not_fit();
         lists_every_key_over_two_pages();
         reports_a_container_that_is_not_there();
-        refuses_a_page_over_the_limit();
         names_an_error_that_only_the_body_carries();
         names_an_error_that_only_a_read_body_carries();
         reports_a_missing_object();
