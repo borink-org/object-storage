@@ -87,6 +87,18 @@ void board_main(void) {
                .bytes.len;
     sink = (unsigned)borink_http_date_ms(entries[0].last_modified.bytes).value;
 
+    // A value that no field of the entry carries, by name and by walk, and one
+    // decoded into the board's own memory.
+    sink = (unsigned)borink_entry_property(&entries[0], as_bytes("Content-Length")).bytes.len;
+    borink_properties walk = borink_entry_properties(&entries[0]);
+    for (borink_property found = borink_next_property(&walk); found.present;
+         found = borink_next_property(&walk)) {
+        sink = (unsigned)(found.name.len + found.value.len);
+    }
+    sink = (unsigned)borink_decode_into(as_bytes("a&amp;b"),
+                                        (borink_bytes_mut){quoted, sizeof quoted})
+               .bytes.len;
+
     board_cxx();
 
     // A board's entry point never returns.

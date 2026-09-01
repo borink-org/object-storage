@@ -84,6 +84,19 @@ extern "C" void board_cxx(void) {
             .size());
     sink = static_cast<unsigned>(borink::http_date_ms(entries[0].last_modified).value);
 
+    // A value that no field of the entry carries, by name and by walk, and one
+    // decoded into the board's own memory.
+    sink = static_cast<unsigned>(borink::property(entries[0], "Content-Length").bytes.len);
+    borink::Properties walk = borink::properties(entries[0]);
+    for (borink::Property found = borink::next(walk); found.present;
+         found = borink::next(walk)) {
+        sink = static_cast<unsigned>(borink::text_of(found.name).size() + found.value.len);
+    }
+    sink = static_cast<unsigned>(
+        borink::decoded(borink::as_bytes("a&amp;b"),
+                        std::span<std::uint8_t>(quoted, sizeof quoted))
+            .size());
+
     // Both sentences, and the room a whole one takes.
     static std::uint8_t room[256];
     const std::span<std::uint8_t> paper(room, sizeof room);

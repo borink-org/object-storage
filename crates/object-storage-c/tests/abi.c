@@ -101,6 +101,14 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_list_entry_size = offsetof(borink_list_entry, size),
         .offsetof_list_entry_e_tag = offsetof(borink_list_entry, e_tag),
         .offsetof_list_entry_last_modified = offsetof(borink_list_entry, last_modified),
+        .offsetof_list_entry_raw = offsetof(borink_list_entry, raw),
+        .sizeof_properties = sizeof(borink_properties),
+        .alignof_properties = _Alignof(borink_properties),
+        .offsetof_properties_within = offsetof(borink_properties, within),
+        .sizeof_property = sizeof(borink_property),
+        .alignof_property = _Alignof(borink_property),
+        .offsetof_property_name = offsetof(borink_property, name),
+        .offsetof_property_value = offsetof(borink_property, value),
         .sizeof_resume = sizeof(borink_resume),
         .alignof_resume = _Alignof(borink_resume),
         .offsetof_resume_within = offsetof(borink_resume, within),
@@ -309,6 +317,50 @@ static void the_helpers_read_what_a_listing_lends(void) {
     CHECK(!borink_http_date_ms(as_bytes("yesterday")).present);
 }
 
+// A value that no field of an entry carries is read out of the entry itself,
+// by name or in one walk over it.
+static void a_property_is_read_out_of_the_entry(void) {
+    const borink_session session = opened();
+    char body[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name>"
+                  "<Properties><Content-Length>4</Content-Length>"
+                  "<AccessTier>Hot</AccessTier><Content-Encoding /></Properties>"
+                  "</Blob></Blobs><NextMarker /></EnumerationResults>";
+    borink_list_entry entries[1] = {0};
+    const borink_fill fill = borink_fill_listing(
+        &session, (borink_bytes_mut){(uint8_t *)body, strlen(body)}, entries, 1);
+    CHECK(fill.filled == 1);
+    CHECK(entries[0].raw.len > 0);
+
+    const borink_maybe_bytes tier =
+        borink_entry_property(&entries[0], as_bytes("AccessTier"));
+    CHECK(tier.present);
+    CHECK(memcmp(tier.bytes.ptr, "Hot", tier.bytes.len) == 0);
+    // An element that carries nothing is present and empty; one the entry
+    // never wrote is absent.
+    CHECK(borink_entry_property(&entries[0], as_bytes("Content-Encoding")).present);
+    CHECK(borink_entry_property(&entries[0], as_bytes("Content-Encoding")).bytes.len == 0);
+    CHECK(!borink_entry_property(&entries[0], as_bytes("Snapshot")).present);
+
+    // The walk reports each value once and then stays ended.
+    borink_properties walk = borink_entry_properties(&entries[0]);
+    size_t found = 0;
+    for (borink_property read = borink_next_property(&walk); read.present;
+         read = borink_next_property(&walk)) {
+        found += 1;
+        CHECK(read.name.len > 0);
+    }
+    CHECK(found == 4);
+    CHECK(!borink_next_property(&walk).present);
+
+    // A reference is resolved into the caller's own buffer.
+    uint8_t room[16];
+    const borink_maybe_bytes decoded =
+        borink_decode_into(as_bytes("a&amp;b"), (borink_bytes_mut){room, sizeof room});
+    CHECK(decoded.present);
+    CHECK(decoded.bytes.len == 3);
+    CHECK(memcmp(decoded.bytes.ptr, "a&b", 3) == 0);
+}
+
 int main(void) {
     the_two_compilers_agree_on_every_struct();
     one_request_head_is_written_into_a_stack_buffer();
@@ -318,6 +370,7 @@ int main(void) {
     one_page_is_read_out_of_a_body();
     a_body_that_is_not_a_page_is_refused();
     the_helpers_read_what_a_listing_lends();
+    a_property_is_read_out_of_the_entry();
 
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);

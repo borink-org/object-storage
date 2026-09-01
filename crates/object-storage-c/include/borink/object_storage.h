@@ -999,7 +999,60 @@ typedef struct borink_list_entry {
      * that the `Last-Modified` header uses.
      */
     struct borink_maybe_bytes last_modified;
+    /**
+     * This entry as the service wrote it, from its opening tag to its closing
+     * one.
+     *
+     * Read a value that the fields above do not carry out of these bytes,
+     * with `borink_entry_property` or `borink_entry_properties`.
+     */
+    struct borink_bytes raw;
 } borink_list_entry;
+
+/**
+ * A walk over the values that one entry holds.
+ *
+ * `borink_entry_properties` starts one and `borink_next_property` steps it.
+ * The two values are this crate's own: keep the walk and pass it back.
+ *
+ * # Lifetime
+ *
+ * The walk points into the body that `borink_fill_listing` read, and is valid
+ * for as long as the entry it came from.
+ */
+typedef struct borink_properties {
+    /**
+     * The bytes of the entry that the walk has not read.
+     */
+    struct borink_bytes remaining;
+    /**
+     * Whether the walk stands inside the properties element.
+     */
+    bool within;
+} borink_properties;
+
+/**
+ * One value that an entry holds.
+ *
+ * # Lifetime
+ *
+ * Both values point into the body that `borink_fill_listing` read, and are
+ * valid until you release or reuse that buffer.
+ */
+typedef struct borink_property {
+    /**
+     * Whether the walk read one. A walk that has ended reports `false`.
+     */
+    bool present;
+    /**
+     * The name of the element that held the value.
+     */
+    struct borink_bytes name;
+    /**
+     * The value, as the service wrote it.
+     */
+    struct borink_bytes value;
+} borink_property;
 
 /**
  * What a C compiler computes for the structs that cross this boundary.
@@ -1079,6 +1132,14 @@ typedef struct borink_layout {
     size_t offsetof_list_entry_size;
     size_t offsetof_list_entry_e_tag;
     size_t offsetof_list_entry_last_modified;
+    size_t offsetof_list_entry_raw;
+    size_t sizeof_properties;
+    size_t alignof_properties;
+    size_t offsetof_properties_within;
+    size_t sizeof_property;
+    size_t alignof_property;
+    size_t offsetof_property_name;
+    size_t offsetof_property_value;
     size_t sizeof_resume;
     size_t alignof_resume;
     size_t offsetof_resume_within;
@@ -1370,6 +1431,94 @@ struct borink_fill borink_resume_listing(const struct borink_session *session,
                                          const struct borink_resume *from,
                                          struct borink_list_entry *into,
                                          size_t capacity);
+
+/**
+ * Returns the value that one entry gave for a property.
+ *
+ * The name is matched exactly, against the elements of the entry and of its
+ * properties element: `AccessTier` and `Creation-Time` on Azure. An absent
+ * value means the entry wrote no such property, which is not the same fact as
+ * a property it wrote empty.
+ *
+ * Each call reads the entry again. Read more than one or two with
+ * `borink_entry_properties`, which reads it once.
+ *
+ * The three values that the entry carries are not read back this way. Reading
+ * the page decoded them where they stood, so the element that held one now
+ * holds the decoded text and what the decoding left behind. Read `key`,
+ * `e_tag` and `last_modified` from the entry.
+ *
+ * # Safety
+ *
+ * `entry` must be null or point at one readable value whose `raw` addresses
+ * its stated length. `name` must address its stated length.
+ *
+ * # Lifetime
+ *
+ * The value points into the body that the entry points into.
+ */
+struct borink_maybe_bytes borink_entry_property(const struct borink_list_entry *entry,
+                                                struct borink_bytes name);
+
+/**
+ * Starts a walk over the values that one entry holds.
+ *
+ * Step it with `borink_next_property`, which reports one value per call and
+ * reads the entry once over the whole walk. A null `entry` starts a walk that
+ * has already ended.
+ *
+ * # Safety
+ *
+ * As `borink_entry_property`.
+ *
+ * # Lifetime
+ *
+ * The walk points into the body that the entry points into.
+ */
+struct borink_properties borink_entry_properties(const struct borink_list_entry *entry);
+
+/**
+ * Reads the next value of a walk, and steps the walk past it.
+ *
+ * An element that holds other elements, such as the metadata of an object,
+ * reports those bytes as its value. The properties element is stepped into
+ * rather than reported. A walk that has ended reports an absent value, and
+ * stays ended.
+ *
+ * # Safety
+ *
+ * `walk` must be null or point at one writable `borink_properties` whose
+ * `remaining` addresses its stated length.
+ *
+ * # Lifetime
+ *
+ * The value points into the body that the walk points into.
+ */
+struct borink_property borink_next_property(struct borink_properties *walk);
+
+/**
+ * Writes the text of a listed value with its references resolved.
+ *
+ * Use this on a value that `borink_entry_property` returned, which holds the
+ * bytes that the service wrote. XML writes an `&` as `&amp;`, and a character
+ * that the document cannot carry as `&#233;`.
+ *
+ * Copies `value` into `into` and returns what it wrote, which is never longer
+ * than `value`. An absent value means that `into` is shorter than `value`, or
+ * that `value` holds a reference that no listing declares.
+ *
+ * # Safety
+ *
+ * `value` must address its stated length. `into` must address its stated
+ * length and be reached through nothing else during the call.
+ *
+ * # Lifetime
+ *
+ * The bytes returned are `into`, so they are valid until you release or
+ * reuse it.
+ */
+struct borink_maybe_bytes borink_decode_into(struct borink_bytes value,
+                                             struct borink_bytes_mut into);
 
 /**
  * Writes an entity tag from a listing in the quoted form that HTTP defines.

@@ -196,6 +196,46 @@ void reads_the_values_an_entry_lends() {
     CHECK(!borink::http_date_ms(borink::MaybeBytes{}).present);
 }
 
+// A value that no field of an entry carries is read out of the entry itself.
+void reads_a_property_out_of_an_entry() {
+    const borink::Session session = a_session();
+    std::string body = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name>"
+                       "<VersionId>2026-09-01T19:08:11Z</VersionId><Properties>"
+                       "<Content-Length>4</Content-Length><AccessTier>Hot</AccessTier>"
+                       "</Properties><Metadata><colour>a&amp;b</colour></Metadata>"
+                       "</Blob></Blobs><NextMarker /></EnumerationResults>";
+    std::array<borink::ListEntry, 1> entries{};
+    const borink::Fill fill = borink_fill_listing(
+        &session,
+        borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(body.data()),
+                                             body.size())),
+        entries.data(), entries.size());
+    CHECK(fill.filled == 1);
+
+    // Inside the properties element and beside it, by one call.
+    CHECK(borink::text_of(borink::property(entries[0], "AccessTier")) == "Hot");
+    CHECK(borink::text_of(borink::property(entries[0], "VersionId")) == "2026-09-01T19:08:11Z");
+    CHECK(!borink::property(entries[0], "Snapshot").present);
+
+    // The walk reports every value once, in the order the service wrote them.
+    std::vector<std::string> names;
+    borink::Properties walk = borink::properties(entries[0]);
+    for (borink::Property found = borink::next(walk); found.present;
+         found = borink::next(walk)) {
+        names.push_back(std::string(borink::text_of(found.name)));
+    }
+    CHECK(names == std::vector<std::string>({"Name", "VersionId", "Content-Length",
+                                             "AccessTier", "Metadata"}));
+    CHECK(!borink::next(walk).present);
+
+    // An element that holds others reports those bytes, and a reference in
+    // them is resolved into a room of the caller's.
+    const borink::MaybeBytes metadata = borink::property(entries[0], "Metadata");
+    CHECK(borink::text_of(metadata) == "<colour>a&amp;b</colour>");
+    std::array<std::uint8_t, 32> room{};
+    CHECK(borink::decoded(metadata.bytes, room) == "<colour>a&b</colour>");
+}
+
 // A range read reports where the bytes sit, and lends back what the head said.
 void reads_the_values_a_head_lent_back() {
     const borink::Session session = a_session();
@@ -288,6 +328,7 @@ int main() {
     reads_a_page_out_of_a_body();
     reads_the_rest_of_a_page_that_did_not_fit();
     reads_the_values_an_entry_lends();
+    reads_a_property_out_of_an_entry();
     reads_the_values_a_head_lent_back();
     writes_a_sentence_into_a_room_that_fits();
     reports_the_room_a_whole_sentence_takes();

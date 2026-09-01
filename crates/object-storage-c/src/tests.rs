@@ -1218,3 +1218,100 @@ fn the_values_a_listing_lends_are_read_by_the_calls_beside_it() {
     assert!(!bad.present);
     assert!(!none.present);
 }
+
+// A property that the entry does not carry is read out of the entry's own
+// bytes, one at a time or in one walk.
+#[test]
+fn a_property_of_an_entry_crosses_by_name_and_by_walk() {
+    let session = session();
+    let mut body = Vec::from(
+        b"<EnumerationResults><Blobs><Blob><Name>a.txt</Name>\
+          <VersionId>2026-09-01T19:08:11Z</VersionId><Properties>\
+          <Content-Length>4</Content-Length><Content-Encoding />\
+          <AccessTier>Hot</AccessTier></Properties>\
+          <Metadata><colour>a&amp;b</colour></Metadata></Blob>\
+          </Blobs><NextMarker /></EnumerationResults>"
+            .as_slice(),
+    );
+    let mut entries = [ListEntry::default(); 1];
+    // SAFETY: the body and the array are live, and nothing else reaches them.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 1) };
+    assert_eq!(fill.filled, 1);
+    let entry = entries[0];
+    assert_ne!(entry.raw.len, 0);
+
+    // SAFETY: the entry points into the body, which is still live.
+    let (tier, version, encoding, absent) = unsafe {
+        (
+            borink_entry_property(&entry, lent(b"AccessTier")),
+            borink_entry_property(&entry, lent(b"VersionId")),
+            borink_entry_property(&entry, lent(b"Content-Encoding")),
+            borink_entry_property(&entry, lent(b"Snapshot")),
+        )
+    };
+    assert_eq!(borrowed(tier), Some(b"Hot".as_slice()));
+    assert_eq!(borrowed(version), Some(b"2026-09-01T19:08:11Z".as_slice()));
+    // An element that carries nothing is present and empty; one the entry
+    // never wrote is absent.
+    assert_eq!(borrowed(encoding), Some(b"".as_slice()));
+    assert!(!absent.present);
+
+    // The walk reports each of them once, and the properties element itself
+    // is never one of them.
+    // SAFETY: as above, and the walk is a value of this test.
+    let names = unsafe {
+        let mut walk = borink_entry_properties(&entry);
+        let mut names = Vec::new();
+        loop {
+            let found = borink_next_property(&mut walk);
+            if !found.present {
+                break;
+            }
+            names.push(String::from_utf8(slice(found.name).to_vec()).unwrap());
+        }
+        // A walk that ended stays ended.
+        assert!(!borink_next_property(&mut walk).present);
+        names
+    };
+    assert_eq!(
+        names,
+        [
+            "Name",
+            "VersionId",
+            "Content-Length",
+            "Content-Encoding",
+            "AccessTier",
+            "Metadata"
+        ]
+    );
+
+    // A null entry reads nothing and walks nothing.
+    // SAFETY: the null pointers are the case under test.
+    unsafe {
+        assert!(!borink_entry_property(core::ptr::null(), lent(b"AccessTier")).present);
+        assert_eq!(borink_entry_properties(core::ptr::null()).remaining.len, 0);
+        assert!(!borink_next_property(core::ptr::null_mut()).present);
+    }
+}
+
+// A value that carries a reference is decoded into the caller's own buffer.
+#[test]
+fn a_listed_value_is_decoded_into_the_caller_s_buffer() {
+    // One buffer per call: what a call returns is the buffer it wrote, so the
+    // next call on the same buffer takes those bytes back.
+    let (mut room, mut cramped, mut third) = ([0; 16], [0; 6], [0; 16]);
+    // SAFETY: every value is live, and nothing else reaches the buffers.
+    let (decoded, refused, unknown) = unsafe {
+        (
+            borink_decode_into(lent(b"a&amp;b"), writable(&mut room)),
+            borink_decode_into(lent(b"a&amp;b"), writable(&mut cramped)),
+            borink_decode_into(lent(b"a&nbsp;b"), writable(&mut third)),
+        )
+    };
+    assert_eq!(borrowed(decoded), Some(b"a&b".as_slice()));
+    // A buffer shorter than the value, and a reference that no listing
+    // declares.
+    assert!(!refused.present);
+    assert!(!unknown.present);
+}

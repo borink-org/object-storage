@@ -578,6 +578,47 @@ pub struct ListEntry {
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
     pub last_modified: MaybeBytes,
+    /// This entry as the service wrote it, from its opening tag to its closing
+    /// one.
+    ///
+    /// Read a value that the fields above do not carry out of these bytes,
+    /// with `borink_entry_property` or `borink_entry_properties`.
+    pub raw: Bytes,
+}
+
+/// A walk over the values that one entry holds.
+///
+/// `borink_entry_properties` starts one and `borink_next_property` steps it.
+/// The two values are this crate's own: keep the walk and pass it back.
+///
+/// # Lifetime
+///
+/// The walk points into the body that `borink_fill_listing` read, and is valid
+/// for as long as the entry it came from.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Properties {
+    /// The bytes of the entry that the walk has not read.
+    pub remaining: Bytes,
+    /// Whether the walk stands inside the properties element.
+    pub within: bool,
+}
+
+/// One value that an entry holds.
+///
+/// # Lifetime
+///
+/// Both values point into the body that `borink_fill_listing` read, and are
+/// valid until you release or reuse that buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Property {
+    /// Whether the walk read one. A walk that has ended reports `false`.
+    pub present: bool,
+    /// The name of the element that held the value.
+    pub name: Bytes,
+    /// The value, as the service wrote it.
+    pub value: Bytes,
 }
 
 /// Where a fill stopped in a page.

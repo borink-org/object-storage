@@ -99,7 +99,25 @@ pub(crate) fn entry_view(entry: &proto::ListEntry<'_>) -> ListEntry {
         size: maybe_number(entry.size),
         e_tag: maybe_bytes(entry.e_tag),
         last_modified: maybe_bytes(entry.last_modified),
+        raw: bytes(entry.raw),
     }
+}
+
+// A walk, as the two values that a C program keeps between calls.
+pub(crate) fn properties_view(walk: proto::Properties<'_>) -> Properties {
+    Properties {
+        remaining: bytes(walk.remaining()),
+        within: walk.within(),
+    }
+}
+
+// One value that a walk read, or the end of the walk.
+pub(crate) fn property_view(found: Option<(&[u8], &[u8])>) -> Property {
+    found.map_or_else(Default::default, |(name, value)| Property {
+        present: true,
+        name: bytes(name),
+        value: bytes(value),
+    })
 }
 
 // A fill that read the page to its end.

@@ -43,6 +43,8 @@ using PutShape      = borink_put_shape;
 using DeleteShape   = borink_delete_shape;
 using ListShape     = borink_list_shape;
 using ListEntry     = borink_list_entry;
+using Properties    = borink_properties;
+using Property      = borink_property;
 using Resume        = borink_resume;
 using Fill          = borink_fill;
 using RequestHeader = borink_request_header;
@@ -287,6 +289,40 @@ inline MaybeU64 http_date_ms(const MaybeBytes &value) {
 inline std::span<const ListEntry> entries_of(std::span<const ListEntry> entries,
                                              const Fill &fill) {
     return entries.subspan(0, fill.filled);
+}
+
+// Returns the value that one entry gave for a property.
+//
+// An entry carries the values every listing reports; this reads one of the
+// rest, such as `AccessTier` or `Creation-Time`, out of the entry's own bytes.
+// An absent value means the entry wrote no such property.
+//
+// Reading more than one or two is a walk: see `properties`.
+inline MaybeBytes property(const ListEntry &entry, std::string_view name) {
+    return borink_entry_property(&entry, as_bytes(name));
+}
+
+// Returns a walk over every value that one entry holds.
+//
+// Step it with `next`, which reports one value per call:
+//
+//     Properties walk = properties(entry);
+//     for (Property found = next(walk); found.present; found = next(walk)) {
+//         // text_of(found.name), text_of(found.value)
+//     }
+inline Properties properties(const ListEntry &entry) { return borink_entry_properties(&entry); }
+
+// Reads the next value of a walk, and steps the walk past it.
+inline Property next(Properties &walk) { return borink_next_property(&walk); }
+
+// Returns the text of a listed value with its references resolved.
+//
+// A value that an entry lends holds what the service wrote, where XML writes
+// an `&` as `&amp;`. This writes what those stand for into `room`, which needs
+// no more room than the value. The text is empty when `room` is shorter than
+// the value, and when the value holds a reference that no listing declares.
+inline std::string_view decoded(const Bytes &value, std::span<std::uint8_t> room) {
+    return text_of(borink_decode_into(value, into(room)));
 }
 
 // What a describe call wrote into a room.

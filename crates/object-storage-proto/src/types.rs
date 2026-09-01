@@ -639,7 +639,7 @@ impl<'b> ListEntry<'b> {
     /// An element that holds other elements, such as the metadata of a blob,
     /// reports those bytes as its value.
     pub fn properties(&self) -> Properties<'b> {
-        Properties::of(self.raw)
+        Properties::new(self.raw)
     }
 }
 
@@ -657,16 +657,38 @@ pub struct Properties<'b> {
 }
 
 impl<'b> Properties<'b> {
-    // The walk over one entry, from just after its own opening tag.
-    fn of(raw: &'b [u8]) -> Self {
-        let rest = match crate::xml::after_tag(raw) {
-            Some(rest) => rest,
-            None => &[],
-        };
+    /// Creates a walk over the bytes of one entry.
+    ///
+    /// Pass [`ListEntry::raw`]. The walk starts after the entry's own opening
+    /// tag, so it reports what the entry holds and not the entry itself.
+    pub fn new(raw: &'b [u8]) -> Self {
         Self {
-            rest,
+            rest: crate::xml::after_tag(raw).unwrap_or_default(),
             within: false,
         }
+    }
+
+    /// Creates a walk from the values that [`Self::remaining`] and
+    /// [`Self::within`] returned.
+    ///
+    /// Use it to rebuild a walk that you kept as those two values, over the
+    /// entry they came from. A walk built from other bytes reports whatever
+    /// elements they hold, and one over another entry reports that entry.
+    pub const fn from_parts(remaining: &'b [u8], within: bool) -> Self {
+        Self {
+            rest: remaining,
+            within,
+        }
+    }
+
+    /// Returns the bytes of the entry that this walk has not read.
+    pub const fn remaining(self) -> &'b [u8] {
+        self.rest
+    }
+
+    /// Returns whether the walk stands inside the properties element.
+    pub const fn within(self) -> bool {
+        self.within
     }
 }
 

@@ -7,8 +7,8 @@
 //! nowhere else.
 
 use crate::outcome::{
-    delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, put_outcome,
-    refused_fill, status_of,
+    delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, properties_view,
+    property_view, put_outcome, refused_fill, status_of,
 };
 use crate::plan::{delete_shape, get_shape, list_shape, put_shape, resume};
 use crate::ptr;
@@ -17,8 +17,8 @@ use crate::step::{filling, finishing, head_of, open, optional, ready, text, writ
 use crate::types::*;
 
 use borink_object_storage_proto::{
-    InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Timestamps,
-    layered,
+    self as proto, InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+    Timestamps, layered,
 };
 
 /// Reports what is wrong with `session`, if anything.
@@ -515,6 +515,125 @@ pub unsafe extern "C" fn borink_resume_listing(
             filling(&blobs, body, Some(resume(from)), into)
         })
         .unwrap_or_else(|error| refused_fill(&error))
+}
+
+/// Returns the value that one entry gave for a property.
+///
+/// The name is matched exactly, against the elements of the entry and of its
+/// properties element: `AccessTier` and `Creation-Time` on Azure. An absent
+/// value means the entry wrote no such property, which is not the same fact as
+/// a property it wrote empty.
+///
+/// Each call reads the entry again. Read more than one or two with
+/// `borink_entry_properties`, which reads it once.
+///
+/// The three values that the entry carries are not read back this way. Reading
+/// the page decoded them where they stood, so the element that held one now
+/// holds the decoded text and what the decoding left behind. Read `key`,
+/// `e_tag` and `last_modified` from the entry.
+///
+/// # Safety
+///
+/// `entry` must be null or point at one readable value whose `raw` addresses
+/// its stated length. `name` must address its stated length.
+///
+/// # Lifetime
+///
+/// The value points into the body that the entry points into.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_entry_property(entry: *const ListEntry, name: Bytes) -> MaybeBytes {
+    // SAFETY: the caller states the contract of this function.
+    let (raw, name) = unsafe {
+        match entry.as_ref() {
+            Some(entry) => (ptr::slice(entry.raw), ptr::slice(name)),
+            None => return MaybeBytes::default(),
+        }
+    };
+    maybe_bytes(
+        proto::Properties::new(raw)
+            .find(|(found, _)| *found == name)
+            .map(|(_, value)| value),
+    )
+}
+
+/// Starts a walk over the values that one entry holds.
+///
+/// Step it with `borink_next_property`, which reports one value per call and
+/// reads the entry once over the whole walk. A null `entry` starts a walk that
+/// has already ended.
+///
+/// # Safety
+///
+/// As `borink_entry_property`.
+///
+/// # Lifetime
+///
+/// The walk points into the body that the entry points into.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_entry_properties(entry: *const ListEntry) -> Properties {
+    // SAFETY: the caller states the contract of this function.
+    let raw = unsafe {
+        match entry.as_ref() {
+            Some(entry) => ptr::slice(entry.raw),
+            None => return Properties::default(),
+        }
+    };
+    properties_view(proto::Properties::new(raw))
+}
+
+/// Reads the next value of a walk, and steps the walk past it.
+///
+/// An element that holds other elements, such as the metadata of an object,
+/// reports those bytes as its value. The properties element is stepped into
+/// rather than reported. A walk that has ended reports an absent value, and
+/// stays ended.
+///
+/// # Safety
+///
+/// `walk` must be null or point at one writable `borink_properties` whose
+/// `remaining` addresses its stated length.
+///
+/// # Lifetime
+///
+/// The value points into the body that the walk points into.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_next_property(walk: *mut Properties) -> Property {
+    // SAFETY: the caller states the contract of this function.
+    let Some(walk) = (unsafe { walk.as_mut() }) else {
+        return Property::default();
+    };
+    // SAFETY: as above, for the bytes that the walk has not read.
+    let mut reading =
+        proto::Properties::from_parts(unsafe { ptr::slice(walk.remaining) }, walk.within);
+    let found = property_view(reading.next());
+    *walk = properties_view(reading);
+    found
+}
+
+/// Writes the text of a listed value with its references resolved.
+///
+/// Use this on a value that `borink_entry_property` returned, which holds the
+/// bytes that the service wrote. XML writes an `&` as `&amp;`, and a character
+/// that the document cannot carry as `&#233;`.
+///
+/// Copies `value` into `into` and returns what it wrote, which is never longer
+/// than `value`. An absent value means that `into` is shorter than `value`, or
+/// that `value` holds a reference that no listing declares.
+///
+/// # Safety
+///
+/// `value` must address its stated length. `into` must address its stated
+/// length and be reached through nothing else during the call.
+///
+/// # Lifetime
+///
+/// The bytes returned are `into`, so they are valid until you release or
+/// reuse it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_decode_into(value: Bytes, into: BytesMut) -> MaybeBytes {
+    // SAFETY: the caller states the contract of this function.
+    let (value, into) = unsafe { (ptr::slice(value), ptr::slice_mut(into)) };
+    maybe_bytes(layered::decode_into(value, into))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
