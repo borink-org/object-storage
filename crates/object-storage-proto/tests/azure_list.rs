@@ -760,3 +760,51 @@ fn whitespace_between_the_entries_is_not_an_entry() {
     assert_eq!(entries[1].key, "b.txt");
     assert_eq!(listing.next_marker, Some(b"next".as_slice()));
 }
+
+/// One page exactly as the service sent it, byte for byte, from a live run.
+///
+/// The hand-written pages above are this crate's idea of what Azure writes.
+/// This is what it actually wrote: a byte-order mark, elements this crate
+/// reads nothing from, empty elements written `<X />` with the space, and a
+/// name that says it is encoded and is encoded whole, separators included.
+#[test]
+fn a_page_the_service_actually_sent() {
+    let mut body = Vec::from(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <EnumerationResults ServiceEndpoint=\"https://borinkstoragetest.blob.core.windows.net/\" \
+         ContainerName=\"borink-object-test\">\
+         <Prefix>borink-object-storage/azure-list-scratch/</Prefix><Blobs>\
+         <Blob><Name Encoded=\"true\">borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt</Name>\
+         <VersionId>2026-09-01T19:08:11.7600332Z</VersionId><IsCurrentVersion>true</IsCurrentVersion>\
+         <Properties><Creation-Time>Tue, 01 Sep 2026 19:08:11 GMT</Creation-Time>\
+         <Last-Modified>Tue, 01 Sep 2026 19:08:11 GMT</Last-Modified>\
+         <Etag>0x8DF085C5E09984C</Etag><Content-Length>1</Content-Length>\
+         <Content-Type>application/octet-stream</Content-Type><Content-Encoding />\
+         <Content-Language /><Content-CRC64 /><Content-MD5>ndTkYSaMgDT1yFZOFVxnpg==</Content-MD5>\
+         <Cache-Control /><Content-Disposition /><BlobType>BlockBlob</BlobType>\
+         <AccessTier>Hot</AccessTier><AccessTierInferred>true</AccessTierInferred>\
+         <LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState>\
+         <ServerEncrypted>true</ServerEncrypted></Properties><OrMetadata /></Blob>\
+         </Blobs><NextMarker /></EnumerationResults>"
+            .as_bytes(),
+    );
+    let mut entries = [ListEntry::default(); 2];
+    let listing = fill(&mut body, &mut entries);
+
+    assert_eq!(listing.filled, 1);
+    // The whole name was encoded, so the separators come back as separators
+    // and the character XML cannot carry comes back as itself.
+    assert_eq!(
+        entries[0].key,
+        "borink-object-storage/azure-list-scratch/100%-\u{fffe}-name.txt"
+    );
+    assert_eq!(entries[0].kind, EntryKind::Object);
+    assert_eq!(entries[0].size, Some(1));
+    assert_eq!(entries[0].e_tag, Some(b"0x8DF085C5E09984C".as_slice()));
+    assert_eq!(
+        entries[0].last_modified.and_then(layered::http_date_ms),
+        Some(1_788_289_691_000)
+    );
+    // The last page of the listing, written the way the service writes it.
+    assert_eq!(listing.next_marker, None);
+}

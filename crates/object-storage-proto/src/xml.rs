@@ -465,11 +465,11 @@ fn scan_entry(text: &str, prefix: bool) -> Result<Fields> {
 /// what is left of the text.
 pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
     let len = decode_references(bytes)?;
-    Ok(if percent {
+    if percent {
         decode_percent(&mut bytes[..len])
     } else {
-        len
-    })
+        Ok(len)
+    }
 }
 
 fn decode_references(bytes: &mut [u8]) -> Result<usize> {
@@ -537,12 +537,15 @@ fn xml_char(code: u32) -> bool {
     )
 }
 
-fn decode_percent(bytes: &mut [u8]) -> usize {
+fn decode_percent(bytes: &mut [u8]) -> Result<usize> {
     let (mut read, mut write) = (0, 0);
     while read < bytes.len() {
-        if bytes[read] == b'%'
-            && let Some(decoded) = hex_pair(bytes, read + 1)
-        {
+        if bytes[read] == b'%' {
+            // A name that says it is encoded is encoded whole, down to the
+            // separators between its segments, so every `%` in one begins an
+            // escape and a `%` that does not is not this name. Measured: a
+            // listed name reads `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
+            let decoded = hex_pair(bytes, read + 1).ok_or_else(fault)?;
             bytes[write] = decoded;
             write += 1;
             read += 3;
@@ -552,7 +555,7 @@ fn decode_percent(bytes: &mut [u8]) -> usize {
         write += 1;
         read += 1;
     }
-    write
+    Ok(write)
 }
 
 fn hex_pair(bytes: &[u8], at: usize) -> Option<u8> {
@@ -700,7 +703,12 @@ mod tests {
         assert_eq!(decoded("a%20b%2Fc", false), "a%20b%2Fc");
         // The references are undone first, so a name may carry both.
         assert_eq!(decoded("a&amp;b%20c", true), "a&b c");
-        assert_eq!(decoded("100%25 %zz %", true), "100% %zz %");
+        assert_eq!(decoded("100%25", true), "100%");
+        // An escape that is not one says the name is not the one that was
+        // listed, because a name that is encoded is encoded whole.
+        for text in ["100%25 %zz", "a%", "a%2", "a%2Gb"] {
+            assert!(refused(text, true), "{text}");
+        }
     }
 
     #[test]

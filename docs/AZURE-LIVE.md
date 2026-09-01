@@ -44,10 +44,12 @@ Azure counts a key's length in **UTF-16 code units**, not characters or bytes. A
 
 Two keys are stored under a name the caller did not write, so they are refused before they are sent. `dot.` is stored as `dot`: Azure drops a dot from the end of a name. `dots/../up` writes `up`: a host resolves dot segments out of the URL before sending it, as the standard for URLs requires. A trailing separator, a doubled separator, a space before one, a dot inside a segment and a leading pair of dots all survive unchanged.
 
-The documented maximum of 254 `/`-delimited path segments is not enforced on a write: 255 is taken. Since a segment costs at least two code units and a key holds 1024, no key this crate accepts can reach a segment limit, and there is nothing to check.
+The documented maximum of 254 `/`-delimited path segments is not what the service enforces: 255 is taken and 494 is refused with 400. `a_key_holds_the_segments_azure_says_it_may` bisects for the real boundary and holds it.
 
-Azure refuses `U+0001` in a name with 400, so the obvious way to make it write `Encoded="true"` is closed. Whether any name this crate can write reaches the encoded form is still open, and `a_name_that_xml_cannot_carry_is_refused_or_says_how_it_is_encoded` tries the rest of what XML 1.0 forbids. Until one of them can be stored, `xml::decode_percent` stays lenient about a `%` that is not an escape, because nothing measured says such a `%` is ever an escape.
+A listed name that says `Encoded="true"` is encoded **whole**, down to the separators between its segments: `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`. So every `%` in an encoded name begins an escape, and `xml::decode_percent` refuses one that does not. Azure refuses the C0 controls in a name outright, with 400, but holds `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to carry; those are what make it write the encoded form.
+
+Azure drops a dot from the end of **every segment** of a name, not just the end of the name: `dot.` is stored as `dot` and `dotseg./x` as `dotseg/x`. A `.` or `..` segment is resolved out of the URL by the host before the request is sent, as the standard for URLs requires, so `dots/../up` writes `up`. Both are refused by `addressable` rather than stored under a name the caller did not write.
 
 ## What the suite is still measuring
 
-Whether any name this crate can write makes Azure percent-encode a listed one; see the paragraph above. That is the only open question about keys.
+Where the limit on path segments falls. It is somewhere between 256 and 493; the bisection names it, and `addressable` has to refuse past it once it is named.

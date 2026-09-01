@@ -903,16 +903,15 @@ fn addressable(key: &str) -> bool {
     if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
         return false;
     }
-    // Azure drops a dot from the end of a name: `dot.` is stored as `dot`, and
-    // a listing reports it that way. Measured; see the live suite.
-    if key.ends_with('.') {
-        return false;
-    }
-    // A host resolves these out of the URL before it sends it, as the standard
-    // for a URL says it must, so the request would name another object
-    // entirely. Measured: `dots/../up` wrote `up`.
-    !key.split('/')
-        .any(|segment| segment == "." || segment == "..")
+    // Azure drops a dot from the end of every segment of a name: `dot.` is
+    // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
+    // suite.
+    //
+    // The same test covers a segment that is only dots. A host resolves `.`
+    // and `..` out of the URL before it sends it, as the standard for URLs
+    // requires, so those would name another object entirely; measured, as
+    // `dots/../up` wrote `up`.
+    !key.split('/').any(|segment| segment.ends_with('.'))
 }
 
 fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {

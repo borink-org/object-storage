@@ -282,9 +282,9 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
         );
     }
 
-    // Azure drops a dot from the end of a name, so a key that ends in one
+    // Azure drops a dot from the end of every segment, so a key with one
     // names an object that will not be there.
-    for key in ["dot.", "a/dot.", "..", "."] {
+    for key in ["dot.", "a/dot.", "dotseg./x", "a./b", "..", ".", "a/../"] {
         assert_eq!(
             refused(key),
             Err(Error::InvalidPlan(InvalidPlan::Key)),
@@ -304,7 +304,17 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
 
     // A dot that is not the whole segment and not at the end is ordinary text,
     // and so is a slash wherever it falls but the cases above.
-    for key in ["a.b", "..a", "a..b", "a/b", "a//b", "trailing/", "/leading"] {
+    for key in [
+        "a.b",
+        "..a",
+        "a..b",
+        "a/b",
+        "a//b",
+        "trailing/",
+        "/leading",
+        "..leading",
+        "a.b/c",
+    ] {
         assert!(refused(key).is_ok(), "{key:?}");
     }
 }

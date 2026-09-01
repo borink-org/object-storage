@@ -1067,62 +1067,72 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     }
 }
 
-/// Settles whether a name this crate can write ever makes Azure percent-encode
-/// one, which is what decides whether `xml::decode_percent` may refuse a `%`
-/// that is not an escape.
+/// Holds what a listed name looks like when Azure says it is encoded, which is
+/// what lets `xml::decode_percent` refuse a `%` that is not an escape.
 ///
-/// Azure sets `Encoded="true"` on a listed name that holds characters XML
-/// cannot carry. Measured: it refuses `U+0001` in a name outright, with 400,
-/// so the obvious way to produce such a name is closed. This tries the rest of
-/// what XML 1.0 forbids and asks whether any of them can be stored at all.
-///
-/// If none can, the encoded form is unreachable for a name written through
-/// this crate, and `decode_percent` stays lenient because nothing measured
-/// says a `%` in a name is ever an escape. If one can, the listing says how
-/// much of the name was encoded, and a `%` in it settles the rest.
+/// Measured. Azure refuses the C0 controls in a name outright, with 400, but
+/// takes `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to hold. It
+/// lists such a name with `Encoded="true"` and encodes the whole of it, down
+/// to the separators between its segments: the name below comes back reading
+/// `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`.
+/// So every `%` in an encoded name begins an escape.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_name_that_xml_cannot_carry_is_refused_or_says_how_it_is_encoded() {
+fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     let fixture = Fixture::from_env();
     empty(&fixture);
 
-    // Every kind of character XML 1.0 forbids that a Rust string can hold: a
-    // C0 control, the two others below a space, and the two non-characters.
-    // Each one carries a percent, which is the byte in question.
-    let mut stored = Vec::new();
-    for forbidden in ['\u{1}', '\u{B}', '\u{C}', '\u{E}', '\u{FFFE}', '\u{FFFF}'] {
-        let key = format!("{}100%-{forbidden}-name.txt", fixture.list_prefix);
+    // What XML 1.0 forbids and Azure refuses to hold at all.
+    for control in ['\u{1}', '\u{B}', '\u{C}', '\u{E}'] {
+        let key = format!("{}c-{control}.txt", fixture.list_prefix);
         let owner = Fixture {
-            put_key: key.clone(),
+            put_key: key,
             ..clone(&fixture)
         };
-        if write(&owner, PutShape::default(), None, b"x")
-            .unwrap()
-            .outcome
-            == WriteOutcome::Created
-        {
-            stored.push((forbidden, key));
-        }
-    }
-
-    // Passing says the encoded form is unreachable through this crate, which
-    // is what keeps `decode_percent` lenient. It must not say that by saying
-    // nothing, so the answer is asserted rather than returned from.
-    if !stored.is_empty() {
-        let plan = PhysicalList::new(&fixture.list_prefix);
-        let body = fetch(&fixture, &plan).unwrap();
-        let xml = String::from_utf8_lossy(&body).into_owned();
-        empty(&fixture);
-        panic!(
-            "Azure stored {stored:?}, so a listed name can carry \
-             `Encoded=\"true\"` after all and the question is open again. This \
-             listing says how much of the name was encoded: if the `100%-` in \
-             it is written `100%25-`, the whole name is encoded, a `%` in an \
-             encoded name is always an escape, and xml::decode_percent may \
-             refuse a lone one. If it is written `100%-`, only what XML \
-             refuses is encoded and decode_percent must stay lenient.\n{xml}"
+        assert!(
+            !matches!(
+                write(&owner, PutShape::default(), None, b"x")
+                    .unwrap()
+                    .outcome,
+                WriteOutcome::Created
+            ),
+            "Azure took {control:?} in a name; it refused one before, and a \
+             name it holds is one this test should list"
         );
     }
+
+    // What it forbids and Azure does hold. The percent is the byte in
+    // question: in an encoded name it must be written `%25`.
+    let key = format!("{}100%-{}-name.txt", fixture.list_prefix, '\u{fffe}');
+    let owner = Fixture {
+        put_key: key.clone(),
+        ..clone(&fixture)
+    };
+    assert_eq!(
+        write(&owner, PutShape::default(), None, b"x")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created,
+        "a name holding U+FFFE was stored before"
+    );
+
+    let plan = PhysicalList::new(&fixture.list_prefix);
+    let body = fetch(&fixture, &plan).unwrap();
+    let xml = String::from_utf8_lossy(&body).into_owned();
+    assert!(xml.contains("Encoded=\"true\""), "{xml}");
+    assert!(
+        xml.contains("100%25-") && xml.contains("azure-list-scratch%2F"),
+        "an encoded name is encoded whole, separators included, which is what \
+         makes every `%` in one an escape. If this fails, xml::decode_percent \
+         must stop refusing a `%` that is not one: {xml}"
+    );
+
+    // And the name comes back as it was written.
+    let listed: Vec<String> = walk(&fixture, false, 1000)
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    assert_eq!(listed, [key]);
 
     empty(&fixture);
 }
@@ -1185,16 +1195,15 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
     empty(&fixture);
 }
 
-/// Settles whether the documented maximum of 254 `/`-delimited path segments
-/// is one this crate has to check. It is not.
+/// Finds the largest number of `/`-delimited path segments Azure takes, which
+/// the documentation gives as 254 and which measurement does not agree with.
 ///
-/// Measured: a name of 255 segments is taken, so the documented limit is not
-/// enforced on a write. This asks for the most segments a key can hold at all,
-/// since a segment costs at least two code units and a key has 1024 of them,
-/// and that is taken too. There is nothing here for `validate_put` to refuse.
+/// Measured: 255 segments is taken and 494 is refused with 400, so a limit is
+/// real but is not the documented one. This bisects for it and holds the
+/// answer, because `addressable` has to refuse what the service will not take.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_key_holds_as_many_segments_as_its_length_allows() {
+fn a_key_holds_the_segments_azure_says_it_may() {
     let fixture = Fixture::from_env();
     empty(&fixture);
 
@@ -1204,32 +1213,44 @@ fn a_key_holds_as_many_segments_as_its_length_allows() {
         let tail = vec!["s"; total - 2].join("/");
         format!("{}{tail}", fixture.list_prefix)
     };
-    let count = |key: &str| key.matches('/').count() + 1;
-
-    // Past the documented maximum, and then as far past it as a key of 1024
-    // code units can reach.
-    let longest = (1024 - fixture.list_prefix.len()).div_ceil(2) + 2;
-    for total in [255, longest] {
+    let takes = |total: usize| {
         let key = of_segments(total);
-        assert_eq!(count(&key), total);
-        assert!(key.encode_utf16().count() <= 1024, "{}", key.len());
+        assert_eq!(key.matches('/').count() + 1, total);
+        assert!(key.encode_utf16().count() <= 1024, "{total} is too long");
         let owner = Fixture {
             put_key: key,
             ..clone(&fixture)
         };
-        assert_eq!(
-            write(&owner, PutShape::default(), None, b"x")
-                .unwrap()
-                .outcome,
-            WriteOutcome::Created,
-            "{total} segments. The documentation gives 254 as the maximum; if \
-             this refuses, the limit is real and falls between 255 and \
-             {longest}, and validate_put has to count segments after all"
-        );
+        write(&owner, PutShape::default(), None, b"x")
+            .unwrap()
+            .outcome
+            == WriteOutcome::Created
+    };
+
+    // Between the largest that was taken and the smallest that was refused.
+    let (mut taken, mut refused) = (255, 494);
+    assert!(takes(taken), "{taken} segments was taken before");
+    assert!(!takes(refused), "{refused} segments was refused before");
+    while taken + 1 < refused {
+        let mid = (taken + refused) / 2;
+        if takes(mid) {
+            taken = mid;
+        } else {
+            refused = mid;
+        }
     }
+
+    assert_eq!(
+        taken, MAX_SEGMENTS,
+        "the largest name Azure takes has {taken} segments, not {MAX_SEGMENTS}. \
+         Correct MAX_SEGMENTS here and the segment rule in `addressable`"
+    );
 
     empty(&fixture);
 }
+
+// Measured by the bisection above.
+const MAX_SEGMENTS: usize = 256;
 
 /// Settles what Azure does with the slashes this crate leaves literal in the
 /// URL path, which is what makes a hierarchical-namespace path work.
