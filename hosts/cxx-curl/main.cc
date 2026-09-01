@@ -3,9 +3,10 @@
 // This program is the same for every host in this directory. Which HTTP client
 // sends the request is decided by which host it is linked with.
 //
-//     borink-azure-curl get    <key>   writes the object to standard output
-//     borink-azure-curl put    <key>   stores standard input as the object
-//     borink-azure-curl delete <key>   removes the object
+//     borink-azure-curl get    <key>      writes the object to standard output
+//     borink-azure-curl put    <key>      stores standard input as the object
+//     borink-azure-curl delete <key>      removes the object
+//     borink-azure-curl list   <prefix>   writes every key under the prefix
 
 #include <cstdint>
 #include <cstdio>
@@ -47,12 +48,18 @@ void write_all(std::span<const std::uint8_t> part) {
     }
 }
 
+void write_keys(std::span<const borink::ListEntry> entries) {
+    for (const borink::ListEntry &entry : entries) {
+        std::cout << borink::text_of(entry.key) << "\n";
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
     try {
         if (argc != 3) {
-            std::cerr << "usage: " << argv[0] << " get|put|delete <key>\n";
+            std::cerr << "usage: " << argv[0] << " get|put|delete <key> | list <prefix>\n";
             return 2;
         }
         const std::string_view command = argv[1];
@@ -72,6 +79,11 @@ int main(int argc, char **argv) {
             client.put(key, content);
         } else if (command == "delete") {
             client.remove(key);
+        } else if (command == "list") {
+            // The array is this program's budget: the client reads every page
+            // into it, an arrayful at a time, and holds no more than that.
+            std::vector<borink::ListEntry> entries(1000);
+            client.list(key, entries, write_keys, borink::List{false, borink::at_most(1000), {}});
         } else {
             std::cerr << "unknown command " << command << "\n";
             return 2;

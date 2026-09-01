@@ -11,7 +11,7 @@ This library uses a style of programming inspired by Zig, but still provides Rus
 
 Currently we only provide the sans-I/O core as a library; you must provide the host yourself. [`hosts/ureq`](hosts/ureq) contains an example host.
 
-For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `extern "C"` static archive and [`hosts/cxx-curl`](hosts/cxx-curl) is a libcurl host built on it. It allocates nothing at all, returns no `Result` and throws nothing, so an application built without exceptions can use it. A C++ program includes the header-only `borink/object_storage.hpp` for `std::span` and `std::string_view` ergonomics; a C program includes the generated `borink/object_storage.h` alone. Neither needs a C++ runtime library, so the same archive links on a hosted operating system and on a bare-metal board (`--no-default-features`, no allocator, no panic handler of ours to replace). Your application keeps its HTTP client, its buffers and its memory budget.
+For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `extern "C"` static archive and [`hosts/cxx-curl`](hosts/cxx-curl) is a libcurl host built on it. It allocates nothing at all, returns no `Result` and throws nothing, so an application built without exceptions can use it. A C++ program includes the header-only `borink/object_storage.hpp` for `std::span` and `std::string_view` ergonomics; a C program includes the generated `borink/object_storage.h` alone. Neither needs a C++ runtime library, so the same archive links on a hosted operating system and on a bare-metal board (`--no-default-features`, no allocator, no panic handler of ours to replace). Your application keeps its HTTP client, its buffers and its memory budget. Every operation below crosses that boundary, listing included: a page is read out of the response body you held, into an array of entries you own.
 
 ## Supported features
 
@@ -32,7 +32,29 @@ For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `exter
   - Supports delimiters, prefixes
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 
-## Compressed objects
+## Development status and roadmap
+
+The goal is a full-featured object storage library that supports both Azure Blob Storage and S3 (including S3-compatible services). The goal is to also include a lot of useful functionality around the basic operations, in particular authentication/authorization features (as usually the SDK's and existing libraries can be quite heavy). This includes things like AssumeRoleWithWebIdentity and OIDC token exchange (e.g. exchanging your GitHub Actions identity token for a short-lived Azure one).
+
+The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) will target Azure only, S3 will come in 0.0.2. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
+
+Roadmap:
+- Azure multipart support (Put Block List) -> 0.0.1 release
+- S3 PUT, GET, DELETE (so lands SigV4 support and crypto primitives)
+- S3 LIST
+- S3 multipart -> 0.0.2 release
+- S3 directory buckets, S3 Express One Zone, Azure HNS compatibility -> 0.0.3 release
+- Refine API, performance improvements
+- 0.1 release (with promise to try and keep API stable from now on, no guarantee)
+- ... support for various AWS and Azure authorization schemes -> 0.2 release
+- Convenience layer and API -> 0.3 release
+- 1.0 release (API stability)
+- ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings)
+- ... various improvements to the convenience layer and API and CLI that implements various non-core features that are coupled to the transport
+
+## Library notes
+
+### Compressed objects
 
 Azure stores a blob as opaque bytes and never compresses it for you. If you
 uploaded compressed bytes and set `Content-Encoding`, then those bytes are what

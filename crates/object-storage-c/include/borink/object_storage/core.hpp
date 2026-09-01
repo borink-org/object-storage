@@ -33,12 +33,20 @@ using BytesMut      = borink_bytes_mut;
 using Span          = borink_span;
 using MaybeBytes    = borink_maybe_bytes;
 using MaybeU64      = borink_maybe_u64;
+using MaybeU32      = borink_maybe_u32;
+using MaybeSpan     = borink_maybe_span;
 using Status        = borink_status;
 using Session       = borink_session;
 using Range         = borink_range;
 using GetShape      = borink_get_shape;
 using PutShape      = borink_put_shape;
 using DeleteShape   = borink_delete_shape;
+using ListShape     = borink_list_shape;
+using ListEntry     = borink_list_entry;
+using Properties    = borink_properties;
+using Property      = borink_property;
+using Resume        = borink_resume;
+using Fill          = borink_fill;
 using RequestHeader = borink_request_header;
 using RequestHead   = borink_request_head;
 using HeaderRef     = borink_header_ref;
@@ -56,6 +64,8 @@ using DeleteKind    = borink_delete_kind;
 using FailureClass  = borink_failure_class;
 using ServiceError  = borink_service_error;
 using OutcomeKind   = borink_outcome_kind;
+using EntryKind     = borink_entry_kind;
+using FillKind      = borink_fill_kind;
 
 inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
 
@@ -118,6 +128,14 @@ inline constexpr OutcomeKind OutcomeKindNeedErrorBody       = BORINK_OUTCOME_KIN
 inline constexpr OutcomeKind OutcomeKindServiceFailure      = BORINK_OUTCOME_KIND_SERVICE_FAILURE;
 inline constexpr OutcomeKind OutcomeKindUnsupported         = BORINK_OUTCOME_KIND_UNSUPPORTED;
 inline constexpr OutcomeKind OutcomeKindInvalid             = BORINK_OUTCOME_KIND_INVALID;
+inline constexpr OutcomeKind OutcomeKindPage                = BORINK_OUTCOME_KIND_PAGE;
+
+inline constexpr EntryKind EntryKindObject    = BORINK_ENTRY_KIND_OBJECT;
+inline constexpr EntryKind EntryKindPrefix    = BORINK_ENTRY_KIND_PREFIX;
+inline constexpr EntryKind EntryKindDirectory = BORINK_ENTRY_KIND_DIRECTORY;
+
+inline constexpr FillKind FillKindPage    = BORINK_FILL_KIND_PAGE;
+inline constexpr FillKind FillKindPartial = BORINK_FILL_KIND_PARTIAL;
 
 // Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }
@@ -131,6 +149,13 @@ inline Range bounded(std::uint64_t start, std::uint64_t end) {
 inline Range from(std::uint64_t start) {
     return Range{RangeFormOffset, start, 0};
 }
+
+// Returns the number of entries that one page of a listing reports.
+//
+// A default-built `MaybeU32` is absent, and asks for the service's maximum.
+// Azure applies that maximum to any larger number too: 6,000 asks for 6,000
+// and is answered with 5,000 and a marker.
+inline MaybeU32 at_most(std::uint32_t entries) { return MaybeU32{true, entries}; }
 
 // Reads text as the bytes a call takes.
 inline Bytes as_bytes(std::string_view value) {
@@ -184,6 +209,22 @@ struct Write {
     PutShape shape() const { return PutShape{condition}; }
 };
 
+// The settings of one page of a listing.
+//
+// The defaults ask for every key under the prefix, in pages of the size that
+// the service chooses.
+struct List {
+    // Whether the listing groups the keys at each `/` after the prefix.
+    bool delimited = false;
+    // The most entries that one page reports.
+    MaybeU32 max_results = {};
+    // The text that the last page gave for the next one. Empty asks for the
+    // first page.
+    std::string_view marker;
+
+    ListShape shape() const { return ListShape{delimited, max_results}; }
+};
+
 // The settings of one removal.
 struct Removal {
     // What the removal takes with it.
@@ -211,6 +252,77 @@ inline std::span<const std::uint8_t> bytes_of(const MaybeBytes &value) {
 inline std::string_view text_of(const MaybeBytes &value) {
     const std::span<const std::uint8_t> bytes = bytes_of(value);
     return std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+}
+
+// Returns the bytes of a value that a call lent back.
+//
+// The span points into the storage that the call read, and is valid for as
+// long as that storage is. Copy what you keep.
+inline std::span<const std::uint8_t> bytes_of(const Bytes &value) {
+    return std::span<const std::uint8_t>(value.ptr, value.len);
+}
+
+// Returns the same bytes as text, such as the key of a listing entry.
+inline std::string_view text_of(const Bytes &value) {
+    return std::string_view(reinterpret_cast<const char *>(value.ptr), value.len);
+}
+
+// Returns an entity tag from a listing in the quoted form that HTTP defines.
+//
+// A listing writes an entity tag without the quotes that a condition takes.
+// This writes the quoted form into `room`, which needs at most two bytes more
+// than the tag, and returns it. The text points into `room` until the next
+// call that writes there, and is empty when `room` was too small.
+inline std::string_view quoted_etag(const MaybeBytes &listed, std::span<std::uint8_t> room) {
+    return text_of(borink_quoted_etag(listed.bytes, into(room)));
+}
+
+// Returns an HTTP date as milliseconds since the Unix epoch.
+//
+// Reads the `last_modified` of a listing entry or of object metadata. A value
+// that is not an RFC 1123 date is absent.
+inline MaybeU64 http_date_ms(const MaybeBytes &value) {
+    return borink_http_date_ms(value.bytes);
+}
+
+// Returns the part of `entries` that a fill wrote.
+inline std::span<const ListEntry> entries_of(std::span<const ListEntry> entries,
+                                             const Fill &fill) {
+    return entries.subspan(0, fill.filled);
+}
+
+// Returns the value that one entry gave for a property.
+//
+// An entry carries the values every listing reports; this reads one of the
+// rest, such as `AccessTier` or `Creation-Time`, out of the entry's own bytes.
+// An absent value means the entry wrote no such property.
+//
+// Reading more than one or two is a walk: see `properties`.
+inline MaybeBytes property(const ListEntry &entry, std::string_view name) {
+    return borink_entry_property(&entry, as_bytes(name));
+}
+
+// Returns a walk over every value that one entry holds.
+//
+// Step it with `next`, which reports one value per call:
+//
+//     Properties walk = properties(entry);
+//     for (Property found = next(walk); found.present; found = next(walk)) {
+//         // text_of(found.name), text_of(found.value)
+//     }
+inline Properties properties(const ListEntry &entry) { return borink_entry_properties(&entry); }
+
+// Reads the next value of a walk, and steps the walk past it.
+inline Property next(Properties &walk) { return borink_next_property(&walk); }
+
+// Returns the text of a listed value with its references resolved.
+//
+// A value that an entry lends holds what the service wrote, where XML writes
+// an `&` as `&amp;`. This writes what those stand for into `room`, which needs
+// no more room than the value. The text is empty when `room` is shorter than
+// the value, and when the value holds a reference that no listing declares.
+inline std::string_view decoded(const Bytes &value, std::span<std::uint8_t> room) {
+    return text_of(borink_decode_into(value, into(room)));
 }
 
 // What a describe call wrote into a room.

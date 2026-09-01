@@ -9,7 +9,7 @@ use crate::types::*;
 
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, Error, GetHeadOutcome, PutHeadOutcome, ServiceErrorKind,
+    DeleteHeadOutcome, Error, GetHeadOutcome, ListHeadOutcome, PutHeadOutcome, ServiceErrorKind,
 };
 
 pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
@@ -70,6 +70,98 @@ pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         DeleteHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
         _ => only(OutcomeKind::Unsupported),
+    }
+}
+
+pub(crate) fn list_outcome(outcome: &ListHeadOutcome<'_>) -> Outcome {
+    match *outcome {
+        // A page is a document rather than part of an object, so the length is
+        // the only field of the window that a listing fills.
+        ListHeadOutcome::Page { expected_len } => Outcome {
+            body: BodyWindow {
+                expected_len: maybe_number(expected_len),
+                ..Default::default()
+            },
+            ..only(OutcomeKind::Page)
+        },
+        ListHeadOutcome::NotFound { kind } => not_found(kind),
+        ListHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        ListHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        _ => only(OutcomeKind::Unsupported),
+    }
+}
+
+// One entry, pointing at the bytes of the body that the fill decoded.
+pub(crate) fn entry_view(entry: &proto::ListEntry<'_>) -> ListEntry {
+    ListEntry {
+        kind: entry.kind as u16,
+        key: bytes(entry.key.as_bytes()),
+        size: maybe_number(entry.size),
+        e_tag: maybe_bytes(entry.e_tag),
+        last_modified: maybe_bytes(entry.last_modified),
+        raw: bytes(entry.raw),
+    }
+}
+
+// A walk, as the two values that a C program keeps between calls.
+pub(crate) fn properties_view(walk: proto::Properties<'_>) -> Properties {
+    Properties {
+        remaining: bytes(walk.remaining()),
+        within: walk.within(),
+    }
+}
+
+// One value that a walk read, or the end of the walk.
+pub(crate) fn property_view(found: Option<(&[u8], &[u8])>) -> Property {
+    found.map_or_else(Default::default, |(name, value)| Property {
+        present: true,
+        name: bytes(name),
+        value: bytes(value),
+    })
+}
+
+// A fill that read the page to its end.
+pub(crate) fn page_fill(filled: usize, next_marker: Option<&[u8]>) -> Fill {
+    Fill {
+        kind: FillKind::Page as u16,
+        filled,
+        next_marker: maybe_bytes(next_marker),
+        ..Default::default()
+    }
+}
+
+// A fill that stopped because the array was full.
+pub(crate) fn partial_fill(filled: usize, resume: proto::Resume) -> Fill {
+    Fill {
+        kind: FillKind::Partial as u16,
+        filled,
+        resume: resume_view(resume),
+        ..Default::default()
+    }
+}
+
+// A fill that read nothing, because the body is not a page or the call was
+// refused. No entry of the array is reported, whatever the call wrote there.
+pub(crate) fn refused_fill(error: &Error) -> Fill {
+    Fill {
+        status: status_of(error),
+        ..Default::default()
+    }
+}
+
+fn resume_view(resume: proto::Resume) -> Resume {
+    Resume {
+        at: resume.at(),
+        within: resume.within(),
+        marker: resume
+            .marker()
+            .map_or_else(Default::default, |span| MaybeSpan {
+                present: true,
+                span: Span {
+                    start: span.start,
+                    len: span.len,
+                },
+            }),
     }
 }
 
@@ -141,17 +233,21 @@ pub(crate) fn kind_view(kind: Option<ServiceErrorKind>) -> u16 {
     kind.map_or(0, |kind| kind as u16)
 }
 
-fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
-    value.map_or_else(Default::default, |bytes| MaybeBytes {
+pub(crate) fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
+    value.map_or_else(Default::default, |value| MaybeBytes {
         present: true,
-        bytes: Bytes {
-            ptr: bytes.as_ptr(),
-            len: bytes.len(),
-        },
+        bytes: bytes(value),
     })
 }
 
-fn maybe_number(value: Option<u64>) -> MaybeU64 {
+fn bytes(value: &[u8]) -> Bytes {
+    Bytes {
+        ptr: value.as_ptr(),
+        len: value.len(),
+    }
+}
+
+pub(crate) fn maybe_number(value: Option<u64>) -> MaybeU64 {
     value.map_or_else(Default::default, |value| MaybeU64 {
         present: true,
         value,

@@ -1406,3 +1406,111 @@ fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
          grow: status {status}"
     );
 }
+
+/// What the service does with a marker that this crate passed through.
+///
+/// A marker is the service's own text and this crate checks only that it is
+/// not empty, so what a wrong one costs is the service's answer, not ours.
+/// Measured on 2026-09-01: a marker that is not one at all is 400
+/// `InvalidQueryParameterValue`, and the body names `marker` as the parameter;
+/// a real marker with its last bytes cut off is 400 `InvalidInput`. Neither is
+/// a code this crate maps, so both arrive as `ServiceFailure` with no `kind`,
+/// which is right: a 400 is the caller's bug and is not retryable.
+///
+/// A marker that is stale is not a case at all. The one below is read twice,
+/// pages from the same place both times, and never expires within a run.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_marker_the_service_did_not_write_is_refused_by_it() {
+    let fixture = Fixture::from_env();
+    let blobs = fixture.blobs();
+    let refused = list_status(&fixture, Some(b"not-a-marker"));
+    assert_eq!(refused.0, 400);
+    assert_eq!(
+        blobs.accept_list_error_body(refused.0, None, &refused.1),
+        ListHeadOutcome::ServiceFailure(borink_object_storage_proto::Failure {
+            status: 400,
+            class: borink_object_storage_proto::FailureClass::Other,
+            kind: None,
+            request_id: None,
+        }),
+        "a code this crate maps would name the error here"
+    );
+
+    // A marker the service wrote reads the same page however often it is used.
+    let plan = PhysicalList {
+        max_results: Some(1),
+        ..PhysicalList::new(&fixture.list_prefix)
+    };
+    seed_listing(&fixture);
+    let (_, marker) = page(&fixture, &plan, 4).unwrap();
+    let marker = marker.expect("a first page of one entry names the next");
+    let again = PhysicalList {
+        marker: Some(&marker),
+        ..plan
+    };
+    assert_eq!(
+        page(&fixture, &again, 4).unwrap().0,
+        page(&fixture, &again, 4).unwrap().0,
+        "a marker names a place in the container, not a session"
+    );
+
+    // The same marker with its last bytes cut off is not a marker.
+    let cut = &marker[..marker.len() - 2];
+    assert_eq!(list_status(&fixture, Some(cut)).0, 400);
+}
+
+/// The most entries a page reports, when the plan asks for more than the
+/// service gives.
+///
+/// Measured on 2026-09-01: Azure answers 200 and echoes `<MaxResults>5000`,
+/// which is what `PhysicalList::max_results` documents. A caller that asks for
+/// more is not refused; it is answered with the maximum and a marker.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_page_larger_than_the_service_gives_is_answered_with_its_maximum() {
+    let fixture = Fixture::from_env();
+    let plan = PhysicalList {
+        max_results: Some(99_999),
+        ..PhysicalList::new(&fixture.list_prefix)
+    };
+    seed_listing(&fixture);
+
+    let body = fetch(&fixture, &plan).expect("the service answers rather than refusing");
+    let echoed = String::from_utf8(body).unwrap();
+    assert!(
+        echoed.contains("<MaxResults>5000</MaxResults>"),
+        "the service no longer reports its own maximum: {echoed}"
+    );
+}
+
+// One listing request, as the status and the body that answered it. The
+// listing helpers above read a page; this one is for the answers that are not
+// pages.
+fn list_status(fixture: &Fixture, marker: Option<&[u8]>) -> (u16, Vec<u8>) {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalList {
+        marker,
+        ..PhysicalList::new(&fixture.list_prefix)
+    };
+    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let status = incoming.status().as_u16();
+    (status, incoming.body_mut().read_to_vec().unwrap())
+}

@@ -502,6 +502,24 @@ fn an_array_smaller_than_the_page_reads_the_rest_of_it_afterwards() {
     assert_eq!(listing.next_marker, Some(b"next".as_slice()));
 }
 
+// A caller that cannot hold a Rust value stores the three numbers of a
+// position instead, and reading continues from what those numbers rebuild.
+#[test]
+fn a_position_stored_as_its_numbers_reads_the_same_rest() {
+    let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "next");
+    let mut entries = [ListEntry::default(); 1];
+    let (filled, at) = partial(&mut body, &mut entries);
+    assert_eq!(filled, 1);
+
+    let stored = Resume::from_parts(at.at(), at.within(), at.marker());
+    assert_eq!(stored, at);
+
+    let mut entries = [ListEntry::default(); 1];
+    let listing = resume(&mut body, stored, &mut entries);
+    assert_eq!((listing.filled, entries[0].key), (1, "b.txt"));
+    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
+}
+
 #[test]
 fn an_array_that_holds_the_page_exactly_is_not_partial() {
     let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "");
@@ -807,4 +825,170 @@ fn a_page_the_service_actually_sent() {
     );
     // The last page of the listing, written the way the service writes it.
     assert_eq!(listing.next_marker, None);
+}
+
+// An entry as Azure writes it when the account has versioning, a tier and a
+// content type: values beside the properties element, values inside it, an
+// element that carries nothing, and one that carries other elements.
+fn furnished(name: &str) -> String {
+    format!(
+        "<Blob><Name>{name}</Name>\
+         <VersionId>2026-09-01T19:08:11.7600332Z</VersionId>\
+         <IsCurrentVersion>true</IsCurrentVersion>\
+         <Properties>\
+         <Creation-Time>Tue, 01 Sep 2026 19:08:11 GMT</Creation-Time>\
+         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8DF0046E8E555AF</Etag><Content-Length>1</Content-Length>\
+         <Content-Type>text/plain</Content-Type><Content-Encoding />\
+         <BlobType>BlockBlob</BlobType><AccessTier>Hot</AccessTier>\
+         </Properties>\
+         <Metadata><colour>a&amp;b</colour></Metadata><OrMetadata />\
+         </Blob>"
+    )
+}
+
+/// A property that this crate does not read is read from the entry itself,
+/// wherever the service put it.
+#[test]
+fn a_property_this_crate_does_not_read_is_read_from_the_entry() {
+    let mut body = page(&furnished("a.txt"), "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+    let entry = entries[0];
+
+    // Inside the properties element, and beside it: one call reads both.
+    assert_eq!(entry.property("AccessTier"), Some(b"Hot".as_slice()));
+    assert_eq!(entry.property("BlobType"), Some(b"BlockBlob".as_slice()));
+    assert_eq!(
+        entry.property("Content-Type"),
+        Some(b"text/plain".as_slice())
+    );
+    assert_eq!(entry.property("IsCurrentVersion"), Some(b"true".as_slice()));
+    assert_eq!(
+        entry.property("VersionId"),
+        Some(b"2026-09-01T19:08:11.7600332Z".as_slice())
+    );
+
+    // An element that carries nothing has an empty value, which is not the
+    // same fact as a property the entry never wrote.
+    assert_eq!(entry.property("Content-Encoding"), Some(b"".as_slice()));
+    assert_eq!(entry.property("OrMetadata"), Some(b"".as_slice()));
+    assert_eq!(entry.property("Snapshot"), None);
+    // The properties element is what holds properties, not one of them.
+    assert_eq!(entry.property("Properties"), None);
+
+    // An element that holds others reports those bytes, which is what a walk
+    // over the metadata of a blob starts from.
+    assert_eq!(
+        entry.property("Metadata"),
+        Some(b"<colour>a&amp;b</colour>".as_slice())
+    );
+}
+
+/// The walk reports every element of an entry once, in the order the service
+/// wrote them, and reports the properties element by its contents.
+#[test]
+fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
+    let mut body = page(&furnished("a.txt"), "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+
+    let mut walk = entries[0].properties();
+    let names: Vec<String> = walk
+        .by_ref()
+        .map(|(name, _)| String::from_utf8(name.to_vec()).unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Name",
+            "VersionId",
+            "IsCurrentVersion",
+            "Creation-Time",
+            "Last-Modified",
+            "Etag",
+            "Content-Length",
+            "Content-Type",
+            "Content-Encoding",
+            "BlobType",
+            "AccessTier",
+            "Metadata",
+            "OrMetadata",
+        ]
+    );
+    // A walk that ended stays ended.
+    assert_eq!(walk.next(), None);
+    assert_eq!(walk.next(), None);
+
+    // A group of keys carries a name and nothing else.
+    let mut body = page("<BlobPrefix><Name>nested/</Name></BlobPrefix>", "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+    assert_eq!(entries[0].properties().count(), 1);
+}
+
+/// Reading a page decodes the values it reports where they stand, so those
+/// elements no longer hold what the service wrote. The entry carries them.
+#[test]
+fn a_value_that_was_decoded_in_place_is_read_from_the_entry_and_not_the_bytes() {
+    let mut body = page(&object("a&amp;b.txt", 4), "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+
+    assert_eq!(entries[0].key, "a&b.txt");
+    // The element that held it is shorter than what it holds now, so the walk
+    // reports the decoded text and the bytes the decoding left behind.
+    assert_ne!(entries[0].property("Name"), Some(b"a&b.txt".as_slice()));
+    // Everything the page did not decode is what the service wrote.
+    assert_eq!(
+        entries[0].property("BlobType"),
+        Some(b"BlockBlob".as_slice())
+    );
+}
+
+/// A value that carries a reference is decoded into the caller's own buffer,
+/// because the page's bytes are lent out and cannot be written again.
+#[test]
+fn a_listed_value_is_decoded_into_a_buffer_of_the_caller() {
+    let mut into = [0; 32];
+    assert_eq!(
+        layered::decode_into(b"a&amp;b", &mut into),
+        Some(b"a&b".as_slice())
+    );
+    assert_eq!(
+        layered::decode_into(b"caf&#233;", &mut into),
+        Some("café".as_bytes())
+    );
+    // Text with nothing to decode is copied as it stands.
+    assert_eq!(
+        layered::decode_into(b"text/plain", &mut into),
+        Some(b"text/plain".as_slice())
+    );
+    // A buffer shorter than the value, and a reference no listing declares.
+    assert_eq!(layered::decode_into(b"a&amp;b", &mut [0; 6]), None);
+    assert_eq!(layered::decode_into(b"a&nbsp;b", &mut into), None);
+}
+
+/// A prefix that a hierarchical account furnishes, and an entry whose
+/// properties element carries nothing: neither reports that element itself.
+#[test]
+fn the_properties_element_is_never_reported_as_one_of_them() {
+    let mut body = page(
+        "<Blob><Name>a.txt</Name><Properties><Content-Length>4</Content-Length>\
+         </Properties></Blob>\
+         <BlobPrefix><Name>nested/</Name><Properties /><ResourceType>directory\
+         </ResourceType></BlobPrefix>",
+        "",
+    );
+    let mut entries = [ListEntry::default(); 2];
+    fill(&mut body, &mut entries);
+
+    let names: Vec<&[u8]> = entries[1].properties().map(|(name, _)| name).collect();
+    assert_eq!(names, [b"Name".as_slice(), b"ResourceType".as_slice()]);
+    assert_eq!(entries[1].property("Properties"), None);
+    // What follows the empty element is still walked.
+    assert_eq!(
+        entries[1].property("ResourceType"),
+        Some(b"directory".as_slice())
+    );
 }

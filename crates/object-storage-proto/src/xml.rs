@@ -355,6 +355,7 @@ fn read_entry(raw: &mut [u8], prefix: bool) -> Result<ListEntry<'_>> {
             .filter(|_| !directory)
             .map(|(start, end)| &raw[start..end]),
         last_modified: last_modified.map(|(start, end)| &raw[start..end]),
+        raw,
     })
 }
 
@@ -567,6 +568,103 @@ fn hex_pair(bytes: &[u8], at: usize) -> Option<u8> {
 
 fn fault() -> Error {
     Error::Response(ResponseFault::Body)
+}
+
+// The element that holds the properties of one entry. The walk below reports
+// what is inside it beside what is beside it, because a service puts the same
+// kind of value in both places: Azure under this element, S3 next to it.
+const PROPERTIES: &[u8] = b"Properties";
+
+// What follows the first tag of an entry, which is the entry's own.
+pub(crate) fn after_tag(raw: &[u8]) -> Option<&[u8]> {
+    Some(&raw[find(raw, b">")? + 1..])
+}
+
+// One step of the walk over the elements of an entry.
+//
+// `rest` starts after the entry's own opening tag and is advanced past what
+// this call read, so a whole walk reads each byte once. `within` says whether
+// the walk is inside the properties element, which it steps into rather than
+// reporting.
+//
+// A byte that is not the start of an element ends the walk. The document was
+// read once before an entry was ever lent out, so that is a walk that has
+// reached the end of its entry rather than a document to refuse.
+pub(crate) fn next_property<'b>(
+    rest: &mut &'b [u8],
+    within: &mut bool,
+) -> Option<(&'b [u8], &'b [u8])> {
+    loop {
+        let start = *rest;
+        let open = skip_space(start);
+        let Some(after) = open.strip_prefix(b"<") else {
+            *rest = &[];
+            return None;
+        };
+        // A close tag ends the properties element, or the entry itself.
+        if let Some(closing) = after.strip_prefix(b"/") {
+            let end = find(closing, b">")? + 1;
+            if *within && closing.starts_with(PROPERTIES) {
+                *within = false;
+                *rest = &closing[end..];
+                continue;
+            }
+            *rest = &[];
+            return None;
+        }
+        let tag = find(after, b">")?;
+        let name = element_name(&after[..tag]);
+        let body = &after[tag + 1..];
+        let empty = after[..tag].ends_with(b"/");
+        // The properties element is stepped into rather than reported, and one
+        // that carries nothing has nothing to step into.
+        if !*within && name == PROPERTIES {
+            *within = !empty;
+            *rest = body;
+            continue;
+        }
+        // An element that carries nothing holds no value, and there is no
+        // close tag to look for.
+        if empty {
+            *rest = body;
+            return Some((name, &[]));
+        }
+        let (value, after_close) = closed(body, name)?;
+        *rest = after_close;
+        return Some((name, value));
+    }
+}
+
+// The value of an element, and what follows its close tag. The close tag is
+// found by name, which reads the whole of an element that holds others.
+fn closed<'b>(body: &'b [u8], name: &[u8]) -> Option<(&'b [u8], &'b [u8])> {
+    let mut at = 0;
+    loop {
+        let found = at + find(&body[at..], b"</")?;
+        let after = &body[found + 2..];
+        if after.starts_with(name) && after[name.len()..].starts_with(b">") {
+            return Some((&body[..found], &after[name.len() + 1..]));
+        }
+        at = found + 2;
+    }
+}
+
+// The name of an element, as the bytes of its opening tag hold it: everything
+// up to the first space, which is where an attribute would begin.
+fn element_name(tag: &[u8]) -> &[u8] {
+    let end = tag
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || *byte == b'/')
+        .unwrap_or(tag.len());
+    &tag[..end]
+}
+
+fn skip_space(bytes: &[u8]) -> &[u8] {
+    let count = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[count..]
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

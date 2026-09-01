@@ -386,12 +386,76 @@ enum borink_outcome_kind
      * The core crate returned a variant that this crate does not know.
      */
     BORINK_OUTCOME_KIND_UNSUPPORTED = 12,
+    /**
+     * The page of a listing follows in the response body.
+     *
+     * Read the whole body into one buffer and pass it to
+     * `borink_fill_listing`. `body.expected_len` is the length of that body,
+     * and the other two values of `body` are absent.
+     */
+    BORINK_OUTCOME_KIND_PAGE = 13,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
 typedef enum borink_outcome_kind borink_outcome_kind;
 #else
 typedef uint16_t borink_outcome_kind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * What one entry of a listing page names.
+ */
+enum borink_entry_kind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * One object.
+     */
+    BORINK_ENTRY_KIND_OBJECT = 1,
+    /**
+     * A group of keys that a delimited listing did not report one by one.
+     */
+    BORINK_ENTRY_KIND_PREFIX = 2,
+    /**
+     * A directory that the service keeps as its own entry. Only an Azure
+     * account with a hierarchical namespace reports one.
+     */
+    BORINK_ENTRY_KIND_DIRECTORY = 3,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_entry_kind borink_entry_kind;
+#else
+typedef uint16_t borink_entry_kind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * How much of a page one fill read.
+ */
+enum borink_fill_kind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * The page was read to its end. `next_marker` names the page after it.
+     */
+    BORINK_FILL_KIND_PAGE = 1,
+    /**
+     * The array filled before the page ended. Read the rest of the same body
+     * with `borink_resume_listing`, passing the `resume` beside this number.
+     */
+    BORINK_FILL_KIND_PARTIAL = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_fill_kind borink_fill_kind;
+#else
+typedef uint16_t borink_fill_kind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -785,6 +849,212 @@ typedef struct borink_header_ref {
 } borink_header_ref;
 
 /**
+ * A number that a plan may not carry.
+ */
+typedef struct borink_maybe_u32 {
+    /**
+     * Whether the plan carries this number.
+     */
+    bool present;
+    /**
+     * The number.
+     */
+    uint32_t value;
+} borink_maybe_u32;
+
+/**
+ * The part of a listing plan that holds no borrows.
+ */
+typedef struct borink_list_shape {
+    /**
+     * Whether the listing groups the keys at each `/` after the prefix.
+     *
+     * A delimited listing reports each group once, as an entry of kind
+     * `Prefix`, instead of reporting every key in it.
+     */
+    bool delimited;
+    /**
+     * The most entries that one page reports.
+     *
+     * An absent number asks for the service's maximum, which Azure also
+     * applies to any larger number: it answers 5,000 entries and a marker
+     * rather than refusing. The service may also report fewer entries than
+     * you asked for and still name a next page.
+     */
+    struct borink_maybe_u32 max_results;
+} borink_list_shape;
+
+/**
+ * A range of a response body that a page may not name.
+ */
+typedef struct borink_maybe_span {
+    /**
+     * Whether the page named a range.
+     */
+    bool present;
+    /**
+     * The range.
+     */
+    struct borink_span span;
+} borink_maybe_span;
+
+/**
+ * Where a fill stopped in a page.
+ *
+ * `borink_fill_listing` reports one when your array fills before the page
+ * ends, and `borink_resume_listing` takes it back. Store it and pass it back
+ * unchanged.
+ *
+ * One value describes one body. Passed with another body, it names no entry
+ * of it.
+ */
+typedef struct borink_resume {
+    /**
+     * The offset into the body that reading continues from.
+     */
+    size_t at;
+    /**
+     * Whether that offset stands inside the entries of the page.
+     */
+    bool within;
+    /**
+     * The range of the body that holds the text naming the next page.
+     */
+    struct borink_maybe_span marker;
+} borink_resume;
+
+/**
+ * What one call to `borink_fill_listing` read.
+ *
+ * # Lifetime
+ *
+ * `next_marker` points into the body that the call read, and is valid until
+ * you release or reuse that buffer.
+ */
+typedef struct borink_fill {
+    /**
+     * Whether the page could be read, and what stopped it.
+     *
+     * A `code` of 0 means that the entries are in your array. Every other
+     * field is absent when it is not 0.
+     */
+    struct borink_status status;
+    /**
+     * Whether the page ended or the array filled first, as a
+     * `borink_fill_kind`.
+     */
+    uint16_t kind;
+    /**
+     * The number of entries written into your array.
+     *
+     * The entries after these are untouched.
+     */
+    size_t filled;
+    /**
+     * Where the rest of the page starts, for a `Partial` fill.
+     */
+    struct borink_resume resume;
+    /**
+     * The text that names the next page, for a `Page` fill.
+     *
+     * Absent when the listing is complete. Copy the bytes into your own
+     * storage and pass them as the marker of the next request.
+     */
+    struct borink_maybe_bytes next_marker;
+} borink_fill;
+
+/**
+ * One entry of a listing page.
+ *
+ * # Lifetime
+ *
+ * `key`, `e_tag` and `last_modified` point into the body that
+ * `borink_fill_listing` read. They are valid until you release or reuse that
+ * buffer, or until the next call that reads it.
+ */
+typedef struct borink_list_entry {
+    /**
+     * What this entry names, as a `borink_entry_kind`.
+     */
+    uint16_t kind;
+    /**
+     * The object key, the shared start of the group, or the directory path.
+     *
+     * The bytes are UTF-8 text.
+     */
+    struct borink_bytes key;
+    /**
+     * The size of the object. Absent for a group and for a directory.
+     */
+    struct borink_maybe_u64 size;
+    /**
+     * The entity tag, as the listing wrote it.
+     *
+     * Azure lists an entity tag without the quotes that the `ETag` header
+     * carries. Both forms condition a request.
+     */
+    struct borink_maybe_bytes e_tag;
+    /**
+     * The value that the listing gave for the last modification, in the form
+     * that the `Last-Modified` header uses.
+     */
+    struct borink_maybe_bytes last_modified;
+    /**
+     * This entry as the service wrote it, from its opening tag to its closing
+     * one.
+     *
+     * Read a value that the fields above do not carry out of these bytes,
+     * with `borink_entry_property` or `borink_entry_properties`.
+     */
+    struct borink_bytes raw;
+} borink_list_entry;
+
+/**
+ * A walk over the values that one entry holds.
+ *
+ * `borink_entry_properties` starts one and `borink_next_property` steps it.
+ * The two values are this crate's own: keep the walk and pass it back.
+ *
+ * # Lifetime
+ *
+ * The walk points into the body that `borink_fill_listing` read, and is valid
+ * for as long as the entry it came from.
+ */
+typedef struct borink_properties {
+    /**
+     * The bytes of the entry that the walk has not read.
+     */
+    struct borink_bytes remaining;
+    /**
+     * Whether the walk stands inside the properties element.
+     */
+    bool within;
+} borink_properties;
+
+/**
+ * One value that an entry holds.
+ *
+ * # Lifetime
+ *
+ * Both values point into the body that `borink_fill_listing` read, and are
+ * valid until you release or reuse that buffer.
+ */
+typedef struct borink_property {
+    /**
+     * Whether the walk read one. A walk that has ended reports `false`.
+     */
+    bool present;
+    /**
+     * The name of the element that held the value.
+     */
+    struct borink_bytes name;
+    /**
+     * The value, as the service wrote it.
+     */
+    struct borink_bytes value;
+} borink_property;
+
+/**
  * What a C compiler computes for the structs that cross this boundary.
  *
  * Fill every field with the `sizeof`, `alignof` or `offsetof` that its name
@@ -848,6 +1118,38 @@ typedef struct borink_layout {
     size_t offsetof_outcome_body;
     size_t offsetof_outcome_failure;
     size_t offsetof_outcome_error;
+    size_t sizeof_maybe_u32;
+    size_t alignof_maybe_u32;
+    size_t offsetof_maybe_u32_value;
+    size_t sizeof_maybe_span;
+    size_t alignof_maybe_span;
+    size_t offsetof_maybe_span_span;
+    size_t sizeof_list_shape;
+    size_t offsetof_list_shape_max_results;
+    size_t sizeof_list_entry;
+    size_t alignof_list_entry;
+    size_t offsetof_list_entry_key;
+    size_t offsetof_list_entry_size;
+    size_t offsetof_list_entry_e_tag;
+    size_t offsetof_list_entry_last_modified;
+    size_t offsetof_list_entry_raw;
+    size_t sizeof_properties;
+    size_t alignof_properties;
+    size_t offsetof_properties_within;
+    size_t sizeof_property;
+    size_t alignof_property;
+    size_t offsetof_property_name;
+    size_t offsetof_property_value;
+    size_t sizeof_resume;
+    size_t alignof_resume;
+    size_t offsetof_resume_within;
+    size_t offsetof_resume_marker;
+    size_t sizeof_fill;
+    size_t alignof_fill;
+    size_t offsetof_fill_kind;
+    size_t offsetof_fill_filled;
+    size_t offsetof_fill_resume;
+    size_t offsetof_fill_next_marker;
 } borink_layout;
 
 #ifdef __cplusplus
@@ -1024,6 +1326,232 @@ struct borink_outcome borink_finish_put_error_body(const struct borink_session *
 struct borink_outcome borink_finish_delete_error_body(const struct borink_session *session,
                                                       const struct borink_failure *failure,
                                                       struct borink_bytes body);
+
+/**
+ * Writes the request head of one page of a listing into `buf`.
+ *
+ * An empty `prefix` lists the whole container. Pass an empty `marker` for the
+ * first page, and the `next_marker` of the last fill for every page after it.
+ *
+ * # Safety
+ *
+ * `session` and `shape` must each be null or point at one readable value.
+ * `prefix`, `marker` and `buf` must each address their stated length, and
+ * `buf` must be reached through nothing else during the call.
+ */
+struct borink_request_head borink_encode_list(const struct borink_session *session,
+                                              const struct borink_list_shape *shape,
+                                              struct borink_bytes prefix,
+                                              struct borink_bytes marker,
+                                              struct borink_bytes_mut buf,
+                                              uint64_t unix_seconds);
+
+/**
+ * Reads the response head of a listing.
+ *
+ * This call takes no shape: it checks nothing in the response against the
+ * plan.
+ *
+ * # Safety
+ *
+ * `session` must be null or point at one readable value. `headers` must
+ * address `header_count` readable values.
+ *
+ * # Lifetime
+ *
+ * The bytes that `headers` points at must stay valid, and must not move, for
+ * as long as you use the returned outcome.
+ */
+struct borink_outcome borink_accept_list_head(const struct borink_session *session,
+                                              uint16_t status,
+                                              const struct borink_header_ref *headers,
+                                              size_t header_count);
+
+/**
+ * Finishes a listing whose head asked for the error body.
+ *
+ * # Safety
+ *
+ * As `borink_finish_get_error_body`.
+ *
+ * # Lifetime
+ *
+ * As `borink_finish_get_error_body`.
+ */
+struct borink_outcome borink_finish_list_error_body(const struct borink_session *session,
+                                                    const struct borink_failure *failure,
+                                                    struct borink_bytes body);
+
+/**
+ * Reads a page out of the response body of a listing.
+ *
+ * Pass the whole body that the `Page` outcome announced, and an array of
+ * `capacity` entries to write it into. Reading is destructive. This call
+ * decodes the text of the body where it stands, so a body that has been read
+ * is no longer a document.
+ *
+ * Your array is the budget. A page that does not fit fills the array and
+ * reports `Partial`. Read the rest of that page with `borink_resume_listing`
+ * and the `resume` it reported. An array of `max_results` entries always
+ * holds a whole page.
+ *
+ * # Safety
+ *
+ * `session` must be null or point at one readable value. `body` must address
+ * its stated length and be reached through nothing else during the call.
+ * `into` must address `capacity` writable entries.
+ *
+ * # Lifetime
+ *
+ * Every entry, and `next_marker`, point into `body`. They are valid until you
+ * release or reuse that buffer.
+ */
+struct borink_fill borink_fill_listing(const struct borink_session *session,
+                                       struct borink_bytes_mut body,
+                                       struct borink_list_entry *into,
+                                       size_t capacity);
+
+/**
+ * Reads the rest of a page that a fill stopped in.
+ *
+ * Pass the same `body`, unchanged, and the `resume` that came with the
+ * entries you have finished with.
+ *
+ * # Safety
+ *
+ * As `borink_fill_listing`, and `from` must be null or point at one readable
+ * value.
+ *
+ * # Lifetime
+ *
+ * As `borink_fill_listing`.
+ */
+struct borink_fill borink_resume_listing(const struct borink_session *session,
+                                         struct borink_bytes_mut body,
+                                         const struct borink_resume *from,
+                                         struct borink_list_entry *into,
+                                         size_t capacity);
+
+/**
+ * Returns the value that one entry gave for a property.
+ *
+ * The name is matched exactly, against the elements of the entry and of its
+ * properties element: `AccessTier` and `Creation-Time` on Azure. An absent
+ * value means the entry wrote no such property, which is not the same fact as
+ * a property it wrote empty.
+ *
+ * Each call reads the entry again. Read more than one or two with
+ * `borink_entry_properties`, which reads it once.
+ *
+ * The three values that the entry carries are not read back this way. Reading
+ * the page decoded them where they stood, so the element that held one now
+ * holds the decoded text and what the decoding left behind. Read `key`,
+ * `e_tag` and `last_modified` from the entry.
+ *
+ * # Safety
+ *
+ * `entry` must be null or point at one readable value whose `raw` addresses
+ * its stated length. `name` must address its stated length.
+ *
+ * # Lifetime
+ *
+ * The value points into the body that the entry points into.
+ */
+struct borink_maybe_bytes borink_entry_property(const struct borink_list_entry *entry,
+                                                struct borink_bytes name);
+
+/**
+ * Starts a walk over the values that one entry holds.
+ *
+ * Step it with `borink_next_property`, which reports one value per call and
+ * reads the entry once over the whole walk. A null `entry` starts a walk that
+ * has already ended.
+ *
+ * # Safety
+ *
+ * As `borink_entry_property`.
+ *
+ * # Lifetime
+ *
+ * The walk points into the body that the entry points into.
+ */
+struct borink_properties borink_entry_properties(const struct borink_list_entry *entry);
+
+/**
+ * Reads the next value of a walk, and steps the walk past it.
+ *
+ * An element that holds other elements, such as the metadata of an object,
+ * reports those bytes as its value. The properties element is stepped into
+ * rather than reported. A walk that has ended reports an absent value, and
+ * stays ended.
+ *
+ * # Safety
+ *
+ * `walk` must be null or point at one writable `borink_properties` whose
+ * `remaining` addresses its stated length.
+ *
+ * # Lifetime
+ *
+ * The value points into the body that the walk points into.
+ */
+struct borink_property borink_next_property(struct borink_properties *walk);
+
+/**
+ * Writes the text of a listed value with its references resolved.
+ *
+ * Use this on a value that `borink_entry_property` returned, which holds the
+ * bytes that the service wrote. XML writes an `&` as `&amp;`, and a character
+ * that the document cannot carry as `&#233;`.
+ *
+ * Copies `value` into `into` and returns what it wrote, which is never longer
+ * than `value`. An absent value means that `into` is shorter than `value`, or
+ * that `value` holds a reference that no listing declares.
+ *
+ * # Safety
+ *
+ * `value` must address its stated length. `into` must address its stated
+ * length and be reached through nothing else during the call.
+ *
+ * # Lifetime
+ *
+ * The bytes returned are `into`, so they are valid until you release or
+ * reuse it.
+ */
+struct borink_maybe_bytes borink_decode_into(struct borink_bytes value,
+                                             struct borink_bytes_mut into);
+
+/**
+ * Writes an entity tag from a listing in the quoted form that HTTP defines.
+ *
+ * A listing writes an entity tag without the quotes that the `ETag` header
+ * carries. Pass `borink_list_entry.e_tag` here to get the form that a
+ * condition takes. `into` needs at most two bytes more than `listed`, and a
+ * shorter one writes nothing and returns an absent value.
+ *
+ * # Safety
+ *
+ * `listed` must address its stated length. `into` must address its stated
+ * length and be reached through nothing else during the call.
+ *
+ * # Lifetime
+ *
+ * The bytes returned are `into`, so they are valid until you release or
+ * reuse it.
+ */
+struct borink_maybe_bytes borink_quoted_etag(struct borink_bytes listed,
+                                             struct borink_bytes_mut into);
+
+/**
+ * Reads an HTTP date as milliseconds since the Unix epoch.
+ *
+ * Pass `borink_list_entry.last_modified`, or the same value of a
+ * `borink_object_meta`. A value that is not an RFC 1123 date is absent.
+ *
+ * # Safety
+ *
+ * `value` must address its stated length.
+ */
+struct borink_maybe_u64 borink_http_date_ms(struct borink_bytes value);
 
 /**
  * Writes one sentence naming what `outcome` says.

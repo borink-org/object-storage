@@ -62,6 +62,43 @@ void board_main(void) {
     static uint8_t sentence[256];
     sink = (unsigned)borink_describe(&outcome, (borink_bytes_mut){sentence, sizeof sentence});
 
+    // A listing: the request, the head, and the page read out of a body.
+    const borink_list_shape listing = {true, {true, 2}};
+    const borink_request_head page_head =
+        borink_encode_list(&session, &listing, as_bytes("directory/"), nothing,
+                           (borink_bytes_mut){request, sizeof request}, 1787400000);
+    sink = (unsigned)page_head.required;
+    sink = borink_accept_list_head(&session, 200, headers,
+                                   sizeof headers / sizeof headers[0]).kind;
+
+    static char page[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name><Properties>"
+                         "<Content-Length>4</Content-Length></Properties></Blob></Blobs>"
+                         "<NextMarker>next</NextMarker></EnumerationResults>";
+    static borink_list_entry entries[1];
+    const borink_bytes_mut body = {(uint8_t *)page, sizeof page - 1};
+    borink_fill fill = borink_fill_listing(&session, body, entries, 1);
+    fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
+    sink = (unsigned)(fill.filled + entries[0].key.len + fill.next_marker.bytes.len);
+
+    // What a listing lends back, read by the two calls that read it.
+    static uint8_t quoted[64];
+    sink = (unsigned)borink_quoted_etag(entries[0].e_tag.bytes,
+                                        (borink_bytes_mut){quoted, sizeof quoted})
+               .bytes.len;
+    sink = (unsigned)borink_http_date_ms(entries[0].last_modified.bytes).value;
+
+    // A value that no field of the entry carries, by name and by walk, and one
+    // decoded into the board's own memory.
+    sink = (unsigned)borink_entry_property(&entries[0], as_bytes("Content-Length")).bytes.len;
+    borink_properties walk = borink_entry_properties(&entries[0]);
+    for (borink_property found = borink_next_property(&walk); found.present;
+         found = borink_next_property(&walk)) {
+        sink = (unsigned)(found.name.len + found.value.len);
+    }
+    sink = (unsigned)borink_decode_into(as_bytes("a&amp;b"),
+                                        (borink_bytes_mut){quoted, sizeof quoted})
+               .bytes.len;
+
     board_cxx();
 
     // A board's entry point never returns.

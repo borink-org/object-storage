@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::Span;
+
 /// Object metadata borrowed from a response head.
 ///
 /// Each field holds the bytes that the service sent. To read `last_modified`
@@ -355,6 +357,51 @@ pub struct Resume {
     // The text of the next marker, as a range of the body. It lies past the
     // entries, so it is still untouched whenever the walk stops.
     pub(crate) marker: Option<(usize, usize)>,
+}
+
+impl Resume {
+    /// Creates a position from the values that [`Self::at`], [`Self::within`]
+    /// and [`Self::marker`] returned.
+    ///
+    /// Use it to rebuild a position that you kept as those three values, and
+    /// read the body it came from with it.
+    ///
+    /// A position from another body names no entry of the body you read. That
+    /// read reports [`ResponseFault::Body`](crate::ResponseFault::Body), or it
+    /// reports entries that the service did not send.
+    pub const fn from_parts(at: usize, within: bool, marker: Option<Span>) -> Self {
+        Self {
+            at,
+            within,
+            marker: match marker {
+                Some(span) => Some((span.start, span.start + span.len)),
+                None => None,
+            },
+        }
+    }
+
+    /// Returns the offset into the body that reading continues from.
+    pub const fn at(self) -> usize {
+        self.at
+    }
+
+    /// Returns whether the position stands inside the entries of the page.
+    pub const fn within(self) -> bool {
+        self.within
+    }
+
+    /// Returns the range of the body that holds the text naming the next page.
+    ///
+    /// Returns [`None`] if the page named none.
+    pub const fn marker(self) -> Option<Span> {
+        match self.marker {
+            Some((start, end)) => Some(Span {
+                start,
+                len: end - start,
+            }),
+            None => None,
+        }
+    }
 }
 
 /// What one page of a listing held.

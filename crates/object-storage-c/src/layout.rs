@@ -75,6 +75,38 @@ pub struct Layout {
     pub offsetof_outcome_body: usize,
     pub offsetof_outcome_failure: usize,
     pub offsetof_outcome_error: usize,
+    pub sizeof_maybe_u32: usize,
+    pub alignof_maybe_u32: usize,
+    pub offsetof_maybe_u32_value: usize,
+    pub sizeof_maybe_span: usize,
+    pub alignof_maybe_span: usize,
+    pub offsetof_maybe_span_span: usize,
+    pub sizeof_list_shape: usize,
+    pub offsetof_list_shape_max_results: usize,
+    pub sizeof_list_entry: usize,
+    pub alignof_list_entry: usize,
+    pub offsetof_list_entry_key: usize,
+    pub offsetof_list_entry_size: usize,
+    pub offsetof_list_entry_e_tag: usize,
+    pub offsetof_list_entry_last_modified: usize,
+    pub offsetof_list_entry_raw: usize,
+    pub sizeof_properties: usize,
+    pub alignof_properties: usize,
+    pub offsetof_properties_within: usize,
+    pub sizeof_property: usize,
+    pub alignof_property: usize,
+    pub offsetof_property_name: usize,
+    pub offsetof_property_value: usize,
+    pub sizeof_resume: usize,
+    pub alignof_resume: usize,
+    pub offsetof_resume_within: usize,
+    pub offsetof_resume_marker: usize,
+    pub sizeof_fill: usize,
+    pub alignof_fill: usize,
+    pub offsetof_fill_kind: usize,
+    pub offsetof_fill_filled: usize,
+    pub offsetof_fill_resume: usize,
+    pub offsetof_fill_next_marker: usize,
 }
 
 /// The layout that this crate compiled to.
@@ -138,6 +170,38 @@ pub(crate) fn layout() -> Layout {
         offsetof_outcome_body: offset_of!(Outcome, body),
         offsetof_outcome_failure: offset_of!(Outcome, failure),
         offsetof_outcome_error: offset_of!(Outcome, error),
+        sizeof_maybe_u32: size_of::<MaybeU32>(),
+        alignof_maybe_u32: align_of::<MaybeU32>(),
+        offsetof_maybe_u32_value: offset_of!(MaybeU32, value),
+        sizeof_maybe_span: size_of::<MaybeSpan>(),
+        alignof_maybe_span: align_of::<MaybeSpan>(),
+        offsetof_maybe_span_span: offset_of!(MaybeSpan, span),
+        sizeof_list_shape: size_of::<ListShape>(),
+        offsetof_list_shape_max_results: offset_of!(ListShape, max_results),
+        sizeof_list_entry: size_of::<ListEntry>(),
+        alignof_list_entry: align_of::<ListEntry>(),
+        offsetof_list_entry_key: offset_of!(ListEntry, key),
+        offsetof_list_entry_size: offset_of!(ListEntry, size),
+        offsetof_list_entry_e_tag: offset_of!(ListEntry, e_tag),
+        offsetof_list_entry_last_modified: offset_of!(ListEntry, last_modified),
+        offsetof_list_entry_raw: offset_of!(ListEntry, raw),
+        sizeof_properties: size_of::<Properties>(),
+        alignof_properties: align_of::<Properties>(),
+        offsetof_properties_within: offset_of!(Properties, within),
+        sizeof_property: size_of::<Property>(),
+        alignof_property: align_of::<Property>(),
+        offsetof_property_name: offset_of!(Property, name),
+        offsetof_property_value: offset_of!(Property, value),
+        sizeof_resume: size_of::<Resume>(),
+        alignof_resume: align_of::<Resume>(),
+        offsetof_resume_within: offset_of!(Resume, within),
+        offsetof_resume_marker: offset_of!(Resume, marker),
+        sizeof_fill: size_of::<Fill>(),
+        alignof_fill: align_of::<Fill>(),
+        offsetof_fill_kind: offset_of!(Fill, kind),
+        offsetof_fill_filled: offset_of!(Fill, filled),
+        offsetof_fill_resume: offset_of!(Fill, resume),
+        offsetof_fill_next_marker: offset_of!(Fill, next_marker),
     }
 }
 
@@ -205,6 +269,10 @@ const _: () = {
     assert!(DeleteKind::Object as u16 == proto::DeleteKind::Object as u16);
     assert!(DeleteKind::ObjectAndSnapshots as u16 == proto::DeleteKind::ObjectAndSnapshots as u16);
     assert!(DeleteKind::SnapshotsOnly as u16 == proto::DeleteKind::SnapshotsOnly as u16);
+
+    assert!(EntryKind::Object as u16 == proto::EntryKind::Object as u16);
+    assert!(EntryKind::Prefix as u16 == proto::EntryKind::Prefix as u16);
+    assert!(EntryKind::Directory as u16 == proto::EntryKind::Directory as u16);
 
     assert!(FailureClass::Auth as u16 == proto::FailureClass::Auth as u16);
     assert!(FailureClass::Throttled as u16 == proto::FailureClass::Throttled as u16);

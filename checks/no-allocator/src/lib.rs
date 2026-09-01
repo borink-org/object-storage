@@ -4,7 +4,7 @@
 
 use borink_object_storage_proto::{
     Blobs, Container, Fill, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet, PhysicalList,
-    ResponseHead, Timestamps,
+    ResponseHead, Timestamps, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -67,7 +67,15 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
     let Ok(Fill::Partial { filled, resume }) = blobs.fill_listing(&mut body, &mut first) else {
         return 7;
     };
-    let key = filled + first[0].key.len();
+    // A property that the entry does not carry is read out of its own bytes,
+    // and decoding one is a copy into the caller's buffer. Neither allocates.
+    let mut into = [0; 16];
+    let length = first[0]
+        .property("Content-Length")
+        .and_then(|value| layered::decode_into(value, &mut into))
+        .map_or(0, <[u8]>::len)
+        + first[0].properties().count();
+    let key = filled + first[0].key.len() + length;
     let mut rest = [ListEntry::default(); 1];
     let Ok(Fill::Page(page)) = blobs.resume_listing(&mut body, resume, &mut rest) else {
         return 8;

@@ -32,6 +32,8 @@ include = [
     "FailureClass",
     "ServiceError",
     "OutcomeKind",
+    "EntryKind",
+    "FillKind",
 ]
 renaming_overrides_prefixing = true
 
@@ -43,12 +45,20 @@ renaming_overrides_prefixing = true
 "Span" = "borink_span"
 "MaybeBytes" = "borink_maybe_bytes"
 "MaybeU64" = "borink_maybe_u64"
+"MaybeU32" = "borink_maybe_u32"
+"MaybeSpan" = "borink_maybe_span"
 "Status" = "borink_status"
 "Session" = "borink_session"
 "Range" = "borink_range"
 "GetShape" = "borink_get_shape"
 "PutShape" = "borink_put_shape"
 "DeleteShape" = "borink_delete_shape"
+"ListShape" = "borink_list_shape"
+"ListEntry" = "borink_list_entry"
+"Properties" = "borink_properties"
+"Property" = "borink_property"
+"Resume" = "borink_resume"
+"Fill" = "borink_fill"
 "RequestHeader" = "borink_request_header"
 "RequestHead" = "borink_request_head"
 "HeaderRef" = "borink_header_ref"
@@ -66,6 +76,8 @@ renaming_overrides_prefixing = true
 "FailureClass" = "borink_failure_class"
 "ServiceError" = "borink_service_error"
 "OutcomeKind" = "borink_outcome_kind"
+"EntryKind" = "borink_entry_kind"
+"FillKind" = "borink_fill_kind"
 # `class` is a C++ keyword.
 "class" = "class_"
 

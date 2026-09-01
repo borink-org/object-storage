@@ -599,6 +599,105 @@ pub struct ListEntry<'b> {
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
     pub last_modified: Option<&'b [u8]>,
+    /// This entry as the service wrote it, from its opening tag to its closing
+    /// one.
+    ///
+    /// Read a value that the fields above do not carry with [`Self::property`]
+    /// or [`Self::properties`], which read these bytes.
+    pub raw: &'b [u8],
+}
+
+impl<'b> ListEntry<'b> {
+    /// Returns the value that this entry gave for one property.
+    ///
+    /// The name is matched exactly, against the elements of the entry and of
+    /// its properties element: `AccessTier` and `Creation-Time` on Azure,
+    /// `StorageClass` on S3. Returns [`None`] if the entry gave no such
+    /// property.
+    ///
+    /// Each call reads the entry again, so read more than one or two with
+    /// [`Self::properties`], which reads it once.
+    ///
+    /// The value is the bytes between the two tags, as the service wrote them.
+    /// A value that holds `&amp;` or another reference is decoded by
+    /// [`layered::decode_into`](crate::layered::decode_into).
+    ///
+    /// The three values that this entry already carries are not read back this
+    /// way. Reading the page decoded them where they stood, so the element
+    /// that held one now holds the decoded text and what the decoding left
+    /// behind. Read `key`, `e_tag` and `last_modified` from the fields.
+    pub fn property(&self, name: &str) -> Option<&'b [u8]> {
+        self.properties()
+            .find(|(found, _)| *found == name.as_bytes())
+            .map(|(_, value)| value)
+    }
+
+    /// Returns every property of this entry, in the order it wrote them.
+    ///
+    /// One walk reads the entry once, whatever it holds. The values are the
+    /// bytes between the tags, under the rules that [`Self::property`] states.
+    /// An element that holds other elements, such as the metadata of a blob,
+    /// reports those bytes as its value.
+    pub fn properties(&self) -> Properties<'b> {
+        Properties::new(self.raw)
+    }
+}
+
+/// The properties of one entry, as the service wrote them.
+///
+/// [`ListEntry::properties`] hands this out. It reads the entry as it goes and
+/// keeps only where it stopped. One walk is therefore one pass over the entry,
+/// and copying this value starts a second walk from the same place.
+#[derive(Debug, Clone, Copy)]
+pub struct Properties<'b> {
+    // What is left of the entry: the next element, or its closing tag.
+    rest: &'b [u8],
+    // Whether the walk stands inside the properties element.
+    within: bool,
+}
+
+impl<'b> Properties<'b> {
+    /// Creates a walk over the bytes of one entry.
+    ///
+    /// Pass [`ListEntry::raw`]. The walk starts after the entry's own opening
+    /// tag, so it reports what the entry holds and not the entry itself.
+    pub fn new(raw: &'b [u8]) -> Self {
+        Self {
+            rest: crate::xml::after_tag(raw).unwrap_or_default(),
+            within: false,
+        }
+    }
+
+    /// Creates a walk from the values that [`Self::remaining`] and
+    /// [`Self::within`] returned.
+    ///
+    /// Use it to rebuild a walk that you kept as those two values, over the
+    /// entry they came from. A walk built from other bytes reports whatever
+    /// elements they hold, and one over another entry reports that entry.
+    pub const fn from_parts(remaining: &'b [u8], within: bool) -> Self {
+        Self {
+            rest: remaining,
+            within,
+        }
+    }
+
+    /// Returns the bytes of the entry that this walk has not read.
+    pub const fn remaining(self) -> &'b [u8] {
+        self.rest
+    }
+
+    /// Returns whether the walk stands inside the properties element.
+    pub const fn within(self) -> bool {
+        self.within
+    }
+}
+
+impl<'b> Iterator for Properties<'b> {
+    type Item = (&'b [u8], &'b [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        crate::xml::next_property(&mut self.rest, &mut self.within)
+    }
 }
 
 #[cfg(test)]

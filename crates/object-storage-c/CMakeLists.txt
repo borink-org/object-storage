@@ -49,11 +49,19 @@ execute_process(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMAND_ERROR_IS_FATAL ANY)
 
+# Every source of the crate, re-globbed each build. cargo-c copies the headers
+# beside the archive, so a header edit has to rebuild too.
+file(GLOB_RECURSE crate_sources CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.rs
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/borink/*.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/borink/*.hpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/borink/object_storage/*.hpp)
+
 add_custom_command(
   OUTPUT ${abi_archive}
   COMMAND ${cbuild_command}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  DEPENDS src/lib.rs src/panic.rs Cargo.toml ${workspace_root}/Cargo.lock
+  DEPENDS ${crate_sources} Cargo.toml ${workspace_root}/Cargo.lock
   COMMENT "Building the Rust archive with cargo cbuild"
   VERBATIM)
 add_custom_target(borink_object_storage_build DEPENDS ${abi_archive})

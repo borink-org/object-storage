@@ -1,8 +1,8 @@
 // What a host does against a server on the loopback address.
 //
-// One server answers one request with one canned response, and the test reads
-// back what the host sent. This is the same program for every host: it is
-// linked with one of them, and checks the request that host puts on the wire.
+// One server answers each request with the next canned response, and the test
+// reads back what the host sent. This is the same program for every host: it is
+// linked with one of them, and checks the requests that host puts on the wire.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -42,10 +42,12 @@ std::string lowercase(std::string value) {
     return value;
 }
 
-// One HTTP server, for one request.
+// One HTTP server, answering one canned response per request.
 class Server {
   public:
-    explicit Server(std::string response) : response_(std::move(response)) {
+    explicit Server(std::string response) : Server(std::vector<std::string>{std::move(response)}) {}
+
+    explicit Server(std::vector<std::string> responses) : responses_(std::move(responses)) {
         listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listener_ < 0) {
             throw std::runtime_error("no socket");
@@ -85,17 +87,23 @@ class Server {
         }
     }
 
-    // The request that the host sent, once the server has answered it.
-    const std::string &received() {
+    // One request that the host sent, once the server has answered them all.
+    const std::string &received(std::size_t index = 0) {
         if (serving_.joinable()) {
             serving_.join();
         }
-        return received_;
+        return requests_.at(index);
     }
 
-    std::string_view head() { return std::string_view(received()).substr(0, head_end(received())); }
+    std::string_view head(std::size_t index = 0) {
+        const std::string &request = received(index);
+        return std::string_view(request).substr(0, head_end(request));
+    }
 
-    std::string_view body() { return std::string_view(received()).substr(head_end(received())); }
+    std::string_view body(std::size_t index = 0) {
+        const std::string &request = received(index);
+        return std::string_view(request).substr(head_end(request));
+    }
 
   private:
     // Reads the received bytes directly, because the thread that fills them
@@ -106,29 +114,33 @@ class Server {
     }
 
     void serve() {
-        const int client = ::accept(listener_, nullptr, nullptr);
-        if (client < 0) {
-            return;
-        }
-        char chunk[4096];
-        while (received_.find("\r\n\r\n") == std::string::npos) {
-            const ssize_t read = ::recv(client, chunk, sizeof chunk, 0);
-            if (read <= 0) {
-                break;
+        for (const std::string &response : responses_) {
+            const int client = ::accept(listener_, nullptr, nullptr);
+            if (client < 0) {
+                return;
             }
-            received_.append(chunk, static_cast<std::size_t>(read));
-        }
-        const std::size_t end = head_end(received_);
-        const std::size_t content = content_length(std::string_view(received_).substr(0, end));
-        while (received_.size() - end < content) {
-            const ssize_t read = ::recv(client, chunk, sizeof chunk, 0);
-            if (read <= 0) {
-                break;
+            std::string request;
+            char chunk[4096];
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                const ssize_t read = ::recv(client, chunk, sizeof chunk, 0);
+                if (read <= 0) {
+                    break;
+                }
+                request.append(chunk, static_cast<std::size_t>(read));
             }
-            received_.append(chunk, static_cast<std::size_t>(read));
+            const std::size_t end = head_end(request);
+            const std::size_t content = content_length(std::string_view(request).substr(0, end));
+            while (request.size() - end < content) {
+                const ssize_t read = ::recv(client, chunk, sizeof chunk, 0);
+                if (read <= 0) {
+                    break;
+                }
+                request.append(chunk, static_cast<std::size_t>(read));
+            }
+            requests_.push_back(std::move(request));
+            ::send(client, response.data(), response.size(), 0);
+            ::close(client);
         }
-        ::send(client, response_.data(), response_.size(), 0);
-        ::close(client);
     }
 
     static std::size_t content_length(std::string_view head) {
@@ -140,11 +152,11 @@ class Server {
         return std::strtoul(lowered.c_str() + at + sizeof("content-length:") - 1, nullptr, 10);
     }
 
-    std::string response_;
+    std::vector<std::string> responses_;
     int listener_ = -1;
     std::uint16_t port_ = 0;
     std::thread serving_;
-    std::string received_;
+    std::vector<std::string> requests_;
 };
 
 borink::host::Client open(const Server &server) {
@@ -254,6 +266,120 @@ void removes_an_object_and_its_snapshots() {
 
     CHECK(lowercase(std::string(server.head())).find("x-ms-delete-snapshots: include\r\n") !=
           std::string::npos);
+}
+
+// One page of a listing: the request names the container rather than a key,
+// and the entries come out of the body that the host held.
+void lists_one_page_of_keys() {
+    const std::string body =
+        "<EnumerationResults><Blobs>"
+        "<Blob><Name>directory/a.txt</Name><Properties><Etag>0x1</Etag>"
+        "<Content-Length>4</Content-Length></Properties></Blob>"
+        "<BlobPrefix><Name>directory/nested/</Name></BlobPrefix>"
+        "</Blobs><NextMarker>next</NextMarker></EnumerationResults>";
+    Server server("HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
+                  "\r\nConnection: close\r\n\r\n" + body);
+
+    borink::host::Client client = open(server);
+    std::vector<borink::ListEntry> entries(4);
+    const borink::host::Page page =
+        client.page("directory/", entries, borink::List{true, borink::at_most(1000), {}});
+
+    CHECK(server.head().starts_with(
+        "GET /container?restype=container&comp=list&prefix=directory%2F"
+        "&delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"));
+    CHECK(page.complete);
+    CHECK(page.entries.size() == 2);
+    CHECK(borink::text_of(page.entries[0].key) == "directory/a.txt");
+    CHECK(page.entries[0].kind == borink::EntryKindObject);
+    CHECK(page.entries[0].size.value == 4);
+    // A delimited listing reports the level below as one group.
+    CHECK(page.entries[1].kind == borink::EntryKindPrefix);
+    CHECK(borink::text_of(page.entries[1].key) == "directory/nested/");
+    CHECK(page.next_marker == "next");
+}
+
+// The array the caller passed is the budget. What did not fit stays in the
+// page the host holds, and the next call reads it from there.
+void reads_the_rest_of_a_page_that_did_not_fit() {
+    const std::string body = "<EnumerationResults><Blobs>"
+                             "<Blob><Name>a.txt</Name><Properties>"
+                             "<Content-Length>4</Content-Length></Properties></Blob>"
+                             "<Blob><Name>b.txt</Name><Properties>"
+                             "<Content-Length>8</Content-Length></Properties></Blob>"
+                             "</Blobs><NextMarker /></EnumerationResults>";
+    Server server("HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
+                  "\r\nConnection: close\r\n\r\n" + body);
+
+    borink::host::Client client = open(server);
+    std::vector<borink::ListEntry> entries(1);
+    borink::host::Page page = client.page("", entries);
+    CHECK(!page.complete);
+    CHECK(borink::text_of(page.entries[0].key) == "a.txt");
+
+    page = client.more(page.resume, entries);
+    CHECK(page.complete);
+    CHECK(borink::text_of(page.entries[0].key) == "b.txt");
+    // The service named no next page, so the listing is complete.
+    CHECK(page.next_marker.empty());
+}
+
+// A whole listing is one call: the client asks for the next page on the marker
+// the last one gave, and reads each page in as many rounds as the array takes.
+void lists_every_key_over_two_pages() {
+    const std::string first = "<EnumerationResults><Blobs>"
+                              "<Blob><Name>a.txt</Name><Properties>"
+                              "<Content-Length>1</Content-Length></Properties></Blob>"
+                              "<Blob><Name>b.txt</Name><Properties>"
+                              "<Content-Length>2</Content-Length></Properties></Blob>"
+                              "</Blobs><NextMarker>page-2</NextMarker></EnumerationResults>";
+    const std::string second = "<EnumerationResults><Blobs>"
+                               "<Blob><Name>c.txt</Name><Properties>"
+                               "<Content-Length>3</Content-Length></Properties></Blob>"
+                               "</Blobs><NextMarker /></EnumerationResults>";
+    const auto answer = [](const std::string &body) {
+        return "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
+               "\r\nConnection: close\r\n\r\n" + body;
+    };
+    Server server(std::vector<std::string>{answer(first), answer(second)});
+
+    borink::host::Client client = open(server);
+    // One entry of room, so the first page is read in two rounds and the sink
+    // is called once per round.
+    std::vector<borink::ListEntry> entries(1);
+    std::vector<std::string> keys;
+    std::size_t rounds = 0;
+    client.list("", entries, [&](std::span<const borink::ListEntry> read) {
+        rounds += 1;
+        for (const borink::ListEntry &entry : read) {
+            keys.push_back(std::string(borink::text_of(entry.key)));
+        }
+    });
+
+    CHECK(keys == std::vector<std::string>({"a.txt", "b.txt", "c.txt"}));
+    CHECK(rounds == 3);
+    // The second request asks for the page that the first one named.
+    CHECK(server.head(0).find("&marker=") == std::string_view::npos);
+    CHECK(server.head(1).find("&marker=page-2") != std::string_view::npos);
+}
+
+// A listing lists a container, and a container that is not there is the one
+// thing a listing reports as missing.
+void reports_a_container_that_is_not_there() {
+    Server server("HTTP/1.1 404 Not Found\r\nx-ms-error-code: ContainerNotFound\r\n"
+                  "Content-Length: 0\r\nConnection: close\r\n\r\n");
+
+    borink::host::Client client = open(server);
+    std::vector<borink::ListEntry> entries(4);
+    std::string reported;
+    try {
+        client.page("", entries);
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("container does not exist") != std::string::npos);
+    CHECK(client.outcome().failure.kind == borink::ServiceErrorNoSuchContainer);
 }
 
 // Azure names an error in the head when it can, and in the body when it
@@ -405,6 +531,10 @@ int main() {
         writes_an_object();
         removes_an_object();
         removes_an_object_and_its_snapshots();
+        lists_one_page_of_keys();
+        reads_the_rest_of_a_page_that_did_not_fit();
+        lists_every_key_over_two_pages();
+        reports_a_container_that_is_not_there();
         names_an_error_that_only_the_body_carries();
         names_an_error_that_only_a_read_body_carries();
         reports_a_missing_object();

@@ -58,6 +58,45 @@ extern "C" void board_cxx(void) {
     sink = static_cast<unsigned>(borink::bytes_of(outcome.meta.e_tag).size() +
                                  borink::text_of(outcome.meta.e_tag).size());
 
+    // A listing: the settings it carries, and the page read out of a body.
+    const borink::List listing{true, borink::at_most(2), "marker-1"};
+    const borink::ListShape page_shape = listing.shape();
+    sink = static_cast<unsigned>(page_shape.max_results.value + page_shape.delimited);
+
+    static char page[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name><Properties>"
+                         "<Content-Length>4</Content-Length></Properties></Blob></Blobs>"
+                         "<NextMarker>next</NextMarker></EnumerationResults>";
+    static borink::ListEntry entries[1];
+    const borink::BytesMut body =
+        borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(page),
+                                             sizeof page - 1));
+    borink::Fill fill = borink_fill_listing(&session, body, entries, 1);
+    fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
+    const std::span<const borink::ListEntry> listed = borink::entries_of(entries, fill);
+    sink = static_cast<unsigned>(listed.size() + borink::text_of(entries[0].key).size() +
+                                 borink::bytes_of(entries[0].key).size() +
+                                 borink::text_of(fill.next_marker).size());
+
+    // What a listing lends back, read by the two helpers that read it.
+    static std::uint8_t quoted[64];
+    sink = static_cast<unsigned>(
+        borink::quoted_etag(entries[0].e_tag, std::span<std::uint8_t>(quoted, sizeof quoted))
+            .size());
+    sink = static_cast<unsigned>(borink::http_date_ms(entries[0].last_modified).value);
+
+    // A value that no field of the entry carries, by name and by walk, and one
+    // decoded into the board's own memory.
+    sink = static_cast<unsigned>(borink::property(entries[0], "Content-Length").bytes.len);
+    borink::Properties walk = borink::properties(entries[0]);
+    for (borink::Property found = borink::next(walk); found.present;
+         found = borink::next(walk)) {
+        sink = static_cast<unsigned>(borink::text_of(found.name).size() + found.value.len);
+    }
+    sink = static_cast<unsigned>(
+        borink::decoded(borink::as_bytes("a&amp;b"),
+                        std::span<std::uint8_t>(quoted, sizeof quoted))
+            .size());
+
     // Both sentences, and the room a whole one takes.
     static std::uint8_t room[256];
     const std::span<std::uint8_t> paper(room, sizeof room);
