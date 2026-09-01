@@ -40,11 +40,15 @@ pub(crate) fn encode_object_key(value: &str) -> PercentEncode<'_> {
     utf8_percent_encode(value, OBJECT_KEY_ESCAPE)
 }
 
-// review: where is this from; as in what requires us to define precisely this? i find the explanation very vague
-// "so no byte of them may be structural"; use plainer language please
-// Everything but the unreserved bytes of RFC 3986. That is stricter than a
-// query needs, and it is what an opaque marker or a delimiter requires: those
-// values are the service's own bytes, so no byte of them may be structural.
+// Everything but the bytes RFC 3986 calls unreserved: the letters, the digits,
+// `-`, `.`, `_` and `~`. Nothing requires exactly this set. A query would
+// accept `/` and `:` unescaped too, but escaping a byte that did not need it
+// changes nothing, while leaving one that did lets an `&` or an `=` end the
+// value early and start a parameter the caller never wrote. These values are a
+// caller's prefix and the service's own marker, so this takes the set that is
+// safe rather than the set that is smallest. The live paging test is the
+// evidence that Azure reads it back: a real marker carries `!`, which this
+// writes as `%21`.
 const QUERY_VALUE_ESCAPE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')

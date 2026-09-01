@@ -77,9 +77,9 @@ pub(crate) fn resume_listing<'b>(
     read_page(body, resume, into)
 }
 
-// review: "where the entries do,"? that seems like a language error?
-// The second pass. It starts where `locate_page` said the entries do, or where
-// a previous call stopped, and reads until the array is full or the page ends.
+// The second pass. It begins at the first entry that `locate_page` found, or
+// where a previous call stopped, and reads until the array is full or the page
+// ends.
 fn read_page<'b>(body: &'b mut [u8], page: Resume, into: &mut [ListEntry<'b>]) -> Result<Fill<'b>> {
     let total = body.len();
     if page.at > total {

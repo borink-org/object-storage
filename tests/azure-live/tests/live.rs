@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
-    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    GetHeadOutcome, GetKind, GetShape, ListEntry, ListHeadOutcome, Method, Payload, PhysicalDelete,
     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
     ServiceErrorKind, Timestamps, layered,
 };
@@ -688,11 +688,11 @@ struct Entry {
 // One page, read into an array of `room` entries at a time. `room` is what
 // proves the resuming path against a real body: a page that does not fit is
 // read in as many rounds as it takes, and no round asks the service again.
-fn page(
+// The response body of one listing request, as it came off the wire.
+fn fetch(
     fixture: &Fixture,
     plan: &PhysicalList<'_>,
-    room: usize,
-) -> Result<Page, Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now)?];
@@ -718,10 +718,20 @@ fn page(
         ListHeadOutcome::Page { expected_len } => expected_len,
         outcome => panic!("unexpected outcome {outcome:?}"),
     };
-    let mut body = incoming.body_mut().read_to_vec()?;
+    let body = incoming.body_mut().read_to_vec()?;
     if let Some(len) = expected_len {
         assert_eq!(body.len() as u64, len, "the head sized the body");
     }
+    Ok(body)
+}
+
+fn page(
+    fixture: &Fixture,
+    plan: &PhysicalList<'_>,
+    room: usize,
+) -> Result<Page, Box<dyn std::error::Error>> {
+    let blobs = fixture.blobs();
+    let mut body = fetch(fixture, plan)?;
 
     let mut entries = Vec::new();
     let mut resume = None;
@@ -1053,6 +1063,78 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
              rather than reading it, and quoted_etag is required for a \
              condition to have any effect: {}",
             String::from_utf8_lossy(stale)
+        );
+    }
+}
+
+/// Settles how much of a name Azure percent-encodes when it writes
+/// `Encoded="true"`, which is what decides whether a `%` that is not an escape
+/// can reach a listed key.
+///
+/// A blob name may hold characters XML cannot carry, and Azure encodes the name
+/// rather than write them. If it encodes the whole name, then `%` is always
+/// written `%25`, a bare one is malformed, and `xml::decode_percent` could
+/// refuse it. If it encodes only the characters XML refuses, a literal `%`
+/// reaches the reader and refusing it would fault a real page.
+///
+/// The keys must come back exactly as written either way, and must still name
+/// the object well enough to remove it.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_name_that_xml_cannot_carry_says_how_much_of_it_is_encoded() {
+    let fixture = Fixture::from_env();
+    empty(&fixture);
+
+    // A percent on its own, and a percent beside a character that XML has no
+    // way to write.
+    let plain_suffix = "100%-plain.txt";
+    let control_suffix = "100%-\u{1}-control.txt";
+    place(&fixture, plain_suffix, b"x");
+    place(&fixture, control_suffix, b"x");
+    let plain = format!("{}{plain_suffix}", fixture.list_prefix);
+    let control = format!("{}{control_suffix}", fixture.list_prefix);
+
+    let plan = PhysicalList::new(&fixture.list_prefix);
+    let mut body = fetch(&fixture, &plan).unwrap();
+    let xml = String::from_utf8_lossy(&body).into_owned();
+
+    // The name XML cannot carry is the one that gets encoded, and the name
+    // that is only unusual is not.
+    assert!(xml.contains("Encoded=\"true\""), "{xml}");
+    assert!(
+        xml.contains("%01"),
+        "the control character is encoded: {xml}"
+    );
+    assert!(
+        xml.contains("100%25-%01"),
+        "Azure encodes the whole name, so a `%` in an encoded name is always \
+         written `%25`. If this fails it encodes only what XML refuses, a \
+         literal `%` can reach a listed key, and xml::decode_percent must stay \
+         lenient about one: {xml}"
+    );
+
+    // Whatever it encodes, both keys come back as they were written.
+    let blobs = fixture.blobs();
+    let mut entries = vec![ListEntry::default(); 8];
+    let Fill::Page(read) = blobs.fill_listing(&mut body, &mut entries).unwrap() else {
+        panic!("eight entries hold two");
+    };
+    let keys: Vec<&str> = entries[..read.filled].iter().map(|e| e.key).collect();
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert!(keys.contains(&plain.as_str()), "{keys:?}");
+    assert!(keys.contains(&control.as_str()), "{keys:?}");
+
+    // Removing each one by the key the listing reported is what proves the key
+    // came back whole rather than merely looking right.
+    for key in [control.as_str(), plain.as_str()] {
+        let owner = Fixture {
+            put_key: key.to_owned(),
+            ..clone(&fixture)
+        };
+        assert_eq!(
+            remove(&owner, DeleteShape::default(), None).unwrap(),
+            RemoveOutcome::Accepted,
+            "{key:?}"
         );
     }
 }
