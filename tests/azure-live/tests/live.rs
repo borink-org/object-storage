@@ -1191,7 +1191,6 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
 #[ignore = "requires Azure credentials"]
 fn a_key_holds_the_segments_azure_says_it_may() {
     let fixture = Fixture::from_env();
-    empty(&fixture);
 
     // The prefix carries two segments of its own, so `total - 2` more of them
     // joined by the separator make a name of exactly `total`.
@@ -1199,18 +1198,20 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         let tail = vec!["s"; total - 2].join("/");
         format!("{}{tail}", fixture.list_prefix)
     };
+    // `addressable` refuses a name past the boundary this is looking for, so
+    // the request is written by hand: the point is where the service draws the
+    // line, not where this crate believes it is. Every byte of these names is
+    // one a URL keeps, so the key and its encoded form are the same text.
     let takes = |total: usize| {
         let key = of_segments(total);
         assert_eq!(key.matches('/').count() + 1, total);
         assert!(key.encode_utf16().count() <= 1024, "{total} is too long");
-        let owner = Fixture {
-            put_key: key,
-            ..clone(&fixture)
-        };
-        write(&owner, PutShape::default(), None, b"x")
-            .unwrap()
-            .outcome
-            == WriteOutcome::Created
+        let status = raw_put(&fixture, &key);
+        let took = (200..300).contains(&status);
+        if took {
+            assert!(raw_delete(&fixture, &key) < 300, "left {total} behind");
+        }
+        took
     };
 
     // Between the largest that was taken and the smallest that was refused.
@@ -1231,8 +1232,6 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         "the largest name Azure takes has {taken} segments, not {MAX_SEGMENTS}. \
          Correct MAX_SEGMENTS here and the segment rule in `addressable`"
     );
-
-    empty(&fixture);
 }
 
 // Measured by the bisection above, and the number `addressable` holds.

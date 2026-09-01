@@ -52,6 +52,8 @@ Azure refuses an ASCII control character in a name with 400, measured for `U+000
 
 Azure drops a dot from the end of **every segment** of a name, not just the end of the name: `dot.` is stored as `dot` and `dotseg./x` as `dotseg/x`. A `.` or `..` segment is resolved out of the URL by the host before the request is sent, as the standard for URLs requires, so `dots/../up` writes `up`. Both are refused by `addressable` rather than stored under a name the caller did not write.
 
-## What the suite is still measuring
+## Probing what this crate refuses
 
-Whether Azure refuses control characters that are not ASCII ones. `U+0085` is the probe; `addressable` allows it, and the test says so if the service does not.
+`addressable` refuses a key that Azure would rename or reject, which means the probe that measured the rule can no longer send the key it measured. Three tests hit that in turn, each failing on `InvalidPlan::Key` rather than on anything the service said.
+
+A probe that measures where the service draws a line must therefore write its own request, as `raw_put` and `raw_delete` do and as `snapshot` did before them, and remove what it wrote the same way. A probe that measures what the service does with a key this crate still accepts can go through `encode_put` as usual. Which of the two a test needs changes the moment a rule is added, so add the rule and move the probe in the same commit.
