@@ -22,6 +22,9 @@ struct Fixture {
     // The listing tests own everything under this prefix, and empty it before
     // each test so that what a page holds is what the test wrote.
     list_prefix: String,
+    // Whether the account under test keeps a hierarchical namespace. The suite
+    // runs against both, and three things only such an account can answer.
+    hierarchical: bool,
     token: String,
 }
 
@@ -33,6 +36,10 @@ impl Fixture {
             key: env::var("AZURE_BLOB_KEY").unwrap(),
             put_key: env::var("AZURE_PUT_KEY").unwrap(),
             list_prefix: env::var("AZURE_LIST_PREFIX").unwrap(),
+            // An exported but empty value is not the same as an unset one: it
+            // would run the tests that only a hierarchical account can pass
+            // against a flat one, where they fail for the wrong reason.
+            hierarchical: env::var("AZURE_HIERARCHICAL").is_ok_and(|value| value == "1"),
             token: env::var("AZURE_STORAGE_ACCESS_TOKEN").unwrap(),
         }
     }
@@ -326,12 +333,8 @@ fn seed(fixture: &Fixture, content: &[u8]) -> String {
 // against the key they own.
 fn read_put_key(fixture: &Fixture, shape: GetShape) -> ReadResult {
     let swapped = Fixture {
-        endpoint: fixture.endpoint.clone(),
-        container: fixture.container.clone(),
         key: fixture.put_key.clone(),
-        put_key: fixture.put_key.clone(),
-        list_prefix: fixture.list_prefix.clone(),
-        token: fixture.token.clone(),
+        ..clone(fixture)
     };
     read(&swapped, shape, None).unwrap()
 }
@@ -604,6 +607,11 @@ fn a_stale_entity_tag_refuses_the_removal() {
 #[ignore = "requires Azure credentials"]
 fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
     let fixture = Fixture::from_env();
+    // A hierarchical account has no snapshots to leave behind; the probe that
+    // measured that says so.
+    if fixture.hierarchical {
+        return;
+    }
     seed(&fixture, b"the object with a snapshot");
     snapshot(&fixture).unwrap();
 
@@ -642,6 +650,9 @@ fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
 #[ignore = "requires Azure credentials"]
 fn removing_only_the_snapshots_keeps_the_object() {
     let fixture = Fixture::from_env();
+    if fixture.hierarchical {
+        return;
+    }
     seed(&fixture, b"the object that outlives its snapshot");
     snapshot(&fixture).unwrap();
 
@@ -805,13 +816,20 @@ fn clone(fixture: &Fixture) -> Fixture {
         key: fixture.key.clone(),
         put_key: fixture.put_key.clone(),
         list_prefix: fixture.list_prefix.clone(),
+        hierarchical: fixture.hierarchical,
         token: fixture.token.clone(),
     }
 }
 
 // Removes whatever is under the prefix, so the tests below start from nothing.
 fn empty(fixture: &Fixture) {
-    for entry in walk(fixture, false, 1000) {
+    // An account with a hierarchical namespace lists the directories it keeps
+    // beside the objects under them, and refuses to remove one that still
+    // holds anything: measured, that is a 409. So the longest key goes first,
+    // which puts every child before the directory that holds it.
+    let mut entries = walk(fixture, false, 1000);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.key.len()));
+    for entry in entries {
         let owner = Fixture {
             put_key: entry.key.clone(),
             ..clone(fixture)
@@ -847,34 +865,38 @@ fn lists_every_key_under_the_prefix() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
 
+    let prefix = &fixture.list_prefix;
+    let mut expected = vec![
+        (EntryKind::Object, format!("{prefix}a.txt"), Some(8)),
+        (EntryKind::Object, format!("{prefix}b.txt"), Some(10)),
+        (EntryKind::Object, format!("{prefix}nested/c.txt"), Some(1)),
+    ];
+    // Measured on the hierarchical account: an undelimited listing reports the
+    // directory that holds `nested/c.txt` as an entry of its own, named
+    // **without** a trailing separator and with no length. That is the one
+    // shape a flat account never writes, and it sorts where the name puts it.
+    if fixture.hierarchical {
+        expected.insert(2, (EntryKind::Directory, format!("{prefix}nested"), None));
+    }
+
     let entries = walk(&fixture, false, 1000);
     assert_eq!(
         entries
             .iter()
-            .map(|entry| (entry.kind, entry.key.as_str(), entry.size))
+            .map(|entry| (entry.kind, entry.key.clone(), entry.size))
             .collect::<Vec<_>>(),
-        [
-            (
-                EntryKind::Object,
-                format!("{}a.txt", fixture.list_prefix).as_str(),
-                Some(8)
-            ),
-            (
-                EntryKind::Object,
-                format!("{}b.txt", fixture.list_prefix).as_str(),
-                Some(10)
-            ),
-            (
-                EntryKind::Object,
-                format!("{}nested/c.txt", fixture.list_prefix).as_str(),
-                Some(1)
-            ),
-        ]
+        expected
     );
     // Every object carries the two values that a listing is read for besides
-    // the key, so a caller need not head each one.
+    // the key, so a caller need not head each one. A directory is not an
+    // object: this crate reports no entity tag for one.
     for entry in &entries {
-        assert!(entry.e_tag.is_some(), "{}", entry.key);
+        assert_eq!(
+            entry.e_tag.is_some(),
+            entry.kind != EntryKind::Directory,
+            "{}",
+            entry.key
+        );
         assert!(entry.last_modified.is_some(), "{}", entry.key);
     }
 }
@@ -921,7 +943,9 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
     let whole = walk(&fixture, false, 1000);
-    assert_eq!(whole.len(), 3);
+    // Three objects, and on a hierarchical account the directory that holds
+    // one of them.
+    assert_eq!(whole.len(), if fixture.hierarchical { 4 } else { 3 });
 
     // One entry per page, so the service names a next page twice.
     let mut marker: Option<Vec<u8>> = None;
@@ -943,7 +967,11 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
         assert!(pages < 10, "a page of one is not making progress");
     }
     assert_eq!(paged, whole);
-    assert!(pages >= 3, "three objects, one per page: {pages} pages");
+    assert!(
+        pages >= whole.len(),
+        "{} entries, one per page: {pages} pages",
+        whole.len()
+    );
 
     // One entry per round, against whole pages. The body is read once and the
     // service is asked nothing extra.
@@ -1214,8 +1242,9 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         took
     };
 
-    // Between the largest that was taken and the smallest that was refused.
-    let (mut taken, mut refused) = (255, 494);
+    // The two accounts draw the line in different places, so the search starts
+    // below both and above both rather than at either answer.
+    let (mut taken, mut refused) = (3, 494);
     assert!(takes(taken), "{taken} segments was taken before");
     assert!(!takes(refused), "{refused} segments was refused before");
     while taken + 1 < refused {
@@ -1227,15 +1256,28 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         }
     }
 
+    println!("--- the largest name taken has {taken} segments");
+    let expected = if fixture.hierarchical {
+        MAX_SEGMENTS_HIERARCHICAL
+    } else {
+        MAX_SEGMENTS
+    };
     assert_eq!(
-        taken, MAX_SEGMENTS,
-        "the largest name Azure takes has {taken} segments, not {MAX_SEGMENTS}. \
-         Correct MAX_SEGMENTS here and the segment rule in `addressable`"
+        taken, expected,
+        "the largest name Azure takes has {taken} segments, not {expected}. \
+         Correct the constant here and the segment rule in `addressable`"
     );
 }
 
 // Measured by the bisection above, and the number `addressable` holds.
 const MAX_SEGMENTS: usize = 255;
+
+// The same, measured on an account with a hierarchical namespace, where the
+// name is a path through directories that the service keeps rather than a name
+// that happens to hold separators. A quarter of the flat limit, and `addressable`
+// enforces neither yet: the number a plan may be refused on depends on the
+// account, which this crate is not told about.
+const MAX_SEGMENTS_HIERARCHICAL: usize = 61;
 
 /// Settles what Azure does with the slashes this crate leaves literal in the
 /// URL path, which is what makes a hierarchical-namespace path work.
@@ -1284,7 +1326,22 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
         .into_iter()
         .map(|entry| entry.key)
         .collect();
+    println!("--- the names the account stored: {listed:?}");
     for key in &created {
+        // Measured on the hierarchical account, where a name is a path: an
+        // empty segment is folded away, so `double//slash` is stored as
+        // `double/slash`. That is a name the caller did not write, and the
+        // rule `addressable` enforces for a flat account does not cover it.
+        // The two accounts therefore disagree about which keys are
+        // addressable, which this records and no code here acts on yet.
+        if fixture.hierarchical && key.contains("//") {
+            assert!(
+                !listed.contains(key) && listed.contains(&key.replace("//", "/")),
+                "{key:?} was not folded the way the account was measured to \
+                 fold it. The listing reports {listed:?}"
+            );
+            continue;
+        }
         assert!(
             listed.contains(key),
             "{key:?} was taken and stored under another name, so `addressable` \
@@ -1513,4 +1570,174 @@ fn list_status(fixture: &Fixture, marker: Option<&[u8]>) -> (u16, Vec<u8>) {
         .unwrap();
     let status = incoming.status().as_u16();
     (status, incoming.body_mut().read_to_vec().unwrap())
+}
+
+// One response, whole, as a fixture records it.
+#[derive(Debug)]
+struct Raw {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Raw {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn error_code(&self) -> Option<&str> {
+        self.header("x-ms-error-code")
+    }
+
+    // The head and the body, in the form the core tests quote them in. Run
+    // the suite with `--nocapture` to capture one.
+    fn show(&self, what: &str) {
+        println!("--- {what}: {}", self.status);
+        for (name, value) in &self.headers {
+            // The token is in no response, but the identifiers that are say
+            // nothing about the account either. Dates change every run, so
+            // they are shown as what they are rather than what they said.
+            println!("{name}: {value}");
+        }
+        if !self.body.is_empty() {
+            println!("{}", String::from_utf8_lossy(&self.body));
+        }
+        println!("---");
+    }
+}
+
+// A request this crate cannot encode, against a key it can.
+fn raw(
+    fixture: &Fixture,
+    method: Method,
+    key: &str,
+    query: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalDelete::new(key);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
+
+    let url = format!("{}{query}", request.url());
+    // The head this crate wrote, plus whatever the probe adds to it.
+    let head: Vec<(&str, &str)> = request.headers().chain(extra.iter().copied()).collect();
+    // A request that carries a body and one that does not are different types
+    // in the host, so the head is written twice rather than the send.
+    let mut incoming = match method {
+        Method::Put => {
+            let mut outgoing = ureq::put(&url);
+            for (name, value) in head {
+                outgoing = outgoing.header(name, value);
+            }
+            outgoing
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send(body)
+                .unwrap()
+        }
+        _ => {
+            let mut outgoing = match method {
+                Method::Get => ureq::get(&url),
+                Method::Head => ureq::head(&url),
+                _ => ureq::delete(&url),
+            };
+            for (name, value) in head {
+                outgoing = outgoing.header(name, value);
+            }
+            outgoing
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .call()
+                .unwrap()
+        }
+    };
+    let status = incoming.status().as_u16();
+    let headers = incoming
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    let body = incoming.body_mut().read_to_vec().unwrap_or_default();
+    Raw {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// What a hierarchical account does with a snapshot, which no measurement of
+/// this crate's has ever covered.
+///
+/// `DeleteKind` already exposes `x-ms-delete-snapshots`, so whether the header
+/// is refused where the account keeps a hierarchical namespace is a question
+/// the delete plan already has an answer for on one account and none on the
+/// other.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_hierarchical_account_answers_for_the_snapshots_a_delete_asks_about() {
+    let fixture = Fixture::from_env();
+    if !fixture.hierarchical {
+        return;
+    }
+    // The write tests own the put key, so this probe writes it too, and
+    // starts from its absence.
+    let key = fixture.put_key.clone();
+    match remove(&fixture, DeleteShape::default(), None).unwrap() {
+        RemoveOutcome::Accepted | RemoveOutcome::NotFound(_) => {}
+        outcome => panic!("{key}: {outcome:?}"),
+    }
+    assert_eq!(
+        write(&fixture, PutShape::default(), None, b"snapshot me")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+
+    // Measured: a hierarchical account has no snapshots at all. It refuses to
+    // take one with 409 and a code that says the feature is not there, so the
+    // two suites above that assert what a removal does about snapshots
+    // measure a flat account and only a flat account.
+    let snapshot = raw(&fixture, Method::Put, &key, "?comp=snapshot", &[], b"");
+    snapshot.show("Snapshot Blob, on a hierarchical account");
+    assert_eq!(
+        (snapshot.status, snapshot.error_code()),
+        (
+            409,
+            Some("FeatureNotYetSupportedForHierarchicalNamespaceAccounts")
+        )
+    );
+
+    // The header that asks about them is still accepted on the removal, which
+    // is what says `DeleteKind` need not be refused ahead of the request.
+    let removed = remove(
+        &fixture,
+        DeleteShape {
+            kind: DeleteKind::ObjectAndSnapshots,
+            ..DeleteShape::default()
+        },
+        None,
+    )
+    .unwrap();
+    println!(
+        "--- Delete Blob asking for the snapshots too, on a hierarchical account: {removed:?}"
+    );
+    assert_eq!(removed, RemoveOutcome::Accepted);
 }
