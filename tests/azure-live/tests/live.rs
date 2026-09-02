@@ -1,4 +1,5 @@
 use std::env;
+use std::str;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
@@ -1740,4 +1741,114 @@ fn a_hierarchical_account_answers_for_the_snapshots_a_delete_asks_about() {
         "--- Delete Blob asking for the snapshots too, on a hierarchical account: {removed:?}"
     );
     assert_eq!(removed, RemoveOutcome::Accepted);
+}
+
+// A listing request whose query this crate cannot write. `PhysicalList::prefix`
+// is a `&str`, so it cannot carry a byte that does not decode, and a `%` in it
+// is escaped as `%25`; the probes below need the escape to reach the service.
+// The head comes from a plan this crate does encode.
+fn raw_list(fixture: &Fixture, query: &str) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalList::new("");
+    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+
+    let url = format!(
+        "{}/{}?restype=container&comp=list{query}",
+        fixture.endpoint, fixture.container
+    );
+    let mut outgoing = ureq::get(&url);
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let status = incoming.status().as_u16();
+    let headers = incoming
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    let body = incoming.body_mut().read_to_vec().unwrap_or_default();
+    Raw {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// What licenses the reader to treat a body that is not UTF-8 as a fault.
+///
+/// The reader checks the whole body before it reads anything out of it and
+/// refuses one that does not decode. That is a claim about the service, not
+/// about XML: nothing in the wire format stops a percent escape from naming a
+/// byte that is not UTF-8, and a key is percent-encoded bytes in a path. This
+/// measures the two doors such a byte could come through.
+///
+/// Measured: Azure refuses the key outright, and replaces the byte in a query
+/// value with `U+FFFD` before it echoes it. A byte that does not decode
+/// therefore never reaches a listing body, and one that does is a protocol
+/// violation rather than a key some caller holds.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_listing_body_is_always_utf_8() {
+    let fixture = Fixture::from_env();
+
+    // The key. `ObjectKey` is a `&str` and cannot express this, so the
+    // request is written by hand, as every probe of a line this crate does
+    // not cross is.
+    for escaped in ["%80", "%FF", "%C3%28", "%ED%A0%80", "%F4%90%80%80"] {
+        let key = format!("{}nonutf8-{escaped}.txt", fixture.list_prefix);
+        let status = raw_put(&fixture, &key);
+        if (200..300).contains(&status) {
+            assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
+        }
+        assert_eq!(
+            status, 400,
+            "Azure stored a key that is not UTF-8 ({escaped}), so a listing \
+             can carry one and the reader may not refuse a body for it"
+        );
+    }
+
+    // The query. The prefix is echoed into the page, which is the one place a
+    // caller's bytes reach the body without being a key first.
+    let echoed = raw_list(&fixture, "&prefix=nonutf8-%80-probe");
+    echoed.show("List Blobs, a prefix that is not UTF-8");
+    assert_eq!(echoed.status, 200);
+    assert!(
+        str::from_utf8(&echoed.body).is_ok(),
+        "the body Azure wrote is not UTF-8"
+    );
+    // U+FFFD, in the place the byte stood.
+    assert!(
+        echoed
+            .body
+            .windows(3)
+            .any(|window| window == [0xEF, 0xBF, 0xBD]),
+        "Azure echoed the byte as something other than a replacement character"
+    );
+
+    // A control character is valid UTF-8 and XML still forbids it, and Azure
+    // says so rather than writing one into the page.
+    let refused = raw_list(&fixture, "&prefix=nonutf8-%01-probe");
+    refused.show("List Blobs, a prefix XML cannot carry");
+    assert_eq!(
+        (refused.status, refused.error_code()),
+        (400, Some("InvalidQueryParameterValue"))
+    );
 }

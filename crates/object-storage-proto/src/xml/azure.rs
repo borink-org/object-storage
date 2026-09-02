@@ -39,6 +39,14 @@ pub(crate) fn resume_listing<'b>(
 // Measured at 45 to 50 GB/s against a read that runs at 1.7, so it is a few
 // percent of the read. It does not stand in for the check each key gets after
 // it is decoded, because a percent escape can write any byte.
+//
+// Refusing the body outright is a claim about the service, and it was
+// measured rather than assumed: Azure replaces or refuses a byte that does
+// not decode before it reaches a response body — a key carrying one is
+// `400 InvalidUri`, and a query value carrying one comes back with `U+FFFD`
+// where the byte was. So invalid UTF-8 here is a protocol violation and not a
+// key a caller might hold. `a_listing_body_is_always_utf_8` in the live suite
+// is that measurement.
 fn prelude(body: &[u8]) -> Result<usize> {
     if core::str::from_utf8(body).is_err() {
         return fault();

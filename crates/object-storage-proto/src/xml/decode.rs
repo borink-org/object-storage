@@ -93,6 +93,16 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         // A reference to a number that names no character a document may hold
         // is not a character reference, whatever it would decode to: taking it
         // would put a byte in a key that no key may carry.
+        //
+        // This is a rule about the document, not about the bytes: a character
+        // XML forbids is still valid UTF-8, and the two axes only look alike.
+        // Azure cannot reach this rule — it refuses a control in a key at the
+        // door, and escapes the non-characters it does hold as
+        // `<Name Encoded="true">` instead. S3 can: it stores `U+0001` and,
+        // where a listing is not asked for `encoding-type=url`, writes it as
+        // `&#x1;`. This crate always asks, so the reference never arrives; if
+        // that ever changes, this rule refuses a key AWS is willing to store,
+        // and the decision belongs with S3 LIST rather than here.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
             return fault();
         };

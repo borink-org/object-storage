@@ -130,6 +130,12 @@ fn required(result: Result<()>) -> Result<usize> {
 /// than `value`. Returns [`None`] if `into` is shorter than `value`, and for a
 /// reference that no listing declares.
 ///
+/// This undoes references and nothing else. A value that looks
+/// percent-encoded is not: Azure escapes the metadata it echoes for XML but
+/// never percent-encodes it, so `already%80escaped` is that text and not an
+/// escape. Only a name the service marked as encoded is percent-decoded, and
+/// reading the page did that already.
+///
 /// The values that an entry carries need none of this. Reading the page
 /// decoded them where they stood.
 pub fn decode_into<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
