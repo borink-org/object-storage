@@ -3,8 +3,8 @@ use std::str;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
-    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
+    GetHeadOutcome, GetKind, GetShape, ListEntry, ListHeadOutcome, Method, Payload, PhysicalDelete,
     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
     ServiceErrorKind, Timestamps, layered,
 };
@@ -687,7 +687,7 @@ fn removing_only_the_snapshots_keeps_the_object() {
 // test wrote and nothing a previous run left behind.
 
 // One page: what it held, and where the next one starts.
-type Page = (Vec<Entry>, Option<Vec<u8>>);
+type Page = (Vec<Entry>, Option<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
@@ -735,52 +735,33 @@ fn fetch(
     Ok(body)
 }
 
-// Reads one page into an array of `room` entries at a time. `room` tests the
-// resume path against a real body. A page that does not fit is read in as
-// many rounds as it takes, and no round asks the service again.
-fn page(
-    fixture: &Fixture,
-    plan: &PhysicalList<'_>,
-    room: usize,
-) -> Result<Page, Box<dyn std::error::Error>> {
+// Reads one page into an array that holds it whole: as many entries as the
+// plan asked for, or the most the service writes when it asked for none.
+fn page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Result<Page, Box<dyn std::error::Error>> {
     let blobs = fixture.blobs();
     let mut body = fetch(fixture, plan)?;
-
-    let mut entries = Vec::new();
-    let mut resume = None;
-    loop {
-        let mut into = vec![Default::default(); room];
-        let fill = match resume {
-            None => blobs.fill_listing(&mut body, &mut into)?,
-            Some(at) => blobs.resume_listing(&mut body, at, &mut into)?,
-        };
-        let (filled, done) = match fill {
-            Fill::Partial { filled, resume: at } => {
-                resume = Some(at);
-                (filled, None)
-            }
-            Fill::Page(page) => (page.filled, Some(page.next_marker.map(<[u8]>::to_vec))),
-        };
-        entries.extend(into[..filled].iter().map(|entry| {
-            Entry {
-                kind: entry.kind,
-                key: entry.key.to_owned(),
-                size: entry.size,
-                e_tag: entry
-                    .e_tag
-                    .map(|value| String::from_utf8(value.to_vec()).unwrap()),
-                last_modified: entry.last_modified.and_then(layered::http_date_ms),
-            }
-        }));
-        if let Some(marker) = done {
-            return Ok((entries, marker));
-        }
-    }
+    let room = plan.max_results.map_or(5000, |most| most as usize);
+    let mut into = vec![ListEntry::default(); room];
+    let page = blobs.fill_listing(&mut body, &mut into)?;
+    let entries = into[..page.filled]
+        .iter()
+        .map(|entry| Entry {
+            kind: entry.kind,
+            key: entry.key.to_owned(),
+            size: entry.size,
+            e_tag: entry.e_tag.map(str::to_owned),
+            last_modified: entry
+                .last_modified
+                .map(str::as_bytes)
+                .and_then(layered::http_date_ms),
+        })
+        .collect();
+    Ok((entries, page.next_marker.map(str::to_owned)))
 }
 
 // Every key under the prefix, page by page, the way a caller walks a listing.
-fn walk(fixture: &Fixture, delimited: bool, room: usize) -> Vec<Entry> {
-    let mut marker: Option<Vec<u8>> = None;
+fn walk(fixture: &Fixture, delimited: bool) -> Vec<Entry> {
+    let mut marker: Option<String> = None;
     let mut all = Vec::new();
     loop {
         let plan = PhysicalList {
@@ -788,7 +769,7 @@ fn walk(fixture: &Fixture, delimited: bool, room: usize) -> Vec<Entry> {
             delimited,
             ..PhysicalList::new(&fixture.list_prefix)
         };
-        let (entries, next) = page(fixture, &plan, room).unwrap();
+        let (entries, next) = page(fixture, &plan).unwrap();
         all.extend(entries);
         match next {
             Some(next) => marker = Some(next),
@@ -829,7 +810,7 @@ fn empty(fixture: &Fixture) {
     // objects under them. It refuses to delete a directory that still holds
     // anything, with a 409. Deleting the longest key first puts every child
     // before the directory that holds it.
-    let mut entries = walk(fixture, false, 1000);
+    let mut entries = walk(fixture, false);
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.key.len()));
     for entry in entries {
         let owner = Fixture {
@@ -843,7 +824,7 @@ fn empty(fixture: &Fixture) {
             entry.key
         );
     }
-    assert_eq!(walk(fixture, false, 1000), []);
+    assert_eq!(walk(fixture, false), []);
 }
 
 // The three objects that the listing tests read.
@@ -881,7 +862,7 @@ fn lists_every_key_under_the_prefix() {
         expected.insert(2, (EntryKind::Directory, format!("{prefix}nested"), None));
     }
 
-    let entries = walk(&fixture, false, 1000);
+    let entries = walk(&fixture, false);
     assert_eq!(
         entries
             .iter()
@@ -911,7 +892,7 @@ fn a_delimited_listing_reports_the_level_below_as_a_group() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
 
-    let entries = walk(&fixture, true, 1000);
+    let entries = walk(&fixture, true);
     assert_eq!(
         entries
             .iter()
@@ -941,16 +922,16 @@ fn a_delimited_listing_reports_the_level_below_as_a_group() {
 /// into rounds. Neither may lose a key or report one twice.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
+fn a_listing_split_into_pages_reads_the_same_keys() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
-    let whole = walk(&fixture, false, 1000);
+    let whole = walk(&fixture, false);
     // Three objects, and on a hierarchical account the directory that holds
     // one of them.
     assert_eq!(whole.len(), if fixture.hierarchical { 4 } else { 3 });
 
     // One entry per page, so the service names a next page twice.
-    let mut marker: Option<Vec<u8>> = None;
+    let mut marker: Option<String> = None;
     let mut paged = Vec::new();
     let mut pages = 0;
     loop {
@@ -959,7 +940,7 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
             max_results: Some(1),
             ..PhysicalList::new(&fixture.list_prefix)
         };
-        let (entries, next) = page(&fixture, &plan, 1000).unwrap();
+        let (entries, next) = page(&fixture, &plan).unwrap();
         pages += 1;
         paged.extend(entries);
         match next {
@@ -974,10 +955,6 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
         "{} entries, one per page: {pages} pages",
         whole.len()
     );
-
-    // One entry per round, against whole pages. The body is read once and the
-    // service is asked nothing extra.
-    assert_eq!(walk(&fixture, false, 1), whole);
 }
 
 /// A listing lists a container; a container that is not there is the one thing
@@ -1052,7 +1029,7 @@ fn listing_a_container_that_is_not_there_reports_that() {
 fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
-    let entry = walk(&fixture, false, 1000).remove(0);
+    let entry = walk(&fixture, false).remove(0);
     let listed = entry.e_tag.unwrap();
     assert!(
         !listed.starts_with('"'),
@@ -1144,7 +1121,7 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     );
 
     // And the name comes back as it was written.
-    let listed: Vec<String> = walk(&fixture, false, 1000)
+    let listed: Vec<String> = walk(&fixture, false)
         .into_iter()
         .map(|entry| entry.key)
         .collect();
@@ -1324,7 +1301,7 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     }
     assert!(!created.is_empty(), "Azure took none of the slash edges");
 
-    let listed: Vec<String> = walk(&fixture, false, 1000)
+    let listed: Vec<String> = walk(&fixture, false)
         .into_iter()
         .map(|entry| entry.key)
         .collect();
@@ -1482,7 +1459,7 @@ fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
 fn a_marker_the_service_did_not_write_is_refused_by_it() {
     let fixture = Fixture::from_env();
     let blobs = fixture.blobs();
-    let refused = list_status(&fixture, Some(b"not-a-marker"));
+    let refused = list_status(&fixture, Some("not-a-marker"));
     assert_eq!(refused.0, 400);
     assert_eq!(
         blobs.accept_list_error_body(refused.0, None, &refused.1),
@@ -1501,15 +1478,15 @@ fn a_marker_the_service_did_not_write_is_refused_by_it() {
         ..PhysicalList::new(&fixture.list_prefix)
     };
     seed_listing(&fixture);
-    let (_, marker) = page(&fixture, &plan, 4).unwrap();
+    let (_, marker) = page(&fixture, &plan).unwrap();
     let marker = marker.expect("a first page of one entry names the next");
     let again = PhysicalList {
         marker: Some(&marker),
         ..plan
     };
     assert_eq!(
-        page(&fixture, &again, 4).unwrap().0,
-        page(&fixture, &again, 4).unwrap().0,
+        page(&fixture, &again).unwrap().0,
+        page(&fixture, &again).unwrap().0,
         "a marker names a place in the container, not a session"
     );
 
@@ -1545,7 +1522,7 @@ fn a_page_larger_than_the_service_gives_is_answered_with_its_maximum() {
 // One listing request, as the status and the body that answered it. The
 // listing helpers above read a page; this one is for the answers that are not
 // pages.
-fn list_status(fixture: &Fixture, marker: Option<&[u8]>) -> (u16, Vec<u8>) {
+fn list_status(fixture: &Fixture, marker: Option<&str>) -> (u16, Vec<u8>) {
     let now = Timestamps::from_unix(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

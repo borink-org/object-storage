@@ -141,15 +141,10 @@ class CollectedHead {
 
 // What one call of a listing read.
 //
-// A page too large for your array leaves `complete` false, and `more` reads
-// the rest of it from `resume`. No entry is lost or read twice.
+// The array holds the whole page: a page larger than it is refused.
 struct Page {
     // The part of your array that this call filled.
     std::span<const ListEntry> entries;
-    // Whether the page was read to its end.
-    bool complete = false;
-    // Where the rest of the page starts, when it was not read to its end.
-    Resume resume{};
     // The text that names the next page of the listing, or empty when the
     // listing is complete.
     //
@@ -218,11 +213,6 @@ class Client {
     //
     // Throws what `list` throws.
     Page page(std::string_view prefix, std::span<ListEntry> entries, const List &plan = {});
-
-    // Reads the rest of the page that the last call left unread.
-    //
-    // Pass the `resume` of the page it returned, and an array to read into.
-    Page more(const Resume &resume, std::span<ListEntry> entries);
 
     // The session, built from this client's own strings.
     //

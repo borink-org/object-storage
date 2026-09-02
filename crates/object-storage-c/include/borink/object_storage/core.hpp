@@ -34,7 +34,6 @@ using Span          = borink_span;
 using MaybeBytes    = borink_maybe_bytes;
 using MaybeU64      = borink_maybe_u64;
 using MaybeU32      = borink_maybe_u32;
-using MaybeSpan     = borink_maybe_span;
 using Status        = borink_status;
 using Session       = borink_session;
 using Range         = borink_range;
@@ -45,7 +44,6 @@ using ListShape     = borink_list_shape;
 using ListEntry     = borink_list_entry;
 using Properties    = borink_properties;
 using Property      = borink_property;
-using Resume        = borink_resume;
 using Fill          = borink_fill;
 using RequestHeader = borink_request_header;
 using RequestHead   = borink_request_head;
@@ -65,7 +63,6 @@ using FailureClass  = borink_failure_class;
 using ServiceError  = borink_service_error;
 using OutcomeKind   = borink_outcome_kind;
 using EntryKind     = borink_entry_kind;
-using FillKind      = borink_fill_kind;
 
 inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
 
@@ -133,9 +130,6 @@ inline constexpr OutcomeKind OutcomeKindPage                = BORINK_OUTCOME_KIN
 inline constexpr EntryKind EntryKindObject    = BORINK_ENTRY_KIND_OBJECT;
 inline constexpr EntryKind EntryKindPrefix    = BORINK_ENTRY_KIND_PREFIX;
 inline constexpr EntryKind EntryKindDirectory = BORINK_ENTRY_KIND_DIRECTORY;
-
-inline constexpr FillKind FillKindPage    = BORINK_FILL_KIND_PAGE;
-inline constexpr FillKind FillKindPartial = BORINK_FILL_KIND_PARTIAL;
 
 // Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }

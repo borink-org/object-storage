@@ -523,9 +523,9 @@ pub struct PhysicalList<'h> {
     /// Where the previous page ended.
     ///
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
-    /// previous page reported. The first page carries [`None`]. The bytes are
-    /// the service's, and mean nothing to this crate.
-    pub marker: Option<&'h [u8]>,
+    /// previous page reported. The first page carries [`None`]. The text is
+    /// the service's, and means nothing to this crate.
+    pub marker: Option<&'h str>,
     /// Whether to group the keys at each `/` after the prefix.
     ///
     /// A delimited listing reports each group once, as an
@@ -551,8 +551,8 @@ impl<'h> PhysicalList<'h> {
         }
     }
 
-    /// Creates a plan from a stored shape and the bytes that it needs.
-    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h [u8]>) -> Self {
+    /// Creates a plan from a stored shape and the text that it needs.
+    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,
             marker,
@@ -576,8 +576,8 @@ impl<'h> PhysicalList<'h> {
 /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
 /// until you reuse that buffer.
 ///
-/// The fields hold the bytes that the service sent, as [`ObjectMeta`] does.
-/// Read `last_modified` with
+/// The fields hold the text that the service wrote, which is what
+/// [`ObjectMeta`] holds as bytes. Read `last_modified` with
 /// [`layered::http_date_ms`](crate::layered::http_date_ms).
 ///
 /// [`ObjectMeta`]: crate::ObjectMeta
@@ -595,15 +595,18 @@ pub struct ListEntry<'b> {
     /// carries, and conditions a request on either form. To write the one that
     /// HTTP defines, quote it with
     /// [`layered::quoted_etag`](crate::layered::quoted_etag).
-    pub e_tag: Option<&'b [u8]>,
+    pub e_tag: Option<&'b str>,
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
-    pub last_modified: Option<&'b [u8]>,
+    pub last_modified: Option<&'b str>,
     /// This entry as the service wrote it, from its opening tag to its closing
     /// one.
     ///
     /// Read a value that the fields above do not carry with [`Self::property`]
     /// or [`Self::properties`], which read these bytes.
+    ///
+    /// Reading the page decoded the key, the entity tag and the date in place
+    /// and set the bytes each no longer needed to zero.
     pub raw: &'b [u8],
 }
 
@@ -622,10 +625,10 @@ impl<'b> ListEntry<'b> {
     /// A value that holds `&amp;` or another reference is decoded by
     /// [`layered::decode_into`](crate::layered::decode_into).
     ///
-    /// The three values that this entry already carries are not read back this
-    /// way. Reading the page decoded them where they stood, so the element
-    /// that held one now holds the decoded text and what the decoding left
-    /// behind. Read `key`, `e_tag` and `last_modified` from the fields.
+    /// The key, the entity tag and the date were decoded when the page was
+    /// read, so for those three elements this reports the decoded text and
+    /// not what the service wrote. Read them from `key`, `e_tag` and
+    /// `last_modified` instead.
     pub fn property(&self, name: &str) -> Option<&'b [u8]> {
         self.properties()
             .find(|(found, _)| *found == name.as_bytes())
@@ -663,7 +666,7 @@ impl<'b> Properties<'b> {
     /// tag, so it reports what the entry holds and not the entry itself.
     pub fn new(raw: &'b [u8]) -> Self {
         Self {
-            rest: crate::xml::after_tag(raw).unwrap_or_default(),
+            rest: crate::xml::after_opening_tag(raw).unwrap_or_default(),
             within: false,
         }
     }

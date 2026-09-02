@@ -3,7 +3,9 @@
 //
 // Both only ever shorten the text, so both decode in place from left to
 // right. The bytes freed at the end keep whatever they held. Each function
-// returns the length of the decoded text.
+// returns the length of the decoded text. The page reader then sets the
+// leftover bytes to zero, so that the walk over an entry can find where the
+// decoded text ends.
 
 use super::scan::{AMP, PCT, fault, find_byte};
 use crate::Result;
@@ -34,21 +36,15 @@ pub(crate) fn decode(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize
     Ok(len)
 }
 
-// Moves `b[r..r + n]` down to `w`. The decoders do this with the text between
-// escapes. Nothing moves before the first escape, because nothing has shrunk
-// yet.
-#[inline(always)]
-fn shift_down(b: &mut [u8], r: usize, w: usize, n: usize) {
-    if w != r {
-        b.copy_within(r..r + n, w);
-    }
-}
-
 fn decode_references(b: &mut [u8]) -> Result<usize> {
+    // `r` reads and `w` writes. The two are equal up to the first escape, so
+    // nothing moves until something has shrunk.
     let (mut r, mut w) = (0, 0);
     while r < b.len() {
         let run = find_byte(b, r, b'&') - r;
-        shift_down(b, r, w, run);
+        if w != r {
+            b.copy_within(r..r + run, w);
+        }
         r += run;
         w += run;
         if r == b.len() {
@@ -141,7 +137,9 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
     let (mut r, mut w) = (0, 0);
     while r < b.len() {
         let run = find_byte(b, r, b'%') - r;
-        shift_down(b, r, w, run);
+        if w != r {
+            b.copy_within(r..r + run, w);
+        }
         r += run;
         w += run;
         if r == b.len() {

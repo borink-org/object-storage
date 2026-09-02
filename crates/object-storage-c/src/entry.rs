@@ -10,7 +10,7 @@ use crate::outcome::{
     delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, properties_view,
     property_view, put_outcome, refused_fill, status_of,
 };
-use crate::plan::{delete_shape, get_shape, list_shape, put_shape, resume};
+use crate::plan::{delete_shape, get_shape, list_shape, put_shape};
 use crate::ptr;
 use crate::sentence::{describe, describe_status};
 use crate::step::{filling, finishing, head_of, open, optional, ready, text, written};
@@ -373,7 +373,9 @@ pub unsafe extern "C" fn borink_encode_list(
             let list = PhysicalList::from_shape(
                 shape,
                 text(prefix, InvalidPlan::Prefix)?,
-                optional(marker),
+                optional(marker)
+                    .map(|marker| text(marker, InvalidPlan::Marker))
+                    .transpose()?,
             );
             blobs.encode_list(buf, &list, &Timestamps::from_unix(unix_seconds))
         }),
@@ -444,10 +446,9 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
 /// decodes the text of the body where it stands, so a body that has been read
 /// is no longer a document.
 ///
-/// Your array is the budget. A page that does not fit fills the array and
-/// reports `Partial`. Read the rest of that page with `borink_resume_listing`
-/// and the `resume` it reported. An array of `max_results` entries always
-/// holds a whole page.
+/// Your array must hold the whole page. An array of `max_results` entries
+/// always does. A smaller one is refused with `Capacity`, and `required` says
+/// how many entries the page holds; the body cannot be read again by then.
 ///
 /// # Safety
 ///
@@ -475,45 +476,7 @@ pub unsafe extern "C" fn borink_fill_listing(
         )
     };
     open(session)
-        .and_then(|blobs| filling(&blobs, body, None, into))
-        .unwrap_or_else(|error| refused_fill(&error))
-}
-
-/// Reads the rest of a page that a fill stopped in.
-///
-/// Pass the same `body`, unchanged, and the `resume` that came with the
-/// entries you have finished with.
-///
-/// # Safety
-///
-/// As `borink_fill_listing`, and `from` must be null or point at one readable
-/// value.
-///
-/// # Lifetime
-///
-/// As `borink_fill_listing`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_resume_listing(
-    session: *const Session,
-    body: BytesMut,
-    from: *const Resume,
-    into: *mut ListEntry,
-    capacity: usize,
-) -> Fill {
-    // SAFETY: the caller states the contract of this function.
-    let (session, body, from, into) = unsafe {
-        (
-            ptr::session(session),
-            ptr::slice_mut(body),
-            from.as_ref(),
-            ptr::items_mut(into, capacity),
-        )
-    };
-    open(session)
-        .and_then(|blobs| {
-            let from = from.ok_or(crate::plan::UNKNOWN)?;
-            filling(&blobs, body, Some(resume(from)), into)
-        })
+        .and_then(|blobs| filling(&blobs, body, into))
         .unwrap_or_else(|error| refused_fill(&error))
 }
 

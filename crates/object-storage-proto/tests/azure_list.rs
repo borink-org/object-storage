@@ -1,9 +1,9 @@
 //! Azure listing encoding, response interpretation and page reading.
 
 use borink_object_storage_proto::{
-    Blobs, Container, EntryKind, Error, Failure, FailureClass, Fill, InvalidPlan, ListEntry,
-    ListHeadOutcome, ListShape, Listing, Method, PhysicalList, ResponseFault, ResponseHead, Resume,
-    ServiceErrorKind, Timestamps, layered,
+    Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList, ResponseFault,
+    ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -55,25 +55,7 @@ fn object(name: &str, size: u64) -> String {
 }
 
 fn fill<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Listing<'b> {
-    match blobs().fill_listing(body, into).unwrap() {
-        Fill::Page(page) => page,
-        Fill::Partial { filled, .. } => panic!("the array holds the page, but only {filled} fit"),
-    }
-}
-
-// The same, for a call that is expected to run out of room.
-fn partial<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> (usize, Resume) {
-    match blobs().fill_listing(body, into).unwrap() {
-        Fill::Partial { filled, resume } => (filled, resume),
-        Fill::Page(page) => panic!("the array held the whole page: {page:?}"),
-    }
-}
-
-fn resume<'b>(body: &'b mut [u8], at: Resume, into: &mut [ListEntry<'b>]) -> Listing<'b> {
-    match blobs().resume_listing(body, at, into).unwrap() {
-        Fill::Page(page) => page,
-        Fill::Partial { filled, .. } => panic!("the array holds the rest, but only {filled} fit"),
-    }
+    blobs().fill_listing(body, into).unwrap()
 }
 
 #[test]
@@ -128,7 +110,7 @@ fn every_query_parameter_is_written_in_one_order() {
     // not unreserved is encoded, including one that is already a percent.
     assert_eq!(
         url(&PhysicalList {
-            marker: Some(b"2!72!MDAwMDI4!a+b%c"),
+            marker: Some("2!72!MDAwMDI4!a+b%c"),
             ..PhysicalList::new("")
         }),
         format!("{base}&marker=2%2172%21MDAwMDI4%21a%2Bb%25c")
@@ -141,7 +123,7 @@ fn every_query_parameter_is_written_in_one_order() {
                 max_results: Some(2),
             },
             "directory/",
-            Some(b"next"),
+            Some("next"),
         )),
         format!("{base}&prefix=directory%2F&delimiter=%2F&marker=next&maxresults=2")
     );
@@ -150,7 +132,7 @@ fn every_query_parameter_is_written_in_one_order() {
 #[test]
 fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
     let list = PhysicalList {
-        marker: Some(b"next"),
+        marker: Some("next"),
         delimited: true,
         max_results: Some(2),
         ..PhysicalList::new("directory/")
@@ -169,7 +151,7 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
         (PhysicalList::new(long.as_str()), InvalidPlan::Prefix),
         (
             PhysicalList {
-                marker: Some(b""),
+                marker: Some(""),
                 ..PhysicalList::new("")
             },
             InvalidPlan::Marker,
@@ -303,9 +285,12 @@ fn a_page_reports_every_object_it_holds() {
     assert_eq!(entries[0].kind, EntryKind::Object);
     assert_eq!(entries[0].key, "a.txt");
     assert_eq!(entries[0].size, Some(8));
-    assert_eq!(entries[0].e_tag, Some(b"0x8DF0046E8E555AF".as_slice()));
+    assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0]
+            .last_modified
+            .map(str::as_bytes)
+            .and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].key, "b/c.txt");
@@ -433,7 +418,7 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
     let mut body = page(&object("a.txt", 1), "2!72!MDAwMDI4");
     let mut entries = [ListEntry::default(); 1];
     let listing = fill(&mut body, &mut entries);
-    assert_eq!(listing.next_marker, Some(b"2!72!MDAwMDI4".as_slice()));
+    assert_eq!(listing.next_marker, Some("2!72!MDAwMDI4"));
 
     let mut body = page(&object("a.txt", 1), "");
     assert_eq!(fill(&mut body, &mut entries).next_marker, None);
@@ -461,7 +446,7 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
         let mut entries = [ListEntry::default(); 1];
         assert_eq!(
             fill(&mut body, &mut entries).next_marker,
-            Some(b"2!72!MDAwMDI4".as_slice()),
+            Some("2!72!MDAwMDI4"),
             "{named}"
         );
     }
@@ -479,102 +464,41 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
 }
 
 #[test]
-fn an_array_smaller_than_the_page_reads_the_rest_of_it_afterwards() {
+fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
     let three = object("a.txt", 1) + &object("b.txt", 2) + &object("c.txt", 3);
     let mut body = page(&three, "next");
 
-    // The array is the budget: two entries fit, and the third is left where it
-    // stands rather than counted and dropped.
+    // The array must hold the whole page. One that does not is refused, and
+    // the error says how many entries the page holds. The page is walked to
+    // its end for that count, so a damaged page is still reported as one.
     let mut entries = [ListEntry::default(); 2];
-    let (filled, at) = partial(&mut body, &mut entries);
-    assert_eq!(filled, 2);
-    assert_eq!(entries.map(|entry| entry.key), ["a.txt", "b.txt"]);
-
-    // The rest of the same body, from where the first call stopped. Nothing
-    // was read twice and nothing was lost.
-    let mut entries = [ListEntry::default(); 2];
-    let listing = resume(&mut body, at, &mut entries);
-    assert_eq!(listing.filled, 1);
-    assert_eq!(entries[0].key, "c.txt");
-    assert_eq!(entries[1], ListEntry::default());
-    // Only the call that reaches the end of the page names the next one, so a
-    // loop that continues on the marker cannot step over an unread entry.
-    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
-}
-
-// A caller that cannot hold a Rust value stores the three numbers of a
-// position instead, and reading continues from what those numbers rebuild.
-#[test]
-fn a_position_stored_as_its_numbers_reads_the_same_rest() {
-    let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "next");
-    let mut entries = [ListEntry::default(); 1];
-    let (filled, at) = partial(&mut body, &mut entries);
-    assert_eq!(filled, 1);
-
-    let stored = Resume::from_parts(at.at(), at.within(), at.marker());
-    assert_eq!(stored, at);
-
-    let mut entries = [ListEntry::default(); 1];
-    let listing = resume(&mut body, stored, &mut entries);
-    assert_eq!((listing.filled, entries[0].key), (1, "b.txt"));
-    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
+    assert_eq!(
+        blobs().fill_listing(&mut body, &mut entries),
+        Err(Error::Capacity(CapacityError {
+            required: 3,
+            available: 2,
+        }))
+    );
 }
 
 #[test]
-fn an_array_that_holds_the_page_exactly_is_not_partial() {
+fn an_array_that_holds_the_page_exactly_is_read_whole() {
     let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "");
     let listing = fill(&mut body, &mut [ListEntry::default(); 2]);
     assert_eq!((listing.filled, listing.next_marker), (2, None));
 }
 
 #[test]
-fn an_array_with_no_room_reads_nothing_and_keeps_the_page() {
+fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
     let mut body = page(&object("a.txt", 1), "next");
-    let (filled, at) = partial(&mut body, &mut []);
-    assert_eq!(filled, 0);
-
-    // The page is untouched, so the whole of it is still there to read.
-    let mut entries = [ListEntry::default(); 1];
-    let listing = resume(&mut body, at, &mut entries);
-    assert_eq!((listing.filled, entries[0].key), (1, "a.txt"));
-    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
-}
-
-#[test]
-fn a_page_read_one_entry_at_a_time_reads_every_entry_once() {
-    // The whole point of resuming: a caller with room for one entry reads a
-    // page of any size without asking the service for it again. The escapes
-    // are what a second read of the same bytes would corrupt.
-    let mut body = page(
-        &(object("a&amp;b", 1) + &object("c&amp;d", 2) + &object("e&amp;f", 3)),
-        "next",
+    let mut none: [ListEntry; 0] = [];
+    assert_eq!(
+        blobs().fill_listing(&mut body, &mut none),
+        Err(Error::Capacity(CapacityError {
+            required: 1,
+            available: 0,
+        }))
     );
-    let blobs = blobs();
-    let mut keys: Vec<String> = Vec::new();
-    let mut at = None;
-    let marker = loop {
-        let mut entries = [ListEntry::default(); 1];
-        let fill = match at {
-            None => blobs.fill_listing(&mut body, &mut entries).unwrap(),
-            Some(at) => blobs.resume_listing(&mut body, at, &mut entries).unwrap(),
-        };
-        match fill {
-            Fill::Partial { filled, resume } => {
-                keys.extend(entries[..filled].iter().map(|entry| entry.key.to_owned()));
-                at = Some(resume);
-            }
-            Fill::Page(page) => {
-                keys.extend(
-                    entries[..page.filled]
-                        .iter()
-                        .map(|entry| entry.key.to_owned()),
-                );
-                break page.next_marker.map(<[u8]>::to_vec);
-            }
-        }
-    };
-    assert_eq!(keys, ["a&b", "c&d", "e&f"]);
-    assert_eq!(marker.as_deref(), Some(b"next".as_slice()));
 }
 
 #[test]
@@ -582,7 +506,7 @@ fn an_empty_page_holds_nothing_and_may_still_name_a_next() {
     let mut body = page("", "next");
     let listing = fill(&mut body, &mut []);
     assert_eq!(listing.filled, 0);
-    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
+    assert_eq!(listing.next_marker, Some("next"));
 
     // A container with nothing in it comes back with the tag written this
     // way instead.
@@ -613,9 +537,12 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
 
     assert_eq!(entries[0].key, " a.txt ");
     assert_eq!(entries[0].size, Some(8));
-    assert_eq!(entries[0].e_tag, Some(b"0x8DF0046E8E555AF".as_slice()));
+    assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0]
+            .last_modified
+            .map(str::as_bytes)
+            .and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].kind, EntryKind::Directory);
@@ -737,26 +664,32 @@ fn a_body_that_is_not_a_page_is_a_fault() {
 }
 
 #[test]
-fn only_the_entries_that_were_read_stop_being_a_document() {
+fn a_body_that_was_read_stops_being_a_document() {
     // The entries borrow the body, so the compiler keeps them from outliving
     // it. What this checks is the other half: an entry that was read was
     // decoded where it stood and is not its own text any more, while an entry
-    // that was not read is untouched. That is what makes resuming exact and
-    // reading the same bytes twice impossible.
+    // the array had no room for is untouched. That is why a refused read
+    // cannot be retried on the same body with a larger array.
     let two = object("a&amp;b", 1) + &object("c&amp;d", 2);
     let mut body = page(&two, "");
 
     let mut entries = [ListEntry::default(); 1];
-    let (filled, at) = partial(&mut body, &mut entries);
-    assert_eq!((filled, entries[0].key), (1, "a&b"));
+    assert!(matches!(
+        blobs().fill_listing(&mut body, &mut entries),
+        Err(Error::Capacity(_))
+    ));
+    assert_eq!(entries[0].key, "a&b");
 
     let read = String::from_utf8_lossy(&body).into_owned();
     assert!(!read.contains("<Name>a&amp;b</Name>"), "{read}");
     assert!(read.contains("<Name>c&amp;d</Name>"), "{read}");
 
-    let mut entries = [ListEntry::default(); 1];
-    assert_eq!(resume(&mut body, at, &mut entries).filled, 1);
-    assert_eq!(entries[0].key, "c&d");
+    // The decoding left zero bytes behind, which no document holds.
+    let mut entries = [ListEntry::default(); 2];
+    assert_eq!(
+        blobs().fill_listing(&mut body, &mut entries),
+        Err(Error::Response(ResponseFault::Body))
+    );
 }
 
 #[test]
@@ -776,7 +709,7 @@ fn whitespace_between_the_entries_is_not_an_entry() {
 
     assert_eq!(listing.filled, 2);
     assert_eq!(entries[1].key, "b.txt");
-    assert_eq!(listing.next_marker, Some(b"next".as_slice()));
+    assert_eq!(listing.next_marker, Some("next"));
 }
 
 /// One page exactly as the service sent it, byte for byte, from a live run.
@@ -818,9 +751,12 @@ fn a_page_the_service_actually_sent() {
     );
     assert_eq!(entries[0].kind, EntryKind::Object);
     assert_eq!(entries[0].size, Some(1));
-    assert_eq!(entries[0].e_tag, Some(b"0x8DF085C5E09984C".as_slice()));
+    assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0]
+            .last_modified
+            .map(str::as_bytes)
+            .and_then(layered::http_date_ms),
         Some(1_788_289_691_000)
     );
     // The last page of the listing, written the way the service writes it.
@@ -928,17 +864,16 @@ fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
 }
 
 /// Reading a page decodes the values it reports where they stand, so those
-/// elements no longer hold what the service wrote. The entry carries them.
+/// elements no longer hold what the service wrote. The walk reports the
+/// decoded text for them.
 #[test]
-fn a_value_that_was_decoded_in_place_is_read_from_the_entry_and_not_the_bytes() {
+fn a_value_that_was_decoded_in_place_is_reported_decoded_by_the_walk() {
     let mut body = page(&object("a&amp;b.txt", 4), "");
     let mut entries = [ListEntry::default(); 1];
     fill(&mut body, &mut entries);
 
     assert_eq!(entries[0].key, "a&b.txt");
-    // The element that held it is shorter than what it holds now, so the walk
-    // reports the decoded text and the bytes the decoding left behind.
-    assert_ne!(entries[0].property("Name"), Some(b"a&b.txt".as_slice()));
+    assert_eq!(entries[0].property("Name"), Some(b"a&b.txt".as_slice()));
     // Everything the page did not decode is what the service wrote.
     assert_eq!(
         entries[0].property("BlobType"),

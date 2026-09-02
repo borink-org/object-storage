@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    outcome::{entry_view, page_fill, partial_fill, status_of},
+    outcome::{page_fill, status_of},
     plan::UNKNOWN,
     types::*,
 };
@@ -60,58 +60,18 @@ pub(crate) fn optional(value: &[u8]) -> Option<&[u8]> {
     (!value.is_empty()).then_some(value)
 }
 
-// How many entries one round of a fill reads before they are copied out.
+// Reads a page into the caller's array.
 //
-// The core crate writes Rust values, which hold their borrow of the body, and
-// the caller's array holds pointers instead. This is the array in between, and
-// it stands on the stack, so a page of any size is read in rounds of this many
-// entries rather than in one.
-const ROUND: usize = 16;
-
-// Reads a page into the caller's array, one round at a time.
-//
-// `from` is the position that a previous fill reported, or `None` to read from
-// the first entry of the body. Reading stops where the page ends or where the
-// array is full, which is what the core crate would do with an array of this
-// length.
+// The core crate writes the caller's entries itself: a C entry is built from
+// a core entry as each is read, so no array stands in between and the page is
+// read in one call.
 pub(crate) fn filling(
     blobs: &Blobs<'_>,
     body: &mut [u8],
-    from: Option<proto::Resume>,
     into: &mut [ListEntry],
 ) -> proto::Result<Fill> {
-    let mut written = 0;
-    let mut at = from;
-    loop {
-        let room = ROUND.min(into.len() - written);
-        // The entries borrow the body, so they live for one round only. What
-        // the caller keeps is the pointers that `entry_view` writes.
-        let mut round = [proto::ListEntry::default(); ROUND];
-        let fill = match at {
-            None => blobs.fill_listing(&mut *body, &mut round[..room])?,
-            Some(resume) => blobs.resume_listing(&mut *body, resume, &mut round[..room])?,
-        };
-        match fill {
-            proto::Fill::Page(page) => {
-                copy(&round[..page.filled], &mut into[written..]);
-                return Ok(page_fill(written + page.filled, page.next_marker));
-            }
-            proto::Fill::Partial { filled, resume } => {
-                copy(&round[..filled], &mut into[written..]);
-                written += filled;
-                at = Some(resume);
-                if written == into.len() {
-                    return Ok(partial_fill(written, resume));
-                }
-            }
-        }
-    }
-}
-
-fn copy(round: &[proto::ListEntry<'_>], into: &mut [ListEntry]) {
-    for (slot, entry) in into.iter_mut().zip(round) {
-        *slot = entry_view(entry);
-    }
+    let page = blobs.fill_listing(body, into)?;
+    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
 }
 
 // The head, read where your HTTP library already put it. A name that is not

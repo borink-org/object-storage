@@ -3,7 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, DeleteHeadOutcome, Fill, GetHeadOutcome, ListEntry, ListHeadOutcome, Payload,
+    Blobs, DeleteHeadOutcome, GetHeadOutcome, ListEntry, ListHeadOutcome, Listing, Payload,
     PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
     Timestamps, layered,
 };
@@ -178,8 +178,8 @@ fn not_removed(outcome: DeleteHeadOutcome<'_>) -> Box<dyn std::error::Error> {
 ///
 /// This function reads the page into `body`, and the entries it writes into
 /// `into` borrow those bytes. An array of `max_results` entries always holds a
-/// whole page. A smaller one fills and reports where to resume, which
-/// [`Blobs::resume_listing`] reads the rest from.
+/// whole page. A smaller one is refused with the number of entries the page
+/// holds.
 ///
 /// # Errors
 ///
@@ -190,7 +190,7 @@ pub fn list<'b>(
     plan: &PhysicalList<'_>,
     body: &'b mut Vec<u8>,
     into: &mut [ListEntry<'b>],
-) -> Result<Fill<'b>, Box<dyn std::error::Error>> {
+) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let mut buf = vec![0; layered::list_requirements(blobs, plan, &now)?];

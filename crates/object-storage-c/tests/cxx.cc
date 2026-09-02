@@ -123,7 +123,6 @@ void reads_a_page_out_of_a_body() {
         borink_fill_listing(&session, page, entries.data(), entries.size());
 
     CHECK(fill.status.code == borink::ErrorCodeNone);
-    CHECK(fill.kind == borink::FillKindPage);
     const std::span<const borink::ListEntry> read = borink::entries_of(entries, fill);
     CHECK(read.size() == 2);
     // The escape in the name was decoded inside the body.
@@ -139,9 +138,9 @@ void reads_a_page_out_of_a_body() {
     CHECK(borink::text_of(fill.next_marker) == "next");
 }
 
-// An array smaller than the page keeps what did not fit, and the rest of the
-// same body is read from where the fill stopped.
-void reads_the_rest_of_a_page_that_did_not_fit() {
+// An array smaller than the page is refused, and the fill says how many
+// entries the page holds.
+void an_array_smaller_than_the_page_is_refused() {
     const borink::Session session = a_session();
     std::string body = "<EnumerationResults><Blobs>"
                        "<Blob><Name>a.txt</Name><Properties>"
@@ -154,15 +153,11 @@ void reads_the_rest_of_a_page_that_did_not_fit() {
                                              body.size()));
 
     std::array<borink::ListEntry, 1> entries{};
-    borink::Fill fill = borink_fill_listing(&session, page, entries.data(), entries.size());
-    CHECK(fill.kind == borink::FillKindPartial);
-    CHECK(borink::text_of(entries[0].key) == "a.txt");
-
-    fill = borink_resume_listing(&session, page, &fill.resume, entries.data(), entries.size());
-    CHECK(fill.kind == borink::FillKindPage);
-    CHECK(borink::text_of(entries[0].key) == "b.txt");
-    // The service named no next page, so the listing is complete.
-    CHECK(fill.next_marker.present == false);
+    const borink::Fill fill =
+        borink_fill_listing(&session, page, entries.data(), entries.size());
+    CHECK(fill.status.code == borink::ErrorCodeCapacity);
+    CHECK(fill.required == 2);
+    CHECK(fill.filled == 0);
 }
 
 // An entry's entity tag and date are read by the helpers beside them.
@@ -326,7 +321,7 @@ int main() {
     reads_the_shapes_the_helpers_build();
     reads_the_shape_a_listing_carries();
     reads_a_page_out_of_a_body();
-    reads_the_rest_of_a_page_that_did_not_fit();
+    an_array_smaller_than_the_page_is_refused();
     reads_the_values_an_entry_lends();
     reads_a_property_out_of_an_entry();
     reads_the_values_a_head_lent_back();

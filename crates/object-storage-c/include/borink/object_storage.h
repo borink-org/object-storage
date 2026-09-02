@@ -434,32 +434,6 @@ typedef uint16_t borink_entry_kind;
 #endif // __cplusplus
 
 /**
- * How much of a page one fill read.
- */
-enum borink_fill_kind
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : uint16_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-    /**
-     * The page was read to its end. `next_marker` names the page after it.
-     */
-    BORINK_FILL_KIND_PAGE = 1,
-    /**
-     * The array filled before the page ended. Read the rest of the same body
-     * with `borink_resume_listing`, passing the `resume` beside this number.
-     */
-    BORINK_FILL_KIND_PARTIAL = 2,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum borink_fill_kind borink_fill_kind;
-#else
-typedef uint16_t borink_fill_kind;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
-
-/**
  * A failure, as the two numbers that describe every error of the core crate.
  *
  * `code` is a `borink_error_code`, and `detail` is the discriminant of the
@@ -885,45 +859,6 @@ typedef struct borink_list_shape {
 } borink_list_shape;
 
 /**
- * A range of a response body that a page may not name.
- */
-typedef struct borink_maybe_span {
-    /**
-     * Whether the page named a range.
-     */
-    bool present;
-    /**
-     * The range.
-     */
-    struct borink_span span;
-} borink_maybe_span;
-
-/**
- * Where a fill stopped in a page.
- *
- * `borink_fill_listing` reports one when your array fills before the page
- * ends, and `borink_resume_listing` takes it back. Store it and pass it back
- * unchanged.
- *
- * One value describes one body. Passed with another body, it names no entry
- * of it.
- */
-typedef struct borink_resume {
-    /**
-     * The offset into the body that reading continues from.
-     */
-    size_t at;
-    /**
-     * Whether that offset stands inside the entries of the page.
-     */
-    bool within;
-    /**
-     * The range of the body that holds the text naming the next page.
-     */
-    struct borink_maybe_span marker;
-} borink_resume;
-
-/**
  * What one call to `borink_fill_listing` read.
  *
  * # Lifetime
@@ -933,17 +868,13 @@ typedef struct borink_resume {
  */
 typedef struct borink_fill {
     /**
-     * Whether the page could be read, and what stopped it.
+     * Whether the page could be read.
      *
-     * A `code` of 0 means that the entries are in your array. Every other
-     * field is absent when it is not 0.
+     * A `code` of 0 means that the entries are in your array. When it is
+     * `Capacity`, `required` is set; every other field is absent when the
+     * code is not 0.
      */
     struct borink_status status;
-    /**
-     * Whether the page ended or the array filled first, as a
-     * `borink_fill_kind`.
-     */
-    uint16_t kind;
     /**
      * The number of entries written into your array.
      *
@@ -951,11 +882,16 @@ typedef struct borink_fill {
      */
     size_t filled;
     /**
-     * Where the rest of the page starts, for a `Partial` fill.
+     * The number of entries that the page holds, when the array had no room
+     * for all of them.
+     *
+     * The body has been decoded by then and cannot be read again. Ask the
+     * service for the page again, with an array of this many entries, or ask
+     * for a page no larger than your array.
      */
-    struct borink_resume resume;
+    size_t required;
     /**
-     * The text that names the next page, for a `Page` fill.
+     * The text that names the next page.
      *
      * Absent when the listing is complete. Copy the bytes into your own
      * storage and pass them as the marker of the next request.
@@ -1121,9 +1057,6 @@ typedef struct borink_layout {
     size_t sizeof_maybe_u32;
     size_t alignof_maybe_u32;
     size_t offsetof_maybe_u32_value;
-    size_t sizeof_maybe_span;
-    size_t alignof_maybe_span;
-    size_t offsetof_maybe_span_span;
     size_t sizeof_list_shape;
     size_t offsetof_list_shape_max_results;
     size_t sizeof_list_entry;
@@ -1140,15 +1073,10 @@ typedef struct borink_layout {
     size_t alignof_property;
     size_t offsetof_property_name;
     size_t offsetof_property_value;
-    size_t sizeof_resume;
-    size_t alignof_resume;
-    size_t offsetof_resume_within;
-    size_t offsetof_resume_marker;
     size_t sizeof_fill;
     size_t alignof_fill;
-    size_t offsetof_fill_kind;
     size_t offsetof_fill_filled;
-    size_t offsetof_fill_resume;
+    size_t offsetof_fill_required;
     size_t offsetof_fill_next_marker;
 } borink_layout;
 
@@ -1390,10 +1318,9 @@ struct borink_outcome borink_finish_list_error_body(const struct borink_session 
  * decodes the text of the body where it stands, so a body that has been read
  * is no longer a document.
  *
- * Your array is the budget. A page that does not fit fills the array and
- * reports `Partial`. Read the rest of that page with `borink_resume_listing`
- * and the `resume` it reported. An array of `max_results` entries always
- * holds a whole page.
+ * Your array must hold the whole page. An array of `max_results` entries
+ * always does. A smaller one is refused with `Capacity`, and `required` says
+ * how many entries the page holds; the body cannot be read again by then.
  *
  * # Safety
  *
@@ -1410,27 +1337,6 @@ struct borink_fill borink_fill_listing(const struct borink_session *session,
                                        struct borink_bytes_mut body,
                                        struct borink_list_entry *into,
                                        size_t capacity);
-
-/**
- * Reads the rest of a page that a fill stopped in.
- *
- * Pass the same `body`, unchanged, and the `resume` that came with the
- * entries you have finished with.
- *
- * # Safety
- *
- * As `borink_fill_listing`, and `from` must be null or point at one readable
- * value.
- *
- * # Lifetime
- *
- * As `borink_fill_listing`.
- */
-struct borink_fill borink_resume_listing(const struct borink_session *session,
-                                         struct borink_bytes_mut body,
-                                         const struct borink_resume *from,
-                                         struct borink_list_entry *into,
-                                         size_t capacity);
 
 /**
  * Returns the value that one entry gave for a property.

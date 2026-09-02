@@ -46,20 +46,6 @@ pub(crate) fn list_shape(shape: &ListShape) -> proto::Result<proto::ListShape> {
     })
 }
 
-// The position that a fill reported, as the core crate reads it. A position
-// built from other numbers names no entry, which the core crate refuses when
-// it reads the body.
-pub(crate) fn resume(resume: &Resume) -> proto::Resume {
-    proto::Resume::from_parts(
-        resume.at,
-        resume.within,
-        resume.marker.present.then_some(proto::Span {
-            start: resume.marker.span.start,
-            len: resume.marker.span.len,
-        }),
-    )
-}
-
 fn number(value: MaybeU32) -> Option<u32> {
     value.present.then_some(value.value)
 }

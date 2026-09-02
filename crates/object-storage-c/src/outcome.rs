@@ -92,13 +92,19 @@ pub(crate) fn list_outcome(outcome: &ListHeadOutcome<'_>) -> Outcome {
 }
 
 // One entry, pointing at the bytes of the body that the fill decoded.
+impl From<proto::ListEntry<'_>> for ListEntry {
+    fn from(entry: proto::ListEntry<'_>) -> Self {
+        entry_view(&entry)
+    }
+}
+
 pub(crate) fn entry_view(entry: &proto::ListEntry<'_>) -> ListEntry {
     ListEntry {
         kind: entry.kind as u16,
         key: bytes(entry.key.as_bytes()),
         size: maybe_number(entry.size),
-        e_tag: maybe_bytes(entry.e_tag),
-        last_modified: maybe_bytes(entry.last_modified),
+        e_tag: maybe_bytes(entry.e_tag.map(str::as_bytes)),
+        last_modified: maybe_bytes(entry.last_modified.map(str::as_bytes)),
         raw: bytes(entry.raw),
     }
 }
@@ -123,45 +129,20 @@ pub(crate) fn property_view(found: Option<(&[u8], &[u8])>) -> Property {
 // A fill that read the page to its end.
 pub(crate) fn page_fill(filled: usize, next_marker: Option<&[u8]>) -> Fill {
     Fill {
-        kind: FillKind::Page as u16,
         filled,
         next_marker: maybe_bytes(next_marker),
         ..Default::default()
     }
 }
 
-// A fill that stopped because the array was full.
-pub(crate) fn partial_fill(filled: usize, resume: proto::Resume) -> Fill {
-    Fill {
-        kind: FillKind::Partial as u16,
-        filled,
-        resume: resume_view(resume),
-        ..Default::default()
-    }
-}
-
-// A fill that read nothing, because the body is not a page or the call was
-// refused. No entry of the array is reported, whatever the call wrote there.
+// A fill that read nothing, because the body is not a page, the array is too
+// small for it, or the call was refused. No entry of the array is reported,
+// whatever the call wrote there.
 pub(crate) fn refused_fill(error: &Error) -> Fill {
     Fill {
         status: status_of(error),
+        required: error.capacity().map_or(0, |capacity| capacity.required),
         ..Default::default()
-    }
-}
-
-fn resume_view(resume: proto::Resume) -> Resume {
-    Resume {
-        at: resume.at(),
-        within: resume.within(),
-        marker: resume
-            .marker()
-            .map_or_else(Default::default, |span| MaybeSpan {
-                present: true,
-                span: Span {
-                    start: span.start,
-                    len: span.len,
-                },
-            }),
     }
 }
 

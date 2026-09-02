@@ -629,19 +629,6 @@ fn a_null_pointer_is_refused_rather_than_read() {
             .status,
             unknown()
         );
-        // A position that was never filled in is refused rather than read as
-        // the start of the body.
-        assert_eq!(
-            borink_resume_listing(
-                &session,
-                writable(&mut buf),
-                core::ptr::null(),
-                core::ptr::null_mut(),
-                0,
-            )
-            .status,
-            unknown()
-        );
         // A sentence for nothing is no sentence, not a guess at one.
         assert_eq!(borink_describe(core::ptr::null(), writable(&mut buf)), 0);
     }
@@ -1007,7 +994,6 @@ fn a_page_crosses_as_entries_that_point_into_the_body() {
         unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 4) };
 
     assert_eq!(fill.status, Status::default());
-    assert_eq!(fill.kind, FillKind::Page as u16);
     assert_eq!(fill.filled, 2);
     assert_eq!(keys(&entries, &fill), ["key-0", "key-1"]);
     assert_eq!(entries[0].kind, EntryKind::Object as u16);
@@ -1030,67 +1016,41 @@ fn a_page_crosses_as_entries_that_point_into_the_body() {
     assert_eq!(entries[2].key.len, 0);
 }
 
-// The array is the budget. A page larger than it is read in as many calls as
-// the caller has room for, and no entry is lost or read twice.
+// The array must hold the whole page. One that does not is refused, and
+// `required` says how many entries the page holds. No entry of the array is
+// reported, and the body cannot be read again.
 #[test]
-fn an_array_smaller_than_the_page_reads_the_rest_of_it_afterwards() {
+fn an_array_smaller_than_the_page_is_refused_with_the_count_it_holds() {
     let session = session();
-    // More entries than one round of the fill reads, so the rounds inside one
-    // call are exercised as well as the calls.
     let mut body = page(40, "");
     let mut entries = [ListEntry::default(); 25];
     // SAFETY: the body and the array are live, and nothing else reaches them.
     let fill =
         unsafe { borink_fill_listing(&session, writable(&mut body), entries.as_mut_ptr(), 25) };
-    assert_eq!(fill.kind, FillKind::Partial as u16);
-    assert_eq!(fill.filled, 25);
-    assert_eq!(keys(&entries, &fill)[24], "key-24");
-    assert!(!fill.next_marker.present);
-
-    let mut rest = [ListEntry::default(); 25];
-    // SAFETY: the same body, unread past where the first call stopped.
-    let fill = unsafe {
-        borink_resume_listing(
-            &session,
-            writable(&mut body),
-            &fill.resume,
-            rest.as_mut_ptr(),
-            25,
-        )
-    };
-    assert_eq!(fill.kind, FillKind::Page as u16);
-    assert_eq!(fill.filled, 15);
-    assert_eq!(keys(&rest, &fill)[0], "key-25");
-    assert_eq!(keys(&rest, &fill)[14], "key-39");
-    // The page named no next one, so the listing is complete.
+    assert_eq!(fill.status.code, ErrorCode::Capacity as u16);
+    assert_eq!(fill.required, 40);
+    assert_eq!(fill.filled, 0);
     assert!(!fill.next_marker.present);
 }
 
-// An array with no room reads nothing and keeps the page, so a caller that
-// sized it wrongly loses no entry.
+// An array with no room is refused the same way, unless the page is empty.
 #[test]
-fn an_array_with_no_room_reads_nothing_and_keeps_the_page() {
+fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
     let session = session();
     let mut body = page(1, "next");
     // SAFETY: the body is live, and no array is passed.
     let fill =
         unsafe { borink_fill_listing(&session, writable(&mut body), core::ptr::null_mut(), 0) };
-    assert_eq!(fill.kind, FillKind::Partial as u16);
-    assert_eq!(fill.filled, 0);
+    assert_eq!(fill.status.code, ErrorCode::Capacity as u16);
+    assert_eq!(fill.required, 1);
 
-    let mut entries = [ListEntry::default(); 1];
-    // SAFETY: as above, with room for the one entry.
-    let fill = unsafe {
-        borink_resume_listing(
-            &session,
-            writable(&mut body),
-            &fill.resume,
-            entries.as_mut_ptr(),
-            1,
-        )
-    };
-    assert_eq!(fill.filled, 1);
-    assert_eq!(keys(&entries, &fill), ["key-0"]);
+    let mut body = page(0, "next");
+    // SAFETY: as above.
+    let fill =
+        unsafe { borink_fill_listing(&session, writable(&mut body), core::ptr::null_mut(), 0) };
+    assert_eq!(fill.status, Status::default());
+    assert_eq!(fill.filled, 0);
+    assert!(fill.next_marker.present);
 }
 
 // A body that is not a page reports the fault of the core crate, and no

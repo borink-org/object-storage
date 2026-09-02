@@ -90,9 +90,6 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .sizeof_maybe_u32 = sizeof(borink_maybe_u32),
         .alignof_maybe_u32 = _Alignof(borink_maybe_u32),
         .offsetof_maybe_u32_value = offsetof(borink_maybe_u32, value),
-        .sizeof_maybe_span = sizeof(borink_maybe_span),
-        .alignof_maybe_span = _Alignof(borink_maybe_span),
-        .offsetof_maybe_span_span = offsetof(borink_maybe_span, span),
         .sizeof_list_shape = sizeof(borink_list_shape),
         .offsetof_list_shape_max_results = offsetof(borink_list_shape, max_results),
         .sizeof_list_entry = sizeof(borink_list_entry),
@@ -109,15 +106,10 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .alignof_property = _Alignof(borink_property),
         .offsetof_property_name = offsetof(borink_property, name),
         .offsetof_property_value = offsetof(borink_property, value),
-        .sizeof_resume = sizeof(borink_resume),
-        .alignof_resume = _Alignof(borink_resume),
-        .offsetof_resume_within = offsetof(borink_resume, within),
-        .offsetof_resume_marker = offsetof(borink_resume, marker),
         .sizeof_fill = sizeof(borink_fill),
         .alignof_fill = _Alignof(borink_fill),
-        .offsetof_fill_kind = offsetof(borink_fill, kind),
         .offsetof_fill_filled = offsetof(borink_fill, filled),
-        .offsetof_fill_resume = offsetof(borink_fill, resume),
+        .offsetof_fill_required = offsetof(borink_fill, required),
         .offsetof_fill_next_marker = offsetof(borink_fill, next_marker),
     };
     // A `borink_layout` is `size_t` fields alone, so a field this file forgot
@@ -260,28 +252,39 @@ static void one_page_is_read_out_of_a_body(void) {
                   "<Blob><Name>b.txt</Name><Properties><Etag>0x2</Etag>"
                   "<Content-Length>8</Content-Length></Properties></Blob>"
                   "</Blobs><NextMarker>next</NextMarker></EnumerationResults>";
-    borink_list_entry entries[1] = {0};
+    borink_list_entry entries[2] = {0};
     const borink_bytes_mut page = {(uint8_t *)body, strlen(body)};
 
-    // One entry of room, so the page does not fit and the rest is read from
-    // where this call stopped.
-    borink_fill fill = borink_fill_listing(&session, page, entries, 1);
+    const borink_fill fill = borink_fill_listing(&session, page, entries, 2);
     CHECK(fill.status.code == 0);
-    CHECK(fill.kind == BORINK_FILL_KIND_PARTIAL);
-    CHECK(fill.filled == 1);
+    CHECK(fill.filled == 2);
     CHECK(entries[0].kind == BORINK_ENTRY_KIND_OBJECT);
     CHECK(entries[0].key.len == strlen("a.txt"));
     CHECK(memcmp(entries[0].key.ptr, "a.txt", entries[0].key.len) == 0);
     CHECK(entries[0].size.present && entries[0].size.value == 4);
     CHECK(entries[0].e_tag.present);
-
-    fill = borink_resume_listing(&session, page, &fill.resume, entries, 1);
-    CHECK(fill.status.code == 0);
-    CHECK(fill.kind == BORINK_FILL_KIND_PAGE);
-    CHECK(fill.filled == 1);
-    CHECK(entries[0].size.value == 8);
+    CHECK(entries[1].size.value == 8);
     CHECK(fill.next_marker.present);
     CHECK(memcmp(fill.next_marker.bytes.ptr, "next", fill.next_marker.bytes.len) == 0);
+}
+
+// An array smaller than the page is refused, and the fill says how many
+// entries the page holds.
+static void an_array_smaller_than_the_page_is_refused(void) {
+    const borink_session session = opened();
+    char body[] = "<EnumerationResults><Blobs>"
+                  "<Blob><Name>a.txt</Name><Properties>"
+                  "<Content-Length>4</Content-Length></Properties></Blob>"
+                  "<Blob><Name>b.txt</Name><Properties>"
+                  "<Content-Length>8</Content-Length></Properties></Blob>"
+                  "</Blobs><NextMarker /></EnumerationResults>";
+    borink_list_entry entries[1] = {0};
+    const borink_bytes_mut page = {(uint8_t *)body, strlen(body)};
+
+    const borink_fill fill = borink_fill_listing(&session, page, entries, 1);
+    CHECK(fill.status.code == BORINK_ERROR_CODE_CAPACITY);
+    CHECK(fill.required == 2);
+    CHECK(fill.filled == 0);
 }
 
 // A body that is not a page is refused, and no entry is reported.
@@ -368,6 +371,7 @@ int main(void) {
     one_response_head_is_read_from_two_buffers();
     an_unknown_number_is_refused();
     one_page_is_read_out_of_a_body();
+    an_array_smaller_than_the_page_is_refused();
     a_body_that_is_not_a_page_is_refused();
     the_helpers_read_what_a_listing_lends();
     a_property_is_read_out_of_the_entry();

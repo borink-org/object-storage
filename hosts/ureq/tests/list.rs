@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_proto::{Blobs, Container, Fill, ListEntry, PhysicalList};
+use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
 
 const PAGE: &str = "<EnumerationResults><Blobs>\
                     <Blob><Name>directory/a.txt</Name><Properties>\
@@ -49,17 +49,13 @@ fn reads_the_page_that_the_generated_request_asked_for() {
     };
     let mut body = Vec::new();
     let mut entries = [ListEntry::default(); 4];
-    let fill = borink_azure_get_ureq::list(&blobs, &plan, &mut body, &mut entries).unwrap();
-
-    let Fill::Page(page) = fill else {
-        panic!("the array held the whole page: {fill:?}");
-    };
+    let page = borink_azure_get_ureq::list(&blobs, &plan, &mut body, &mut entries).unwrap();
     assert_eq!(page.filled, 2);
     assert_eq!(entries[0].key, "directory/a.txt");
     assert_eq!(entries[0].size, Some(4));
     // A delimited listing reports the level below as one group.
     assert_eq!(entries[1].key, "directory/nested/");
     assert_eq!(entries[1].size, None);
-    assert_eq!(page.next_marker, Some(b"next".as_slice()));
+    assert_eq!(page.next_marker, Some("next"));
     server.join().unwrap();
 }

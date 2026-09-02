@@ -35,7 +35,7 @@
 //!
 //! ```
 //! use borink_object_storage_proto::{
-//!     Blobs, Container, Fill, GetHeadOutcome, ListEntry, ListHeadOutcome, Method, Payload,
+//!     Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, Method, Payload,
 //!     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps,
 //!     layered,
 //! };
@@ -93,10 +93,7 @@
 //!         .as_slice(),
 //! );
 //! let mut entries = vec![ListEntry::default(); 2];
-//! let Fill::Page(page) = blobs.fill_listing(&mut body, &mut entries)? else {
-//!     // Only an array with less room than the page holds says otherwise.
-//!     panic!("the array holds the page");
-//! };
+//! let page = blobs.fill_listing(&mut body, &mut entries)?;
 //! assert_eq!(page.filled, 1);
 //! assert_eq!(entries[0].key, "directory/a.txt");
 //! assert_eq!(page.next_marker, None);
@@ -157,8 +154,8 @@ pub use azure::{Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, Fill, GetHeadOutcome,
-    ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, Resume, ServiceErrorKind,
+    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,
+    ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, ServiceErrorKind,
 };
 pub use request::{MAX_HEADERS, Method, Span, WireRequest};
 pub use time::Timestamps;

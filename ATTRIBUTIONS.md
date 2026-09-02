@@ -88,7 +88,7 @@ The rest were read and are not used:
 
 ### XML parsers
 
-Read and benchmarked for the listing reader in `crates/object-storage-proto/src/xml/`. The reader takes its scanning technique from pugixml, but no code: it uses a 256-entry byte class table, scans names four bytes at a time, reads past the end of the buffer as a NUL sentinel, and decodes escapes in place because a value only ever shrinks. Everything else, including the whole-tag compares, the word-at-a-time searches and the `Fill` and `Resume` contract, is this crate's own. pugixml builds a tree; this reader builds nothing and fills the caller's array.
+Read and benchmarked for the listing reader in `crates/object-storage-proto/src/xml/`. The reader takes its scanning technique from pugixml, but no code: it uses a 256-entry byte class table, scans names four bytes at a time, reads past the end of the buffer as a NUL sentinel, and decodes escapes in place because a value only ever shrinks. Everything else, including the whole-tag compares, the word-at-a-time searches and the caller-array fill, is this crate's own. pugixml builds a tree; this reader builds nothing and fills the caller's array.
 
 | Project | License (SPDX) | Upstream | Read for |
 | --- | --- | --- | --- |

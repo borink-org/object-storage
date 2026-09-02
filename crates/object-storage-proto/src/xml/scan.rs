@@ -156,7 +156,7 @@ const MAX_DEPTH: usize = 16;
 #[derive(Clone, Copy)]
 pub(crate) struct Tag {
     pub(crate) name: Span,
-    pub(crate) attrs: Span,
+    pub(crate) attributes: Span,
     pub(crate) empty: bool,
 }
 
@@ -166,13 +166,14 @@ pub(crate) enum Child {
 }
 
 pub(crate) struct Scan<'a> {
-    pub(crate) b: &'a [u8],
-    pub(crate) i: usize,
+    pub(crate) bytes: &'a [u8],
+    // The offset of the next byte to read.
+    pub(crate) cursor: usize,
 }
 
 impl<'a> Scan<'a> {
-    pub(crate) fn new(b: &'a [u8]) -> Self {
-        Self { b, i: 0 }
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, cursor: 0 }
     }
 
     // Returns the byte at `i`, or 0 past the end. A document may not hold a
@@ -180,29 +181,29 @@ impl<'a> Scan<'a> {
     // test.
     #[inline(always)]
     fn at(&self, i: usize) -> u8 {
-        self.b.get(i).copied().unwrap_or(0)
+        self.bytes.get(i).copied().unwrap_or(0)
     }
 
     #[inline(always)]
     pub(crate) fn cur(&self) -> u8 {
-        self.at(self.i)
+        self.at(self.cursor)
     }
 
     #[inline(always)]
     pub(crate) fn text(&self, span: Span) -> &'a [u8] {
-        &self.b[span.0..span.1]
+        &self.bytes[span.0..span.1]
     }
 
     #[inline(always)]
     pub(crate) fn skip_space(&mut self) {
         while CLASS[self.cur() as usize] & SPACE != 0 {
-            self.i += 1;
+            self.cursor += 1;
         }
     }
 
     fn expect(&mut self, c: u8) -> Result<()> {
         if self.cur() == c {
-            self.i += 1;
+            self.cursor += 1;
             Ok(())
         } else {
             fault()
@@ -210,42 +211,42 @@ impl<'a> Scan<'a> {
     }
 
     fn name(&mut self) -> Result<Span> {
-        let start = self.i;
-        self.i += name_len(&self.b[start..]);
+        let start = self.cursor;
+        self.cursor += name_len(&self.bytes[start..]);
         // A listing has no namespace prefixes. Reading a document that has
         // them would mean resolving the prefixes, which this crate does not
         // do.
-        if self.i == start || self.cur() == b':' {
+        if self.cursor == start || self.cur() == b':' {
             return fault();
         }
-        Ok((start, self.i))
+        Ok((start, self.cursor))
     }
 
     // Reads a start tag. Starts at its `<` and consumes through its `>`.
     #[inline(always)]
     pub(crate) fn open(&mut self) -> Result<Tag> {
-        self.i += 1;
+        self.cursor += 1;
         let name = self.name()?;
-        let start = self.i;
+        let start = self.cursor;
         loop {
             self.skip_space();
             match self.cur() {
                 b'>' => {
-                    let attrs = (start, self.i);
-                    self.i += 1;
+                    let attributes = (start, self.cursor);
+                    self.cursor += 1;
                     return Ok(Tag {
                         name,
-                        attrs,
+                        attributes,
                         empty: false,
                     });
                 }
                 b'/' => {
-                    let attrs = (start, self.i);
-                    self.i += 1;
+                    let attributes = (start, self.cursor);
+                    self.cursor += 1;
                     self.expect(b'>')?;
                     return Ok(Tag {
                         name,
-                        attrs,
+                        attributes,
                         empty: true,
                     });
                 }
@@ -265,17 +266,17 @@ impl<'a> Scan<'a> {
         if quote != b'"' && quote != b'\'' {
             return fault();
         }
-        self.i += 1;
-        let start = self.i;
+        self.cursor += 1;
+        let start = self.cursor;
         loop {
             match self.cur() {
                 c if c == quote => break,
                 0 | b'<' => return fault(),
-                _ => self.i += 1,
+                _ => self.cursor += 1,
             }
         }
-        let span = (start, self.i);
-        self.i += 1;
+        let span = (start, self.cursor);
+        self.cursor += 1;
         Ok(span)
     }
 
@@ -285,8 +286,8 @@ impl<'a> Scan<'a> {
     pub(crate) fn attributes(&self, tag: Tag) -> Attributes<'a> {
         Attributes {
             scan: Scan {
-                b: &self.b[..tag.attrs.1],
-                i: tag.attrs.0,
+                bytes: &self.bytes[..tag.attributes.1],
+                cursor: tag.attributes.0,
             },
         }
     }
@@ -297,12 +298,12 @@ impl<'a> Scan<'a> {
     pub(crate) fn close(&mut self, name: &[u8]) -> Result<()> {
         // The service writes `</name>` with no whitespace, so compare the
         // whole tag first and only scan a name if that fails.
-        let at = self.i + 2;
-        if self.b.len() > at + name.len()
-            && &self.b[at..at + name.len()] == name
-            && self.b[at + name.len()] == b'>'
+        let at = self.cursor + 2;
+        if self.bytes.len() > at + name.len()
+            && &self.bytes[at..at + name.len()] == name
+            && self.bytes[at + name.len()] == b'>'
         {
-            self.i = at + name.len() + 1;
+            self.cursor = at + name.len() + 1;
             return Ok(());
         }
         self.close_slow(name)
@@ -310,7 +311,7 @@ impl<'a> Scan<'a> {
 
     #[inline(never)]
     fn close_slow(&mut self, name: &[u8]) -> Result<()> {
-        self.i += 2;
+        self.cursor += 2;
         let found = self.name()?;
         if self.text(found) != name {
             return fault();
@@ -323,21 +324,21 @@ impl<'a> Scan<'a> {
     // true. Refuses a CDATA section or a markup declaration. Leaves an element
     // tag alone and returns false.
     pub(crate) fn skip_misc(&mut self) -> Result<bool> {
-        match self.at(self.i + 1) {
+        match self.at(self.cursor + 1) {
             b'!' => {
-                if self.at(self.i + 2) == b'-' && self.at(self.i + 3) == b'-' {
-                    self.i += 4;
+                if self.at(self.cursor + 2) == b'-' && self.at(self.cursor + 3) == b'-' {
+                    self.cursor += 4;
                     loop {
                         match self.cur() {
                             0 => return fault(),
-                            b'-' if self.at(self.i + 1) == b'-' => {
-                                if self.at(self.i + 2) == b'>' {
-                                    self.i += 3;
+                            b'-' if self.at(self.cursor + 1) == b'-' => {
+                                if self.at(self.cursor + 2) == b'>' {
+                                    self.cursor += 3;
                                     return Ok(true);
                                 }
                                 return fault();
                             }
-                            _ => self.i += 1,
+                            _ => self.cursor += 1,
                         }
                     }
                 }
@@ -346,15 +347,15 @@ impl<'a> Scan<'a> {
                 fault()
             }
             b'?' => {
-                self.i += 2;
+                self.cursor += 2;
                 loop {
                     match self.cur() {
                         0 => return fault(),
-                        b'?' if self.at(self.i + 1) == b'>' => {
-                            self.i += 2;
+                        b'?' if self.at(self.cursor + 1) == b'>' => {
+                            self.cursor += 2;
                             return Ok(true);
                         }
-                        _ => self.i += 1,
+                        _ => self.cursor += 1,
                     }
                 }
             }
@@ -372,7 +373,7 @@ impl<'a> Scan<'a> {
             if self.cur() != b'<' {
                 return fault();
             }
-            if self.at(self.i + 1) == b'/' {
+            if self.at(self.cursor + 1) == b'/' {
                 self.close(parent)?;
                 return Ok(Child::Close);
             }
@@ -389,18 +390,18 @@ impl<'a> Scan<'a> {
     #[inline]
     pub(crate) fn value(&mut self, tag: Tag) -> Result<(Span, u8)> {
         if tag.empty {
-            return Ok(((self.i, self.i), 0));
+            return Ok(((self.cursor, self.cursor), 0));
         }
         self.value_of(self.text(tag.name))
     }
 
     #[inline(always)]
     pub(crate) fn value_of(&mut self, name: &[u8]) -> Result<(Span, u8)> {
-        let start = self.i;
-        let Some((end, flags)) = find_lt(self.b, start) else {
+        let start = self.cursor;
+        let Some((end, flags)) = find_lt(self.bytes, start) else {
             return fault();
         };
-        self.i = end;
+        self.cursor = end;
         // Anything but the close tag here splits the value in two. Returning
         // one of the pieces would report a value the service did not write.
         if self.at(end + 1) != b'/' {
@@ -415,8 +416,8 @@ impl<'a> Scan<'a> {
     // six-byte compare, and anything else falls through to `child`.
     #[inline(always)]
     pub(crate) fn lit(&mut self, lit: &[u8]) -> bool {
-        if self.b[self.i..].starts_with(lit) {
-            self.i += lit.len();
+        if self.bytes[self.cursor..].starts_with(lit) {
+            self.cursor += lit.len();
             true
         } else {
             false
@@ -434,10 +435,10 @@ impl<'a> Scan<'a> {
         open[0] = tag.name;
         let mut depth = 1;
         loop {
-            let Some((at, _)) = find_lt(self.b, self.i) else {
+            let Some((at, _)) = find_lt(self.bytes, self.cursor) else {
                 return fault();
             };
-            self.i = at;
+            self.cursor = at;
             match self.at(at + 1) {
                 b'/' => {
                     depth -= 1;
@@ -476,7 +477,7 @@ impl<'a> Iterator for Attributes<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.scan.skip_space();
-        if self.scan.i >= self.scan.b.len() {
+        if self.scan.cursor >= self.scan.bytes.len() {
             return None;
         }
         Some(self.read())
@@ -490,7 +491,7 @@ impl<'a> Attributes<'a> {
         if self.scan.cur() != b'=' {
             return fault();
         }
-        self.scan.i += 1;
+        self.scan.cursor += 1;
         self.scan.skip_space();
         let value = self.scan.quoted()?;
         // The spans index the whole body, which outlives the attribute span

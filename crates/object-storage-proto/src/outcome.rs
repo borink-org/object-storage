@@ -1,7 +1,5 @@
 use core::fmt;
 
-use crate::Span;
-
 /// Object metadata borrowed from a response head.
 ///
 /// Each field holds the bytes that the service sent. To read `last_modified`
@@ -321,92 +319,10 @@ pub enum ListHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-/// What one call to [`Blobs::fill_listing`](crate::Blobs::fill_listing) read.
-///
-/// A page too large for your array is not an error and loses nothing: what did
-/// not fit is read by [`Blobs::resume_listing`](crate::Blobs::resume_listing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fill<'b> {
-    /// The page was read to its end.
-    Page(Listing<'b>),
-    /// The array filled before the page ended.
-    ///
-    /// Use the entries that were written, then read the rest of the same body
-    /// with [`Blobs::resume_listing`](crate::Blobs::resume_listing).
-    ///
-    /// An array with no room reports `filled` of zero and makes no progress.
-    Partial {
-        /// The number of entries written into your array.
-        filled: usize,
-        /// Where the rest of the page starts.
-        resume: Resume,
-    },
-}
-
-/// Where a page was left off.
-///
-/// [`Fill::Partial`] hands this out and
-/// [`Blobs::resume_listing`](crate::Blobs::resume_listing) takes it back. It
-/// describes one body, and means nothing applied to another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Resume {
-    // Where the walk stopped: the next entry, or the tag that closes them.
-    pub(crate) at: usize,
-    // Whether that point is still inside the entries.
-    pub(crate) within: bool,
-    // The text of the next marker, as a range of the body. It lies past the
-    // entries, so it is still untouched whenever the walk stops.
-    pub(crate) marker: Option<(usize, usize)>,
-}
-
-impl Resume {
-    /// Creates a position from the values that [`Self::at`], [`Self::within`]
-    /// and [`Self::marker`] returned.
-    ///
-    /// Use it to rebuild a position that you kept as those three values, and
-    /// read the body it came from with it.
-    ///
-    /// A position from another body names no entry of the body you read. That
-    /// read reports [`ResponseFault::Body`](crate::ResponseFault::Body), or it
-    /// reports entries that the service did not send.
-    pub const fn from_parts(at: usize, within: bool, marker: Option<Span>) -> Self {
-        Self {
-            at,
-            within,
-            marker: match marker {
-                Some(span) => Some((span.start, span.start + span.len)),
-                None => None,
-            },
-        }
-    }
-
-    /// Returns the offset into the body that reading continues from.
-    pub const fn at(self) -> usize {
-        self.at
-    }
-
-    /// Returns whether the position stands inside the entries of the page.
-    pub const fn within(self) -> bool {
-        self.within
-    }
-
-    /// Returns the range of the body that holds the text naming the next page.
-    ///
-    /// Returns [`None`] if the page named none.
-    pub const fn marker(self) -> Option<Span> {
-        match self.marker {
-            Some((start, end)) => Some(Span {
-                start,
-                len: end - start,
-            }),
-            None => None,
-        }
-    }
-}
-
 /// What one page of a listing held.
 ///
-/// [`Fill::Page`] carries this once the page has been read to its end.
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) returns this once the
+/// page has been read to its end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Listing<'b> {
     /// The number of entries that this call wrote into your array.
@@ -415,13 +331,13 @@ pub struct Listing<'b> {
     pub filled: usize,
     /// Where the next page starts, or [`None`] when the listing is complete.
     ///
-    /// Copy these bytes into your own storage and pass them as
+    /// Copy this text into your own storage and pass it as
     /// [`PhysicalList::marker`](crate::PhysicalList::marker); the next page
-    /// overwrites the body they borrow.
+    /// overwrites the body it borrows.
     ///
     /// A page names a next one whenever more keys follow, even if it reported
     /// fewer entries than it asked for.
-    pub next_marker: Option<&'b [u8]>,
+    pub next_marker: Option<&'b str>,
 }
 
 /// The result of [`classify_error`](crate::classify_error).

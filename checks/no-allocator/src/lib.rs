@@ -3,7 +3,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use borink_object_storage_proto::{
-    Blobs, Container, Fill, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet, PhysicalList,
+    Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet, PhysicalList,
     ResponseHead, Timestamps, layered,
 };
 
@@ -60,11 +60,10 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
 <Content-Length>8</Content-Length></Properties></Blob><Blob><Name>c</Name><Properties>\
 <Content-Length>9</Content-Length></Properties></Blob></Blobs>\
 <NextMarker>next</NextMarker></EnumerationResults>";
-    // One entry at a time, so the walk that stops short and the one that
-    // resumes are both linked. The entries borrow the body, so the array that
-    // holds them belongs to the round that reads them.
-    let mut first = [ListEntry::default(); 1];
-    let Ok(Fill::Partial { filled, resume }) = blobs.fill_listing(&mut body, &mut first) else {
+    // The entries borrow the body, so the array that holds them belongs to
+    // the read.
+    let mut first = [ListEntry::default(); 2];
+    let Ok(page) = blobs.fill_listing(&mut body, &mut first) else {
         return 7;
     };
     // A property that the entry does not carry is read out of its own bytes,
@@ -75,10 +74,6 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
         .and_then(|value| layered::decode_into(value, &mut into))
         .map_or(0, <[u8]>::len)
         + first[0].properties().count();
-    let key = filled + first[0].key.len() + length;
-    let mut rest = [ListEntry::default(); 1];
-    let Ok(Fill::Page(page)) = blobs.resume_listing(&mut body, resume, &mut rest) else {
-        return 8;
-    };
+    let key = first[0].key.len() + first[1].key.len() + length;
     url + key + page.filled + page.next_marker.unwrap_or_default().len()
 }

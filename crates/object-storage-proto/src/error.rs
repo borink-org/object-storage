@@ -3,11 +3,15 @@ use core::fmt;
 /// The result type that this crate returns.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The exact capacity that your request buffer needs.
+/// The exact capacity that your buffer needs.
 ///
+/// For an encoding method the two counts are bytes of the request buffer.
 /// Grow the buffer to `required` bytes and call the same method again. To
 /// learn the requirement before the first call, use
 /// [`layered::get_requirements`](crate::layered::get_requirements).
+///
+/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing) the two counts are
+/// entries of the array, and `required` is the number that the page holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
     /// The smallest buffer that the call accepts, in bytes.
@@ -20,7 +24,7 @@ impl fmt::Display for CapacityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the request buffer needs {} bytes but has {}",
+            "the buffer needs {} but has {}",
             self.required, self.available
         )
     }
@@ -62,7 +66,7 @@ pub enum InvalidPlan {
     // yet. Every number here is assigned once, so the holes stay open.
     /// The listing prefix is longer than an object key may be.
     Prefix = 10,
-    /// The listing marker is empty.
+    /// The listing marker is empty, or it is not UTF-8.
     ///
     /// A page that starts at the beginning of the container carries no marker
     /// at all.
@@ -233,7 +237,7 @@ impl ErrorCode {
             Self::InvalidContainer => "invalid container name",
             Self::InvalidToken => "invalid bearer token",
             Self::InvalidPlan => "the plan cannot become a request",
-            Self::Capacity => "the request buffer is too small",
+            Self::Capacity => "the buffer is too small",
             Self::Response => "the response cannot be read",
         }
     }
@@ -283,7 +287,7 @@ pub enum Error {
     InvalidToken,
     /// The plan cannot become a request.
     InvalidPlan(InvalidPlan),
-    /// Your request buffer is too small.
+    /// Your request buffer or your entry array is too small.
     Capacity(CapacityError),
     /// The response cannot be read.
     Response(ResponseFault),

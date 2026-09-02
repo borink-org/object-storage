@@ -127,6 +127,10 @@
             pkgs.gcc-arm-embedded
             pkgs.rust-cbindgen
             pkgs.cargo-c
+            # For `bench/`: exact instruction counts under callgrind, and
+            # `perf stat` beside the counters the bench reads itself.
+            pkgs.valgrind
+            pkgs.perf
           ];
           buildInputs = [
             pkgs.curl.dev
