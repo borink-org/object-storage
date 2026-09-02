@@ -40,7 +40,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Inspiration and reference projects
 
-None of the projects below is a dependency, and no code from any of them is in this tree. They were read while the API was designed: the object-storage SDKs for what an operation and its options are called, and the sans-I/O, serialization and allocator families for how a library takes its memory and its bytes from the caller. `docs/DESIGN.md` states the constraints they were read against.
+None of the projects below is a dependency, and no code from any of them is in this tree. One of them, `xmlparser`, was a dependency until the listing reader below replaced it, and one of them, pugixml, taught that reader how to scan; the section on it says exactly what that means. The rest were read while the API was designed: the object-storage SDKs for what an operation and its options are called, and the sans-I/O, serialization and allocator families for how a library takes its memory and its bytes from the caller. `docs/DESIGN.md` states the constraints they were read against.
 
 Each row says what was read and whether this crate does the same thing. Many rows say it does not: a pattern that was rejected after reading it is still a debt to the project that stated it clearly.
 
@@ -88,6 +88,33 @@ The rest were read and are not used:
 | Boost.Beast | `BSL-1.0` | <https://github.com/boostorg/beast> | A message layer with no I/O, the allocator as a template parameter, and explicit header and body limits. Same rejection as nghttp2. |
 | mbedTLS | `Apache-2.0 OR GPL-2.0-or-later` | <https://github.com/Mbed-TLS/mbedtls> | Three separable knobs: I/O callbacks, a global calloc/free override, and a heap seeded from a static buffer. None applies to a crate with no heap. |
 | wolfSSL | `GPL-3.0-or-later` (or commercial) | <https://github.com/wolfSSL/wolfssl> | `WOLFSSL_STATIC_MEMORY`: one caller buffer carved into size-bucketed pools. Read for the shape of the configuration only. |
+
+### The listing reader
+
+`crates/object-storage-proto/src/xml/` reads a listing page the way **pugixml** scans rather than the way a tokeniser does, which is the one place in this crate where a reading changed the code and not only the vocabulary. No line of pugixml is in this tree: its tables, macros and structures were not transcribed, and what follows is technique rather than code. It is written out here so a reader can check that for themselves.
+
+Four things came from it, all visible in `scan.rs`:
+
+- **A 256-entry class table indexed by the byte, one bit per class.** pugixml's `chartype_table` carries eight classes; `CLASS` here carries two, name and space, and is computed by a `const fn` rather than written out as numbers. With it comes the shortcut that makes the table work on UTF-8 without decoding it: every byte at or above `0x80` is a name character, which is sound because every delimiter the scanner acts on is ASCII and UTF-8 never spells an ASCII byte inside a multi-byte sequence.
+- **Scanning a name four bytes at a time**, one branch per four while the name goes on — pugixml's `PUGI_IMPL_SCANWHILE_UNROLL`. `name_len` is that loop.
+- **One sentinel for the end of the buffer.** pugixml terminates its buffer with a NUL so a loop can read the next character without a bounds test; `Scan::at` returns `0` past the end for the same reason, that NUL is not a character a document may hold.
+- **Decoding escapes in place because a value only ever shrinks**, moving the runs between the escapes down over what they replace. pugixml's `gap` defers those moves and collapses them at the end; `decode.rs` compacts as it goes, which is simpler and costs nothing at these sizes.
+
+What did not come from it is most of what the file does. pugixml builds a document tree through its own allocator and its parse is driven by an options mask; this reader builds nothing, holds nothing between calls, and is driven by the shape of a listing page. The eight-bytes-at-a-time searches (`find_lt`, `find_byte`) are the classic zero-byte word trick and not pugixml, which scans a byte at a time. The `Fill` and `Resume` contract, the whole-tag compares that recognise a known element in one step, and every refusal the reader makes are this crate's.
+
+The prototype behind the reader is `prototypes/listxml/` in the design repository, and `docs/records/LISTING-READER-PROTOTYPE.md` there holds the measurements. pugixml is also the number the design was aimed at: on the same S3 page it reads at 934 MB/s building a whole tree and copying every field, and 1617 MB/s parsing without reading one, against 1740 MB/s for the safe reader adopted here, which fills the caller's array as it goes.
+
+| Project | License (SPDX) | Upstream | Read for |
+| --- | --- | --- | --- |
+| pugixml | `MIT` | <https://github.com/zeux/pugixml> | 1.16. The four techniques above, and the parse-in-place design they serve: values are pointers into the caller's own buffer, decoded where they stand. |
+| tinyxml2 | `Zlib` | <https://github.com/leethomason/tinyxml2> | The other single-file C++ DOM parser, read and benchmarked beside pugixml as the cost of the tree without the scanning. |
+| libxml2 (through libs3) | `MIT` | <https://gitlab.gnome.org/GNOME/libxml2> | A SAX callback parser as the shape a C client uses. Not used: a callback per element inverts control, and this crate hands the caller an array instead. |
+| libs3 | `LGPL-3.0-or-later OR GPL-2.0-or-later`, with a linking exception | <https://github.com/bji/libs3> | How a C S3 client reads a listing at all: libxml2 SAX callbacks writing into fixed buffers. Read and benchmarked only; its license is the reason nothing could be taken from it even if there had been something to take. |
+| aws-c-common | `Apache-2.0` | <https://github.com/awslabs/aws-c-common> | `xml_parser`, the CRT's own reader, for what the AWS C libraries settle for. |
+| quick-xml | `MIT` | <https://github.com/tafia/quick-xml> | The fastest Rust pull parser measured, and the borrowed-event API that avoids copying names. |
+| roxmltree | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> | An arena DOM as the middle ground between a pull parser and a tree with its own allocator. |
+| xmlparser | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/xmlparser> | Until this reader landed, a dependency of this crate: the tokeniser the old two-pass reader ran over the body twice. It set the ceiling the new reader had to beat, since no design on top of it passes its own 440–460 MB/s. |
+| aws-smithy-xml | `Apache-2.0` | <https://github.com/smithy-lang/smithy-rs> | `ScopedDecoder`, how the generated AWS SDK reads a listing, benchmarked as the shape this crate would have had by following the SDK. |
 
 ### Serialization and parsers
 
