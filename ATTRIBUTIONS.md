@@ -4,7 +4,7 @@
 
 <https://github.com/paolobarbolini/rusty-s3>, 0.10.1, by Paolo Barbolini and Federico Guerinoni.
 
-`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/path.rs`, the `OBJECT_KEY_ESCAPE` percent-encoding `AsciiSet`, is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, added to the same `CONTROLS` base. 
+`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/path.rs`, the set of bytes `OBJECT_KEY_ESCAPE` percent-encodes is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, over the same control characters. It was an `AsciiSet` of the `percent-encoding` crate there and here, until this crate wrote its own encoder and the set became a table. 
 
 `rusty-s3` is not a dependency of any crate here. When SigV4 signing lands, the canonical-query-string rules and the AWS test vectors are expected to come from the same source, and this section is where that gets recorded.
 

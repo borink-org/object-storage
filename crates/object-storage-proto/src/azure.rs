@@ -183,7 +183,7 @@ impl<'a> Blobs<'a> {
             if let Some(key) = key {
                 out.push(b"/");
                 for part in crate::path::encode_object_key(key) {
-                    out.push(part.as_bytes());
+                    out.push(part);
                 }
             }
             for (index, (name, value)) in query.iter().flatten().enumerate() {
@@ -624,7 +624,7 @@ impl QueryValue<'_> {
             Self::Literal(value) => out.push(value.as_bytes()),
             Self::Encoded(value) => {
                 for part in crate::path::encode_query_value(value) {
-                    out.push(part.as_bytes());
+                    out.push(part);
                 }
             }
             Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),

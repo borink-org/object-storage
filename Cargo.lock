@@ -41,9 +41,6 @@ dependencies = [
 [[package]]
 name = "borink-object-storage-proto"
 version = "0.0.1"
-dependencies = [
- "percent-encoding",
-]
 
 [[package]]
 name = "bytes"
