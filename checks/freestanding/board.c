@@ -76,8 +76,7 @@ void board_main(void) {
                          "<NextMarker>next</NextMarker></EnumerationResults>";
     static borink_list_entry entries[1];
     const borink_bytes_mut body = {(uint8_t *)page, sizeof page - 1};
-    borink_fill fill = borink_fill_listing(&session, body, entries, 1);
-    fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
+    const borink_fill fill = borink_fill_listing(&session, body, entries, 1);
     sink = (unsigned)(fill.filled + entries[0].key.len + fill.next_marker.bytes.len);
 
     // What a listing lends back, read by the two calls that read it.

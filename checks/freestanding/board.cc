@@ -70,8 +70,7 @@ extern "C" void board_cxx(void) {
     const borink::BytesMut body =
         borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(page),
                                              sizeof page - 1));
-    borink::Fill fill = borink_fill_listing(&session, body, entries, 1);
-    fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
+    const borink::Fill fill = borink_fill_listing(&session, body, entries, 1);
     const std::span<const borink::ListEntry> listed = borink::entries_of(entries, fill);
     sink = static_cast<unsigned>(listed.size() + borink::text_of(entries[0].key).size() +
                                  borink::bytes_of(entries[0].key).size() +
