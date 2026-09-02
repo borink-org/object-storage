@@ -69,25 +69,25 @@ fn zero_bytes(x: u64) -> u64 {
 pub(crate) fn find_lt(b: &[u8], from: usize) -> Option<(usize, u8)> {
     let mut flags = 0u8;
     let mut i = from;
-    let mut words = b[from..].chunks_exact(8);
-    for word in &mut words {
+    let (words, remainder) = b[from..].as_chunks::<8>();
+    for word in words {
         // Eight bytes as one load. Written any other way this is eight bounds
         // checks and eight shifts, which the compiler does not merge.
-        let w = u64::from_le_bytes(word.try_into().unwrap_or([0; 8]));
+        let w = u64::from_le_bytes(*word);
         let lt = zero_bytes(w ^ (ONES * b'<' as u64));
         let amp = zero_bytes(w ^ (ONES * b'&' as u64));
         let pct = zero_bytes(w ^ (ONES * b'%' as u64));
         if lt != 0 {
             // A false positive sits above a true hit, never below, so masking
             // the bytes before the first `<` keeps only true hits.
-            let below = (lt & lt.wrapping_neg()) - 1;
+            let below = lt.isolate_lowest_one() - 1;
             flags |= ((amp & below != 0) as u8) | (((pct & below != 0) as u8) << 1);
             return Some((i + lt.trailing_zeros() as usize / 8, flags));
         }
         flags |= ((amp != 0) as u8) | (((pct != 0) as u8) << 1);
         i += 8;
     }
-    for &c in words.remainder() {
+    for &c in remainder {
         match c {
             b'<' => return Some((i, flags)),
             b'&' => flags |= AMP,
@@ -105,8 +105,8 @@ pub(crate) fn find_lt(b: &[u8], from: usize) -> Option<(usize, u8)> {
 #[inline(always)]
 fn name_len(b: &[u8]) -> usize {
     let mut n = 0;
-    let mut quads = b.chunks_exact(4);
-    for q in &mut quads {
+    let (quads, rest) = b.as_chunks::<4>();
+    for q in quads {
         let c = [
             CLASS[q[0] as usize],
             CLASS[q[1] as usize],
@@ -119,7 +119,6 @@ fn name_len(b: &[u8]) -> usize {
         }
         return n + c.iter().position(|x| x & NAME == 0).unwrap_or(4);
     }
-    let rest = quads.remainder();
     n + rest
         .iter()
         .position(|x| CLASS[*x as usize] & NAME == 0)
@@ -130,16 +129,16 @@ fn name_len(b: &[u8]) -> usize {
 #[inline]
 pub(crate) fn find_byte(b: &[u8], from: usize, needle: u8) -> usize {
     let mut i = from;
-    let mut words = b[from..].chunks_exact(8);
-    for word in &mut words {
-        let w = u64::from_le_bytes(word.try_into().unwrap_or([0; 8]));
+    let (words, remainder) = b[from..].as_chunks::<8>();
+    for word in words {
+        let w = u64::from_le_bytes(*word);
         let hit = zero_bytes(w ^ (ONES * needle as u64));
         if hit != 0 {
             return i + hit.trailing_zeros() as usize / 8;
         }
         i += 8;
     }
-    for &c in words.remainder() {
+    for &c in remainder {
         if c == needle {
             return i;
         }
