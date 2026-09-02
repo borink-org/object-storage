@@ -1,30 +1,30 @@
-// Writing the caller's bytes into a URL.
+// Percent-encodes the caller's bytes into a URL.
 //
-// Two sets, one encoder. Both hand the writer the runs that need nothing done
-// to them as they stand and one three-byte escape for every byte that does, so
-// a key or a marker is written into the request buffer without a copy of it
-// being made first.
+// There are two escape sets and one encoder. The encoder yields the runs of
+// bytes that need no escaping as they are, and a three-byte escape for every
+// byte that does. So a key or a marker is written into the request buffer
+// without being copied first.
 
-// Encode bytes that are structural or ambiguous inside a URL path, including
-// `%` so caller text cannot smuggle in a pre-encoded separator. Flat accounts
-// may list with another delimiter, but that is ordinary blob-name text here.
-// Slash remains literal because HNS paths use it between directory segments.
+// The bytes that have a structural meaning in a URL path or could be read as
+// one. `%` is included so caller text cannot contain a pre-encoded separator.
+// A flat account may list with another delimiter, but that delimiter is
+// ordinary blob-name text here. Slash is not escaped because HNS paths use it
+// between directory segments.
 static OBJECT_KEY_ESCAPE: [bool; 256] = escaped(b":?#[]@!$&'()*+,;=\" <>%{}|\\^`");
 
 // Everything but the bytes RFC 3986 calls unreserved: the letters, the digits,
 // `-`, `.`, `_` and `~`. Nothing requires exactly this set. A query would
-// accept `/` and `:` unescaped too, but escaping a byte that did not need it
-// changes nothing, while leaving one that did lets an `&` or an `=` end the
-// value early and start a parameter the caller never wrote. These values are a
-// caller's prefix and the service's own marker, so this takes the set that is
-// safe rather than the set that is smallest. The live paging test is the
-// evidence that Azure reads it back: a real marker carries `!`, which this
-// writes as `%21`.
+// accept `/` and `:` unescaped too. But escaping a byte that did not need it
+// changes nothing. Leaving one unescaped that did lets an `&` or an `=` end
+// the value early, and start a parameter the caller never wrote. These values
+// are a caller's prefix and the service's own marker, so this takes the safe
+// set rather than the smallest one. The live paging test shows that Azure
+// reads it back: a real marker holds `!`, which this writes as `%21`.
 static QUERY_VALUE_ESCAPE: [bool; 256] = unreserved_only();
 
-// The bytes given, plus the ones that are never written as themselves: the
-// control characters, which a URL may not carry, and everything outside ASCII,
-// whose meaning in a URL is the percent-encoded UTF-8 it stands for.
+// Builds an escape table from the bytes given, plus the bytes that are never
+// written as themselves. Those are the control characters, which a URL may
+// not hold, and all non-ASCII bytes, which a URL holds percent-encoded.
 const fn escaped(structural: &[u8]) -> [bool; 256] {
     let mut table = [false; 256];
     let mut byte = 0usize;
@@ -82,8 +82,8 @@ pub(crate) fn encode_query_value(value: &[u8]) -> Encode<'_> {
     }
 }
 
-// One value as the pieces it is written in: a run of bytes that stand for
-// themselves, or one escape.
+// Yields one value as the pieces it is written in: a run of bytes that need no
+// escaping, or one escape.
 pub(crate) struct Encode<'v> {
     rest: &'v [u8],
     escape: &'static [bool; 256],

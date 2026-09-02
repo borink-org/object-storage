@@ -1,11 +1,9 @@
-// The `EnumerationResults` grammar, on the scanner beside it.
+// Reads an `EnumerationResults` document, using the scanner in `scan.rs`.
 //
-// One pass over the body. The document is read as it is walked: the entries
-// are the only thing kept, each one is split off as its own borrow of the
-// body so that its text can be decoded where it stands and then lent out, and
-// the array the caller passed is the budget. An entry that does not fit is
-// not read at all, so the bytes it stands in are still a document and the next
-// call reads it from there.
+// The read is one pass over the body. Only the entries are kept. Each entry
+// is split off as its own borrow of the body. Its text is decoded in place and
+// then handed to the caller. The array the caller passed sets the limit. An entry that does not fit is not read at all, so its bytes are
+// untouched and the next call reads from there.
 
 use super::decode::decode;
 use super::scan::{Child, Scan, Span, Tag, fault, split_off, trim};
@@ -15,6 +13,9 @@ const ROOT: &[u8] = b"EnumerationResults";
 const ENTRIES: &[u8] = b"Blobs";
 
 pub(crate) fn fill_listing<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Result<Fill<'b>> {
+    // review: i'm not very happy with the names like `prelude` and `drive`, they are much too short and don't describe exactly what they are doing. Also I think some functions are maybe a bit too short
+    // if they are not reused a lot I'd rather inline them in many cases; they should be created only when there is a very clear "phase" to them, or when otherwise the using function explodes, for clear reuse
+    // // review: and then only if there is a good descriptive name
     let at = prelude(body)?;
     let start = Resume {
         at,
@@ -32,21 +33,20 @@ pub(crate) fn resume_listing<'b>(
     drive(body, resume, into, false)
 }
 
-// The bytes before the first child of the root element.
+// Reads up to the first child of the root element and returns that offset.
 //
-// The whole body is checked for its encoding here, once, before anything is
-// read out of it: a document that is not valid in its encoding is not XML.
-// Measured at 45 to 50 GB/s against a read that runs at 1.7, so it is a few
-// percent of the read. It does not stand in for the check each key gets after
-// it is decoded, because a percent escape can write any byte.
+// The whole body is checked for valid UTF-8 here, once, before anything is
+// read from it. A document that is not valid UTF-8 is not XML. The check runs
+// at 45 to 50 GB/s and the read at 1.7 GB/s, so it costs a few percent. It
+// does not replace the check each key gets after decoding, because a percent
+// escape can produce any byte.
 //
-// Refusing the body outright is a claim about the service, and it was
-// measured rather than assumed: Azure replaces or refuses a byte that does
-// not decode before it reaches a response body — a key carrying one is
-// `400 InvalidUri`, and a query value carrying one comes back with `U+FFFD`
-// where the byte was. So invalid UTF-8 here is a protocol violation and not a
-// key a caller might hold. `a_listing_body_is_always_utf_8` in the live suite
-// is that measurement.
+// Refusing the body is safe because Azure never sends invalid UTF-8. This was
+// measured, not assumed. A key with an invalid byte is refused with
+// `400 InvalidUri`. A query value with one comes back with `U+FFFD` in its
+// place. So invalid UTF-8 here is a protocol violation, not a key the caller
+// might hold. The measurement is `a_listing_body_is_always_utf_8` in the live
+// suite.
 fn prelude(body: &[u8]) -> Result<usize> {
     if core::str::from_utf8(body).is_err() {
         return fault();
@@ -66,14 +66,14 @@ fn prelude(body: &[u8]) -> Result<usize> {
     }
     let root = sc.open()?;
     // A service can answer a listing with an error document under a success
-    // status. That is not a page, and this is what says so.
+    // status. That is not a page.
     if sc.text(root.name) != ROOT || root.empty {
         return fault();
     }
     Ok(sc.i)
 }
 
-// One child of the element that is being read, as the driver needs to see it.
+// One child of the element being read, as the driver sees it.
 enum Item {
     Entry(Fields),
     // The element that holds the entries, and whether it holds any.
@@ -82,14 +82,14 @@ enum Item {
     Leave,
     // The text that names the next page.
     Marker((Span, u8)),
-    // An element this crate reads nothing from.
+    // An element this crate does not read.
     Skip,
     // The root element has ended.
     End,
 }
 
-// One item, read from the bytes that begin with it. The driver has already
-// stepped over the whitespace before it, so the byte at zero is its own.
+// Reads one item from the bytes that begin with it. The driver has already
+// skipped the whitespace before it, so byte zero is the item's first byte.
 fn item(b: &[u8], within: bool) -> Result<(Item, usize)> {
     let mut sc = Scan::new(b);
     if !within {
@@ -97,10 +97,10 @@ fn item(b: &[u8], within: bool) -> Result<(Item, usize)> {
             Child::Close => Item::End,
             Child::Open(tag) => match sc.text(tag.name) {
                 ENTRIES => Item::Entries { within: !tag.empty },
-                // The marker names the page to ask for next, so it holds text
-                // and nothing else. The service writes it as `<NextMarker/>`,
-                // as `<NextMarker />`, and with text between two tags, and all
-                // three name the same thing.
+                // The marker names the next page, so it holds only text. The
+                // service writes it as `<NextMarker/>`, as `<NextMarker />`,
+                // or with text between two tags. All three are the same
+                // element.
                 b"NextMarker" => Item::Marker(sc.value(tag)?),
                 _ => {
                     sc.skip(tag)?;
@@ -110,10 +110,9 @@ fn item(b: &[u8], within: bool) -> Result<(Item, usize)> {
         };
         return Ok((item, sc.i));
     }
-    // Inside the entries, where nothing but an entry belongs. A comment, a
-    // character-data section and a processing instruction may each hold the
-    // very tags that the entries are read by, so all three are refused here
-    // rather than stepped over.
+    // Inside the entries element, where only entries belong. A comment, a
+    // CDATA section and a processing instruction may each hold the tags that
+    // entries are read by. All three are refused here rather than skipped.
     if sc.cur() != b'<' {
         return fault();
     }
@@ -125,8 +124,8 @@ fn item(b: &[u8], within: bool) -> Result<(Item, usize)> {
         b'!' | b'?' => return fault(),
         _ => {}
     }
-    // `<Blob>` is one six-byte compare, which is how nearly every entry of a
-    // page is recognised. Anything else falls to the general path below.
+    // Nearly every entry of a page starts with `<Blob>`, which is one six-byte
+    // compare. Anything else takes the general path below.
     if sc.lit(b"<Blob>") {
         let tag = Tag {
             name: (1, 5),
@@ -139,17 +138,17 @@ fn item(b: &[u8], within: bool) -> Result<(Item, usize)> {
     let fields = match sc.text(tag.name) {
         b"Blob" => blob(&mut sc, tag)?,
         b"BlobPrefix" => prefix(&mut sc, tag)?,
-        // Something else where an entry belongs is not a page this crate can
-        // read: a later service version writing one here would be read as an
-        // entry it is not.
+        // Any other element where an entry belongs makes this a page this
+        // crate cannot read. Skipping it would silently drop an entry that a
+        // later service version added.
         _ => return fault(),
     };
     Ok((Item::Entry(fields), sc.i))
 }
 
-// The fields of one entry, as ranges of the entry's own bytes. Recording
-// ranges rather than slices is what lets the text be decoded afterwards, when
-// the entry has been split off the body.
+// The fields of one entry, as ranges into the entry's own bytes. Ranges
+// rather than slices let the text be decoded later, after the entry has been
+// split off the body.
 struct Fields {
     prefix: bool,
     key: Option<(Span, u8)>,
@@ -174,8 +173,8 @@ impl Fields {
     }
 }
 
-// A value written twice would leave which of them was meant to a rule this
-// crate would be inventing, so the second one is a fault rather than a choice.
+// A value written twice is a fault. Choosing one of them would be a rule this
+// crate made up.
 fn set<T>(slot: &mut Option<T>, value: T) -> Result<()> {
     if slot.is_some() {
         return fault();
@@ -207,29 +206,29 @@ fn blob(sc: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
             Child::Close => break,
             Child::Open(tag) => match sc.text(tag.name) {
                 b"Name" => name(sc, tag, &mut fields)?,
-                // The properties are read only under this element, so one
-                // that a later service version adds beside it cannot be
+                // Properties are read only under this element. A property
+                // that a later service version adds beside it is not
                 // mistaken for one of them.
                 b"Properties" if !tag.empty => properties(sc, &mut fields)?,
                 _ => sc.skip(tag)?,
             },
         }
     }
-    // An entry with no name names no object.
+    // An entry without a name is not an object.
     if fields.key.is_none() {
         return fault();
     }
     Ok(fields)
 }
 
-// `<Properties>` has been consumed. Four of its children matter; the rest, a
-// dozen or so per blob, are the bulk of an Azure page and are stepped over
-// without being looked at.
+// Reads the properties of a blob. `<Properties>` has been consumed. Four of
+// its children matter. The rest, a dozen or so per blob, are most of an Azure
+// page and are skipped without being read.
 fn properties(sc: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
     loop {
         sc.skip_space();
-        // The children the service writes, matched whole and dispatched on
-        // the byte after the `<`, so one child costs one compare.
+        // The children the service writes, matched whole. The byte after the
+        // `<` picks the compare, so one child costs one compare.
         match sc.b.get(sc.i + 1).copied().unwrap_or(0) {
             b'L' if sc.lit(b"<Last-Modified>") => {
                 let value = sc.value_of(b"Last-Modified")?;
@@ -274,9 +273,9 @@ fn properties(sc: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
     }
 }
 
-// A group of keys. A hierarchical-namespace account gives one a `<Properties>`
-// block too; nothing consumes it, since a group has no size and no entity tag
-// to use.
+// Reads a group of keys. A hierarchical-namespace account writes a
+// `<Properties>` element here too. It is skipped, because a group has no size
+// and no entity tag.
 fn prefix(sc: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
     if tag.empty {
         return fault();
@@ -297,8 +296,8 @@ fn prefix(sc: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
     Ok(fields)
 }
 
-// A name, and the one attribute this crate reads. Azure writes `Encoded`
-// once, and writes a boolean in it.
+// Reads a name and its `Encoded` attribute, the one attribute this crate
+// reads. Azure writes it at most once, with a boolean value.
 fn name(sc: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
     let mut encoded = None;
     for attribute in sc.attributes(tag) {
@@ -317,13 +316,13 @@ fn name(sc: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
     set(&mut fields.key, value)
 }
 
-// One entry, out of the bytes it was written in.
+// Builds one entry from the bytes it was written in.
 fn materialize(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let Some((key, key_flags)) = fields.key else {
         return fault();
     };
-    // A directory is told from an object before any decoding, because the
-    // value is the service's own word and carries nothing to decode.
+    // The resource type is a fixed word the service writes, so it needs no
+    // decoding and is read first.
     let directory = match fields.resource_type {
         Some(span) => {
             let (start, end) = trim(chunk, span);
@@ -339,8 +338,8 @@ fn materialize(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
                 None => return fault(),
             }
         }
-        // An object states its length. A group of keys and a directory are
-        // not objects and have none to state.
+        // An object always has a length. A group of keys and a directory are
+        // not objects and have none.
         None if !fields.prefix && !directory => return fault(),
         None => None,
     };
@@ -350,8 +349,8 @@ fn materialize(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
         (false, false) => EntryKind::Object,
     };
 
-    // A key may begin or end with a space, so only the values that the service
-    // writes for itself are trimmed.
+    // A key may begin or end with a space, so the key is not trimmed. Only
+    // the values the service writes for itself are.
     let key_len = decode(&mut chunk[key.0..key.1], key_flags, fields.percent)?;
     let e_tag = lend(chunk, fields.e_tag)?;
     let last_modified = lend(chunk, fields.last_modified)?;
@@ -373,7 +372,7 @@ fn materialize(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     })
 }
 
-// One value, decoded where it stands, as what is left of it.
+// Decodes one value in place and returns the range of the decoded text.
 fn lend(chunk: &mut [u8], field: Option<(Span, u8)>) -> Result<Option<Span>> {
     let Some((span, flags)) = field else {
         return Ok(None);
@@ -395,8 +394,8 @@ fn drive<'b>(
     if position.at > body.len() || past_the_marker {
         return fault();
     }
-    // The marker stands past the entries, so the read and the marker are two
-    // pieces of the body that are never the same bytes.
+    // The marker comes after the entries, so the bytes still to read and the
+    // marker never overlap.
     let (before, mut rest) = body.split_at_mut(position.at);
     let before: &'b [u8] = before;
     let mut next_marker: Option<&'b [u8]> = position
@@ -405,8 +404,8 @@ fn drive<'b>(
         .filter(|marker| !marker.is_empty());
     let mut consumed = position.at;
     let mut filled = 0;
-    // A document with no entries element at all is not a page. A resumed read
-    // starts past it and cannot see it, so only a read from the start says so.
+    // A document with no entries element is not a page. A resumed read starts
+    // past that element and cannot see it, so only a fresh read checks this.
     let mut entries = !fresh;
 
     loop {
@@ -419,8 +418,8 @@ fn drive<'b>(
         let (item, end) = item(rest, position.within)?;
         match item {
             Item::Entry(fields) => {
-                // The array is the budget. An entry that does not fit is not
-                // read at all, so the next call reads it from where it stands.
+                // The array sets the limit. An entry that does not fit is not
+                // read at all, so the next call reads it from here.
                 if filled == into.len() {
                     return Ok(Fill::Partial {
                         filled,
@@ -440,8 +439,8 @@ fn drive<'b>(
                 let len = decode(&mut chunk[start..stop], flags, false)?;
                 let chunk: &'b [u8] = chunk;
                 position.marker = Some((consumed + start, consumed + start + len));
-                // An empty marker is how the service says that the listing is
-                // complete, so it names no next page rather than an empty one.
+                // An empty marker means the listing is complete, so it is
+                // reported as no next page rather than an empty one.
                 next_marker = Some(&chunk[start..start + len]).filter(|m| !m.is_empty());
             }
             Item::Entries { within } => {

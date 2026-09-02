@@ -1,8 +1,8 @@
 name: azure-live
 # This suite spends the storage account, so opening a pull request must not be
 # enough to run it. The `azure-live` environment requires a reviewer: a run
-# waits for that approval before it holds a token, and until then it is a
-# pending check, which is what stops the merge.
+# waits for that approval before it gets a token, and until then it is a
+# pending check, which blocks the merge.
 #
 # A pull request from a fork is given no `id-token` permission whatever the
 # reviewer says, so the job fails there rather than passing untested. Push the
@@ -33,11 +33,11 @@ env:
   # each test. It must not contain either key above.
   AZURE_LIST_PREFIX: borink-object-storage/azure-list-scratch/
 jobs:
-  # Both accounts, because the suite measures a service and the two disagree:
-  # a hierarchical namespace lists the directories it keeps, folds an empty
-  # path segment away, takes a quarter of the path segments, and has no
-  # snapshots at all. Each leg owns its own keys on its own account, so the two
-  # do not have to be serialised against one another.
+  # The suite runs against both accounts, because the two behave differently:
+  # a hierarchical namespace lists its directories as entries, drops an empty
+  # path segment, allows a quarter of the path segments, and has no snapshots.
+  # Each job owns its own keys on its own account, so the two can run at the
+  # same time.
   test:
     runs-on: ubuntu-latest
     environment: azure-live

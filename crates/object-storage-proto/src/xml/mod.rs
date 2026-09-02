@@ -1,11 +1,12 @@
-// Reading the XML that a blob service answers with: a listing page, and the
-// error document behind a failure that names its code in the body.
+// Reads the XML that a blob service sends back: a listing page, and the error
+// document that names the error code in the body.
 //
-// The reader is structural rather than tokenised. `scan.rs` walks the bytes
-// once, `decode.rs` undoes the escaping in the caller's own buffer, and
-// `azure.rs` holds the grammar of a page. This file holds the error document,
-// whose three elements need no grammar of their own, and the walk that lends
-// a caller the properties of an entry that this crate reads nothing from.
+// The reader walks the document structure directly; it does not tokenise.
+// `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
+// the caller's buffer, and `azure.rs` knows the shape of a listing page. This
+// file reads the error document, which is only three elements. It also walks
+// the properties of an entry, so the caller can read the ones this crate
+// skips.
 
 pub(crate) mod azure;
 pub(crate) mod decode;
@@ -16,21 +17,20 @@ pub(crate) use decode::decode_text;
 
 use scan::{find_byte, trim};
 
-/// The error code that a service wrote into a response body.
+/// Returns the error code that a service wrote into a response body.
 ///
-/// Returns the text of the first `<Code>` element that holds any, at whatever
-/// depth it stands. A body that was cut short yields whatever code had been
-/// written by the cut, which
-/// [`classify_error`](crate::classify_error) is told separately to read as
-/// incomplete rather than unknown.
+/// This is the text of the first non-empty `<Code>` element, at any depth. A
+/// body that was cut short yields whatever part of the code was written before
+/// the cut. [`classify_error`](crate::classify_error) knows the body was cut
+/// short and reports such a code as incomplete rather than unknown.
 pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
-    // A body that is not valid in its encoding names no code, and the text is
-    // handed back as `&str`.
+    // The code is returned as `&str`, so a body that is not valid UTF-8 has
+    // no code.
     core::str::from_utf8(body).ok()?;
     let mut at = 0;
     while at < body.len() {
         let open = find_byte(body, at, b'<');
-        // A tag the body was cut off in the middle of names nothing.
+        // A tag that the body was cut off in the middle of has no name.
         let close = find_byte(body, open, b'>');
         if close == body.len() {
             return None;
@@ -43,8 +43,7 @@ pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
         if name == b"Code" && !tag.ends_with(b"/") {
             let end = find_byte(body, close + 1, b'<');
             let (start, end) = trim(body, (close + 1, end));
-            // An element with no text in it is not the code; a later one may
-            // still be.
+            // An empty element is not the code. A later one may still be.
             if start < end {
                 return core::str::from_utf8(&body[start..end]).ok();
             }
@@ -55,26 +54,26 @@ pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
 }
 
 // The element that holds the properties of one entry. The walk below reports
-// what is inside it beside what is beside it, because a service puts the same
-// kind of value in both places: Azure under this element, S3 next to it.
+// the elements inside it and beside it in one sequence. Azure puts a property
+// under this element, and S3 puts it next to the entry.
 const PROPERTIES: &[u8] = b"Properties";
 
-// What follows the first tag of an entry, which is the entry's own.
+// Returns the bytes after the entry's own opening tag.
 pub(crate) fn after_tag(raw: &[u8]) -> Option<&[u8]> {
     let end = find_byte(raw, 0, b'>');
     (end < raw.len()).then(|| &raw[end + 1..])
 }
 
-// One step of the walk over the elements of an entry.
+// Reads the next element of an entry and returns its name and its text.
 //
-// `rest` starts after the entry's own opening tag and is advanced past what
-// this call read, so a whole walk reads each byte once. `within` says whether
-// the walk is inside the properties element, which it steps into rather than
-// reporting.
+// `rest` starts after the entry's own opening tag. Each call advances it past
+// what it read, so a whole walk reads each byte once. `within` records
+// whether the walk is inside the properties element. The walk steps into that
+// element instead of reporting it.
 //
 // A byte that is not the start of an element ends the walk. The document was
-// read once before an entry was ever lent out, so that is a walk that has
-// reached the end of its entry rather than a document to refuse.
+// checked when the page was read, before any entry was handed out. So this is
+// the end of the entry, not a fault.
 pub(crate) fn next_property<'b>(
     rest: &mut &'b [u8],
     within: &mut bool,
@@ -101,15 +100,14 @@ pub(crate) fn next_property<'b>(
         let name = element_name(&after[..tag]);
         let body = &after[tag + 1..];
         let empty = after[..tag].ends_with(b"/");
-        // The properties element is stepped into rather than reported, and one
-        // that carries nothing has nothing to step into.
+        // Step into the properties element instead of reporting it. An empty
+        // one has nothing to step into.
         if !*within && name == PROPERTIES {
             *within = !empty;
             *rest = body;
             continue;
         }
-        // An element that carries nothing holds no value, and there is no
-        // close tag to look for.
+        // An empty element has no value and no close tag.
         if empty {
             *rest = body;
             return Some((name, &[]));
@@ -120,8 +118,9 @@ pub(crate) fn next_property<'b>(
     }
 }
 
-// The value of an element, and what follows its close tag. The close tag is
-// found by name, which reads the whole of an element that holds others.
+// Returns the value of an element and the bytes after its close tag. The
+// close tag is found by name, so an element that holds other elements is
+// returned whole.
 fn closed<'b>(body: &'b [u8], name: &[u8]) -> Option<(&'b [u8], &'b [u8])> {
     let mut at = 0;
     loop {
@@ -140,14 +139,15 @@ fn closed<'b>(body: &'b [u8], name: &[u8]) -> Option<(&'b [u8], &'b [u8])> {
     }
 }
 
-// Where an opening tag ends, counted from just after its `<`.
+// Returns the offset of the `>` that ends an opening tag, counted from just
+// after its `<`.
 fn tag_end(after: &[u8]) -> Option<usize> {
     let end = find_byte(after, 0, b'>');
     (end < after.len()).then_some(end)
 }
 
-// The name of an element, as the bytes of its opening tag hold it: everything
-// up to the first space, which is where an attribute would begin.
+// Returns the name of an element from the bytes of its opening tag: everything
+// up to the first space, where an attribute would begin.
 fn element_name(tag: &[u8]) -> &[u8] {
     let end = tag
         .iter()

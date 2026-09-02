@@ -1,14 +1,14 @@
-// Undoing the escaping that XML applies to text, and the percent-encoding
-// that the service applies to a name that XML cannot carry.
+// Undoes the escaping that XML applies to text, and the percent-encoding that
+// the service applies to a name that XML cannot hold.
 //
-// Both only ever shorten the text, so both run left to right within the span,
-// and the bytes that they free at the end keep whatever they held. Every one
-// returns what is left of the text.
+// Both only ever shorten the text, so both decode in place from left to
+// right. The bytes freed at the end keep whatever they held. Each function
+// returns the length of the decoded text.
 
 use super::scan::{AMP, PCT, fault, find_byte};
 use crate::Result;
 
-/// Undoes both, in the order a document writes them.
+/// Undoes both encodings, in the order a document applies them.
 pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
     let len = decode_references(bytes)?;
     if percent {
@@ -18,25 +18,25 @@ pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
     }
 }
 
-// The same, for a value the scanner has already looked at: it says whether
-// there is anything to undo, and text with neither an `&` nor a `%` in it is
-// the whole of an ordinary listing.
+// The same, for a value the scanner has already seen. The scanner's flags say
+// whether there is anything to undo. In an ordinary listing no text holds an
+// `&` or a `%`, so nothing is undone.
 pub(crate) fn decode(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize> {
     let mut len = bytes.len();
     if flags & AMP != 0 {
         len = decode_references(bytes)?;
     }
-    // A reference can spell a `%`, so once the references are undone the flag
-    // no longer says whether there is one.
+    // A reference can encode a `%`, so after the references are undone the
+    // flag no longer says whether there is one.
     if percent && flags & (PCT | AMP) != 0 {
         len = decode_percent(&mut bytes[..len])?;
     }
     Ok(len)
 }
 
-// Moves `b[r..r + n]` down to `w`, which is what the decoders do between the
-// escapes. Skipped while nothing has shrunk yet, which is the whole of a
-// value up to its first escape.
+// Moves `b[r..r + n]` down to `w`. The decoders do this with the text between
+// escapes. Nothing moves before the first escape, because nothing has shrunk
+// yet.
 #[inline(always)]
 fn shift_down(b: &mut [u8], r: usize, w: usize, n: usize) {
     if w != r {
@@ -54,12 +54,12 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         if r == b.len() {
             break;
         }
-        // XML gives `&` one meaning. This document declares no entity and may
-        // declare none, so the references below are the only ones it can
-        // spell, and anything else is neither a reference nor text.
+        // In XML an `&` always begins a reference. This document declares no
+        // entities and may not declare any, so the references below are the
+        // only ones it can hold. Anything else is a fault.
         //
-        // The five named ones, which are nearly every reference a listing
-        // holds, each decode to one ASCII byte.
+        // The five named references each decode to one ASCII byte. Nearly
+        // every reference in a listing is one of these.
         let rest = &b[r + 1..];
         let named = if rest.starts_with(b"quot;") {
             Some((b'"', 6))
@@ -80,7 +80,7 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
             r += len;
             continue;
         }
-        // The numeric form. A reference longer than this names no character.
+        // The numeric form. A longer reference cannot name a character.
         let Some(len) = rest.iter().take(10).position(|c| *c == b';') else {
             return fault();
         };
@@ -90,26 +90,26 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
             [b'#', decimal @ ..] if !decimal.is_empty() => digits(decimal, 10)?,
             _ => return fault(),
         };
-        // A reference to a number that names no character a document may hold
-        // is not a character reference, whatever it would decode to: taking it
-        // would put a byte in a key that no key may carry.
+        // A reference to a character that XML forbids in a document is a
+        // fault, whatever it would decode to. Accepting it would put a byte
+        // in a key that no key may hold.
         //
-        // This is a rule about the document, not about the bytes: a character
-        // XML forbids is still valid UTF-8, and the two axes only look alike.
-        // Azure cannot reach this rule — it refuses a control in a key at the
-        // door, and escapes the non-characters it does hold as
-        // `<Name Encoded="true">` instead. S3 can: it stores `U+0001` and,
-        // where a listing is not asked for `encoding-type=url`, writes it as
-        // `&#x1;`. This crate always asks, so the reference never arrives; if
-        // that ever changes, this rule refuses a key AWS is willing to store,
-        // and the decision belongs with S3 LIST rather than here.
+        // This is a rule about the document, not about UTF-8: a character XML
+        // forbids is still valid UTF-8. Azure never writes such a reference.
+        // It refuses a control character in a key when the key is written,
+        // and percent-encodes the non-characters it does store, marked with
+        // `<Name Encoded="true">`. S3 can write one: it stores `U+0001` and,
+        // unless the listing asks for `encoding-type=url`, writes it as
+        // `&#x1;`. This crate always asks, so the reference never arrives. If
+        // that changes, this rule refuses a key that AWS stores, and the
+        // decision then belongs with S3 LIST rather than here.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
             return fault();
         };
         let mut buffer = [0u8; 4];
         let encoded = ch.encode_utf8(&mut buffer).as_bytes();
         // The reference is at least four bytes and its character at most
-        // four, so the write never passes the read.
+        // four, so the write position never passes the read position.
         b[w..w + encoded.len()].copy_from_slice(encoded);
         w += encoded.len();
         r += len + 2;
@@ -129,7 +129,7 @@ fn digits(bytes: &[u8], radix: u32) -> Result<u32> {
     })
 }
 
-// The characters that XML 1.0 lets a document hold.
+// Returns whether XML 1.0 allows this character in a document.
 fn xml_char(code: u32) -> bool {
     matches!(
         code,
@@ -147,10 +147,10 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
         if r == b.len() {
             break;
         }
-        // A name that says it is encoded is encoded whole, down to the
-        // separators between its segments, so every `%` in one begins an
-        // escape and a `%` that does not is not this name. Measured: a listed
-        // name reads `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
+        // A name marked as encoded is encoded whole, including the separators
+        // between its segments. So every `%` in it begins an escape, and a
+        // `%` that does not is a fault. Measured: a listed name reads
+        // `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
         let (Some(high), Some(low)) = (
             b.get(r + 1).copied().and_then(hex),
             b.get(r + 2).copied().and_then(hex),
@@ -205,16 +205,16 @@ mod tests {
     fn undoes_a_reference_written_as_a_number() {
         assert_eq!(decoded("caf&#233;", false), "caf\u{e9}");
         assert_eq!(decoded("caf&#xe9;", false), "caf\u{e9}");
-        // Four bytes out of nine is still shorter, which is what lets every
-        // reference be undone where it stands.
+        // Four bytes out of nine is still shorter, so even this reference
+        // can be decoded in place.
         assert_eq!(decoded("&#x1F600;", false), "\u{1f600}");
     }
 
     #[test]
     fn refuses_what_is_not_a_reference() {
-        // A listing declares no entity and may declare none, so `&` can only
-        // begin one of the references above. Passing anything else through
-        // would hand back a key that is not the object's.
+        // A listing declares no entities and may not declare any, so `&` can
+        // only begin one of the references above. Passing anything else
+        // through would return a key that is not the object's.
         for text in ["a&nbsp;b", "a&#;b", "100% &", "a&b", "a&amp"] {
             assert!(refused(text, false), "{text}");
         }
@@ -222,8 +222,8 @@ mod tests {
 
     #[test]
     fn refuses_a_number_that_names_no_character_of_a_document() {
-        // A surrogate is no character at all, and the control codes and the
-        // two non-characters are ones XML 1.0 forbids a document to hold.
+        // A surrogate is not a character. The control codes and the two
+        // non-characters are characters that XML 1.0 forbids in a document.
         for text in [
             "a&#xD800;b",
             "a&#0;b",
@@ -236,7 +236,7 @@ mod tests {
         ] {
             assert!(refused(text, false), "{text}");
         }
-        // The three that XML does allow below a space.
+        // The three control characters that XML does allow.
         assert_eq!(decoded("a&#x9;&#xA;&#xD;b", false), "a\t\n\rb");
     }
 
@@ -244,11 +244,11 @@ mod tests {
     fn undoes_percent_encoding_only_when_asked() {
         assert_eq!(decoded("a%20b%2Fc", true), "a b/c");
         assert_eq!(decoded("a%20b%2Fc", false), "a%20b%2Fc");
-        // The references are undone first, so a name may carry both.
+        // The references are undone first, so a name may hold both.
         assert_eq!(decoded("a&amp;b%20c", true), "a&b c");
         assert_eq!(decoded("100%25", true), "100%");
-        // An escape that is not one says the name is not the one that was
-        // listed, because a name that is encoded is encoded whole.
+        // An encoded name is encoded whole, so a `%` that does not begin an
+        // escape is a fault.
         for text in ["100%25 %zz", "a%", "a%2", "a%2Gb"] {
             assert!(refused(text, true), "{text}");
         }
