@@ -88,11 +88,11 @@ The rest were read and are not used:
 
 ### XML parsers
 
-Read and benchmarked for the listing reader in `crates/object-storage-proto/src/xml/`. The reader takes its scanning technique from pugixml, but no code: it uses a 256-entry byte class table, scans names four bytes at a time, reads past the end of the buffer as a NUL sentinel, and decodes escapes in place because a value only ever shrinks. Everything else, including the whole-tag compares, the word-at-a-time searches and the caller-array fill, is this crate's own. pugixml builds a tree; this reader builds nothing and fills the caller's array.
+Read and benchmarked for the listing reader in `crates/object-storage-proto/src/xml/`. The reader takes its scanning technique from pugixml, but no code: it uses a 256-entry byte class table, scans names four bytes at a time, reads past the end of the buffer as a NUL sentinel, and decodes escapes in place because a value only ever shrinks. 
 
 | Project | License (SPDX) | Upstream | Read for |
 | --- | --- | --- | --- |
-| pugixml | `MIT` | <https://github.com/zeux/pugixml> | 1.16. The four techniques above, and the parse-in-place design they serve: values are pointers into the caller's own buffer, decoded where they stand. It was also the speed target: the reader here is faster than pugixml building a tree. |
+| pugixml | `MIT` | <https://github.com/zeux/pugixml> | Served as inspiration and speed target, and used for various performance techniques. However, we do not build a tree, while pugixml does. |
 | tinyxml2 | `Zlib` | <https://github.com/leethomason/tinyxml2> | The other single-file C++ DOM parser, read and benchmarked beside pugixml as the cost of the tree without the scanning. |
 | libxml2 (through libs3) | `MIT` | <https://gitlab.gnome.org/GNOME/libxml2> | A SAX callback parser as the shape a C client uses. Not used: a callback per element inverts control, and this crate hands the caller an array instead. |
 | libs3 | `LGPL-3.0-or-later OR GPL-2.0-or-later`, with a linking exception | <https://github.com/bji/libs3> | How a C S3 client reads a listing: libxml2 SAX callbacks writing into fixed buffers. Read and benchmarked only, and its license rules out taking anything from it. |
