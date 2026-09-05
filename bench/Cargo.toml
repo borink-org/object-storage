@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 borink-object-storage-proto = { path = "../crates/object-storage-proto" }
+borink-object-storage-c = { path = "../crates/object-storage-c" }
 # Only for `perf_event_open`, `ioctl` and `read` in `counters.rs`.
 libc = "0.2"
 

@@ -6,8 +6,16 @@ version = 4
 name = "borink-object-storage-bench"
 version = "0.0.0"
 dependencies = [
+ "borink-object-storage-c",
  "borink-object-storage-proto",
  "libc",
+]
+
+[[package]]
+name = "borink-object-storage-c"
+version = "0.0.0"
+dependencies = [
+ "borink-object-storage-proto",
 ]
 
 [[package]]

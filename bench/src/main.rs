@@ -12,7 +12,9 @@ use std::hint::black_box;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry};
+use borink_object_storage_proto::{
+    BlobProperty, Blobs, Container, ListEntry, PropertySet, PropertyValues,
+};
 
 // Set on the process this one starts after granting itself the capability,
 // so that a refusal there is reported rather than asked about again.
@@ -22,6 +24,8 @@ struct Args {
     rounds: Option<usize>,
     entries: usize,
     callgrind: bool,
+    // Write the page to this path instead of measuring, for `c/`.
+    write: Option<String>,
 }
 
 fn args() -> Args {
@@ -29,6 +33,7 @@ fn args() -> Args {
         rounds: None,
         entries: 5000,
         callgrind: false,
+        write: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -37,6 +42,7 @@ fn args() -> Args {
             "--rounds" => args.rounds = Some(value().parse().expect("a number of rounds")),
             "--entries" => args.entries = value().parse().expect("a number of entries"),
             "--callgrind" => args.callgrind = true,
+            "--write" => args.write = Some(value()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -127,6 +133,10 @@ struct Sample {
 
 fn main() {
     let args = args();
+    if let Some(path) = &args.write {
+        std::fs::write(path, fixture::azure(args.entries)).expect("writing the page");
+        return;
+    }
     if args.callgrind {
         return callgrind(&args);
     }
@@ -163,6 +173,100 @@ fn main() {
             filled
         },
     );
+    // The same read through the C entry point, in this binary, so that the
+    // cost of the boundary is measured apart from how the archive is built.
+    // `c/` measures it from a C program.
+    //
+    // Measured: the boundary itself costs nothing this bench can see, but
+    // linking the C crate at all, called or not, makes the plain read 12%
+    // slower in instructions and cycles, here and in the archive. The same
+    // functions compile to about five hundred more stack accesses when the
+    // exported entry points are in the link. The cause was not found; it is
+    // in LLVM's code generation, not in the source.
+    let session = borink_object_storage_c::Session {
+        endpoint: c_bytes(b"https://acct.blob.core.windows.net"),
+        container: c_bytes(b"data"),
+        token: c_bytes(b"token"),
+    };
+    measure(
+        "borink_fill_listing, from Rust",
+        &page,
+        rounds,
+        counters.as_ref(),
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![borink_object_storage_c::ListEntry::default(); room];
+            // SAFETY: the body and the array are live for the call, and
+            // nothing else reaches them.
+            let fill = unsafe {
+                borink_object_storage_c::borink_fill_listing(
+                    &session,
+                    borink_object_storage_c::BytesMut {
+                        ptr: work.as_mut_ptr(),
+                        len: work.len(),
+                    },
+                    entries.as_mut_ptr(),
+                    entries.len(),
+                )
+            };
+            black_box(&entries);
+            fill.filled
+        },
+    );
+    // The same read, keeping three properties of every object, into an
+    // entry type of the caller's own.
+    const THREE: PropertySet = PropertySet::of(&[
+        BlobProperty::CreationTime,
+        BlobProperty::AccessTier,
+        BlobProperty::ContentMd5,
+    ]);
+    measure(
+        "fill_listing_with, three properties",
+        &page,
+        rounds,
+        counters.as_ref(),
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![Picked::default(); room];
+            let filled = blobs
+                .fill_listing_with(work, &mut entries, THREE, Picked::build)
+                .unwrap()
+                .filled;
+            black_box(&entries);
+            filled
+        },
+    );
+}
+
+fn c_bytes(value: &'static [u8]) -> borink_object_storage_c::Bytes {
+    borink_object_storage_c::Bytes {
+        ptr: value.as_ptr(),
+        len: value.len(),
+    }
+}
+
+// The fields are only read through `black_box`, which the compiler does not
+// count.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Default)]
+struct Picked<'b> {
+    key: &'b str,
+    size: Option<u64>,
+    created: Option<&'b [u8]>,
+    tier: Option<&'b [u8]>,
+    md5: Option<&'b [u8]>,
+}
+
+impl<'b> Picked<'b> {
+    fn build(entry: ListEntry<'b>, values: PropertyValues<'_, 'b>) -> Self {
+        Self {
+            key: entry.key,
+            size: entry.size,
+            created: values.get(BlobProperty::CreationTime),
+            tier: values.get(BlobProperty::AccessTier),
+            md5: values.get(BlobProperty::ContentMd5),
+        }
+    }
 }
 
 // Runs `round` `rounds` times over a fresh copy of the page and reports the
