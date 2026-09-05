@@ -1,31 +1,24 @@
 # Recorded multipart responses
 
-Every file here is one response as `borinkstoragetest` sent it on 2026-09-02,
-under service version `2026-04-06`. The probes in
-`tests/azure-live/tests/live.rs` captured them and they are pasted verbatim:
-the status line, the headers in the order they arrived, a blank line, and the
-body, byte-order mark included. Nothing in them is a secret. A request
-identifier names a request that is over, and the account holds nothing but
-this suite's own keys.
+`Put Block`, `Put Block List` and `Get Block List`, which this crate does not support yet. Nothing reads these files. They are here so that the multipart types can be written against what Azure actually sent.
 
-Nothing reads these files yet. They are here so that the multipart types can
-be written against what Azure actually sent, and so that a later service
-version that answers differently shows up as a diff.
-`snapshot-hierarchical-409.http` came from `borinkstoragehnstest`.
+Every file here is one response as the account sent it on Sat, 05 Sep 2026 09:49:23 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
 
-| file | what it shows |
-|---|---|
-| `put-block-201.http` | a staged block answers with a CRC64 and no entity tag, no last-modified and no MD5 |
-| `put-block-empty-400.http` | an empty block is refused, and the refusal names `Content-Length` |
-| `put-block-mixed-length-400.http` | identifiers of two decoded lengths are refused when staged, not when committed, with `InvalidBlobOrBlock` |
-| `put-block-list-201.http` | the commit answers like a whole-object write: entity tag, last-modified, CRC64, and a version identifier if the account keeps versions |
-| `put-block-list-lost-create-409.http` | a commit that loses the race to create is `409 BlobAlreadyExists`, like `Put Blob`, and not the documented 412 |
-| `put-block-list-condition-412.http` | a stale `If-Match` on the commit is `412 ConditionNotMet` |
-| `put-block-list-unstaged-400.http` | a commit that names a block nobody staged is `400 InvalidBlockList` |
-| `get-block-list-uncommitted-only.http` | both sections, the empty one written `<CommittedBlocks />`, and blocks ordered by identifier rather than by when they were staged |
-| `get-block-list-committed-empty.http` | a committed listing of a key that holds only staged blocks is a 200 with an empty section and no entity tag, not a 404 |
-| `get-block-list-after-the-commit.http` | a committed listing describes the blob: entity tag, last-modified and `x-ms-blob-content-length` |
-| `get-block-list-both-empty.http` | after a whole-object write both sections are empty |
-| `get-block-list-escaped-identifier.http` | an identifier with `+`, `/` and `=` comes back unescaped in the document |
-| `get-block-list-absent-404.http` | a key that holds nothing at all answers 404 `BlobNotFound` |
-| `snapshot-hierarchical-409.http` | an account with a hierarchical namespace has no snapshots, and names the feature it refuses |
+Do not edit these files. `docs/AZURE-FIXTURES.md` says how to record them again.
+
+| file | request | account | identity | what it shows |
+|---|---|---|---|---|
+| `put-block-201.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=block&blockid=YmxvY2stMQ%3D%3D` | `borinkstoragetest` | container-scoped | a staged block: a CRC64 of what was staged, and no entity tag, no last-modified and no MD5, because staging a block changes no object |
+| `put-block-empty-400.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=block&blockid=YmxvY2stMg%3D%3D` | `borinkstoragetest` | container-scoped | an empty block: refused, and the refusal names the header that states the length |
+| `put-block-mixed-length-400.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=block&blockid=YS1tdWNoLWxvbmdlci1ibG9jay1pZGVudGlmaWVy` | `borinkstoragetest` | container-scoped | an identifier that decodes to another length than the ones already staged: `400 InvalidBlobOrBlock`, at staging time rather than at commit time |
+| `get-block-list-uncommitted-only.http` | `GET /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist&blocklisttype=all` | `borinkstoragetest` | container-scoped | both sections of a key whose blocks are all staged: the empty one written `<CommittedBlocks />`, and the blocks ordered by identifier rather than by when they were staged |
+| `get-block-list-committed-empty.http` | `GET /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist&blocklisttype=committed` | `borinkstoragetest` | container-scoped | the committed listing of that same key: `200` with an empty section and no entity tag, not the `404` that a key holding nothing answers |
+| `put-block-list-unstaged-400.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist` | `borinkstoragetest` | container-scoped | a commit naming a block nobody staged: `400 InvalidBlockList` |
+| `put-block-list-201.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist` | `borinkstoragetest` | container-scoped | the commit: it answers like a whole-object write, with an entity tag, a last-modified, a CRC64 and the version it made |
+| `get-block-list-after-the-commit.http` | `GET /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist&blocklisttype=all` | `borinkstoragetest` | container-scoped | the committed listing after that commit: it describes the object as well, with an entity tag, a last-modified and `x-ms-blob-content-length` |
+| `put-block-list-lost-create-409.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist` | `borinkstoragetest` | container-scoped | a commit under `If-None-Match: *` to a key that already holds something: `409 BlobAlreadyExists`, like a whole-object write, and not the `412` the reference states |
+| `put-block-list-condition-412.http` | `PUT /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist` | `borinkstoragetest` | container-scoped | a commit under `If-Match` with an entity tag the object does not have: `412 ConditionNotMet` |
+| `get-block-list-both-empty.http` | `GET /borink-object-storage/fixtures/multipart/object.bin?comp=blocklist&blocklisttype=all` | `borinkstoragetest` | container-scoped | the listing after a whole-object write to the same key: both sections empty, because a whole-object write discards what was staged |
+| `get-block-list-escaped-identifier.http` | `GET /borink-object-storage/fixtures/multipart/escaped.bin?comp=blocklist&blocklisttype=all` | `borinkstoragetest` | container-scoped | an identifier holding `+`, `/` and `=`: the request escapes them and the document writes them back as they are |
+| `get-block-list-absent-404.http` | `GET /borink-object-storage/fixtures/multipart/absent.bin?comp=blocklist&blocklisttype=all` | `borinkstoragetest` | container-scoped | a key that holds nothing at all, staged or committed: `404 BlobNotFound` |
+| `snapshot-hierarchical-409.http` | `PUT /borink-object-storage/fixtures/multipart/snapshot.bin?comp=snapshot` | `borinkstoragehnstest` | container-scoped | an account with a hierarchical namespace has no snapshots, and names the feature it refuses |

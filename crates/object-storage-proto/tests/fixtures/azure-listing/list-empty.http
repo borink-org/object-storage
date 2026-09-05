@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+content-type: application/xml
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: 604733d5-901e-000b-531b-3d5fcf000000
+x-ms-version: 2026-04-06
+date: Sat, 05 Sep 2026 09:49:24 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><EnumerationResults ServiceEndpoint="https://borinkstoragetest.blob.core.windows.net/" ContainerName="borink-object-test"><Prefix>borink-object-storage/fixtures/nothing/</Prefix><Blobs /><NextMarker /></EnumerationResults>

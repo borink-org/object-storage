@@ -9,6 +9,8 @@ members = [
     "checks/no-allocator",
     "hosts/ureq",
     "tests/azure-live",
+    "tests/azure-record",
+    "tests/support",
 ]
 default-members = ["crates/object-storage-proto"]
 # `hosts/cxx-curl` is a CMake project, not a Cargo package: it needs libcurl,

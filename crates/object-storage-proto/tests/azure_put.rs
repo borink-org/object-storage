@@ -1,4 +1,13 @@
 //! Azure write encoding and response interpretation.
+//!
+//! Every head here that says what the service answers a write with is one of
+//! the responses recorded under `tests/fixtures/azure-put`. A head written out
+//! in this file is one the service does not send to the identity that recorded
+//! them, and says so.
+
+mod recorded;
+
+use recorded::Recorded;
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, Error, Failure, FailureClass, InvalidPlan, Method, ObjectMeta,
@@ -170,43 +179,51 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
 
 #[test]
 fn a_stored_object_reports_the_metadata_azure_returned() {
-    let head = ResponseHead::from_headers(
-        201,
-        [
-            ("ETag", b"\"etag\"".as_slice()),
-            ("Last-Modified", b"Fri, 24 May 2013 00:00:00 GMT"),
-            ("x-ms-version-id", b"version-1"),
-        ],
-    );
+    let recorded = Recorded::load("azure-put/put-created");
     let Ok(PutHeadOutcome::Created { meta, .. }) =
-        blobs().accept_put_head(PutShape::default(), head)
+        blobs().accept_put_head(PutShape::default(), recorded.head())
     else {
         panic!("201 stores the object");
     };
     assert_eq!(
         meta,
         ObjectMeta {
-            // A write never reports a size: it is the length you sent.
+            // A write never reports a size: it is the length you sent. The
+            // `content-length` on the response is the length of the response.
             size: None,
-            e_tag: Some(b"\"etag\""),
-            last_modified: Some(b"Fri, 24 May 2013 00:00:00 GMT"),
-            version: Some(b"version-1"),
+            e_tag: recorded.header("etag"),
+            last_modified: recorded.header("last-modified"),
+            // The account keeps versions, so the write names the one it made.
+            version: recorded.header("x-ms-version-id"),
             ..ObjectMeta::default()
         }
     );
+    assert!(meta.version.is_some());
+
+    // An object of no bytes is an object, and is stored the same way.
+    let empty = Recorded::load("azure-put/put-created-empty");
+    assert!(matches!(
+        blobs().accept_put_head(PutShape::default(), empty.head()),
+        Ok(PutHeadOutcome::Created { .. })
+    ));
 }
 
 #[test]
 fn a_failed_condition_needs_the_condition_that_explains_it() {
     let blobs = blobs();
+    let recorded = Recorded::load("azure-put/put-precondition-failed");
     assert_eq!(
-        blobs.accept_put_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
+        recorded.header("x-ms-error-code"),
+        Some(b"ConditionNotMet".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_put_head(conditional(ConditionKind::IfMatch), recorded.head()),
         Ok(PutHeadOutcome::PreconditionFailed)
     );
 
     // Nothing in an unconditional write explains a 412.
     assert_eq!(
-        blobs.accept_put_head(PutShape::default(), ResponseHead::new(412)),
+        blobs.accept_put_head(PutShape::default(), recorded.head()),
         Err(Error::Response(ResponseFault::Status))
     );
 
@@ -219,27 +236,64 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
 
 #[test]
 fn a_lost_race_to_create_names_the_object_that_already_exists() {
-    let mut head = ResponseHead::new(409);
-    head.error_code = Some(b"BlobAlreadyExists");
-    head.request_id = Some(b"request-123");
-    assert!(matches!(
-        blobs().accept_put_head(conditional(ConditionKind::IfNoneMatch), head),
-        Ok(PutHeadOutcome::ServiceFailure(Failure {
-            status: 409,
-            class: FailureClass::Other,
-            kind: Some(ServiceErrorKind::AlreadyExists),
-            request_id: Some(b"request-123"),
-        }))
-    ));
+    let recorded = Recorded::load("azure-put/put-lost-the-race-to-create");
+    assert_eq!(
+        recorded.header("x-ms-error-code"),
+        Some(b"BlobAlreadyExists".as_slice())
+    );
+    let outcome = blobs().accept_put_head(conditional(ConditionKind::IfNoneMatch), recorded.head());
+    assert!(
+        matches!(
+            outcome,
+            Ok(PutHeadOutcome::ServiceFailure(Failure {
+                status: 409,
+                class: FailureClass::Other,
+                kind: Some(ServiceErrorKind::AlreadyExists),
+                request_id: Some(_),
+            }))
+        ),
+        "{outcome:?}"
+    );
 }
 
+/// The same write to the same container that is not there, under each of the
+/// two identities the corpus is recorded with.
+///
+/// Azure settles the grant before it looks for the container, so what comes
+/// back says which grant the sender holds. An identity that may write only in
+/// one container is refused and never reaches the `404`; one that may write
+/// anywhere in the account is told the container is missing. Neither answer is
+/// a fact about writes, and a caller of this crate can meet either.
 #[test]
 fn a_write_to_a_missing_container_reports_the_container() {
     let blobs = blobs();
-    let mut head = ResponseHead::new(404);
-    head.error_code = Some(b"ContainerNotFound");
+
+    let refused = Recorded::load("azure-put/put-refused");
     assert_eq!(
-        blobs.accept_put_head(PutShape::default(), head),
+        refused.header("x-ms-error-code"),
+        Some(b"AuthorizationPermissionMismatch".as_slice())
+    );
+    let outcome = blobs.accept_put_head(PutShape::default(), refused.head());
+    assert!(
+        matches!(
+            outcome,
+            Ok(PutHeadOutcome::ServiceFailure(Failure {
+                status: 403,
+                class: FailureClass::Auth,
+                kind: Some(ServiceErrorKind::Unauthorized),
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+
+    let missing = Recorded::load("azure-put/put-container-missing");
+    assert_eq!(
+        missing.header("x-ms-error-code"),
+        Some(b"ContainerNotFound".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_put_head(PutShape::default(), missing.head()),
         Ok(PutHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         })

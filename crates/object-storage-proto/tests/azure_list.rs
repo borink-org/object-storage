@@ -1,4 +1,14 @@
 //! Azure listing encoding, response interpretation and page reading.
+//!
+//! Every page here that says what the service sends is one of the responses
+//! recorded under `tests/fixtures/azure-listing`, read back through the
+//! reader. A page written out in this file is one the service does not send:
+//! a shape the reader must still refuse, or a spelling that only a
+//! hand-written document has. Each of those says so.
+
+mod recorded;
+
+use recorded::Recorded;
 
 use borink_object_storage_proto::{
     BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass,
@@ -204,6 +214,20 @@ fn an_undersized_buffer_states_the_exact_requirement() {
 fn a_success_announces_the_page_and_a_failure_names_the_error() {
     let blobs = blobs();
 
+    // The service sends a page in chunks and states no length, so the head
+    // sizes nothing and the host reads the body to its end.
+    let page = Recorded::load("azure-listing/list-page");
+    assert_eq!(
+        page.header("transfer-encoding"),
+        Some(b"chunked".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_list_head(page.head()),
+        Ok(ListHeadOutcome::Page { expected_len: None })
+    );
+
+    // A host may still be told a length, and a head that states one sizes the
+    // buffer the body is read into.
     assert_eq!(
         blobs.accept_list_head(ResponseHead::from_headers(
             200,
@@ -213,17 +237,16 @@ fn a_success_announces_the_page_and_a_failure_names_the_error() {
             expected_len: Some(512)
         })
     );
-    assert_eq!(
-        blobs.accept_list_head(ResponseHead::new(200)),
-        Ok(ListHeadOutcome::Page { expected_len: None })
-    );
 
-    // A missing container is the one thing a listing does not find.
+    // A missing container is the one thing a listing does not find, and the
+    // service names it in the head rather than leaving it to the body.
+    let missing = Recorded::load("azure-listing/list-container-missing");
     assert_eq!(
-        blobs.accept_list_head(ResponseHead::from_headers(
-            404,
-            [("x-ms-error-code", b"ContainerNotFound".as_slice())]
-        )),
+        missing.header("x-ms-error-code"),
+        Some(b"ContainerNotFound".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_list_head(missing.head()),
         Ok(ListHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         })
@@ -276,39 +299,56 @@ fn a_failure_without_a_code_header_is_finished_by_the_body() {
 
 #[test]
 fn a_page_reports_every_object_it_holds() {
-    let mut body = page(&(object("a.txt", 8) + &object("b/c.txt", 0)), "");
+    let recorded = Recorded::load("azure-listing/list-page");
+    let mut body = recorded.body();
     let mut entries = [ListEntry::default(); 4];
     let listing = fill(&mut body, &mut entries);
 
-    assert_eq!(listing.filled, 2);
+    assert_eq!(listing.filled, 3);
     assert_eq!(listing.next_marker, None);
-    assert_eq!(entries[0].kind, EntryKind::Object);
-    assert_eq!(entries[0].key, "a.txt");
-    assert_eq!(entries[0].size, Some(8));
-    assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
+        entries[..3]
+            .iter()
+            .map(|entry| (entry.kind, entry.key, entry.size))
+            .collect::<Vec<_>>(),
+        [
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/a.txt",
+                Some(8)
+            ),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/nested/c.txt",
+                Some(1)
+            ),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/z.txt",
+                Some(2)
+            ),
+        ]
+    );
+
+    // The entity tag and the last-modified are the ones this document holds.
+    // Neither is asserted by value: another recording writes another pair.
+    let e_tag = entries[0].e_tag.expect("an object states an entity tag");
+    assert!(recorded.text().contains(&format!("<Etag>{e_tag}</Etag>")));
+    assert!(
         entries[0]
             .last_modified
             .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
-        Some(1_787_400_000_000)
+            .and_then(layered::http_date_ms)
+            .is_some()
     );
-    assert_eq!(entries[1].key, "b/c.txt");
-    assert_eq!(entries[1].size, Some(0));
     // The array past the page is untouched.
-    assert_eq!(entries[2], ListEntry::default());
+    assert_eq!(entries[3], ListEntry::default());
 }
 
 #[test]
 fn a_delimited_page_interleaves_groups_with_objects() {
-    let mut body = page(
-        &format!(
-            "{}<BlobPrefix><Name>directory/</Name></BlobPrefix>{}",
-            object("a.txt", 1),
-            object("z.txt", 2)
-        ),
-        "",
-    );
+    let recorded = Recorded::load("azure-listing/list-delimited");
+    let mut body = recorded.body();
     let mut entries = [ListEntry::default(); 3];
     let listing = fill(&mut body, &mut entries);
 
@@ -316,54 +356,126 @@ fn a_delimited_page_interleaves_groups_with_objects() {
     assert_eq!(
         entries.map(|entry| (entry.kind, entry.key)),
         [
-            (EntryKind::Object, "a.txt"),
-            (EntryKind::Prefix, "directory/"),
-            (EntryKind::Object, "z.txt"),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/a.txt"
+            ),
+            (
+                EntryKind::Prefix,
+                "borink-object-storage/fixtures/board/nested/"
+            ),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/z.txt"
+            ),
         ]
     );
     // A group of keys is not an object: it has no size and no entity tag.
     assert_eq!(entries[1].size, None);
     assert_eq!(entries[1].e_tag, None);
+    // On a flat account the service writes it with a name and nothing else.
+    assert!(recorded.text().contains(
+        "<BlobPrefix><Name>borink-object-storage/fixtures/board/nested/</Name></BlobPrefix>"
+    ));
 }
 
 #[test]
 fn a_hierarchical_account_reports_its_directories_as_such() {
-    let mut body = page(
-        "<Blob><Name>directory</Name><Properties>\
-         <Etag>0x8DF</Etag><Content-Length>0</Content-Length>\
-         <ResourceType>directory</ResourceType></Properties></Blob>\
-         <BlobPrefix><Name>other/</Name><Properties>\
-         <Etag>0x8E0</Etag></Properties></BlobPrefix>",
-        "",
+    // Undelimited, the directory is an entry of its own, written without the
+    // trailing separator, and the reader says which kind of entry it is.
+    let recorded = Recorded::load("azure-listing/list-hierarchical-directory");
+    let mut body = recorded.body();
+    let mut entries = [ListEntry::default(); 4];
+    assert_eq!(fill(&mut body, &mut entries).filled, 4);
+    assert_eq!(
+        entries.map(|entry| (entry.kind, entry.key, entry.size)),
+        [
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/a.txt",
+                Some(8)
+            ),
+            (
+                EntryKind::Directory,
+                "borink-object-storage/fixtures/board/nested",
+                None
+            ),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/nested/c.txt",
+                Some(1)
+            ),
+            (
+                EntryKind::Object,
+                "borink-object-storage/fixtures/board/z.txt",
+                Some(2)
+            ),
+        ]
     );
-    let mut entries = [ListEntry::default(); 2];
+    // The account states a length and an entity tag for the directory. A
+    // directory is not an object, so neither is read.
+    assert!(
+        recorded
+            .text()
+            .contains("<ResourceType>directory</ResourceType>")
+    );
+    assert_eq!(entries[1].e_tag, None);
+
+    // Delimited, the same account writes that directory as a group of keys,
+    // and furnishes it with the properties block that only this kind of
+    // account attaches to one. The reader takes the name and skips the rest.
+    let recorded = Recorded::load("azure-listing/list-delimited-hierarchical");
+    let mut body = recorded.body();
+    let mut entries = [ListEntry::default(); 3];
     fill(&mut body, &mut entries);
 
-    assert_eq!(entries[0].kind, EntryKind::Directory);
-    assert_eq!(entries[0].key, "directory");
-    assert_eq!((entries[0].size, entries[0].e_tag), (None, None));
-    // The properties that such an account attaches to a group are skipped.
     assert_eq!(entries[1].kind, EntryKind::Prefix);
-    assert_eq!(entries[1].e_tag, None);
+    assert_eq!(
+        entries[1].key,
+        "borink-object-storage/fixtures/board/nested/"
+    );
+    assert_eq!((entries[1].size, entries[1].e_tag), (None, None));
+    assert!(recorded.text().contains("<BlobPrefix><Name>"));
+    assert!(
+        recorded
+            .text()
+            .contains("<ResourceType>directory</ResourceType>")
+    );
 }
 
 #[test]
 fn a_name_is_decoded_where_it_stands() {
-    let mut body = page(
-        &(object("a&amp;b/caf&#233;.txt", 1)
-            + "<Blob><Name Encoded=\"true\">a%20b%2Fc%C3%A9</Name><Properties>\
-               <Content-Length>2</Content-Length></Properties></Blob>"),
-        "",
+    let recorded = Recorded::load("azure-listing/list-encoded-names");
+    let mut body = recorded.body();
+    let mut entries = [ListEntry::default(); 3];
+    assert_eq!(fill(&mut body, &mut entries).filled, 3);
+
+    // A name holding a character that XML cannot write at all is encoded
+    // whole, separators included, and says so. So it comes back with its
+    // separators as separators and that character as itself.
+    assert!(recorded.text().contains("<Name Encoded=\"true\">"));
+    assert_eq!(
+        entries[0].key,
+        "borink-object-storage/fixtures/names/100%-\u{fffe}-name.txt"
     );
-    let mut entries = [ListEntry::default(); 2];
-    fill(&mut body, &mut entries);
+    // A name the document can escape is escaped instead, and read back
+    // through the reference rather than through a percent escape.
+    assert!(recorded.text().contains("names/a&amp;b.txt"));
+    assert_eq!(
+        entries[1].key,
+        "borink-object-storage/fixtures/names/a&b.txt"
+    );
+    assert_eq!(
+        entries[2].key,
+        "borink-object-storage/fixtures/names/café.txt"
+    );
 
-    assert_eq!(entries[0].key, "a&b/café.txt");
-    assert_eq!(entries[1].key, "a b/cé");
-
-    // Written out, `false` says what leaving the attribute off says.
+    // Written out, `false` says what leaving the attribute off says. The
+    // service writes the attribute only when it is true, so this document is
+    // written here rather than recorded.
     let mut body = page(
-        "<Blob><Name Encoded=\"false\">a%20b</Name><Properties>         <Content-Length>1</Content-Length></Properties></Blob>",
+        "<Blob><Name Encoded=\"false\">a%20b</Name><Properties>\
+         <Content-Length>1</Content-Length></Properties></Blob>",
         "",
     );
     let mut entries = [ListEntry::default(); 1];
@@ -375,25 +487,27 @@ fn a_name_is_decoded_where_it_stands() {
 ///
 /// The live suite settles that Azure stores each of these under the name it
 /// was given; this settles that a page carrying one is read back the same way.
-/// Together they are the round trip.
+/// Together they are the round trip. The names are in the order the service
+/// listed them, which is the order of the names and not the order they were
+/// written in.
 #[test]
 fn a_key_that_leans_on_a_separator_is_read_back_whole() {
-    let keys = [
-        "directory/trailing/",
-        "directory/double//slash",
-        "directory/space /x",
-        "directory/a.b/c",
-        "directory/..leading",
-    ];
-    let mut body = page(
-        &keys.iter().map(|key| object(key, 1)).collect::<String>(),
-        "",
-    );
+    let recorded = Recorded::load("azure-listing/list-separator-keys");
+    let mut body = recorded.body();
     let mut entries = [ListEntry::default(); 5];
     let listing = fill(&mut body, &mut entries);
 
     assert_eq!(listing.filled, 5);
-    assert_eq!(entries.map(|entry| entry.key), keys);
+    assert_eq!(
+        entries.map(|entry| entry.key),
+        [
+            "borink-object-storage/fixtures/separators/..leading",
+            "borink-object-storage/fixtures/separators/a.b/c",
+            "borink-object-storage/fixtures/separators/double//slash",
+            "borink-object-storage/fixtures/separators/space /x",
+            "borink-object-storage/fixtures/separators/trailing/",
+        ]
+    );
 }
 
 /// A page of one key with as many separators as a key can hold. The live suite
@@ -401,31 +515,48 @@ fn a_key_that_leans_on_a_separator_is_read_back_whole() {
 /// costs the reader nothing it does not have.
 #[test]
 fn a_key_of_many_segments_is_one_entry_like_any_other() {
-    // A separator and a segment cost two UTF-16 code units, and a key holds
-    // 1024 of them.
-    let key = vec!["s"; 512].join("/");
-    assert_eq!(key.encode_utf16().count(), 1023);
-    assert_eq!(key.matches('/').count() + 1, 512);
-
-    let mut body = page(&object(&key, 1), "");
+    let recorded = Recorded::load("azure-listing/list-many-segments");
+    let mut body = recorded.body();
     let mut entries = [ListEntry::default(); 1];
     assert_eq!(fill(&mut body, &mut entries).filled, 1);
-    assert_eq!(entries[0].key, key);
+
+    // 255 path segments, the most the flat account takes.
+    assert_eq!(entries[0].key.matches('/').count() + 1, 255);
+    assert!(
+        entries[0]
+            .key
+            .starts_with("borink-object-storage/fixtures/s/")
+    );
+    assert!(entries[0].key.ends_with("/s"));
+    assert_eq!(entries[0].size, Some(1));
 }
 
 #[test]
 fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
-    let mut body = page(&object("a.txt", 1), "2!72!MDAwMDI4");
-    let mut entries = [ListEntry::default(); 1];
+    // The first of two pages over the same three objects. It names where the
+    // second starts, in the service's own opaque text.
+    let first = Recorded::load("azure-listing/list-first-page");
+    let mut body = first.body();
+    let mut entries = [ListEntry::default(); 2];
     let listing = fill(&mut body, &mut entries);
-    assert_eq!(listing.next_marker, Some("2!72!MDAwMDI4"));
+    let marker = listing.next_marker.expect("the first page names the next");
+    assert_eq!(listing.filled, 2);
+    assert!(
+        first
+            .text()
+            .contains(&format!("<NextMarker>{marker}</NextMarker>"))
+    );
 
-    let mut body = page(&object("a.txt", 1), "");
+    // The page that marker named is the last one, and the service writes an
+    // absent marker as an empty element with a space before the slash.
+    let next = Recorded::load("azure-listing/list-next-page");
+    let mut body = next.body();
+    let mut entries = [ListEntry::default(); 2];
     assert_eq!(fill(&mut body, &mut entries).next_marker, None);
+    assert!(next.text().contains("<NextMarker />"));
 
-    // The service writes an absent marker as an empty element, and its own
-    // serializer puts a space before the slash. Both name no next page, and
-    // both are the last page of every listing that ends.
+    // The same two facts, in the other spellings a document may use for them.
+    // The service writes one spelling; a reader has to take all of them.
     for empty in [
         "<NextMarker/>",
         "<NextMarker />",
@@ -437,7 +568,6 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
         assert_eq!(fill(&mut body, &mut entries).next_marker, None, "{empty}");
     }
 
-    // The same spellings, carrying a page to continue from.
     for named in [
         "<NextMarker>2!72!MDAwMDI4</NextMarker>",
         "<NextMarker>\n  2!72!MDAwMDI4\n</NextMarker>",
@@ -450,23 +580,11 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
             "{named}"
         );
     }
-
-    // A container with nothing in it is the page that carries no entry and no
-    // marker at all, written the way the service writes it.
-    let mut body = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-        <EnumerationResults ContainerName=\"container\">\
-        <Blobs />\
-        <NextMarker />\
-        </EnumerationResults>"
-        .to_vec();
-    let listing = fill(&mut body, &mut [ListEntry::default(); 1]);
-    assert_eq!((listing.filled, listing.next_marker), (0, None));
 }
 
 #[test]
 fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
-    let three = object("a.txt", 1) + &object("b.txt", 2) + &object("c.txt", 3);
-    let mut body = page(&three, "next");
+    let mut body = Recorded::load("azure-listing/list-page").body();
 
     // The array must hold the whole page. One that does not is refused, and
     // the error says how many entries the page holds. The page is walked to
@@ -483,19 +601,19 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
 
 #[test]
 fn an_array_that_holds_the_page_exactly_is_read_whole() {
-    let mut body = page(&(object("a.txt", 1) + &object("b.txt", 2)), "");
-    let listing = fill(&mut body, &mut [ListEntry::default(); 2]);
-    assert_eq!((listing.filled, listing.next_marker), (2, None));
+    let mut body = Recorded::load("azure-listing/list-page").body();
+    let listing = fill(&mut body, &mut [ListEntry::default(); 3]);
+    assert_eq!((listing.filled, listing.next_marker), (3, None));
 }
 
 #[test]
 fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
-    let mut body = page(&object("a.txt", 1), "next");
+    let mut body = Recorded::load("azure-listing/list-page").body();
     let mut none: [ListEntry; 0] = [];
     assert_eq!(
         blobs().fill_listing(&mut body, &mut none),
         Err(Error::Capacity(CapacityError {
-            required: 1,
+            required: 3,
             available: 0,
         }))
     );
@@ -503,13 +621,23 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
 
 #[test]
 fn an_empty_page_holds_nothing_and_may_still_name_a_next() {
+    // A prefix that holds nothing, as the service answers it.
+    let recorded = Recorded::load("azure-listing/list-empty");
+    let mut body = recorded.body();
+    let listing = fill(&mut body, &mut [ListEntry::default(); 2]);
+    assert_eq!(listing.filled, 0);
+    assert_eq!(listing.next_marker, None);
+    assert!(recorded.text().contains("<Blobs /><NextMarker />"));
+
+    // A page that holds no entry and still names a next one. The service
+    // sends this when a page's keys were all filtered out of it, which takes
+    // more keys than the recorded container holds, so it is written here.
     let mut body = page("", "next");
     let listing = fill(&mut body, &mut []);
     assert_eq!(listing.filled, 0);
     assert_eq!(listing.next_marker, Some("next"));
 
-    // A container with nothing in it comes back with the tag written this
-    // way instead.
+    // The same empty container, with both tags written without the space.
     let mut body = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
         <EnumerationResults ContainerName=\"container\">\
         <Blobs/><NextMarker/></EnumerationResults>"
@@ -712,82 +840,11 @@ fn whitespace_between_the_entries_is_not_an_entry() {
     assert_eq!(listing.next_marker, Some("next"));
 }
 
-/// One page exactly as the service sent it, byte for byte, from a live run.
-///
-/// The hand-written pages above are this crate's idea of what Azure writes.
-/// This is what it actually wrote: a byte-order mark, elements this crate
-/// reads nothing from, empty elements written `<X />` with the space, and a
-/// name that says it is encoded and is encoded whole, separators included.
-#[test]
-fn a_page_the_service_actually_sent() {
-    let mut body = Vec::from(
-        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-         <EnumerationResults ServiceEndpoint=\"https://borinkstoragetest.blob.core.windows.net/\" \
-         ContainerName=\"borink-object-test\">\
-         <Prefix>borink-object-storage/azure-list-scratch/</Prefix><Blobs>\
-         <Blob><Name Encoded=\"true\">borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt</Name>\
-         <VersionId>2026-09-01T19:08:11.7600332Z</VersionId><IsCurrentVersion>true</IsCurrentVersion>\
-         <Properties><Creation-Time>Tue, 01 Sep 2026 19:08:11 GMT</Creation-Time>\
-         <Last-Modified>Tue, 01 Sep 2026 19:08:11 GMT</Last-Modified>\
-         <Etag>0x8DF085C5E09984C</Etag><Content-Length>1</Content-Length>\
-         <Content-Type>application/octet-stream</Content-Type><Content-Encoding />\
-         <Content-Language /><Content-CRC64 /><Content-MD5>ndTkYSaMgDT1yFZOFVxnpg==</Content-MD5>\
-         <Cache-Control /><Content-Disposition /><BlobType>BlockBlob</BlobType>\
-         <AccessTier>Hot</AccessTier><AccessTierInferred>true</AccessTierInferred>\
-         <LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState>\
-         <ServerEncrypted>true</ServerEncrypted></Properties><OrMetadata /></Blob>\
-         </Blobs><NextMarker /></EnumerationResults>"
-            .as_bytes(),
-    );
-    let mut entries = [ListEntry::default(); 2];
-    let listing = fill(&mut body, &mut entries);
-
-    assert_eq!(listing.filled, 1);
-    // The whole name was encoded, so the separators come back as separators
-    // and the character XML cannot carry comes back as itself.
-    assert_eq!(
-        entries[0].key,
-        "borink-object-storage/azure-list-scratch/100%-\u{fffe}-name.txt"
-    );
-    assert_eq!(entries[0].kind, EntryKind::Object);
-    assert_eq!(entries[0].size, Some(1));
-    assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
-    assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
-        Some(1_788_289_691_000)
-    );
-    // The last page of the listing, written the way the service writes it.
-    assert_eq!(listing.next_marker, None);
-}
-
-// An entry as Azure writes it when the account has versioning, a tier and a
-// content type: values beside the properties element, values inside it, an
-// element that carries nothing, and one that carries other elements.
-fn furnished(name: &str) -> String {
-    format!(
-        "<Blob><Name>{name}</Name>\
-         <VersionId>2026-09-01T19:08:11.7600332Z</VersionId>\
-         <IsCurrentVersion>true</IsCurrentVersion>\
-         <Properties>\
-         <Creation-Time>Tue, 01 Sep 2026 19:08:11 GMT</Creation-Time>\
-         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
-         <Etag>0x8DF0046E8E555AF</Etag><Content-Length>1</Content-Length>\
-         <Content-Type>text/plain</Content-Type><Content-Encoding />\
-         <BlobType>BlockBlob</BlobType><AccessTier>Hot</AccessTier>\
-         </Properties>\
-         <Metadata><colour>a&amp;b</colour></Metadata><OrMetadata />\
-         </Blob>"
-    )
-}
-
 /// A property that this crate does not read is read from the entry itself,
 /// wherever the service put it.
 #[test]
 fn a_property_this_crate_does_not_read_is_read_from_the_entry() {
-    let mut body = page(&furnished("a.txt"), "");
+    let mut body = Recorded::load("azure-listing/list-furnished").body();
     let mut entries = [ListEntry::default(); 1];
     fill(&mut body, &mut entries);
     let entry = entries[0];
@@ -800,14 +857,11 @@ fn a_property_this_crate_does_not_read_is_read_from_the_entry() {
         Some(b"text/plain".as_slice())
     );
     assert_eq!(entry.property("IsCurrentVersion"), Some(b"true".as_slice()));
-    assert_eq!(
-        entry.property("VersionId"),
-        Some(b"2026-09-01T19:08:11.7600332Z".as_slice())
-    );
+    assert!(entry.property("VersionId").is_some());
 
     // An element that carries nothing has an empty value, which is not the
     // same fact as a property the entry never wrote.
-    assert_eq!(entry.property("Content-Encoding"), Some(b"".as_slice()));
+    assert_eq!(entry.property("Content-Language"), Some(b"".as_slice()));
     assert_eq!(entry.property("OrMetadata"), Some(b"".as_slice()));
     assert_eq!(entry.property("Snapshot"), None);
     // The properties element is what holds properties, not one of them.
@@ -825,7 +879,7 @@ fn a_property_this_crate_does_not_read_is_read_from_the_entry() {
 /// wrote them, and reports the properties element by its contents.
 #[test]
 fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
-    let mut body = page(&furnished("a.txt"), "");
+    let mut body = Recorded::load("azure-listing/list-furnished").body();
     let mut entries = [ListEntry::default(); 1];
     fill(&mut body, &mut entries);
 
@@ -846,8 +900,17 @@ fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
             "Content-Length",
             "Content-Type",
             "Content-Encoding",
+            "Content-Language",
+            "Content-CRC64",
+            "Content-MD5",
+            "Cache-Control",
+            "Content-Disposition",
             "BlobType",
             "AccessTier",
+            "AccessTierInferred",
+            "LeaseStatus",
+            "LeaseState",
+            "ServerEncrypted",
             "Metadata",
             "OrMetadata",
         ]
@@ -856,11 +919,11 @@ fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
     assert_eq!(walk.next(), None);
     assert_eq!(walk.next(), None);
 
-    // A group of keys carries a name and nothing else.
-    let mut body = page("<BlobPrefix><Name>nested/</Name></BlobPrefix>", "");
-    let mut entries = [ListEntry::default(); 1];
+    // A group of keys on a flat account carries a name and nothing else.
+    let mut body = Recorded::load("azure-listing/list-delimited").body();
+    let mut entries = [ListEntry::default(); 3];
     fill(&mut body, &mut entries);
-    assert_eq!(entries[0].properties().count(), 1);
+    assert_eq!(entries[1].properties().count(), 1);
 }
 
 /// Reading a page decodes the values it reports where they stand, so those
@@ -868,15 +931,16 @@ fn every_property_is_reported_once_in_the_order_the_service_wrote_them() {
 /// decoded text for them.
 #[test]
 fn a_value_that_was_decoded_in_place_is_reported_decoded_by_the_walk() {
-    let mut body = page(&object("a&amp;b.txt", 4), "");
-    let mut entries = [ListEntry::default(); 1];
+    let mut body = Recorded::load("azure-listing/list-encoded-names").body();
+    let mut entries = [ListEntry::default(); 3];
     fill(&mut body, &mut entries);
 
-    assert_eq!(entries[0].key, "a&b.txt");
-    assert_eq!(entries[0].property("Name"), Some(b"a&b.txt".as_slice()));
+    let key = "borink-object-storage/fixtures/names/a&b.txt";
+    assert_eq!(entries[1].key, key);
+    assert_eq!(entries[1].property("Name"), Some(key.as_bytes()));
     // Everything the page did not decode is what the service wrote.
     assert_eq!(
-        entries[0].property("BlobType"),
+        entries[1].property("BlobType"),
         Some(b"BlockBlob".as_slice())
     );
 }
@@ -908,6 +972,22 @@ fn a_listed_value_is_decoded_into_a_buffer_of_the_caller() {
 /// properties element carries nothing: neither reports that element itself.
 #[test]
 fn the_properties_element_is_never_reported_as_one_of_them() {
+    let mut body = Recorded::load("azure-listing/list-delimited-hierarchical").body();
+    let mut entries = [ListEntry::default(); 3];
+    fill(&mut body, &mut entries);
+
+    let names: Vec<&[u8]> = entries[1].properties().map(|(name, _)| name).collect();
+    assert_eq!(names[0], b"Name".as_slice());
+    assert!(names.contains(&b"ResourceType".as_slice()));
+    assert!(!names.contains(&b"Properties".as_slice()));
+    assert_eq!(entries[1].property("Properties"), None);
+    assert_eq!(
+        entries[1].property("ResourceType"),
+        Some(b"directory".as_slice())
+    );
+
+    // A properties element that carries nothing at all. The service writes one
+    // for every entry it furnishes, so this document is written here.
     let mut body = page(
         "<Blob><Name>a.txt</Name><Properties><Content-Length>4</Content-Length>\
          </Properties></Blob>\
@@ -920,7 +1000,6 @@ fn the_properties_element_is_never_reported_as_one_of_them() {
 
     let names: Vec<&[u8]> = entries[1].properties().map(|(name, _)| name).collect();
     assert_eq!(names, [b"Name".as_slice(), b"ResourceType".as_slice()]);
-    assert_eq!(entries[1].property("Properties"), None);
     // What follows the empty element is still walked.
     assert_eq!(
         entries[1].property("ResourceType"),

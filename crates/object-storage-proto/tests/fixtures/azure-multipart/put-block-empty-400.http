@@ -1,12 +1,12 @@
-HTTP/1.1 400 Bad Request
+HTTP/1.1 400 The value for one of the HTTP headers is not in the correct format.
 content-length: 321
 content-type: application/xml
 server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
-x-ms-request-id: dc79f341-b01e-0041-7ed6-3afc40000000
+x-ms-request-id: e27f05fc-001e-0054-561b-3debf3000000
 x-ms-version: 2026-04-06
 x-ms-error-code: InvalidHeaderValue
-date: Wed, 02 Sep 2026 12:30:20 GMT
+date: Sat, 05 Sep 2026 09:49:32 GMT
 
 ﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>InvalidHeaderValue</Code><Message>The value for one of the HTTP headers is not in the correct format.
-RequestId:dc79f341-b01e-0041-7ed6-3afc40000000
-Time:2026-09-02T12:30:21.7001713Z</Message><HeaderName>Content-Length</HeaderName><HeaderValue>0</HeaderValue></Error>
+RequestId:e27f05fc-001e-0054-561b-3debf3000000
+Time:2026-09-05T09:49:32.6244989Z</Message><HeaderName>Content-Length</HeaderName><HeaderValue>0</HeaderValue></Error>

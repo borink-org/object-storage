@@ -4,6 +4,10 @@
 //! the reader handles the shapes a document can take. It also has two sweeps
 //! that check a damaged body is refused rather than misread. One tries every
 //! truncation of a page, the other every single-byte change to one.
+//!
+//! No document here is a recorded response. Each is a shape a reader has to
+//! take or refuse, and several are shapes no service sends. What Azure sends
+//! is recorded under `tests/fixtures` and read back in `azure_list.rs`.
 
 use borink_object_storage_proto::{
     Blobs, Container, EntryKind, Error, ListEntry, Listing, ResponseFault,
