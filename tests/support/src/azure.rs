@@ -6,12 +6,19 @@
 //! names inside the responses: a run against other accounts rewrites every
 //! file. The environment overrides them for whoever does want that.
 //!
+//! Each account has two containers. The live suite writes in one, under a
+//! segment named after the run, and a lifecycle rule removes what it leaves.
+//! The recorder writes in the other, under fixed names, and empties it
+//! itself. The identity each one signs in with may write in its own
+//! container and not in the other's, so neither can touch the other's state
+//! whatever its code does.
+//!
 //! Every suite reads the same variables:
 //!
 //! - `AZURE_STORAGE_ACCESS_TOKEN`: a blob data-plane token. Never optional.
 //! - `AZURE_FLAT_ENDPOINT`, `AZURE_HIERARCHICAL_ENDPOINT`: other accounts of
 //!   each kind.
-//! - `AZURE_STORAGE_CONTAINER`: another container, on both.
+//! - `AZURE_LIVE_CONTAINER`, `AZURE_FIXTURES_CONTAINER`: other containers.
 //!
 //! The live suite runs against one account at a time and adds
 //! `AZURE_HIERARCHICAL=1` to pick the hierarchical one. The recorder records
@@ -27,14 +34,18 @@ pub const FLAT_ENDPOINT: &str = "https://borinkstoragetest.blob.core.windows.net
 /// The account with a hierarchical namespace.
 pub const HIERARCHICAL_ENDPOINT: &str = "https://borinkstoragehnstest.blob.core.windows.net";
 
-/// The one container on each account that the suites may write in.
-pub const CONTAINER: &str = "borink-object-test";
+/// The container on each account that the live suite writes in.
+pub const LIVE_CONTAINER: &str = "borink-object-test";
 
-/// Everything the live suite writes lives under this prefix.
+/// The container on each account that the recorder writes in.
+pub const FIXTURES_CONTAINER: &str = "borink-object-fixtures";
+
+/// Everything the live suite writes lives under this prefix in
+/// [`LIVE_CONTAINER`], under a segment named after the run.
 pub const LIVE_PREFIX: &str = "borink-object-storage/live/";
 
-/// Everything the recorder writes lives under this prefix. It never overlaps
-/// [`LIVE_PREFIX`], so the two can run at the same time.
+/// Everything the recorder writes lives under this prefix in
+/// [`FIXTURES_CONTAINER`].
 pub const FIXTURES_PREFIX: &str = "borink-object-storage/fixtures/";
 
 /// One storage account, as the suites address it.
@@ -42,7 +53,8 @@ pub const FIXTURES_PREFIX: &str = "borink-object-storage/fixtures/";
 pub struct Account {
     /// `https://account.blob.core.windows.net`, with no path.
     pub endpoint: String,
-    /// The container the suite writes in.
+    /// The container the suite writes in: the live one unless
+    /// [`Account::for_fixtures`] said otherwise.
     pub container: String,
     /// Whether the account has a hierarchical namespace.
     pub hierarchical: bool,
@@ -82,6 +94,15 @@ impl Account {
         }
     }
 
+    /// The same account, addressed at the recorder's container.
+    pub fn for_fixtures(self) -> Self {
+        Self {
+            container: env::var("AZURE_FIXTURES_CONTAINER")
+                .unwrap_or_else(|_| FIXTURES_CONTAINER.to_owned()),
+            ..self
+        }
+    }
+
     /// The account's own name: `borinkstoragetest`.
     pub fn name(&self) -> &str {
         self.endpoint
@@ -93,7 +114,7 @@ impl Account {
 }
 
 fn container() -> String {
-    env::var("AZURE_STORAGE_CONTAINER").unwrap_or_else(|_| CONTAINER.to_owned())
+    env::var("AZURE_LIVE_CONTAINER").unwrap_or_else(|_| LIVE_CONTAINER.to_owned())
 }
 
 /// The data-plane token in `AZURE_STORAGE_ACCESS_TOKEN`.

@@ -1,9 +1,10 @@
-//! What the test suites share: the accounts they talk to, the file format of
-//! a recorded response, and two encoders that know nothing about a storage
-//! service.
+//! What the test suites share: the accounts they talk to, the name of a run,
+//! the file format of a recorded response, and two encoders that know nothing
+//! about a storage service.
 
 pub mod azure;
 pub mod recorded;
+pub mod run;
 
 /// Encodes `bytes` as base64 with padding.
 pub fn base64(bytes: &[u8]) -> String {

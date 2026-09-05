@@ -2,7 +2,7 @@
 
 The heads that `crates/object-storage-proto/tests/azure_responses.rs` reads: a whole object, a range, a range past the end of one, a condition that held and one that did not, and the statuses a read answers with when there is nothing to return.
 
-Every file here is one response as the account sent it on Sat, 05 Sep 2026 10:56:18 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
+Every file here is one response as the account sent it on Sat, 05 Sep 2026 11:30:54 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
 
 Do not edit these files. `docs/AZURE-TESTING.md` says how to record them again.
 

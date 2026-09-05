@@ -5,11 +5,12 @@
 #   setup.sh --check    say what is missing, create nothing, exit 1 if anything is
 #
 # What it makes, in order: the resource group; the two storage accounts, one
-# with a hierarchical namespace, each with the one container the suites write
-# in, an open firewall and, on the flat account, versioning; the three
+# with a hierarchical namespace, each with a container for the live suite and
+# one for the recorder, an open firewall and, on the flat account, versioning;
+# the lifecycle rules that remove what live runs leave behind; the three
 # applications and their service principals; the role each one holds on each
-# account; the federated credential the workflow signs in with; a client secret
-# for each recorder identity, in `~/.config/borink/`; and the GitHub
+# account, and no other; the federated credential the workflow signs in with; a
+# client secret for each identity, in `~/.config/borink/`; and the GitHub
 # environment and its reviewer. `identities.env` names all of it, and an
 # identifier that is made here is written back into that file.
 #
@@ -125,15 +126,55 @@ account() {
     fi
   fi
 
-  # The container is made through the management plane, which an owner of the
-  # subscription may use without any data-plane grant of their own.
-  if [ "$(az storage container-rm exists --storage-account "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
-      --name "$AZURE_CONTAINER" --query exists --output tsv)" = true ]; then
-    have "container $AZURE_CONTAINER on $name"
+  # The containers are made through the management plane, which an owner of
+  # the subscription may use without any data-plane grant of their own.
+  local container
+  for container in "$AZURE_LIVE_CONTAINER" "$AZURE_FIXTURES_CONTAINER"; do
+    if [ "$(az storage container-rm exists --storage-account "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
+        --name "$container" --query exists --output tsv)" = true ]; then
+      have "container $container on $name"
+    else
+      need "container $container on $name" \
+        az storage container-rm create --storage-account "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
+          --name "$container" --output none
+    fi
+  done
+
+  # Live runs never clean up after themselves: every run writes under a name
+  # of its own, and this removes what they leave a day later. The recorder does
+  # clean up, but a versioned account keeps a version of every object it
+  # removes, and those go the same way. The rule is compared by the names of
+  # its rules; a changed rule under an old name is not noticed.
+  local policy wanted
+  if [ "$hierarchical" = false ]; then
+    wanted=live-runs,fixtures-debris
+    policy=$(jq -n --arg live "$AZURE_LIVE_CONTAINER/" --arg fixtures "$AZURE_FIXTURES_CONTAINER/" '{rules: [
+      {enabled: true, name: "live-runs", type: "Lifecycle", definition: {
+        filters: {blobTypes: ["blockBlob"], prefixMatch: [$live]},
+        actions: {baseBlob: {delete: {daysAfterModificationGreaterThan: 1}},
+                  snapshot: {delete: {daysAfterCreationGreaterThan: 1}},
+                  version: {delete: {daysAfterCreationGreaterThan: 1}}}}},
+      {enabled: true, name: "fixtures-debris", type: "Lifecycle", definition: {
+        filters: {blobTypes: ["blockBlob"], prefixMatch: [$fixtures]},
+        actions: {snapshot: {delete: {daysAfterCreationGreaterThan: 1}},
+                  version: {delete: {daysAfterCreationGreaterThan: 1}}}}}]}')
   else
-    need "container $AZURE_CONTAINER on $name" \
-      az storage container-rm create --storage-account "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
-        --name "$AZURE_CONTAINER" --output none
+    # No versions and no snapshots on a hierarchical account.
+    wanted=live-runs
+    policy=$(jq -n --arg live "$AZURE_LIVE_CONTAINER/" '{rules: [
+      {enabled: true, name: "live-runs", type: "Lifecycle", definition: {
+        filters: {blobTypes: ["blockBlob"], prefixMatch: [$live]},
+        actions: {baseBlob: {delete: {daysAfterModificationGreaterThan: 1}}}}}]}')
+  fi
+  local rules
+  rules=$(az storage account management-policy show --account-name "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query 'policy.rules[].name' --output tsv 2>/dev/null | paste -sd, - || true)
+  if [ "$rules" = "$wanted" ]; then
+    have "lifecycle rules $wanted on $name"
+  else
+    need "lifecycle rules $wanted on $name" \
+      az storage account management-policy create --account-name "$name" --resource-group "$AZURE_RESOURCE_GROUP" \
+        --policy "$policy" --output none
   fi
 }
 
@@ -189,16 +230,36 @@ grant() {
   fi
 }
 
+# `revoke <object id> <who> <role> <scope suffix> <account>`: a grant that must
+# not exist, because it would let one tool write where the other does.
+revoke() {
+  local object=$1 who=$2 role=$3 suffix=$4 account=$5
+  [ -n "$object" ] || return 0
+  local scope
+  scope="$(scope_of "$account")$suffix"
+  local count
+  count=$(az role assignment list --assignee "$object" --role "$role" --scope "$scope" --query 'length(@)' --output tsv)
+  if [ "$count" = 0 ]; then
+    have "$who: no $role on $account$suffix"
+  else
+    need "$who: removing $role on $account$suffix" \
+      az role assignment delete --assignee "$object" --role "$role" --scope "$scope" --output none
+  fi
+}
+
 for account in "$AZURE_FLAT_ACCOUNT" "$AZURE_HIERARCHICAL_ACCOUNT"; do
-  # The workflow's identity and the recorder's: writing in the one container,
-  # reading the whole blob service. The wider read is what lets a listing of a
-  # container that is not there answer 404 rather than 403.
-  for who in LIVE FIXTURES; do
-    object=$(eval "echo \"\$${who}_OBJECT_ID\"")
-    grant "$object" "$who" "Storage Blob Data Contributor" "/blobServices/default/containers/$AZURE_CONTAINER" "$account"
-    grant "$object" "$who" "Storage Blob Data Reader" "/blobServices/default" "$account"
-  done
-  # The account-scoped recorder identity: writing anywhere.
+  # The live identity writes in the live container and the recorder's in the
+  # fixtures container, and neither in the other's. Both read the whole blob
+  # service, which is what lets a listing of a container that is not there
+  # answer 404 rather than 403.
+  grant "$LIVE_OBJECT_ID" LIVE "Storage Blob Data Contributor" "/blobServices/default/containers/$AZURE_LIVE_CONTAINER" "$account"
+  grant "$LIVE_OBJECT_ID" LIVE "Storage Blob Data Reader" "/blobServices/default" "$account"
+  revoke "$LIVE_OBJECT_ID" LIVE "Storage Blob Data Contributor" "/blobServices/default/containers/$AZURE_FIXTURES_CONTAINER" "$account"
+  grant "$FIXTURES_OBJECT_ID" FIXTURES "Storage Blob Data Contributor" "/blobServices/default/containers/$AZURE_FIXTURES_CONTAINER" "$account"
+  grant "$FIXTURES_OBJECT_ID" FIXTURES "Storage Blob Data Reader" "/blobServices/default" "$account"
+  revoke "$FIXTURES_OBJECT_ID" FIXTURES "Storage Blob Data Contributor" "/blobServices/default/containers/$AZURE_LIVE_CONTAINER" "$account"
+  # The account-scoped recorder identity: writing anywhere. It records the two
+  # responses a container-scoped writer is refused before it can provoke.
   grant "$FIXTURES_ACCOUNT_OBJECT_ID" FIXTURES_ACCOUNT "Storage Blob Data Contributor" "/blobServices/default" "$account"
 done
 
@@ -222,7 +283,9 @@ if [ -n "$LIVE_CLIENT_ID" ]; then
 fi
 
 # `secret <prefix> <file>`: a client secret for the identity `<prefix>` names,
-# in `file`, made only when the file is not there. It is never printed.
+# in `file`, made only when the file is not there. It is never printed. A
+# reset replaces the application's password credentials and leaves a federated
+# credential alone, so the live identity keeps signing in from Actions.
 secret() {
   local prefix=$1 file=$2 client
   client=$(eval "echo \"\$${prefix}_CLIENT_ID\"")
@@ -238,6 +301,7 @@ secret() {
   fi
 }
 
+secret LIVE "${AZURE_LIVE_SECRET_FILE:-$HOME/.config/borink/azure-live.secret}"
 secret FIXTURES "${AZURE_FIXTURES_SECRET_FILE:-$HOME/.config/borink/azure-fixtures.secret}"
 secret FIXTURES_ACCOUNT "${AZURE_FIXTURES_ACCOUNT_SECRET_FILE:-$HOME/.config/borink/azure-fixtures-account.secret}"
 

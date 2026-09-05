@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Runs the live suite against the real accounts.
 #
-#   run.sh                      both accounts, the flat one first
+#   run.sh                      both accounts, side by side
 #   run.sh flat                 one account
 #   run.sh hierarchical
 #   run.sh flat -- lists_       what follows `--` goes to the test harness
 #
 # The token comes from `AZURE_STORAGE_ACCESS_TOKEN` when that is set, and from
-# `tests/azure-setup/token.sh` otherwise: the container-scoped identity on a
-# workstation, the workflow identity in GitHub Actions. The workflow runs this
-# script and nothing else, so what CI does is what you can do here.
+# `tests/azure-setup/token.sh live` otherwise: the live identity, signing in
+# with a workstation secret or, in GitHub Actions, with the job's OIDC token.
+# The workflow runs this script and nothing else, so what CI does is what you
+# can do here.
 #
-# Every test owns its own keys, so the tests of one account run at once, as
-# the harness runs them. Two accounts are two runs, because the suite reads
-# which one it is on from `AZURE_HIERARCHICAL`; here they run side by side,
-# each line of output marked with its account.
+# Every key the run writes sits under a segment named after the run, `TEST_RUN`,
+# so runs never see each other and nothing is cleaned up: a lifecycle rule on
+# the account removes what runs leave behind after a day. In Actions the run
+# is named after the workflow run; here, after the clock.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -29,11 +30,21 @@ esac
 [ "${1:-}" = -- ] && shift
 
 if [ -z "${AZURE_STORAGE_ACCESS_TOKEN:-}" ]; then
-  AZURE_STORAGE_ACCESS_TOKEN=$("$root/tests/azure-setup/token.sh")
+  AZURE_STORAGE_ACCESS_TOKEN=$("$root/tests/azure-setup/token.sh" live)
   export AZURE_STORAGE_ACCESS_TOKEN
 fi
 # Nothing below prints the token, and in Actions the log would hide it anyway.
 [ -n "${GITHUB_ACTIONS:-}" ] && echo "::add-mask::$AZURE_STORAGE_ACCESS_TOKEN"
+
+if [ -z "${TEST_RUN:-}" ]; then
+  if [ -n "${GITHUB_RUN_ID:-}" ]; then
+    TEST_RUN=gh-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}
+  else
+    TEST_RUN=$(date -u +%Y%m%dT%H%M%SZ)-$$
+  fi
+  export TEST_RUN
+fi
+echo "--- azure-live: run $TEST_RUN"
 
 # The binary is built once, before the runs, so that neither run waits on the
 # other's build.

@@ -3,7 +3,7 @@
 mod loopback;
 
 use borink_object_storage_proto::{Blobs, Container, EntryKind, ListEntry, PhysicalList};
-use test_support::azure::{CONTAINER, FIXTURES_PREFIX};
+use test_support::azure::{FIXTURES_CONTAINER, FIXTURES_PREFIX};
 
 /// The host sends the request that produced `azure-listing/list-page`, as the
 /// notes beside that file spell it, and reads the page Azure answered with.
@@ -14,7 +14,7 @@ fn reads_the_page_that_the_generated_request_asked_for() {
 
     let board = format!("{FIXTURES_PREFIX}board/");
     let blobs = Blobs::new(
-        Container::new(&server.endpoint, CONTAINER).unwrap(),
+        Container::new(&server.endpoint, FIXTURES_CONTAINER).unwrap(),
         "token",
     )
     .unwrap();
@@ -45,7 +45,7 @@ fn reads_the_page_that_the_generated_request_asked_for() {
     let request = server.request();
     assert!(
         request.starts_with(&format!(
-            "GET /{CONTAINER}?restype=container&comp=list&prefix=borink-object-storage%2Ffixtures%2Fboard%2F HTTP/1.1\r\n"
+            "GET /{FIXTURES_CONTAINER}?restype=container&comp=list&prefix=borink-object-storage%2Ffixtures%2Fboard%2F HTTP/1.1\r\n"
         )),
         "{request}"
     );

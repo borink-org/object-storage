@@ -11,7 +11,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
     Blobs, Container, ListEntry, PhysicalList, Timestamps, WireRequest, layered,
@@ -42,9 +42,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // each and both answers belong in the corpus. See `Account::account_scoped`.
     let token = azure::token();
     let account_token = azure::token_from("AZURE_STORAGE_ACCESS_TOKEN_ACCOUNT");
-    let flat = Account::new(azure::Account::flat(), &token, &account_token);
-    let hierarchical = Account::new(azure::Account::hierarchical(), &token, &account_token);
+    let flat = Account::new(
+        azure::Account::flat().for_fixtures(),
+        &token,
+        &account_token,
+    );
+    let hierarchical = Account::new(
+        azure::Account::hierarchical().for_fixtures(),
+        &token,
+        &account_token,
+    );
 
+    // One recording at a time: the corpus has fixed names, so two runs at
+    // once would record each other's objects.
+    let lock = Lock::acquire(&flat)?;
     let mut session = Session::new(fixtures_dir()?);
     // Both accounts are recorded in one run, because a group holds files from
     // each and the notes beside them name every file in the group.
@@ -53,6 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     corpus::record(&mut session, &flat, &hierarchical)?;
     session.empty(&flat)?;
     session.empty(&hierarchical)?;
+    lock.release()?;
     session.write_notes()?;
 
     println!("azure-record: wrote {} responses", session.written);
@@ -67,6 +79,106 @@ fn fixtures_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
         .and_then(Path::parent)
         .ok_or("the workspace root is not above this crate")?;
     Ok(root.join("crates/object-storage-proto/tests/fixtures"))
+}
+
+/// The key of the lock, in the fixtures container and outside [`PREFIX`], so
+/// that emptying the prefix leaves it alone.
+const LOCK_KEY: &str = "recorder.lock";
+
+/// How long a lock is good for. A recording takes well under a minute; a lock
+/// older than this belongs to a run that died, and the next run takes it over.
+const LOCK_SECONDS: u64 = 300;
+
+/// The lock that makes recordings take turns.
+///
+/// It is an object created on condition that it does not exist yet, which is
+/// `If-None-Match: *` on every object store this crate will talk to, and which
+/// this crate already encodes for `Put Blob`. The object states when the lock
+/// expires, so a run that died does not hold it forever. There is no lease and
+/// no renewal: a run that outlasts its lock says so and fails, because another
+/// run may have started recording over it.
+struct Lock {
+    url: String,
+    account: Account,
+    taken: Instant,
+}
+
+impl Lock {
+    fn acquire(account: &Account) -> Result<Self, Box<dyn std::error::Error>> {
+        let url = account.url(LOCK_KEY);
+        // Once to take a lock nobody holds, and once more to take over one
+        // that has expired.
+        for _ in 0..2 {
+            let expires = unix_now() + LOCK_SECONDS;
+            let request = account
+                .raw("PUT", url.clone())
+                .header("x-ms-blob-type", "BlockBlob")
+                .header("if-none-match", "*")
+                .body(format!("expires {expires}\n").into_bytes());
+            let response = wire::send(&request)?;
+            match response.status {
+                201 => {
+                    return Ok(Self {
+                        url,
+                        account: account.in_container(&account.container),
+                        taken: Instant::now(),
+                    });
+                }
+                // Somebody holds it. Read when that lock expires.
+                409 | 412 => {
+                    let held = wire::send(&account.raw("GET", url.clone()))?;
+                    if held.status == 404 {
+                        continue;
+                    }
+                    let expires = std::str::from_utf8(&held.body)
+                        .ok()
+                        .and_then(|body| body.strip_prefix("expires "))
+                        .and_then(|rest| rest.trim().parse::<u64>().ok())
+                        .ok_or_else(|| {
+                            format!("{url} holds no expiry: not a lock this program wrote")
+                        })?;
+                    let now = unix_now();
+                    if expires <= now {
+                        wire::send(&account.raw("DELETE", url.clone()))?;
+                        continue;
+                    }
+                    return Err(format!(
+                        "another recording holds {url} for {} more seconds; wait for it, or \
+                         remove the object if that run is known to have died",
+                        expires - now
+                    )
+                    .into());
+                }
+                _ => {
+                    return Err(format!("taking {url}: {}", response.status_line).into());
+                }
+            }
+        }
+        Err(format!("{url} could not be taken").into())
+    }
+
+    fn release(self) -> Result<(), Box<dyn std::error::Error>> {
+        let took = self.taken.elapsed().as_secs();
+        if took >= LOCK_SECONDS {
+            return Err(format!(
+                "the run took {took} seconds and its lock was good for {LOCK_SECONDS}: another \
+                 recording may have overlapped it, so record again"
+            )
+            .into());
+        }
+        let response = wire::send(&self.account.raw("DELETE", self.url.clone()))?;
+        if !matches!(response.status, 202 | 404) {
+            return Err(format!("releasing {}: {}", self.url, response.status_line).into());
+        }
+        Ok(())
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs()
 }
 
 /// The identity that may write in one container of the account, and read the
@@ -354,7 +466,12 @@ impl Session {
     /// it seeded and nothing a previous run left behind.
     ///
     /// A hierarchical account refuses to remove a directory that still holds
-    /// something, so the longest key goes first.
+    /// something, so the longest key goes first. An object with snapshots is
+    /// refused unless the removal names them, so every removal does: a run
+    /// that died after taking a snapshot must not stop the next one. What no
+    /// listing shows, the blocks staged against a key that was never
+    /// committed, is discarded where the corpus stages blocks, by writing the
+    /// key whole first.
     pub fn empty(&self, account: &Account) -> Result<(), Box<dyn std::error::Error>> {
         let blobs = account.blobs();
         let mut marker: Option<String> = None;
@@ -391,7 +508,11 @@ impl Session {
 
         keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
         for key in keys {
-            let response = wire::send(&account.raw("DELETE", account.url(&key)))?;
+            let response = wire::send(
+                &account
+                    .raw("DELETE", account.url(&key))
+                    .header("x-ms-delete-snapshots", "include"),
+            )?;
             if !matches!(response.status, 202 | 404) {
                 return Err(format!("removing {key}: {}", response.status_line).into());
             }

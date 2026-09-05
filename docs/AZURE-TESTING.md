@@ -20,13 +20,13 @@ Values that change with every recording, an entity tag, a last-modified, a versi
 
 **Link and ABI checks**: `checks/no-allocator` links the crate with no global allocator, `checks/freestanding` links a bare-metal image, and `crates/object-storage-c` is tested from C and C++. None of them touch Azure.
 
-**The live suite**, `tests/azure-live/`, every test `#[ignore]`. It runs the real code against the real accounts and asks whether Azure still behaves as the crate and the corpus say. It is optional: run it when a rule about the service is added or doubted, and in CI once a reviewer approves. A live test that fails with an explanation is the service having changed, and the recorder is how the change gets into the corpus.
+**The live suite**, `tests/azure-live/`, every test `#[ignore]`. It runs the real code against the real accounts and asks whether Azure still behaves as the crate and the corpus say. It is optional: run it when a rule about the service is added or doubted, and in CI once a reviewer approves. A live test that fails with an explanation is the service having changed, and the recorder is how the change gets into the corpus. Every run writes under a name of its own and cleans nothing up; see [Runs that overlap](#runs-that-overlap).
 
 `cargo test --workspace` runs everything but the live suite, with no credentials and no network.
 
 ## The recorded corpus
 
-`crates/object-storage-proto/tests/fixtures/` holds one file per response, in groups: `azure-listing`, `azure-get`, `azure-put`, `azure-delete`, `azure-multipart`. `tests/azure-record` writes all of them in one run. It empties its prefix on both accounts, seeds the objects that provoke each response, sends the requests, writes what came back, empties the prefix again, and writes a `README.md` in each group naming every file, the request that produced it, the account that answered, the identity that sent it and what the response shows. Do not edit the files or the notes; record them again.
+`crates/object-storage-proto/tests/fixtures/` holds one file per response, in groups: `azure-listing`, `azure-get`, `azure-put`, `azure-delete`, `azure-multipart`. `tests/azure-record` writes all of them in one run. It takes the recorder's lock, empties its prefix in the fixtures container of both accounts, seeds the objects that provoke each response, sends the requests, writes what came back, empties the prefix again, releases the lock, and writes a `README.md` in each group naming every file, the request that produced it, the account that answered, the identity that sent it and what the response shows. Do not edit the files or the notes; record them again.
 
 A file is the status line as it arrived, every header in arrival order with its name lower-cased, a blank line, and the body to the last byte. A body that arrived in chunks is joined; the header that records the framing stays as it arrived. `tests/support/src/recorded.rs` spells the format once, for the recorder that writes it and the tests that read it.
 
@@ -40,9 +40,9 @@ A request the crate encodes is built through the crate, so the recorded response
 tests/azure-record/run.sh
 ```
 
-It takes about twenty seconds, then prints the diff summary. A run that changes nothing but the dates, the entity tags, the versions and the request identifiers is the service answering as it did before. Anything else is the thing worth looking at, and worth saying in the commit message.
+It takes about twenty seconds, then prints the diff summary and, from `tests/azure-record/changes.sh`, the diff with the values that change on every recording masked: dates, entity tags, request and version identifiers, markers. A run that prints `nothing` there is the service answering as it did before. Anything else is the thing worth looking at, and worth saying in the commit message. The fixtures are files, so a change to them reaches `master` the way any change does: through a pull request, where `changes.sh` against the base commit shows a reviewer what actually moved.
 
-It records from both accounts in one run because a group holds files from each and the notes name every file in the group. Its prefix, `borink-object-storage/fixtures/`, is a constant: a recorded name is part of the response and so part of what a test reads back, and a run under another prefix would rewrite every file for no reason.
+It records from both accounts in one run because a group holds files from each and the notes name every file in the group. Its container and prefix, `borink-object-fixtures` and `borink-object-storage/fixtures/`, are constants: a recorded name is part of the response and so part of what a test reads back, and a run under other names would rewrite every file for no reason. That is also why the recorder cleans up rather than writing somewhere fresh: fixed names have to start empty. A run that died leaves objects with snapshots, so every removal names the snapshots; it leaves blocks staged against a key, which no listing shows, so the multipart recording writes its key whole first, which discards them.
 
 ### Adding a response
 
@@ -56,26 +56,29 @@ A page a small container cannot hold. An empty page that still names a next one 
 
 ## The accounts and the identities
 
-Two storage accounts in resource group `borink-storage-test`, each with the container `borink-object-test`: `borinkstoragetest` has a flat namespace and keeps versions, `borinkstoragehnstest` has a hierarchical namespace. The suites run against both because the two behave differently: a hierarchical account lists its directories as entries, drops an empty path segment, takes a quarter of the path segments, and has no snapshots.
+Two storage accounts in resource group `borink-storage-test`: `borinkstoragetest` has a flat namespace and keeps versions, `borinkstoragehnstest` has a hierarchical namespace. The suites run against both because the two behave differently: a hierarchical account lists its directories as entries, drops an empty path segment, takes a quarter of the path segments, and has no snapshots. Each account has two containers: `borink-object-test`, which the live suite writes in, and `borink-object-fixtures`, which the recorder writes in.
 
-`tests/support/src/azure.rs` names the accounts, the container and the two prefixes, `borink-object-storage/live/` for the live suite and `borink-object-storage/fixtures/` for the recorder, and reads the environment every suite shares:
+Versioning and snapshots stay on. The corpus records the shapes they produce, `<VersionId>` beside an object and `409 SnapshotsPresent` on a removal, and the live suite checks them, so an account without them would test less. What they leave behind is handled instead; see below.
+
+`tests/support/src/azure.rs` names the accounts, the containers and the two prefixes, `borink-object-storage/live/` for the live suite and `borink-object-storage/fixtures/` for the recorder, and reads the environment every suite shares:
 
 | variable | meaning |
 |---|---|
 | `AZURE_STORAGE_ACCESS_TOKEN` | a blob data-plane token; `tests/azure-setup/token.sh` prints one |
 | `AZURE_HIERARCHICAL` | exactly `1` makes the live suite run against the hierarchical account |
+| `TEST_RUN` | the live run's name, one path segment; `run.sh` sets it, a process without one makes one up |
 | `AZURE_STORAGE_ACCESS_TOKEN_ACCOUNT` | the recorder's second token; `token.sh account` prints it |
-| `AZURE_FLAT_ENDPOINT`, `AZURE_HIERARCHICAL_ENDPOINT`, `AZURE_STORAGE_CONTAINER` | other accounts or another container, for whoever wants them |
+| `AZURE_FLAT_ENDPOINT`, `AZURE_HIERARCHICAL_ENDPOINT`, `AZURE_LIVE_CONTAINER`, `AZURE_FIXTURES_CONTAINER` | other accounts or containers, for whoever wants them |
 
 The live suite runs against one account per run and the recorder against both per run. That is the one place the two differ, and it follows from what each writes: a live run is one job in CI, one account each so the two run at once, while a recording is one corpus, whose notes name files from both accounts.
 
-Three service principals, all in `tests/azure-setup/identities.env` with their identifiers:
+Three service principals, all in `tests/azure-setup/identities.env` with their identifiers. Each tool has one, which may write where that tool writes and nowhere else:
 
-- `borink-object-storage-github-live` is the workflow's identity. It signs in with a federated credential for the `azure-live` environment of this repository, so no Azure secret is stored in GitHub. It holds `Storage Blob Data Contributor` on the container and `Storage Blob Data Reader` on the whole blob service of each account. The wider read is what lets a listing of a container that does not exist answer `404 ContainerNotFound`: a container-scoped grant is refused with 403 before the service says whether any other container is there.
-- `borink-object-storage-fixtures` is the recorder's identity, with the same two roles. It signs in with a client secret, because it runs from a workstation. Running the live suite locally under it sees exactly what CI sees, the 404 included.
+- `borink-object-storage-github-live` is the live suite's identity. In Actions it signs in with a federated credential for the `azure-live` environment of this repository, so no Azure secret is stored in GitHub; on a workstation, with a client secret. It holds `Storage Blob Data Contributor` on the live container and `Storage Blob Data Reader` on the whole blob service of each account, and no grant on the fixtures container. The wider read is what lets a listing of a container that does not exist answer `404 ContainerNotFound`: a container-scoped grant is refused with 403 before the service says whether any other container is there.
+- `borink-object-storage-fixtures` is the recorder's identity: `Storage Blob Data Contributor` on the fixtures container, `Storage Blob Data Reader` on the whole blob service, and no grant on the live container. It signs in with a client secret.
 - `borink-object-storage-fixtures-account` holds `Storage Blob Data Contributor` on the whole blob service of each account. Azure settles the grant before it looks for the container, so a write to a container that is not there is `403 AuthorizationPermissionMismatch` under the container-scoped identity and `404 ContainerNotFound` under this one. The corpus records both, and this identity records nothing else. Measured on 5 September 2026 for `Put Blob`, `Delete Blob` and `Get Blob`: the read is 404 under both, because both may read across the account.
 
-The `Borink Infra` user identity has container-scoped `Storage Blob Data Contributor` on both accounts. Its subscription `Owner` role covers the management plane and grants no blob data-plane access, and under it the container-not-there listing test fails with 403. Use `token.sh` for local runs instead.
+The `Borink Infra` user identity has container-scoped `Storage Blob Data Contributor` on the live container of both accounts. Its subscription `Owner` role covers the management plane and grants no blob data-plane access, and under it the container-not-there listing test fails with 403. Use `token.sh live` for local runs instead.
 
 ### Setting it all up
 
@@ -84,18 +87,19 @@ tests/azure-setup/setup.sh --check
 tests/azure-setup/setup.sh
 ```
 
-Signed in to `az` as an owner of the subscription and to `gh` as an administrator of the repository, `setup.sh` makes whatever is missing and changes nothing that is in place: the resource group; the two accounts, with the firewall answering requests from anywhere and versioning on the flat one; the container on each; the three applications and their service principals; every role assignment above; the federated credential, whose subject is GitHub's immutable-identifier form so a renamed repository keeps signing in; a client secret for each recorder identity, written to `~/.config/borink/azure-fixtures.secret` and `~/.config/borink/azure-fixtures-account.secret`, readable by you alone and never printed; and the `azure-live` environment with `tiptenbrink` as its required reviewer. An identifier it creates is written back into `identities.env`. `--check` reports instead of creating and exits 1 if anything is missing. A new role assignment takes about a minute to propagate.
+Signed in to `az` as an owner of the subscription and to `gh` as an administrator of the repository, `setup.sh` makes whatever is missing and changes nothing that is in place: the resource group; the two accounts, with the firewall answering requests from anywhere and versioning on the flat one; the two containers on each; the lifecycle rules; the three applications and their service principals; every role assignment above, and the removal of a grant that would let one tool write in the other's container; the federated credential, whose subject is GitHub's immutable-identifier form so a renamed repository keeps signing in; a client secret for each identity, written to `~/.config/borink/azure-live.secret`, `azure-fixtures.secret` and `azure-fixtures-account.secret`, readable by you alone and never printed; and the `azure-live` environment with `tiptenbrink` as its required reviewer. An identifier it creates is written back into `identities.env`. `--check` reports instead of creating and exits 1 if anything is missing. A new role assignment takes about a minute to propagate.
 
 The firewall matters: the hierarchical account was once set to deny by default with one allowed IP, and every CI request failed with `403 AuthorizationFailure`, which is not the `403 AuthorizationPermissionMismatch` of a missing grant.
 
 ### Tokens
 
 ```
-tests/azure-setup/token.sh            # the container-scoped identity
-tests/azure-setup/token.sh account    # the account-scoped identity
+tests/azure-setup/token.sh live       # the live suite's identity
+tests/azure-setup/token.sh fixtures   # the recorder's identity
+tests/azure-setup/token.sh account    # the recorder's account-scoped identity
 ```
 
-Each exchanges the client secret in `~/.config/borink/` for a data-plane token good for about an hour. The secret never becomes an environment variable and your own `az` login is left alone. In GitHub Actions, where there is no secret, `token.sh` exchanges the job's OIDC token for a token of the workflow identity instead. Both `run.sh` scripts call it when `AZURE_STORAGE_ACCESS_TOKEN` is not set.
+Each exchanges the client secret in `~/.config/borink/` for a data-plane token good for about an hour. The secret never becomes an environment variable and your own `az` login is left alone. In GitHub Actions, where there is no secret, `token.sh live` exchanges the job's OIDC token for a token of the live identity instead. Both `run.sh` scripts call it when the token variables are not set.
 
 ## Running the live suite
 
@@ -107,7 +111,21 @@ tests/azure-live/run.sh flat -- lists_         # a filter for the test harness
 
 The workflow in `.github/workflows/azure-get-live.yml` runs that script and nothing else, one job per account, once `tiptenbrink` approves the run. Until then the check is pending, which blocks the merge. A pull request from a fork never gets the `id-token` permission, so push the branch to this repository to run it.
 
-Every test owns its keys under a segment named after it, so the tests of one account run at once and a run takes as long as its slowest test rather than the sum. The read reference is the one shared object; the suite writes it the first time a run reads it, so a container that holds nothing is enough to run against. Locally `run.sh` runs the two accounts side by side as well.
+Every run writes under `borink-object-storage/live/<run>/`, and every test under a segment named after it below that, so the tests of one account run at once and a run takes as long as its slowest test rather than the sum. The read reference is the one object a run's tests share; the suite writes it the first time a run reads it, so a container that holds nothing is enough to run against. Nothing is emptied and nothing is cleaned up. Locally `run.sh` runs the two accounts side by side as well.
+
+## Runs that overlap
+
+The live suite and the recorder may run at any time, from any pull request, from any workstation, and a run may die halfway. None of that may corrupt a recording or fail a live test for a reason that is not the service. Four measures, and what each one covers:
+
+**Separate containers, separate identities.** The live suite writes only in `borink-object-test` and the recorder only in `borink-object-fixtures`, and the identity each one signs in with has no write grant on the other's container. A live run cannot touch the fixtures and a recording cannot touch a live run, whatever a bug in either one does. The account-scoped identity can write anywhere, and only the recorder ever holds its token, for two responses.
+
+**A name per live run.** Two live runs on the same account, two pull requests approved together, a workstation run beside a CI run, or the run that replaces a cancelled one, write under different run names and never see each other. The name comes from the workflow run in Actions and from the clock on a workstation. Because a fresh name is empty, a test never has to empty anything first, and because runs never clean up, a run that dies leaves nothing half-deleted for the next one to trip on.
+
+**Lifecycle rules for what runs leave.** A rule on each account deletes everything under the live prefix a day after it was last written, and on the versioned account the versions and snapshots as well. It covers the fixtures container's versions and snapshots too, since a versioned account keeps a version of every object the recorder removes. A rule runs about once a day, so the accounts hold a day or two of finished runs at any time, which is the cost of no cleanup in the suite. Uncommitted blocks are outside a rule's reach; the service discards them itself after a week.
+
+**One recording at a time.** The corpus has fixed names, so two recordings at once would record each other's objects, and a recording beside a crashed one would record its leftovers. The recorder therefore starts by emptying its prefix, with snapshots, and discarding staged blocks, and it takes a lock first: `recorder.lock` in the fixtures container, created on condition that it does not exist. If another run holds it, the recorder says so and stops; if the lock has passed the expiry written inside it, the run that wrote it died and the lock is taken over. A run that outlasts its own lock fails and says to record again, since another run may have started over it. The one thing not prevented is running the recorder against a fixtures container that a person is writing to by hand, which nothing here does.
+
+The same shape holds for any object store this crate will talk to, and nothing above leans on something only Azure has. A run name is a key prefix. Separate containers with per-identity grants are separate buckets with per-role bucket policies on S3, where a policy can even be scoped to a prefix. A lifecycle rule that expires a prefix after a day exists on both. The lock is a conditional create, `If-None-Match: *` on both services, which this crate already encodes for its own writes; it is not a lease, which S3 does not have, and it needs no renewal. What does not carry over is the debris: S3 has no snapshots and no versions unless a bucket turns them on, and a hierarchical account's directories have no S3 counterpart.
 
 ### Writing a probe
 
@@ -139,7 +157,7 @@ Hierarchical account differences:
 - An undelimited listing reports a directory as an `EntryKind::Directory` entry with no length and no trailing separator. A delimited listing reports it as a prefix with the separator, on both accounts.
 - An empty path segment is removed: `double//slash` is stored as `double/slash`. `addressable` does not cover this yet, since the crate is not told which kind of account it talks to.
 - No snapshots: `?comp=snapshot` is `409 FeatureNotYetSupportedForHierarchicalNamespaceAccounts`. `x-ms-delete-snapshots` on a delete is still accepted.
-- A directory that still holds anything cannot be deleted (409). The account's DFS endpoint removes a directory and everything under it with one request (`DELETE ...dfs.core.windows.net/container/dir?recursive=true`), which is how the live suite empties a prefix there; the recorder, which leaves only a few keys behind, deletes the longest key first instead.
+- A directory that still holds anything cannot be deleted (409), so the recorder deletes the longest key first. The live suite deletes nothing. The account's DFS endpoint would remove a directory and everything under it in one request, `DELETE ...dfs.core.windows.net/container/dir?recursive=true`, if that were ever needed.
 
 Multipart (`Put Block`, `Put Block List`, `Get Block List`; not supported by this crate yet, responses recorded in `azure-multipart/`):
 

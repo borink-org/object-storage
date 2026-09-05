@@ -625,6 +625,12 @@ fn multipart(session: &mut Session, flat: &Account, hierarchical: &Account) -> F
     };
     let list_url = format!("{url}?comp=blocklist");
 
+    // A run that died here left blocks staged against this key, which no
+    // listing shows and emptying the prefix cannot reach. A whole-object write
+    // discards them, and removing what it wrote leaves the key holding nothing.
+    session.seed(flat, &key, b"whole")?;
+    session.send(flat.raw("DELETE", url.clone()))?;
+
     // Two blocks, staged in the order that is not their identifier order, so
     // that the listing shows which of the two orders it reports.
     session.capture(

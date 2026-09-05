@@ -23,13 +23,13 @@ const CONTENTS: &[u8] = b"0123456789-azure-live-reference";
 struct Fixture {
     endpoint: String,
     container: String,
-    // The read reference, shared by every test that reads it and written by
-    // none of them: `Fixture::with_reference` puts it in place.
+    // The read reference, shared by every test of the run that reads it and
+    // written by none of them: `Fixture::with_reference` puts it in place.
     key: String,
     // The write tests own this key. It is never the read reference above.
     put_key: String,
-    // The listing tests own everything under this prefix, and empty it before
-    // each test so that what a page holds is what the test wrote.
+    // The listing tests own everything under this prefix. No other test and
+    // no other run writes there, so what a page holds is what the test wrote.
     list_prefix: String,
     // The multipart probes own everything under this prefix, and remove what
     // they wrote.
@@ -41,23 +41,25 @@ struct Fixture {
 }
 
 impl Fixture {
-    // The account `test_support::azure` names, and the keys this test owns
-    // under the suite's live prefix. Every key a test writes is under a
-    // segment named after the test, which the harness gives its thread, so no
-    // two tests write the same key and all of them run at once. The keys are
-    // constants rather than settings because nothing else may write under
-    // that prefix, and the recorder's prefix never overlaps it.
+    // The account `test_support::azure` names, and the keys this test owns.
+    // Every key a run writes is under a segment named after the run, so two
+    // runs never see each other, and every key a test writes is under a
+    // segment named after the test, which the harness gives its thread, so
+    // the tests of one run all run at once. Nothing is emptied first: a name
+    // no run has used is empty, and a lifecycle rule on the account removes
+    // what runs leave behind.
     fn from_env() -> Self {
         let account = azure::Account::under_test();
+        let run = format!("{LIVE_PREFIX}{}/", test_support::run::id());
         let test = std::thread::current()
             .name()
             .unwrap_or("main")
             .replace("::", "/");
-        let own = format!("{LIVE_PREFIX}{test}/");
+        let own = format!("{run}{test}/");
         Self {
             endpoint: account.endpoint,
             container: account.container,
-            key: format!("{LIVE_PREFIX}reference/a key+é.txt"),
+            key: format!("{run}reference/a key+é.txt"),
             put_key: format!("{own}write/a key+é.bin"),
             list_prefix: format!("{own}list/"),
             multipart_prefix: format!("{own}multipart/"),
@@ -67,9 +69,8 @@ impl Fixture {
     }
 
     // The fixture with the read reference in place: the object is written if
-    // a read finds nothing at its key, once per run. Its content is the
-    // constant the read tests assert, so a reference another run wrote is as
-    // good as this one's.
+    // a read finds nothing at its key, once per process. Its content is the
+    // constant the read tests assert.
     fn with_reference() -> Self {
         static SEEDED: Once = Once::new();
         let fixture = Self::from_env();
@@ -727,9 +728,9 @@ fn removing_only_the_snapshots_keeps_the_object() {
     );
 }
 
-// The listing half of the suite. These tests own everything under
-// `AZURE_LIST_PREFIX`, and empty it first, so a page holds exactly what the
-// test wrote and nothing a previous run left behind.
+// The listing half of the suite. Each test owns everything under its own
+// listing prefix, which no other test and no other run writes under, so a
+// page holds exactly what the test wrote.
 
 // One page: what it held, and where the next one starts.
 type Page = (Vec<Entry>, Option<String>);
@@ -850,78 +851,8 @@ fn clone(fixture: &Fixture) -> Fixture {
     }
 }
 
-// Removes everything under the prefix, so the tests below start from nothing.
-fn empty(fixture: &Fixture) {
-    // A hierarchical account lists its directories as entries beside the
-    // objects under them, and refuses to delete a directory that still holds
-    // anything, with a 409. It also has a second endpoint that removes a
-    // directory and everything in it with one request, which is how the
-    // hundreds of directories a deep key leaves behind go in one go rather
-    // than one at a time, longest first. That endpoint knows nothing of this
-    // crate, so the request is written here, with the head this crate writes.
-    if fixture.hierarchical {
-        let now = Timestamps::from_unix(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
-        let blobs = fixture.blobs();
-        let plan = PhysicalDelete::new(&fixture.list_prefix);
-        let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
-        let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
-        let directory = fixture
-            .list_prefix
-            .trim_end_matches('/')
-            .split('/')
-            .map(percent_encode)
-            .collect::<Vec<_>>()
-            .join("/");
-        let mut outgoing = ureq::delete(&format!(
-            "{}/{}/{directory}?recursive=true",
-            fixture.endpoint.replacen(".blob.", ".dfs.", 1),
-            fixture.container
-        ));
-        for (name, value) in request.headers() {
-            outgoing = outgoing.header(name, value);
-        }
-        let status = outgoing
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .call()
-            .unwrap()
-            .status()
-            .as_u16();
-        assert!(
-            matches!(status, 200 | 404),
-            "removing {}: {status}",
-            fixture.list_prefix
-        );
-    }
-    // The flat account has no directories, so the keys go one at a time; on
-    // the hierarchical one this removes what the request above could not
-    // name, and checks that it left nothing.
-    let mut entries = walk(fixture, false);
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.key.len()));
-    for entry in entries {
-        let owner = Fixture {
-            put_key: entry.key.clone(),
-            ..clone(fixture)
-        };
-        assert_eq!(
-            remove(&owner, DeleteShape::default(), None).unwrap(),
-            RemoveOutcome::Accepted,
-            "{}",
-            entry.key
-        );
-    }
-    assert_eq!(walk(fixture, false), []);
-}
-
 // The three objects that the listing tests read.
 fn seed_listing(fixture: &Fixture) {
-    empty(fixture);
     place(fixture, "a.txt", b"01234567");
     place(fixture, "b.txt", b"0123456789");
     place(fixture, "nested/c.txt", b"0");
@@ -1253,7 +1184,6 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
 #[ignore = "requires Azure credentials"]
 fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     let fixture = Fixture::from_env();
-    empty(&fixture);
 
     // What XML forbids and Azure does hold. The control characters it forbids
     // and Azure does not hold are
@@ -1292,8 +1222,6 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
         .map(|entry| entry.key)
         .collect();
     assert_eq!(listed, [key]);
-
-    empty(&fixture);
 }
 
 /// Holds the boundary that `validate_put` was corrected to: Azure counts a
@@ -1308,7 +1236,6 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
 #[ignore = "requires Azure credentials"]
 fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
     let fixture = Fixture::from_env();
-    empty(&fixture);
 
     let units = |key: &str| key.encode_utf16().count();
     let prefix = units(&fixture.list_prefix);
@@ -1352,8 +1279,6 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
         refused.to_string().contains("key"),
         "a key past the limit is refused before it is sent: {refused}"
     );
-
-    empty(&fixture);
 }
 
 /// Finds the largest number of `/`-delimited path segments Azure takes, which
@@ -1366,9 +1291,6 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
 #[ignore = "requires Azure credentials"]
 fn a_key_holds_the_segments_azure_says_it_may() {
     let fixture = Fixture::from_env();
-    // A hierarchical account keeps the directories of a removed key, and a
-    // later probe of fewer segments would collide with one of them.
-    empty(&fixture);
 
     // The prefix ends in the separator, so it carries as many segments as it
     // has separators, and that many fewer joined after it make a name of
@@ -1426,7 +1348,6 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         "the largest name Azure takes has {taken} segments, not {expected}. \
          Correct the constant here and the segment rule in `addressable`"
     );
-    empty(&fixture);
 }
 
 // Measured by the bisection above, and the number `addressable` holds.
@@ -1456,7 +1377,6 @@ const MAX_SEGMENTS_HIERARCHICAL: usize = 61;
 #[ignore = "requires Azure credentials"]
 fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     let fixture = Fixture::from_env();
-    empty(&fixture);
 
     let mut created = Vec::new();
     for edge in [
@@ -1511,7 +1431,6 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
 
     // Removing them by their listed names is the other half: a name that can
     // be listed but not addressed would be just as bad.
-    empty(&fixture);
 }
 
 // Writes one object under a key already percent-encoded by the caller, and

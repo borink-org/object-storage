@@ -3,7 +3,7 @@
 mod loopback;
 
 use borink_object_storage_proto::{Blobs, Container};
-use test_support::azure::{CONTAINER, FIXTURES_PREFIX};
+use test_support::azure::{FIXTURES_CONTAINER, FIXTURES_PREFIX};
 
 /// The host sends the request that produced `azure-get/get-whole`, as the
 /// notes beside that file spell it, and returns the body Azure answered with.
@@ -12,7 +12,7 @@ fn executes_the_generated_request() {
     let server = loopback::Server::answering(test_support::recorded::load("azure-get/get-whole"));
 
     let blobs = Blobs::new(
-        Container::new(&server.endpoint, CONTAINER).unwrap(),
+        Container::new(&server.endpoint, FIXTURES_CONTAINER).unwrap(),
         "token",
     )
     .unwrap();
@@ -24,7 +24,7 @@ fn executes_the_generated_request() {
 
     let request = server.request();
     assert!(
-        request.starts_with(&format!("GET /{CONTAINER}/{key} HTTP/1.1\r\n")),
+        request.starts_with(&format!("GET /{FIXTURES_CONTAINER}/{key} HTTP/1.1\r\n")),
         "{request}"
     );
     assert!(
