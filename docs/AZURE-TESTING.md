@@ -107,7 +107,7 @@ tests/azure-live/run.sh flat -- lists_         # a filter for the test harness
 
 The workflow in `.github/workflows/azure-get-live.yml` runs that script and nothing else, one job per account, once `tiptenbrink` approves the run. Until then the check is pending, which blocks the merge. A pull request from a fork never gets the `id-token` permission, so push the branch to this repository to run it.
 
-The suite is serial by design: its tests overwrite one key and empty one prefix each. It writes its own read reference the first time a run reads it, so a container that holds nothing is enough to run against.
+Every test owns its keys under a segment named after it, so the tests of one account run at once and a run takes as long as its slowest test rather than the sum. The read reference is the one shared object; the suite writes it the first time a run reads it, so a container that holds nothing is enough to run against. Locally `run.sh` runs the two accounts side by side as well.
 
 ### Writing a probe
 
@@ -139,7 +139,7 @@ Hierarchical account differences:
 - An undelimited listing reports a directory as an `EntryKind::Directory` entry with no length and no trailing separator. A delimited listing reports it as a prefix with the separator, on both accounts.
 - An empty path segment is removed: `double//slash` is stored as `double/slash`. `addressable` does not cover this yet, since the crate is not told which kind of account it talks to.
 - No snapshots: `?comp=snapshot` is `409 FeatureNotYetSupportedForHierarchicalNamespaceAccounts`. `x-ms-delete-snapshots` on a delete is still accepted.
-- A directory that still holds anything cannot be deleted (409), so the prefix-emptying helpers delete the longest key first.
+- A directory that still holds anything cannot be deleted (409). The account's DFS endpoint removes a directory and everything under it with one request (`DELETE ...dfs.core.windows.net/container/dir?recursive=true`), which is how the live suite empties a prefix there; the recorder, which leaves only a few keys behind, deletes the longest key first instead.
 
 Multipart (`Put Block`, `Put Block List`, `Get Block List`; not supported by this crate yet, responses recorded in `azure-multipart/`):
 

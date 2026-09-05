@@ -11,10 +11,10 @@
 # workstation, the workflow identity in GitHub Actions. The workflow runs this
 # script and nothing else, so what CI does is what you can do here.
 #
-# The suite is serial by design: its tests overwrite one key and empty one
-# prefix each, so two at once would read what the other wrote. Two accounts
-# are two runs, because the suite reads which one it is on once, from
-# `AZURE_HIERARCHICAL`.
+# Every test owns its own keys, so the tests of one account run at once, as
+# the harness runs them. Two accounts are two runs, because the suite reads
+# which one it is on from `AZURE_HIERARCHICAL`; here they run side by side,
+# each line of output marked with its account.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -35,12 +35,23 @@ fi
 # Nothing below prints the token, and in Actions the log would hide it anyway.
 [ -n "${GITHUB_ACTIONS:-}" ] && echo "::add-mask::$AZURE_STORAGE_ACCESS_TOKEN"
 
+# The binary is built once, before the runs, so that neither run waits on the
+# other's build.
+(cd "$root" && cargo test --locked -p azure-live --no-run --quiet)
+
+pids=()
 for account in "${accounts[@]}"; do
-  echo "--- azure-live: $account account"
   if [ "$account" = hierarchical ]; then
-    export AZURE_HIERARCHICAL=1
+    hierarchical=1
   else
-    unset AZURE_HIERARCHICAL
+    hierarchical=
   fi
-  (cd "$root" && cargo test --locked -p azure-live -- --ignored --test-threads=1 "$@")
+  (cd "$root" && AZURE_HIERARCHICAL=$hierarchical cargo test --locked -q -p azure-live -- --ignored "$@" 2>&1 \
+    | sed "s/^/$account: /") &
+  pids+=($!)
 done
+status=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=1
+done
+exit $status
