@@ -1,0 +1,12 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+content-type: application/xml
+last-modified: Sat, 05 Sep 2026 11:31:02 GMT
+etag: "0x8DF0B412A62747C"
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: 3eec74de-301e-0002-672a-3d1a1c000000
+x-ms-version: 2026-04-06
+x-ms-blob-content-length: 11
+date: Sat, 05 Sep 2026 11:31:02 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><BlockList><CommittedBlocks><Block><Name>YmxvY2stMA==</Name><Size>5</Size></Block><Block><Name>YmxvY2stMQ==</Name><Size>6</Size></Block></CommittedBlocks><UncommittedBlocks /></BlockList>

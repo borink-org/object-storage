@@ -13,3 +13,8 @@ ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 
 [lints.rust]
 missing_docs = "deny"
+
+[dev-dependencies]
+# The loopback tests answer the host with responses Azure actually sent,
+# read from the recorded corpus.
+test-support = { path = "../../tests/support" }

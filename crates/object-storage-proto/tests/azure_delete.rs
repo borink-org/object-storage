@@ -1,4 +1,11 @@
 //! Azure removal encoding and response interpretation.
+//!
+//! Every head here that says what the service answers a removal with is one of
+//! the responses recorded under `tests/fixtures/azure-delete`.
+
+mod recorded;
+
+use recorded::Recorded;
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
@@ -101,8 +108,9 @@ fn a_removal_plan_is_validated_before_any_byte_is_written() {
 
 #[test]
 fn an_accepted_removal_reports_no_metadata() {
+    let recorded = Recorded::load("azure-delete/delete-accepted");
     assert_eq!(
-        blobs().accept_delete_head(DeleteShape::default(), ResponseHead::new(202)),
+        blobs().accept_delete_head(DeleteShape::default(), recorded.head()),
         Ok(DeleteHeadOutcome::Accepted)
     );
 
@@ -116,12 +124,13 @@ fn an_accepted_removal_reports_no_metadata() {
 #[test]
 fn a_failed_condition_needs_the_condition_that_explains_it() {
     let blobs = blobs();
+    let recorded = Recorded::load("azure-delete/delete-precondition-failed");
     assert_eq!(
-        blobs.accept_delete_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
+        blobs.accept_delete_head(conditional(ConditionKind::IfMatch), recorded.head()),
         Ok(DeleteHeadOutcome::PreconditionFailed)
     );
     assert_eq!(
-        blobs.accept_delete_head(DeleteShape::default(), ResponseHead::new(412)),
+        blobs.accept_delete_head(DeleteShape::default(), recorded.head()),
         Err(Error::Response(ResponseFault::Status))
     );
 }
@@ -129,16 +138,57 @@ fn a_failed_condition_needs_the_condition_that_explains_it() {
 #[test]
 fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
     let blobs = blobs();
-    let mut head = ResponseHead::new(404);
-    head.error_code = Some(b"BlobNotFound");
+    let recorded = Recorded::load("azure-delete/delete-missing");
     assert_eq!(
-        blobs.accept_delete_head(DeleteShape::default(), head),
+        recorded.header("x-ms-error-code"),
+        Some(b"BlobNotFound".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_delete_head(DeleteShape::default(), recorded.head()),
         Ok(DeleteHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NotFound)
         })
     );
 
-    // With no code in the head, the body names it instead.
+    // A removal the identity may not make. A removal needs the writing role,
+    // which covers one container here, so the service refuses it where a read
+    // of that same container answers that the container is not there.
+    let refused = Recorded::load("azure-delete/delete-refused");
+    assert_eq!(
+        refused.header("x-ms-error-code"),
+        Some(b"AuthorizationPermissionMismatch".as_slice())
+    );
+    let outcome = blobs.accept_delete_head(DeleteShape::default(), refused.head());
+    assert!(
+        matches!(
+            outcome,
+            Ok(DeleteHeadOutcome::ServiceFailure(Failure {
+                status: 403,
+                class: FailureClass::Auth,
+                kind: Some(ServiceErrorKind::Unauthorized),
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+
+    // The same removal addressed to a container that is not there, by the
+    // identity that may write anywhere in the account. The one above may write
+    // in a single container, so it is refused before the service looks.
+    let missing = Recorded::load("azure-delete/delete-container-missing");
+    assert_eq!(
+        missing.header("x-ms-error-code"),
+        Some(b"ContainerNotFound".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_delete_head(DeleteShape::default(), missing.head()),
+        Ok(DeleteHeadOutcome::NotFound {
+            kind: Some(ServiceErrorKind::NoSuchContainer)
+        })
+    );
+
+    // With no code in the head, the body names it instead. The service names
+    // the code in the head on every refusal, so this head is written here.
     let unnamed = blobs
         .accept_delete_head(DeleteShape::default(), ResponseHead::new(404))
         .unwrap();
@@ -198,18 +248,37 @@ fn an_object_with_snapshots_is_refused_rather_than_widened() {
     // Azure refuses a base blob that has them. The code is not one this crate
     // classifies, so it lands on the status alone, where an unknown code
     // belongs.
-    let mut head = ResponseHead::new(409);
-    head.error_code = Some(b"SnapshotsPresent");
-    head.request_id = Some(b"request-123");
-    assert!(matches!(
-        blobs().accept_delete_head(DeleteShape::default(), head),
-        Ok(DeleteHeadOutcome::ServiceFailure(Failure {
-            status: 409,
-            class: FailureClass::Other,
-            kind: None,
-            request_id: Some(b"request-123"),
-        }))
-    ));
+    let recorded = Recorded::load("azure-delete/delete-refused-for-snapshots");
+    assert_eq!(
+        recorded.header("x-ms-error-code"),
+        Some(b"SnapshotsPresent".as_slice())
+    );
+    let outcome = blobs().accept_delete_head(DeleteShape::default(), recorded.head());
+    assert!(
+        matches!(
+            outcome,
+            Ok(DeleteHeadOutcome::ServiceFailure(Failure {
+                status: 409,
+                class: FailureClass::Other,
+                kind: None,
+                request_id: Some(_),
+            }))
+        ),
+        "{outcome:?}"
+    );
+
+    // The same removal, naming the snapshots as well, is accepted.
+    let widened = Recorded::load("azure-delete/delete-accepted-with-snapshots");
+    assert_eq!(
+        blobs().accept_delete_head(
+            DeleteShape {
+                kind: DeleteKind::ObjectAndSnapshots,
+                ..DeleteShape::default()
+            },
+            widened.head()
+        ),
+        Ok(DeleteHeadOutcome::Accepted)
+    );
 }
 
 #[test]

@@ -1,0 +1,12 @@
+HTTP/1.1 400 The specified block list is invalid.
+content-length: 221
+content-type: application/xml
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: 41bcdf62-001e-0009-332a-3de177000000
+x-ms-version: 2026-04-06
+x-ms-error-code: InvalidBlockList
+date: Sat, 05 Sep 2026 11:31:01 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>InvalidBlockList</Code><Message>The specified block list is invalid.
+RequestId:41bcdf62-001e-0009-332a-3de177000000
+Time:2026-09-05T11:31:02.0495770Z</Message></Error>

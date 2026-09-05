@@ -1,0 +1,9 @@
+HTTP/1.1 201 Created
+content-length: 0
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: 6dd9ee2b-d01e-0035-782a-3dc8b0000000
+x-ms-version: 2026-04-06
+x-ms-content-crc64: PqcW8uHJ+Qo=
+x-ms-request-server-encrypted: true
+date: Sat, 05 Sep 2026 11:31:00 GMT
+

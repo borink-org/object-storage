@@ -1,0 +1,15 @@
+[package]
+name = "azure-record"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
+test-support = { path = "../support" }
+# The recorder writes the response it received to a file, so it reads the
+# response off the socket itself rather than through an HTTP client that
+# would normalise it first.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "1"

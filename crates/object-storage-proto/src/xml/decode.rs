@@ -151,7 +151,7 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
         // A name marked as encoded is encoded whole, including the separators
         // between its segments. So every `%` in it begins an escape, and a
         // `%` that does not is a fault. Measured: a listed name reads
-        // `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
+        // `...live%2Flist%2F100%25-%EF%BF%BE...`.
         let (Some(high), Some(low)) = (
             b.get(r + 1).copied().and_then(hex),
             b.get(r + 2).copied().and_then(hex),

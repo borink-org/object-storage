@@ -1,0 +1,12 @@
+HTTP/1.1 401 Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+content-length: 397
+content-type: application/xml
+server: Microsoft-HTTPAPI/2.0
+x-ms-request-id: 0a230221-c01e-004b-302a-3d58f7000000
+x-ms-error-code: InvalidAuthenticationInfo
+www-authenticate: Bearer authorization_uri=https://login.microsoftonline.com/1caf922b-3c7e-424e-bae2-b8c2d442371d/oauth2/authorize resource_id=https://storage.azure.com
+date: Sat, 05 Sep 2026 11:30:57 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>InvalidAuthenticationInfo</Code><Message>Server failed to authenticate the request. Please refer to the information in the www-authenticate header.
+RequestId:0a230221-c01e-004b-302a-3d58f7000000
+Time:2026-09-05T11:30:57.8676052Z</Message><AuthenticationErrorDetail>The access token was missing or malformed.</AuthenticationErrorDetail></Error>

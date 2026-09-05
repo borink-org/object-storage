@@ -7,7 +7,19 @@ name = "azure-live"
 version = "0.0.0"
 dependencies = [
  "borink-object-storage-proto",
+ "test-support",
  "ureq",
+]
+
+[[package]]
+name = "azure-record"
+version = "0.0.0"
+dependencies = [
+ "borink-object-storage-proto",
+ "rustls",
+ "rustls-pki-types",
+ "test-support",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -21,6 +33,7 @@ name = "borink-azure-get-ureq"
 version = "0.0.0"
 dependencies = [
  "borink-object-storage-proto",
+ "test-support",
  "ureq",
 ]
 
@@ -41,6 +54,9 @@ dependencies = [
 [[package]]
 name = "borink-object-storage-proto"
 version = "0.0.1"
+dependencies = [
+ "test-support",
+]
 
 [[package]]
 name = "bytes"
@@ -187,6 +203,10 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "test-support"
+version = "0.0.0"
 
 [[package]]
 name = "untrusted"
