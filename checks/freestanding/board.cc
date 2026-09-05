@@ -96,6 +96,24 @@ extern "C" void board_cxx(void) {
                         std::span<std::uint8_t>(quoted, sizeof quoted))
             .size());
 
+    // The same page read again, keeping two properties of the entry in the
+    // board's own row of values.
+    static char page_again[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name><Properties>"
+                               "<Content-Length>4</Content-Length><AccessTier>Hot</AccessTier>"
+                               "</Properties></Blob></Blobs><NextMarker /></EnumerationResults>";
+    const borink::PropertySet wanted =
+        borink::property_set({borink::BlobPropertyAccessTier, borink::BlobPropertyCreationTime});
+    static borink::MaybeBytes values[2];
+    const borink::Fill again = borink_fill_listing_with(
+        &session,
+        borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(page_again),
+                                             sizeof page_again - 1)),
+        entries, 1, wanted, values, sizeof values / sizeof values[0]);
+    const std::span<const borink::MaybeBytes> row = borink::values_of(values, wanted, 0);
+    sink = static_cast<unsigned>(
+        again.filled +
+        borink::text_of(borink::value(row, wanted, borink::BlobPropertyAccessTier)).size());
+
     // Both sentences, and the room a whole one takes.
     static std::uint8_t room[256];
     const std::span<std::uint8_t> paper(room, sizeof room);

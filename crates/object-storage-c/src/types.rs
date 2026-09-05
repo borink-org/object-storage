@@ -600,6 +600,116 @@ pub struct Property {
     pub value: Bytes,
 }
 
+/// An element that a listing writes for a blob, other than the four that
+/// every `borink_list_entry` carries.
+///
+/// Name the ones you want in a `borink_property_set` and read the page with
+/// `borink_fill_listing_with`, which keeps their values as it goes. Most are
+/// written under the properties element; the ones marked otherwise stand
+/// beside it. Read anything not listed here with `borink_entry_property`.
+///
+/// These are the numbers that the core crate's `BlobProperty` uses. A
+/// `const` block in `layout.rs` fails the build if the two lists drift.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlobProperty {
+    /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
+    AccessTier,
+    /// Whether the tier was inferred rather than set.
+    AccessTierInferred,
+    /// When the tier was last changed.
+    AccessTierChangeTime,
+    /// The progress of a rehydration out of the archive tier.
+    ArchiveStatus,
+    /// The access control list, on a hierarchical account listing with permissions.
+    Acl,
+    /// `BlockBlob`, `PageBlob` or `AppendBlob`.
+    BlobType,
+    /// When the blob was created, in the form of the `Last-Modified` header.
+    CreationTime,
+    /// The media type, as stored with the blob.
+    ContentType,
+    /// The content encoding, as stored with the blob.
+    ContentEncoding,
+    /// The content language, as stored with the blob.
+    ContentLanguage,
+    /// The CRC64 of the content, if the service holds one.
+    ContentCrc64,
+    /// The MD5 of the content, base64, if the service holds one.
+    ContentMd5,
+    /// The cache control directives, as stored with the blob.
+    CacheControl,
+    /// The content disposition, as stored with the blob.
+    ContentDisposition,
+    /// The identifier of the last copy operation onto this blob.
+    CopyId,
+    /// The state of that copy: `pending`, `success`, `aborted` or `failed`.
+    CopyStatus,
+    /// The URL that copy read from.
+    CopySource,
+    /// The bytes copied so far and the total, as `copied/total`.
+    CopyProgress,
+    /// When that copy finished.
+    CopyCompletionTime,
+    /// Why that copy failed or was aborted.
+    CopyStatusDescription,
+    /// When a soft-deleted blob was deleted.
+    DeletedTime,
+    /// Whether the entry is a soft-deleted blob. Written beside the properties element.
+    Deleted,
+    /// The encryption scope the blob is stored under.
+    EncryptionScope,
+    /// When the blob expires, on a hierarchical account.
+    ExpiryTime,
+    /// The owning group, on a hierarchical account listing with permissions.
+    Group,
+    /// Whether this version is the current one. Written beside the properties element.
+    IsCurrentVersion,
+    /// Whether the blob is an incremental copy of a page blob snapshot.
+    IncrementalCopy,
+    /// Until when the immutability policy holds.
+    ImmutabilityPolicyUntilDate,
+    /// The immutability policy: `unlocked` or `locked`.
+    ImmutabilityPolicyMode,
+    /// Whether the blob is leased: `locked` or `unlocked`.
+    LeaseStatus,
+    /// The state of the lease: `available`, `leased`, `expired`, `breaking` or `broken`.
+    LeaseState,
+    /// Whether the lease is `infinite` or `fixed`.
+    LeaseDuration,
+    /// Whether a legal hold is set.
+    LegalHold,
+    /// The owner, on a hierarchical account listing with permissions.
+    Owner,
+    /// The POSIX permissions, on a hierarchical account listing with permissions.
+    Permissions,
+    /// How many days a soft-deleted blob is kept.
+    RemainingRetentionDays,
+    /// The priority of a rehydration out of the archive tier.
+    RehydratePriority,
+    /// Whether the blob is encrypted at rest.
+    ServerEncrypted,
+    /// The snapshot's timestamp, on an entry that names a snapshot. Written beside the properties element.
+    Snapshot,
+    /// How many tags the blob has.
+    TagCount,
+    /// The version's identifier, on an account that keeps versions. Written beside the properties element.
+    VersionId,
+    /// The sequence number of a page blob.
+    BlobSequenceNumber,
+}
+
+/// The properties that one `borink_fill_listing_with` call is asked for.
+///
+/// One bit per property, at the bit that the property's number names. Start
+/// from a zeroed value and add each property with `borink_property_set_with`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct PropertySet {
+    /// The bits. Bit `n` stands for the property numbered `n`.
+    pub mask: u64,
+}
+
 /// What one call to `borink_fill_listing` read.
 ///
 /// # Lifetime

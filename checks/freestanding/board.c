@@ -98,6 +98,23 @@ void board_main(void) {
                                         (borink_bytes_mut){quoted, sizeof quoted})
                .bytes.len;
 
+    // The same page read again, keeping two properties of the entry in the
+    // board's own row of values.
+    static char page_again[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name><Properties>"
+                               "<Content-Length>4</Content-Length><AccessTier>Hot</AccessTier>"
+                               "</Properties></Blob></Blobs><NextMarker /></EnumerationResults>";
+    borink_property_set wanted = {0};
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER);
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_CREATION_TIME);
+    static borink_maybe_bytes values[2];
+    const borink_fill again = borink_fill_listing_with(
+        &session, (borink_bytes_mut){(uint8_t *)page_again, sizeof page_again - 1}, entries, 1,
+        wanted, values, borink_property_set_len(wanted));
+    sink = (unsigned)(again.filled +
+                      values[borink_property_slot(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER)]
+                          .bytes.len +
+                      borink_property_name(BORINK_BLOB_PROPERTY_ACCESS_TIER).len);
+
     board_cxx();
 
     // A board's entry point never returns.

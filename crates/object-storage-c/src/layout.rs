@@ -99,6 +99,8 @@ pub struct Layout {
     pub offsetof_fill_filled: usize,
     pub offsetof_fill_required: usize,
     pub offsetof_fill_next_marker: usize,
+    pub sizeof_property_set: usize,
+    pub alignof_property_set: usize,
 }
 
 /// The layout that this crate compiled to.
@@ -186,6 +188,8 @@ pub(crate) fn layout() -> Layout {
         offsetof_fill_filled: offset_of!(Fill, filled),
         offsetof_fill_required: offset_of!(Fill, required),
         offsetof_fill_next_marker: offset_of!(Fill, next_marker),
+        sizeof_property_set: size_of::<PropertySet>(),
+        alignof_property_set: align_of::<PropertySet>(),
     }
 }
 
@@ -257,6 +261,76 @@ const _: () = {
     assert!(EntryKind::Object as u16 == proto::EntryKind::Object as u16);
     assert!(EntryKind::Prefix as u16 == proto::EntryKind::Prefix as u16);
     assert!(EntryKind::Directory as u16 == proto::EntryKind::Directory as u16);
+
+    // The properties, and that neither list has one the other lacks.
+    assert!(proto::BlobProperty::COUNT == BlobProperty::BlobSequenceNumber as usize + 1);
+    assert!(BlobProperty::AccessTier as u16 == proto::BlobProperty::AccessTier as u16);
+    assert!(
+        BlobProperty::AccessTierInferred as u16 == proto::BlobProperty::AccessTierInferred as u16
+    );
+    assert!(
+        BlobProperty::AccessTierChangeTime as u16
+            == proto::BlobProperty::AccessTierChangeTime as u16
+    );
+    assert!(BlobProperty::ArchiveStatus as u16 == proto::BlobProperty::ArchiveStatus as u16);
+    assert!(BlobProperty::Acl as u16 == proto::BlobProperty::Acl as u16);
+    assert!(BlobProperty::BlobType as u16 == proto::BlobProperty::BlobType as u16);
+    assert!(BlobProperty::CreationTime as u16 == proto::BlobProperty::CreationTime as u16);
+    assert!(BlobProperty::ContentType as u16 == proto::BlobProperty::ContentType as u16);
+    assert!(BlobProperty::ContentEncoding as u16 == proto::BlobProperty::ContentEncoding as u16);
+    assert!(BlobProperty::ContentLanguage as u16 == proto::BlobProperty::ContentLanguage as u16);
+    assert!(BlobProperty::ContentCrc64 as u16 == proto::BlobProperty::ContentCrc64 as u16);
+    assert!(BlobProperty::ContentMd5 as u16 == proto::BlobProperty::ContentMd5 as u16);
+    assert!(BlobProperty::CacheControl as u16 == proto::BlobProperty::CacheControl as u16);
+    assert!(
+        BlobProperty::ContentDisposition as u16 == proto::BlobProperty::ContentDisposition as u16
+    );
+    assert!(BlobProperty::CopyId as u16 == proto::BlobProperty::CopyId as u16);
+    assert!(BlobProperty::CopyStatus as u16 == proto::BlobProperty::CopyStatus as u16);
+    assert!(BlobProperty::CopySource as u16 == proto::BlobProperty::CopySource as u16);
+    assert!(BlobProperty::CopyProgress as u16 == proto::BlobProperty::CopyProgress as u16);
+    assert!(
+        BlobProperty::CopyCompletionTime as u16 == proto::BlobProperty::CopyCompletionTime as u16
+    );
+    assert!(
+        BlobProperty::CopyStatusDescription as u16
+            == proto::BlobProperty::CopyStatusDescription as u16
+    );
+    assert!(BlobProperty::DeletedTime as u16 == proto::BlobProperty::DeletedTime as u16);
+    assert!(BlobProperty::Deleted as u16 == proto::BlobProperty::Deleted as u16);
+    assert!(BlobProperty::EncryptionScope as u16 == proto::BlobProperty::EncryptionScope as u16);
+    assert!(BlobProperty::ExpiryTime as u16 == proto::BlobProperty::ExpiryTime as u16);
+    assert!(BlobProperty::Group as u16 == proto::BlobProperty::Group as u16);
+    assert!(BlobProperty::IsCurrentVersion as u16 == proto::BlobProperty::IsCurrentVersion as u16);
+    assert!(BlobProperty::IncrementalCopy as u16 == proto::BlobProperty::IncrementalCopy as u16);
+    assert!(
+        BlobProperty::ImmutabilityPolicyUntilDate as u16
+            == proto::BlobProperty::ImmutabilityPolicyUntilDate as u16
+    );
+    assert!(
+        BlobProperty::ImmutabilityPolicyMode as u16
+            == proto::BlobProperty::ImmutabilityPolicyMode as u16
+    );
+    assert!(BlobProperty::LeaseStatus as u16 == proto::BlobProperty::LeaseStatus as u16);
+    assert!(BlobProperty::LeaseState as u16 == proto::BlobProperty::LeaseState as u16);
+    assert!(BlobProperty::LeaseDuration as u16 == proto::BlobProperty::LeaseDuration as u16);
+    assert!(BlobProperty::LegalHold as u16 == proto::BlobProperty::LegalHold as u16);
+    assert!(BlobProperty::Owner as u16 == proto::BlobProperty::Owner as u16);
+    assert!(BlobProperty::Permissions as u16 == proto::BlobProperty::Permissions as u16);
+    assert!(
+        BlobProperty::RemainingRetentionDays as u16
+            == proto::BlobProperty::RemainingRetentionDays as u16
+    );
+    assert!(
+        BlobProperty::RehydratePriority as u16 == proto::BlobProperty::RehydratePriority as u16
+    );
+    assert!(BlobProperty::ServerEncrypted as u16 == proto::BlobProperty::ServerEncrypted as u16);
+    assert!(BlobProperty::Snapshot as u16 == proto::BlobProperty::Snapshot as u16);
+    assert!(BlobProperty::TagCount as u16 == proto::BlobProperty::TagCount as u16);
+    assert!(BlobProperty::VersionId as u16 == proto::BlobProperty::VersionId as u16);
+    assert!(
+        BlobProperty::BlobSequenceNumber as u16 == proto::BlobProperty::BlobSequenceNumber as u16
+    );
 
     assert!(FailureClass::Auth as u16 == proto::FailureClass::Auth as u16);
     assert!(FailureClass::Throttled as u16 == proto::FailureClass::Throttled as u16);

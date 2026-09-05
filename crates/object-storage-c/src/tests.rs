@@ -1275,3 +1275,87 @@ fn a_listed_value_is_decoded_into_the_caller_s_buffer() {
     assert!(!refused.present);
     assert!(!unknown.present);
 }
+
+/// The two lists of properties are built from one table, so the numbers and
+/// the names agree, and a number that names none is refused everywhere.
+#[test]
+fn the_properties_cross_by_number_and_name() {
+    for (number, property) in proto::BlobProperty::ALL.iter().enumerate() {
+        let number = u16::try_from(number).unwrap();
+        // SAFETY: the name is a static of this crate.
+        let name = unsafe { slice(borink_property_name(number)) };
+        assert_eq!(name, property.name().as_bytes());
+        let set = borink_property_set_with(PropertySet::default(), number);
+        assert_eq!(borink_property_set_len(set), 1);
+        assert_eq!(borink_property_slot(set, number), 0);
+    }
+    let none = u16::try_from(proto::BlobProperty::ALL.len()).unwrap();
+    assert_eq!(
+        borink_property_set_with(PropertySet::default(), none),
+        PropertySet::default()
+    );
+    // SAFETY: as above.
+    assert_eq!(unsafe { slice(borink_property_name(none)) }, b"");
+    assert_eq!(borink_property_slot(PropertySet::default(), none), 0);
+}
+
+/// The values a program asks for are written into its rows as the page is
+/// read, and an array with fewer rows than entries is the capacity.
+#[test]
+fn the_values_a_program_asks_for_are_written_into_its_rows() {
+    let session = session();
+    let page = b"<EnumerationResults><Blobs>\
+          <Blob><Name>a.txt</Name><Properties><Content-Length>4</Content-Length>\
+          <AccessTier>Hot</AccessTier><Content-Encoding /></Properties></Blob>\
+          <Blob><Name>b.txt</Name><Properties><Content-Length>0</Content-Length>\
+          </Properties></Blob>\
+          </Blobs><NextMarker /></EnumerationResults>";
+    let mut wanted = PropertySet::default();
+    wanted = borink_property_set_with(wanted, BlobProperty::ContentEncoding as u16);
+    wanted = borink_property_set_with(wanted, BlobProperty::AccessTier as u16);
+    let tier = borink_property_slot(wanted, BlobProperty::AccessTier as u16);
+    let encoding = borink_property_slot(wanted, BlobProperty::ContentEncoding as u16);
+    assert_eq!((tier, encoding), (0, 1));
+
+    let mut body = Vec::from(page.as_slice());
+    let mut entries = [ListEntry::default(); 2];
+    let mut values = [MaybeBytes::default(); 4];
+    // SAFETY: the body and both arrays are live, and nothing else reaches
+    // them.
+    let fill = unsafe {
+        borink_fill_listing_with(
+            &session,
+            writable(&mut body),
+            entries.as_mut_ptr(),
+            2,
+            wanted,
+            values.as_mut_ptr(),
+            4,
+        )
+    };
+    assert_eq!(fill.status.code, 0);
+    assert_eq!(fill.filled, 2);
+    assert_eq!(borrowed(values[tier]), Some(b"Hot".as_slice()));
+    assert_eq!(borrowed(values[encoding]), Some(b"".as_slice()));
+    assert!(!values[2 + tier].present);
+    assert!(!values[2 + encoding].present);
+
+    // Rows for one entry only: that is the capacity, whatever `into` holds.
+    let mut body = Vec::from(page.as_slice());
+    let mut entries = [ListEntry::default(); 2];
+    let mut values = [MaybeBytes::default(); 2];
+    // SAFETY: as above.
+    let fill = unsafe {
+        borink_fill_listing_with(
+            &session,
+            writable(&mut body),
+            entries.as_mut_ptr(),
+            2,
+            wanted,
+            values.as_mut_ptr(),
+            2,
+        )
+    };
+    assert_eq!(fill.status.code, ErrorCode::Capacity as u16);
+    assert_eq!(fill.required, 2);
+}

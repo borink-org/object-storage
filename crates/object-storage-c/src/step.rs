@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    outcome::{page_fill, status_of},
+    outcome::{entry_view, maybe_bytes, page_fill, status_of},
     plan::UNKNOWN,
     types::*,
 };
@@ -71,6 +71,28 @@ pub(crate) fn filling(
     into: &mut [ListEntry],
 ) -> proto::Result<Fill> {
     let page = blobs.fill_listing(body, into)?;
+    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
+}
+
+// The same read, writing each entry's values into its row of `values`. The
+// rows are `wanted.len()` wide and there is one per slot of `into`.
+pub(crate) fn filling_with(
+    blobs: &Blobs<'_>,
+    body: &mut [u8],
+    into: &mut [ListEntry],
+    wanted: proto::PropertySet,
+    values: &mut [MaybeBytes],
+) -> proto::Result<Fill> {
+    let width = wanted.len();
+    let mut row = 0;
+    let page = blobs.fill_listing_with(body, into, wanted, |entry, given| {
+        let slots = &mut values[row * width..(row + 1) * width];
+        for (slot, value) in slots.iter_mut().zip(given.all()) {
+            *slot = maybe_bytes(*value);
+        }
+        row += 1;
+        entry_view(&entry)
+    })?;
     Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
 }
 

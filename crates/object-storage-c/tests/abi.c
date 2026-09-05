@@ -111,6 +111,8 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_fill_filled = offsetof(borink_fill, filled),
         .offsetof_fill_required = offsetof(borink_fill, required),
         .offsetof_fill_next_marker = offsetof(borink_fill, next_marker),
+        .sizeof_property_set = sizeof(borink_property_set),
+        .alignof_property_set = _Alignof(borink_property_set),
     };
     // A `borink_layout` is `size_t` fields alone, so a field this file forgot
     // to fill would be 0 and would be reported as a disagreement.
@@ -364,6 +366,56 @@ static void a_property_is_read_out_of_the_entry(void) {
     CHECK(memcmp(decoded.bytes.ptr, "a&b", 3) == 0);
 }
 
+// The values of the properties a program asks for are read with the page,
+// one row per entry, and the program never touches the entry's bytes.
+static void the_properties_a_program_asks_for_are_read_with_the_page(void) {
+    const borink_session session = opened();
+    char body[] = "<EnumerationResults><Blobs>"
+                  "<Blob><Name>a.txt</Name><Properties><Content-Length>4</Content-Length>"
+                  "<Content-Encoding>gzip</Content-Encoding><AccessTier>Hot</AccessTier>"
+                  "</Properties></Blob>"
+                  "<Blob><Name>b.txt</Name><Properties><Content-Length>0</Content-Length>"
+                  "<Content-Encoding /></Properties></Blob>"
+                  "<BlobPrefix><Name>c/</Name></BlobPrefix>"
+                  "</Blobs><NextMarker /></EnumerationResults>";
+
+    borink_property_set wanted = {0};
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_CONTENT_ENCODING);
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER);
+    // A number that names no property changes nothing.
+    wanted = borink_property_set_with(wanted, 60000);
+    const size_t width = borink_property_set_len(wanted);
+    CHECK(width == 2);
+    const size_t tier = borink_property_slot(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER);
+    const size_t encoding = borink_property_slot(wanted, BORINK_BLOB_PROPERTY_CONTENT_ENCODING);
+    CHECK(tier == 0 && encoding == 1);
+    CHECK(borink_property_slot(wanted, BORINK_BLOB_PROPERTY_BLOB_TYPE) == width);
+
+    borink_list_entry entries[3] = {0};
+    borink_maybe_bytes values[3 * 2] = {0};
+    const borink_fill fill = borink_fill_listing_with(
+        &session, (borink_bytes_mut){(uint8_t *)body, strlen(body)}, entries, 3, wanted, values,
+        sizeof values / sizeof values[0]);
+    CHECK(fill.status.code == 0);
+    CHECK(fill.filled == 3);
+
+    const borink_maybe_bytes *a = &values[0 * width];
+    CHECK(a[tier].present && memcmp(a[tier].bytes.ptr, "Hot", a[tier].bytes.len) == 0);
+    CHECK(a[encoding].present && a[encoding].bytes.len == 4);
+    // An element written empty is present and empty; one not written is absent.
+    const borink_maybe_bytes *b = &values[1 * width];
+    CHECK(!b[tier].present);
+    CHECK(b[encoding].present && b[encoding].bytes.len == 0);
+    // A group of keys gives no values.
+    const borink_maybe_bytes *c = &values[2 * width];
+    CHECK(!c[tier].present && !c[encoding].present);
+
+    const borink_bytes name = borink_property_name(BORINK_BLOB_PROPERTY_CREATION_TIME);
+    CHECK(name.len == strlen("Creation-Time"));
+    CHECK(memcmp(name.ptr, "Creation-Time", name.len) == 0);
+    CHECK(borink_property_name(60000).len == 0);
+}
+
 int main(void) {
     the_two_compilers_agree_on_every_struct();
     one_request_head_is_written_into_a_stack_buffer();
@@ -375,6 +427,7 @@ int main(void) {
     a_body_that_is_not_a_page_is_refused();
     the_helpers_read_what_a_listing_lends();
     a_property_is_read_out_of_the_entry();
+    the_properties_a_program_asks_for_are_read_with_the_page();
 
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);
