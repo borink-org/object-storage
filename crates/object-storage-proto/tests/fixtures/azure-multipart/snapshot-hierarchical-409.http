@@ -1,0 +1,11 @@
+HTTP/1.1 409 Conflict
+content-length: 334
+content-type: application/xml
+server: Microsoft-HTTPAPI/2.0
+x-ms-request-id: 6add3463-801e-003f-5ad6-3ad923000000
+x-ms-error-code: FeatureNotYetSupportedForHierarchicalNamespaceAccounts
+date: Wed, 02 Sep 2026 12:31:28 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><Error><Code>FeatureNotYetSupportedForHierarchicalNamespaceAccounts</Code><Message>Specified feature is not yet supported for hierarchical namespace accounts.
+RequestId:6add3463-801e-003f-5ad6-3ad923000000
+Time:2026-09-02T12:31:28.6119058Z</Message><FeatureName>Snapshots</FeatureName></Error>

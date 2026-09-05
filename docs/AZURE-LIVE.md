@@ -1,59 +1,93 @@
 # Azure live tests
 
-The manual workflow uses a short-lived GitHub OIDC token; no Azure credential is stored in GitHub.
+The workflow authenticates with a short-lived GitHub OIDC token. No Azure credential is stored in GitHub.
 
-## Azure
+## Azure setup
 
-`az ad app create` and `az ad sp create` created `borink-object-storage-github-read` (`36916623-6d73-4698-9944-8efcb70537ec`; service-principal object ID `bdc02a8f-4712-41fa-8103-69a1a5aaf96b`).
-`az ad app federated-credential create` added issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`, and the immutable-ID subject emitted by GitHub: `repo:borink-org@319807983/object-storage@1342734194:environment:azure-live`.
-`az role assignment create` granted `Storage Blob Data Reader` and `Storage Blob Data Contributor` on `/subscriptions/f6706ae1-d259-498d-8302-cacf4634d368/resourceGroups/borink-storage-test/providers/Microsoft.Storage/storageAccounts/borinkstoragetest/blobServices/default/containers/borink-object-test`.
+Two storage accounts in resource group `borink-storage-test`, both with container `borink-object-test`: `borinkstoragetest` (flat namespace) and `borinkstoragehnstest` (hierarchical namespace, HNS). The suite runs against both because they behave differently.
 
-A second `Storage Blob Data Reader`, on the enclosing `blobServices/default`, is what lets a listing of a container that does not exist answer 404 rather than 403; see below. It widens reading to every container in the account and leaves writing scoped to the one. The account holds no other container.
-The `Borink Infra` identity (`infra@borink.com`; object ID `9ec695e1-f992-4295-9281-2755486d8772`) has container-scoped `Storage Blob Data Contributor` for local tests. Its subscription `Owner` role covers the management plane but does not grant blob data-plane access.
+Service principal `borink-object-storage-github-read` (app `36916623-6d73-4698-9944-8efcb70537ec`, object ID `bdc02a8f-4712-41fa-8103-69a1a5aaf96b`), created with `az ad app create` and `az ad sp create`. Its federated credential (`az ad app federated-credential create`) has issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange` and subject `repo:borink-org@319807983/object-storage@1342734194:environment:azure-live` (the immutable-ID form GitHub emits).
 
-## GitHub
+Roles on each account, assigned with `az role assignment create`:
 
-`gh api --method PUT repos/borink-org/object-storage/environments/azure-live` created the environment.
-`gh variable set --env azure-live --repo borink-org/object-storage` set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`; these identifiers are not secrets.
+```
+SCOPE=/subscriptions/f6706ae1-d259-498d-8302-cacf4634d368/resourceGroups/borink-storage-test/providers/Microsoft.Storage/storageAccounts/<account>
+az role assignment create --assignee-object-id bdc02a8f-4712-41fa-8103-69a1a5aaf96b --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" --scope "$SCOPE/blobServices/default/containers/borink-object-test"
+az role assignment create --assignee-object-id bdc02a8f-4712-41fa-8103-69a1a5aaf96b --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Reader" --scope "$SCOPE/blobServices/default"
+```
 
-The checked fixture is `borink-object-storage/azure-get-reference/a key+é.txt`, with the exact body `0123456789-azure-get-reference`.
+The reader role is on the whole blob service, not the container, so that listing a container that does not exist answers 404 instead of 403. Writing stays scoped to the one container. A new assignment takes about a minute to propagate.
 
-With Azure CLI 2.88.0, storage account keys are under `keys[]`; use `--query 'keys[0].value'`, not `[0].value`.
+The account firewall must allow requests by default (`az storage account update -n <account> -g borink-storage-test --default-action Allow`). The HNS account was initially set to deny by default with one allowed IP, which made every CI request fail with `403 AuthorizationFailure` (an RBAC refusal is `403 AuthorizationPermissionMismatch` instead).
 
-## Running them
+The read reference blob `borink-object-storage/azure-get-reference/a key+é.txt` must exist on both accounts with the exact body `0123456789-azure-get-reference`:
 
-The workflow runs on every pull request and on demand, and the `azure-live` environment requires `tiptenbrink` to approve each run before it holds a token. Nothing reaches the storage account because someone opened a pull request; until the run is approved the check is pending, and a pending check is what stops the merge. `gh api --method PUT repos/borink-org/object-storage/environments/azure-live` set that reviewer.
+```
+az storage blob upload --account-name <account> --container-name borink-object-test --auth-mode login \
+  --name 'borink-object-storage/azure-get-reference/a key+é.txt' --file ref.txt
+```
 
-A pull request from a fork is given no `id-token` permission however it is approved, so the job fails there rather than passing untested. Push the branch to this repository to have it run.
+For local runs, the `Borink Infra` identity (`infra@borink.com`, object ID `9ec695e1-f992-4295-9281-2755486d8772`) has container-scoped `Storage Blob Data Contributor`. Its subscription `Owner` role does not grant blob data-plane access.
 
-`cargo test -p azure-live -- --ignored --test-threads=1` runs the same suite locally against the `Borink Infra` identity.
+With Azure CLI 2.88.0, storage account keys are under `keys[]`: use `--query 'keys[0].value'`.
 
-The suite is serial by design: the write tests overwrite one key, and the listing tests empty one prefix, so two of them at once would read what the other wrote.
+## GitHub setup
 
-The listing tests own everything under `AZURE_LIST_PREFIX` and delete it before each test. `borink-object-storage/azure-list-scratch/` holds nothing else.
+`gh api --method PUT repos/borink-org/object-storage/environments/azure-live` created the `azure-live` environment and set `tiptenbrink` as its required reviewer. `gh variable set --env azure-live --repo borink-org/object-storage` set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` (not secrets).
+
+## Running the suite
+
+The workflow runs on every pull request and on demand, once a reviewer approves the run. Until then the check is pending, which blocks the merge. A pull request from a fork never gets the `id-token` permission, so push the branch to this repository to run it.
+
+Locally:
+
+```
+cargo test -p azure-live -- --ignored --test-threads=1
+```
+
+with `AZURE_STORAGE_ENDPOINT`, `AZURE_STORAGE_CONTAINER`, `AZURE_BLOB_KEY`, `AZURE_PUT_KEY`, `AZURE_LIST_PREFIX`, `AZURE_MULTIPART_PREFIX` and `AZURE_STORAGE_ACCESS_TOKEN` set as in the workflow, plus `AZURE_HIERARCHICAL=1` for the HNS account (only the exact value `1` counts). Under the container-scoped local identity, `listing_a_container_that_is_not_there_reports_that` fails with 403 on the flat account.
+
+The tests must run serially: they share one write key and empty their listing and multipart prefixes before each test.
+
+## Writing a probe
+
+`addressable` refuses keys that Azure would rename or reject, so a probe that measures such a limit cannot send the key through this crate. Write the request by hand, as `raw_put`, `raw_delete` and `snapshot` do, and remove what you wrote the same way. When you add a rule to `addressable`, move the probe that measured it in the same commit.
 
 ## What the suite measured
 
-Azure conditions a request on an entity tag written the way a listing writes it, without quotes, exactly as it does on the quoted form. `layered::quoted_etag` is therefore not a workaround for a service that refuses the listed form; it writes the spelling HTTP defines. `an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not` holds that, and also holds the part that would change the answer: an unquoted tag that does not match must still refuse the read, because a service that discarded the header instead would leave the condition with no effect at all.
+Each item is checked by a test in `tests/azure-live/tests/live.rs`, which fails with an explanation if Azure changes its behaviour.
 
-A listing of a container that is not there answers 404 `ContainerNotFound` only when the grant encloses the container being named. A credential scoped to one container is refused with 403 first, before Azure says whether any other container exists — deliberate, since a 404 there would tell an unauthorized caller which containers are real. That is why the read grant sits on `blobServices/default`: `listing_a_container_that_is_not_there_reports_that` cannot observe the 404 otherwise, and says so if it sees the 403 again.
+Conditions and listings:
 
-## What the suite measured about object keys
+- An entity tag from a listing (unquoted) works in `If-Match` exactly like the quoted form, and a wrong unquoted tag still refuses the read. `layered::quoted_etag` is a convenience, not a workaround.
+- Listing a container that does not exist answers 404 `ContainerNotFound` only if the grant covers the whole blob service. A container-scoped grant gets 403 first.
+- An invalid marker is `400 InvalidQueryParameterValue`, a truncated one `400 InvalidInput`. A marker names a place in the container, not a session, and can be reused.
+- `max_results` above 5000 is answered with 5000 and a marker, not refused.
+- A listing body is always UTF-8. A key with an invalid byte is refused with 400, and an invalid byte in a query value is echoed as U+FFFD. A control character in a query value is `400 InvalidQueryParameterValue`. This is why the reader may refuse a body that is not UTF-8.
+- A group of keys in a delimited listing is a `<BlobPrefix>` with a `<Name>` and nothing else on the flat account. On the HNS account it also holds the directory's own `<Properties>` block: creation time, last-modified, entity tag, `<ResourceType>directory</ResourceType>` and a zero length. The reader takes the name alone; the rest is reachable through `ListEntry::raw`. Both responses are recorded in `crates/object-storage-proto/tests/fixtures/azure-listing/`.
 
-Azure counts a key's length in **UTF-16 code units**, not characters or bytes. A name of 1024 two-byte characters is taken; one of 541 four-byte characters, which is 1041 code units, is refused with 400. `validate_put` counted Unicode scalar values and accepted the second, so `InvalidPlan::Key` claimed a key could become a request when it could not; it now counts the same unit Azure does.
+Object keys:
 
-Two keys are stored under a name the caller did not write, so they are refused before they are sent. `dot.` is stored as `dot`: Azure drops a dot from the end of a name. `dots/../up` writes `up`: a host resolves dot segments out of the URL before sending it, as the standard for URLs requires. A trailing separator, a doubled separator, a space before one, a dot inside a segment and a leading pair of dots all survive unchanged.
+- Length is counted in UTF-16 code units, limit 1024. `validate_put` counts the same way.
+- ASCII control characters (`U+0000`–`U+001F`, `U+007F`) are refused with 400. `U+0085` is accepted. `U+FFFE` and `U+FFFF` are stored, and a listing then writes the name percent-encoded with `Encoded="true"`, whole, separators included. So every `%` in an encoded name begins an escape.
+- A dot at the end of any segment is dropped (`dotseg./x` becomes `dotseg/x`), and `.`/`..` segments are resolved by the HTTP client before sending. `addressable` refuses both.
+- A trailing, doubled or space-preceded separator, a dot inside a segment and leading dots survive unchanged on the flat account.
+- Path segment limit is 255 on the flat account (documented as 254) and 61 on the HNS account, both found by bisection. `addressable` enforces 255.
 
-The documented maximum of 254 `/`-delimited path segments is off by one: bisection puts the boundary at **255**, so 255 segments is taken and 256 is refused with 400. `addressable` holds that number, and `a_key_holds_the_segments_azure_says_it_may` re-bisects for it.
+HNS account differences:
 
-A listed name that says `Encoded="true"` is encoded **whole**, down to the separators between its segments: `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`. So every `%` in an encoded name begins an escape, and `xml::decode_percent` refuses one that does not. Azure refuses the C0 controls in a name outright, with 400, but holds `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to carry; those are what make it write the encoded form.
+- An undelimited listing reports a directory as an `EntryKind::Directory` entry with no length and no trailing separator. A delimited listing reports it as a prefix with the separator, on both accounts.
+- An empty path segment is removed: `double//slash` is stored as `double/slash`. `addressable` does not cover this yet, since the crate is not told which kind of account it talks to.
+- No snapshots: `?comp=snapshot` is `409 FeatureNotYetSupportedForHierarchicalNamespaceAccounts`. `x-ms-delete-snapshots` on a delete is still accepted.
+- A directory that still holds anything cannot be deleted (409), so the prefix-emptying helper deletes the longest key first.
 
-Azure refuses an ASCII control character in a name with 400, measured for `U+0001`, `U+000B`, `U+000C`, `U+000E` and `U+007F`. `addressable` refuses the whole class, which is wider than the measurement, and `the_control_characters_azure_refuses_are_the_ones_this_crate_refuses` checks the rest of it — including tab, line feed and carriage return, which XML itself allows and where a narrower rule would have to stop — and `U+0085` just outside it, a control character that is not an ASCII one.
+Multipart (`Put Block`, `Put Block List`, `Get Block List`; not supported by this crate yet, responses recorded in `crates/object-storage-proto/tests/fixtures/azure-multipart/`):
 
-Azure drops a dot from the end of **every segment** of a name, not just the end of the name: `dot.` is stored as `dot` and `dotseg./x` as `dotseg/x`. A `.` or `..` segment is resolved out of the URL by the host before the request is sent, as the standard for URLs requires, so `dots/../up` writes `up`. Both are refused by `addressable` rather than stored under a name the caller did not write.
-
-## Probing what this crate refuses
-
-`addressable` refuses a key that Azure would rename or reject, which means the probe that measured the rule can no longer send the key it measured. Three tests hit that in turn, each failing on `InvalidPlan::Key` rather than on anything the service said.
-
-A probe that measures where the service draws a line must therefore write its own request, as `raw_put` and `raw_delete` do and as `snapshot` did before them, and remove what it wrote the same way. A probe that measures what the service does with a key this crate still accepts can go through `encode_put` as usual. Which of the two a test needs changes the moment a rule is added, so add the rule and move the probe in the same commit.
+- A committed block list of a key with only staged blocks is 200 with an empty `<CommittedBlocks />` and no entity tag, not 404. Only a key with nothing at all is 404 `BlobNotFound`.
+- A commit that loses the race to create is `409 BlobAlreadyExists`, like `Put Blob`, not the documented 412. A stale `If-Match` is `412 ConditionNotMet`.
+- Block identifiers of different decoded lengths are refused when staged (`400 InvalidBlobOrBlock`). A commit naming an unstaged block is `400 InvalidBlockList`. An empty block is `400 InvalidHeaderValue`.
+- A commit naming no blocks creates an empty object.
+- `Get Block List` orders blocks by identifier, not staging order. Staging one identifier twice keeps the last content. A `Put Block` answers with a CRC64 and no entity tag, last-modified or MD5.
+- Staged blocks are invisible to reads until committed, and a whole-object write to the key discards them. There is no abort operation and none is needed.

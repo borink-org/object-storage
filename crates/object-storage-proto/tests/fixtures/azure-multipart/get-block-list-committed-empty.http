@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+content-type: application/xml
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: 40277ded-501e-0059-0cd6-3a2327000000
+x-ms-version: 2026-04-06
+date: Wed, 02 Sep 2026 12:30:19 GMT
+
+﻿<?xml version="1.0" encoding="utf-8"?><BlockList><CommittedBlocks /></BlockList>

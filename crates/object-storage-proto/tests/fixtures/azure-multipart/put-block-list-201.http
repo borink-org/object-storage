@@ -1,0 +1,11 @@
+HTTP/1.1 201 Created
+content-length: 0
+last-modified: Wed, 02 Sep 2026 12:30:19 GMT
+etag: "0x8DF08EDF37F401D"
+server: Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0
+x-ms-request-id: b91ce6ae-d01e-0068-0ad6-3ac234000000
+x-ms-version: 2026-04-06
+x-ms-content-crc64: NCm4uORgTyY=
+x-ms-version-id: 2026-09-02T12:30:19.5384070Z
+x-ms-request-server-encrypted: true
+date: Wed, 02 Sep 2026 12:30:19 GMT
