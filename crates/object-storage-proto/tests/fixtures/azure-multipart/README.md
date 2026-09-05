@@ -2,9 +2,9 @@
 
 `Put Block`, `Put Block List` and `Get Block List`, which this crate does not support yet. Nothing reads these files. They are here so that the multipart types can be written against what Azure actually sent.
 
-Every file here is one response as the account sent it on Sat, 05 Sep 2026 09:49:23 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
+Every file here is one response as the account sent it on Sat, 05 Sep 2026 10:56:18 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
 
-Do not edit these files. `docs/AZURE-FIXTURES.md` says how to record them again.
+Do not edit these files. `docs/AZURE-TESTING.md` says how to record them again.
 
 | file | request | account | identity | what it shows |
 |---|---|---|---|---|

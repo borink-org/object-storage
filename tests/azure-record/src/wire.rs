@@ -5,7 +5,8 @@
 //! type, not a message: it lower-cases and reorders header names, drops the
 //! reason phrase, and may decode the body. What this module returns is the
 //! status line as it arrived, every header in the order it arrived, and the
-//! message body with only the chunked framing removed.
+//! message body with only the chunked framing removed: a
+//! `RecordedResponse`, which is what the file then holds.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -14,6 +15,7 @@ use std::sync::OnceLock;
 
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::ServerName;
+pub use test_support::recorded::RecordedResponse as Response;
 
 /// One request to send, addressed by absolute URL.
 pub struct Request {
@@ -53,38 +55,17 @@ impl Request {
     }
 }
 
-/// One response, as it arrived.
-pub struct Response {
-    /// The status line, without its line ending: `HTTP/1.1 200 OK`.
-    pub status_line: String,
-    /// The status code out of that line.
-    pub status: u16,
-    /// Every header, in arrival order, with the name lower-cased. A value is
-    /// bytes, because a server may send one that is not UTF-8.
-    pub headers: Vec<(String, Vec<u8>)>,
-    /// The message body, with chunked transfer framing removed.
-    pub body: Vec<u8>,
+// How the head says the body is framed.
+fn chunked(response: &Response) -> bool {
+    response
+        .header("transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"))
 }
 
-impl Response {
-    /// The first value of `name`, if the response carried one.
-    pub fn header(&self, name: &str) -> Option<&[u8]> {
-        self.headers
-            .iter()
-            .find(|(got, _)| got == name)
-            .map(|(_, value)| value.as_slice())
-    }
-
-    fn chunked(&self) -> bool {
-        self.header("transfer-encoding")
-            .is_some_and(|value| value.eq_ignore_ascii_case(b"chunked"))
-    }
-
-    fn content_length(&self) -> Result<Option<usize>, Box<dyn std::error::Error>> {
-        match self.header("content-length") {
-            Some(value) => Ok(Some(std::str::from_utf8(value)?.trim().parse()?)),
-            None => Ok(None),
-        }
+fn content_length(response: &Response) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    match response.header("content-length") {
+        Some(value) => Ok(Some(std::str::from_utf8(value)?.trim().parse()?)),
+        None => Ok(None),
     }
 }
 
@@ -130,12 +111,12 @@ pub fn send(request: &Request) -> Result<Response, Box<dyn std::error::Error>> {
     // body ends. Reading past that would wait for a message that is not coming.
     let body_at = cut;
     if request.method != "HEAD" && !matches!(response.status, 204 | 304) {
-        if response.chunked() {
+        if chunked(&response) {
             read_until(&mut stream, &mut raw, |raw| {
                 chunked_end(&raw[body_at..]).map(|at| body_at + at)
             })?;
             response.body = dechunk(&raw[body_at..])?;
-        } else if let Some(length) = response.content_length()? {
+        } else if let Some(length) = content_length(&response)? {
             read_until(&mut stream, &mut raw, |raw| {
                 (raw.len() >= body_at + length).then_some(body_at + length)
             })?;
@@ -176,8 +157,15 @@ fn chunked_end(body: &[u8]) -> Option<usize> {
         let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
         at = end + 2;
         if size == 0 {
-            // The last chunk is followed by trailers, then a blank line.
-            return find(&body[at..], b"\r\n").map(|at2| at + at2 + 2);
+            // The last chunk is followed by trailers, if any, and then a
+            // blank line, which is where the message ends.
+            loop {
+                let line = find(&body[at..], b"\r\n")?;
+                at += line + 2;
+                if line == 0 {
+                    return Some(at);
+                }
+            }
         }
         at += size + 2;
         if at > body.len() {
@@ -281,4 +269,89 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_head_keeps_the_status_line_and_lower_cases_the_names() {
+        let response = parse(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-6/30\r\nx-ms-request-id:  abc\r\n\r\nbody",
+        )
+        .unwrap();
+        assert_eq!(response.status_line, "HTTP/1.1 206 Partial Content");
+        assert_eq!(response.status, 206);
+        assert_eq!(
+            response.headers,
+            [
+                ("content-range".to_owned(), b"bytes 2-6/30".to_vec()),
+                ("x-ms-request-id".to_owned(), b"abc".to_vec()),
+            ]
+        );
+        // The body is read by the framing the head states, not here.
+        assert!(response.body.is_empty());
+    }
+
+    #[test]
+    fn a_head_that_is_not_one_is_refused() {
+        assert!(parse(b"HTTP/1.1 200 OK\r\n").is_err());
+        assert!(parse(b"HTTP/1.1 200 OK\nno-crlf: x\r\n\r\n").is_err());
+        assert!(parse(b"HTTP/1.1 200 OK\r\nno colon\r\n\r\n").is_err());
+        assert!(parse(b"HTTP/1.1\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn the_framing_is_read_off_the_head() {
+        let chunked_head = parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n").unwrap();
+        assert!(chunked(&chunked_head));
+        assert_eq!(content_length(&chunked_head).unwrap(), None);
+
+        let sized = parse(b"HTTP/1.1 200 OK\r\nContent-Length: 30 \r\n\r\n").unwrap();
+        assert!(!chunked(&sized));
+        assert_eq!(content_length(&sized).unwrap(), Some(30));
+
+        let nonsense = parse(b"HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\n").unwrap();
+        assert!(content_length(&nonsense).is_err());
+    }
+
+    #[test]
+    fn chunks_are_joined_and_their_framing_dropped() {
+        let body = b"4\r\nWiki\r\n5;ext=1\r\npedia\r\n0\r\n\r\n";
+        assert_eq!(dechunk(body).unwrap(), b"Wikipedia");
+        assert_eq!(chunked_end(body), Some(body.len()));
+    }
+
+    #[test]
+    fn a_chunked_body_ends_after_its_last_chunk_and_trailer() {
+        let body = b"1\r\na\r\n0\r\nx-trailer: 1\r\n\r\nHTTP/1.1 200 OK\r\n";
+        let end = chunked_end(body).unwrap();
+        assert_eq!(&body[..end], b"1\r\na\r\n0\r\nx-trailer: 1\r\n\r\n");
+        assert_eq!(dechunk(&body[..end]).unwrap(), b"a");
+    }
+
+    #[test]
+    fn a_chunked_body_still_arriving_has_no_end_yet() {
+        assert_eq!(chunked_end(b"4\r\nWi"), None);
+        assert_eq!(chunked_end(b"4\r\nWiki\r\n0\r\n"), None);
+        assert_eq!(chunked_end(b""), None);
+    }
+
+    #[test]
+    fn a_chunk_cut_short_is_an_error_not_a_body() {
+        assert!(dechunk(b"4\r\nWi").is_err());
+        assert!(dechunk(b"zz\r\n").is_err());
+        assert!(dechunk(b"4\r\nWiki\r\n").is_err());
+    }
+
+    #[test]
+    fn the_url_splits_into_the_host_and_the_target() {
+        assert_eq!(
+            split_url("https://a.blob.core.windows.net/c/k?x=1").unwrap(),
+            ("a.blob.core.windows.net", "/c/k?x=1")
+        );
+        assert_eq!(split_url("https://host").unwrap(), ("host", "/"));
+        assert!(split_url("http://host/").is_err());
+    }
 }

@@ -2,9 +2,9 @@
 
 The pages that `crates/object-storage-proto/tests/azure_list.rs` reads. Between them they hold every shape the listing reader claims to read: a group of keys, a directory, a name the service encoded, a page that names a next one, and a page that holds nothing.
 
-Every file here is one response as the account sent it on Sat, 05 Sep 2026 09:49:23 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
+Every file here is one response as the account sent it on Sat, 05 Sep 2026 10:56:18 GMT, under service version `2026-04-06`. `tests/azure-record` seeded the objects, sent the request and wrote what came back: the status line, the headers in the order they arrived, a blank line, and the body, byte-order mark included and to the last byte. A body that arrived in chunks is joined; the header that records the framing is kept as it arrived. Nothing in them is a secret. A request identifier names a request that is over, and the accounts hold nothing but this suite's own keys.
 
-Do not edit these files. `docs/AZURE-FIXTURES.md` says how to record them again.
+Do not edit these files. `docs/AZURE-TESTING.md` says how to record them again.
 
 | file | request | account | identity | what it shows |
 |---|---|---|---|---|

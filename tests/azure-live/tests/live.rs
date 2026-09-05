@@ -1,6 +1,9 @@
-use std::env;
 use std::str;
+use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use test_support::azure::{self, LIVE_PREFIX};
+use test_support::{base64, percent_encode};
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
@@ -11,18 +14,25 @@ use borink_object_storage_proto::{
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
 // skip these tests, while `cargo test -- --ignored` executes them.
-const CONTENTS: &[u8] = b"0123456789-azure-get-reference";
+
+// The object the read tests read. The suite writes it itself, once per run,
+// so a container that holds nothing is enough to run against.
+const CONTENTS: &[u8] = b"0123456789-azure-live-reference";
 
 #[derive(Debug)]
 struct Fixture {
     endpoint: String,
     container: String,
+    // The read reference: `Fixture::with_reference` puts it in place.
     key: String,
     // The write tests own this key. It is never the read reference above.
     put_key: String,
     // The listing tests own everything under this prefix, and empty it before
     // each test so that what a page holds is what the test wrote.
     list_prefix: String,
+    // The multipart probes own everything under this prefix, and remove what
+    // they wrote.
+    multipart_prefix: String,
     // Whether the account under test has a hierarchical namespace. The suite
     // runs against both kinds, and some tests only apply to one of them.
     hierarchical: bool,
@@ -30,20 +40,47 @@ struct Fixture {
 }
 
 impl Fixture {
+    // The account `test_support::azure` names, and the keys under its live
+    // prefix that this suite owns. The keys are constants rather than
+    // settings because nothing else may write under that prefix, and the
+    // recorder's prefix never overlaps it.
     fn from_env() -> Self {
+        let account = azure::Account::under_test();
         Self {
-            endpoint: env::var("AZURE_STORAGE_ENDPOINT").unwrap(),
-            container: env::var("AZURE_STORAGE_CONTAINER").unwrap(),
-            key: env::var("AZURE_BLOB_KEY").unwrap(),
-            put_key: env::var("AZURE_PUT_KEY").unwrap(),
-            list_prefix: env::var("AZURE_LIST_PREFIX").unwrap(),
-            // Only the exact value "1" counts. An exported but empty value
-            // must mean a flat account. Otherwise tests that only a
-            // hierarchical account can pass would run against a flat one, and
-            // fail for the wrong reason.
-            hierarchical: env::var("AZURE_HIERARCHICAL").is_ok_and(|value| value == "1"),
-            token: env::var("AZURE_STORAGE_ACCESS_TOKEN").unwrap(),
+            endpoint: account.endpoint,
+            container: account.container,
+            key: format!("{LIVE_PREFIX}reference/a key+é.txt"),
+            put_key: format!("{LIVE_PREFIX}write/a key+é.bin"),
+            list_prefix: format!("{LIVE_PREFIX}list/"),
+            multipart_prefix: format!("{LIVE_PREFIX}multipart/"),
+            hierarchical: account.hierarchical,
+            token: azure::token(),
         }
+    }
+
+    // The fixture with the read reference in place: the object is written if
+    // a read finds nothing at its key, once per run. Its content is the
+    // constant the read tests assert, so a reference another run wrote is as
+    // good as this one's.
+    fn with_reference() -> Self {
+        static SEEDED: Once = Once::new();
+        let fixture = Self::from_env();
+        SEEDED.call_once(|| {
+            if read(&fixture, METADATA, None).unwrap().outcome == Outcome::NotFound {
+                let owner = Fixture {
+                    put_key: fixture.key.clone(),
+                    ..clone(&fixture)
+                };
+                assert_eq!(
+                    write(&owner, PutShape::default(), None, CONTENTS)
+                        .unwrap()
+                        .outcome,
+                    WriteOutcome::Created,
+                    "the read reference could not be written"
+                );
+            }
+        });
+        fixture
     }
 
     fn blobs(&self) -> Blobs<'_> {
@@ -155,7 +192,7 @@ fn e_tag(fixture: &Fixture) -> String {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn gets_the_complete_blob() {
-    let result = read(&Fixture::from_env(), GetShape::default(), None).unwrap();
+    let result = read(&Fixture::with_reference(), GetShape::default(), None).unwrap();
     assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, CONTENTS);
     assert_eq!(result.size, Some(CONTENTS.len() as u64));
@@ -168,7 +205,7 @@ fn gets_a_bounded_range() {
         range: RequestedRange::Bounded { start: 2, end: 11 },
         ..GetShape::default()
     };
-    let result = read(&Fixture::from_env(), shape, None).unwrap();
+    let result = read(&Fixture::with_reference(), shape, None).unwrap();
     assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, &CONTENTS[2..11]);
     assert_eq!(result.size, Some(CONTENTS.len() as u64));
@@ -177,7 +214,7 @@ fn gets_a_bounded_range() {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn heads_the_blob() {
-    let result = read(&Fixture::from_env(), METADATA, None).unwrap();
+    let result = read(&Fixture::with_reference(), METADATA, None).unwrap();
     assert_eq!(result.outcome, Outcome::Complete);
     assert!(result.body.is_empty());
     assert_eq!(result.size, Some(CONTENTS.len() as u64));
@@ -187,7 +224,7 @@ fn heads_the_blob() {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn applies_if_match() {
-    let fixture = Fixture::from_env();
+    let fixture = Fixture::with_reference();
     let e_tag = e_tag(&fixture);
     let shape = conditional(ConditionKind::IfMatch);
     assert_eq!(
@@ -203,7 +240,7 @@ fn applies_if_match() {
 #[test]
 #[ignore = "requires Azure credentials"]
 fn applies_if_none_match() {
-    let fixture = Fixture::from_env();
+    let fixture = Fixture::with_reference();
     let e_tag = e_tag(&fixture);
     let shape = conditional(ConditionKind::IfNoneMatch);
     assert_eq!(
@@ -218,8 +255,8 @@ fn applies_if_none_match() {
     );
 }
 
-// The write half of the suite. These tests own `AZURE_PUT_KEY` and overwrite
-// it, so they never touch the blob the read tests assert on.
+// The write half of the suite. These tests own the write key and overwrite
+// it, so they never touch the object the read tests assert on.
 
 #[derive(Debug, PartialEq, Eq)]
 struct WriteResult {
@@ -331,8 +368,8 @@ fn seed(fixture: &Fixture, content: &[u8]) -> String {
     read_put_key(fixture, shape).e_tag.unwrap()
 }
 
-// The read helper reads `AZURE_BLOB_KEY`; the write tests need the same reads
-// against the key they own.
+// The read helper reads the reference object; the write tests need the same
+// reads against the key they own.
 fn read_put_key(fixture: &Fixture, shape: GetShape) -> ReadResult {
     let swapped = Fixture {
         key: fixture.put_key.clone(),
@@ -799,6 +836,7 @@ fn clone(fixture: &Fixture) -> Fixture {
         key: fixture.key.clone(),
         put_key: fixture.put_key.clone(),
         list_prefix: fixture.list_prefix.clone(),
+        multipart_prefix: fixture.multipart_prefix.clone(),
         hierarchical: fixture.hierarchical,
         token: fixture.token.clone(),
     }
@@ -1155,7 +1193,7 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
 /// stores `U+FFFE` and `U+FFFF`, which XML 1.0 forbids in a document. It lists
 /// such a name with `Encoded="true"` and encodes the whole of it, including
 /// the separators between its segments. The name below comes back as
-/// `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`.
+/// `borink-object-storage%2Flive%2Flist%2F100%25-%EF%BF%BE-name.txt`.
 /// So every `%` in an encoded name begins an escape.
 #[test]
 #[ignore = "requires Azure credentials"]
@@ -1188,7 +1226,7 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     let xml = String::from_utf8_lossy(&body).into_owned();
     assert!(xml.contains("Encoded=\"true\""), "{xml}");
     assert!(
-        xml.contains("100%25-") && xml.contains("azure-list-scratch%2F"),
+        xml.contains("100%25-") && xml.contains("live%2Flist%2F"),
         "an encoded name is encoded whole, separators included, so every `%` \
          in one is an escape. If this fails, xml::decode_percent must stop \
          refusing a `%` that is not one: {xml}"
@@ -1222,12 +1260,14 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
     let prefix = units(&fixture.list_prefix);
 
     // Exactly the limit, reached two ways: with two-byte characters, and with
-    // half as many four-byte characters.
+    // half as many four-byte characters, after one two-byte character when
+    // the prefix leaves an odd number of units to fill.
     let widest = format!("{}{}", fixture.list_prefix, "é".repeat(1024 - prefix));
     let deepest = format!(
-        "{}a{}",
+        "{}{}{}",
         fixture.list_prefix,
-        "🦀".repeat((1023 - prefix) / 2)
+        "a".repeat((1024 - prefix) % 2),
+        "🦀".repeat((1024 - prefix) / 2)
     );
     for key in [&widest, &deepest] {
         assert_eq!(units(key), 1024, "{key:?}");
@@ -1273,10 +1313,12 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
 fn a_key_holds_the_segments_azure_says_it_may() {
     let fixture = Fixture::from_env();
 
-    // The prefix carries two segments of its own, so `total - 2` more of them
-    // joined by the separator make a name of exactly `total`.
+    // The prefix ends in the separator, so it carries as many segments as it
+    // has separators, and that many fewer joined after it make a name of
+    // exactly `total`.
+    let own = fixture.list_prefix.matches('/').count();
     let of_segments = |total: usize| {
-        let tail = vec!["s"; total - 2].join("/");
+        let tail = vec!["s"; total - own].join("/");
         format!("{}{tail}", fixture.list_prefix)
     };
     // `addressable` refuses a name past the boundary this is looking for, so
@@ -1297,7 +1339,7 @@ fn a_key_holds_the_segments_azure_says_it_may() {
 
     // The two accounts have different limits, so the search starts below both
     // and above both rather than at either answer.
-    let (mut taken, mut refused) = (3, 494);
+    let (mut taken, mut refused) = (own + 1, 494);
     assert!(takes(taken), "{taken} segments was taken before");
     assert!(!takes(refused), "{refused} segments was refused before");
     while taken + 1 < refused {
@@ -1624,7 +1666,19 @@ fn list_status(fixture: &Fixture, marker: Option<&str>) -> (u16, Vec<u8>) {
     (status, incoming.body_mut().read_to_vec().unwrap())
 }
 
-// One whole response, in the form a fixture records it.
+// The multipart half of the suite: what Put Block, Put Block List and Get
+// Block List do. This crate does not support them yet, and these probes
+// measure them first.
+//
+// Each probe writes its own request the way `snapshot` does. The URL and the
+// head come from a plan this crate encodes, and the query, the extra headers
+// and the body are written here. The multipart types will be designed against
+// these measurements, so every probe asserts the answer it measured and
+// prints the response it read. What Azure sent, byte for byte, is recorded by
+// `tests/azure-record` under `fixtures/azure-multipart`; a probe here says
+// whether it still sends that.
+
+// One whole response, for a probe to assert on and print.
 #[derive(Debug)]
 struct Raw {
     status: u16,
@@ -1666,8 +1720,8 @@ impl Raw {
         self.header("x-ms-error-code")
     }
 
-    // Prints the head and the body in the form the core tests quote them in.
-    // Run the suite with `--nocapture` to see them.
+    // Prints the head and the body, for whoever runs a probe to read what
+    // the service answered. Run the suite with `--nocapture` to see them.
     fn show(&self, what: &str) {
         println!("--- {what}: {}", self.status);
         for (name, value) in &self.headers {
@@ -1740,6 +1794,495 @@ fn raw(
     Raw::read(incoming)
 }
 
+// Returns the eight-character identifier of one part. Every identifier
+// decodes to the same number of bytes, which Azure requires within one
+// upload.
+fn block_id(index: u32) -> String {
+    base64(&index.to_be_bytes())
+}
+
+fn stage(fixture: &Fixture, key: &str, id: &str, content: &[u8]) -> Raw {
+    raw(
+        fixture,
+        Method::Put,
+        key,
+        &format!("?comp=block&blockid={}", percent_encode(id)),
+        &[],
+        content,
+    )
+}
+
+fn commit(fixture: &Fixture, key: &str, ids: &[&str], extra: &[(&str, &str)]) -> Raw {
+    let mut body = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
+    for id in ids {
+        body.push_str(&format!("<Latest>{id}</Latest>"));
+    }
+    body.push_str("</BlockList>");
+    raw(
+        fixture,
+        Method::Put,
+        key,
+        "?comp=blocklist",
+        extra,
+        body.as_bytes(),
+    )
+}
+
+// `kind` is `all`, `committed` or `uncommitted`.
+fn block_list(fixture: &Fixture, key: &str, kind: &str) -> Raw {
+    raw(
+        fixture,
+        Method::Get,
+        key,
+        &format!("?comp=blocklist&blocklisttype={kind}"),
+        &[],
+        &[],
+    )
+}
+
+// Returns the names in one section of a Get Block List document, in order,
+// each with its size. This is the test's own reading of the document. So the
+// probes assert on what the service wrote, not on what this crate's future
+// reader will make of it.
+fn blocks(body: &[u8], section: &str) -> Vec<(String, u64)> {
+    let document = String::from_utf8(body.to_vec()).unwrap();
+    let Some(start) = document.find(&format!("<{section}>")) else {
+        return Vec::new();
+    };
+    let end = document[start..].find(&format!("</{section}>")).unwrap() + start;
+    document[start..end]
+        .split("<Block>")
+        .skip(1)
+        .map(|block| {
+            let field = |name: &str| {
+                let at = block.find(&format!("<{name}>")).unwrap() + name.len() + 2;
+                block[at..at + block[at..].find('<').unwrap()].to_owned()
+            };
+            (field("Name"), field("Size").parse().unwrap())
+        })
+        .collect()
+}
+
+// Returns a key under the multipart prefix. Each probe uses its own suffix.
+fn scratch(fixture: &Fixture, suffix: &str) -> String {
+    format!("{}{suffix}", fixture.multipart_prefix)
+}
+
+// Removes what a probe wrote, whether or not it was ever committed.
+fn discard(fixture: &Fixture, key: &str) {
+    let owner = Fixture {
+        put_key: key.to_owned(),
+        ..clone(fixture)
+    };
+    match remove(&owner, DeleteShape::default(), None).unwrap() {
+        RemoveOutcome::Accepted | RemoveOutcome::NotFound(_) => {}
+        outcome => panic!("{key}: {outcome:?}"),
+    }
+}
+
+fn contents(fixture: &Fixture, key: &str) -> ReadResult {
+    let owner = Fixture {
+        key: key.to_owned(),
+        ..clone(fixture)
+    };
+    read(&owner, GetShape::default(), None).unwrap()
+}
+
+/// Measures what a staged block is, before and after the commit that makes it
+/// part of an object.
+///
+/// This settles four things. A block list of a key with staged blocks and no
+/// committed blob is a 200 with an empty committed section. Its head has no
+/// entity tag and no last-modified. A block list of a key that holds nothing is
+/// a 404 `BlobNotFound`. The commit answers with the same values a whole
+/// write does. And the object holds the blocks in the order the commit named
+/// them, not the order they were staged in.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_block_is_invisible_until_the_commit_names_it() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "invisible.bin");
+    discard(&fixture, &key);
+    let (first, second) = (block_id(1), block_id(2));
+
+    let staged = stage(&fixture, &key, &second, b"second");
+    staged.show("Put Block");
+    assert_eq!(staged.status, 201);
+    // The service reports a checksum of the staged content. Measured under
+    // service version 2026-04-06: the checksum is CRC64, and no `Content-MD5`
+    // comes back.
+    assert!(staged.header("x-ms-content-crc64").is_some());
+    assert!(staged.header("content-md5").is_none());
+    assert!(staged.header("etag").is_none());
+    assert!(staged.header("last-modified").is_none());
+    assert_eq!(stage(&fixture, &key, &first, b"first").status, 201);
+
+    let all = block_list(&fixture, &key, "all");
+    all.show("Get Block List, all, uncommitted only");
+    assert_eq!(all.status, 200);
+    assert_eq!(blocks(&all.body, "CommittedBlocks"), []);
+    // Measured: the uncommitted blocks come back ordered by identifier, not
+    // in the order they were staged. The second block above was staged first
+    // and is listed second. So an identifier that sorts the way the parts are
+    // numbered lists them in the order the object will hold them. The base64
+    // of a big-endian number sorts that way.
+    assert_eq!(
+        blocks(&all.body, "UncommittedBlocks"),
+        [(first.clone(), 5), (second.clone(), 6)]
+    );
+    // No blob exists yet, so there is nothing for these to describe.
+    assert!(all.header("etag").is_none());
+    assert!(all.header("last-modified").is_none());
+    assert!(all.body.contains(&b'<'));
+
+    // Measured, and not what the plan assumed. A committed listing of a key
+    // that holds staged blocks and no blob is a 200 with an empty section.
+    // Only a key that holds nothing at all answers 404. So whether a blob
+    // exists must be read from the listing's contents.
+    let committed = block_list(&fixture, &key, "committed");
+    committed.show("Get Block List, committed, before the commit");
+    assert_eq!((committed.status, committed.error_code()), (200, None));
+    assert_eq!(blocks(&committed.body, "CommittedBlocks"), []);
+    assert!(committed.header("etag").is_none());
+
+    let absent = block_list(&fixture, &scratch(&fixture, "never-written.bin"), "all");
+    absent.show("Get Block List, all, on a key that holds nothing");
+    assert_eq!(
+        (absent.status, absent.error_code()),
+        (404, Some("BlobNotFound"))
+    );
+
+    // The commit names the parts in the order the object should hold them,
+    // which is not the order they were staged in.
+    let commit = commit(&fixture, &key, &[&first, &second], &[]);
+    commit.show("Put Block List");
+    assert_eq!(commit.status, 201);
+    assert!(commit.header("etag").is_some());
+    assert!(commit.header("last-modified").is_some());
+    // `x-ms-version-id` is present when the account keeps versions. The flat
+    // test account does and the hierarchical one cannot, so its presence
+    // depends on the account, not on the operation.
+    println!(
+        "--- x-ms-version-id: {:?}",
+        commit.header("x-ms-version-id")
+    );
+    assert_eq!(contents(&fixture, &key).body, b"firstsecond");
+
+    let after = block_list(&fixture, &key, "all");
+    after.show("Get Block List, all, after the commit");
+    assert_eq!(after.status, 200);
+    assert_eq!(
+        blocks(&after.body, "CommittedBlocks"),
+        [(first, 5), (second, 6)]
+    );
+    assert_eq!(blocks(&after.body, "UncommittedBlocks"), []);
+    // A committed listing describes the blob, so its head holds the blob's
+    // entity tag and length.
+    assert_eq!(after.header("etag"), commit.header("etag"));
+    assert!(after.header("x-ms-blob-content-length").is_some());
+
+    discard(&fixture, &key);
+}
+
+/// Measures the two conditions a commit can be made under, and the status each
+/// refusal answers with.
+///
+/// The lost create is the one that matters. If it answers 409
+/// `BlobAlreadyExists` like `Put Blob` does, the commit can use the same
+/// status handling as a write. The documentation says 412.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_commit_that_a_condition_refuses_names_what_refused_it() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "conditional.bin");
+    discard(&fixture, &key);
+    let id = block_id(1);
+
+    // An object to lose the race against.
+    assert_eq!(stage(&fixture, &key, &id, b"first").status, 201);
+    assert_eq!(commit(&fixture, &key, &[&id], &[]).status, 201);
+    let e_tag = contents(&fixture, &key).e_tag.unwrap();
+
+    assert_eq!(stage(&fixture, &key, &id, b"again").status, 201);
+    let lost = commit(&fixture, &key, &[&id], &[("if-none-match", "*")]);
+    lost.show("Put Block List, If-None-Match: *, on an object that exists");
+    assert_eq!(
+        (lost.status, lost.error_code()),
+        (409, Some("BlobAlreadyExists")),
+        "a lost create is the conflict Put Blob reports, not the 412 the documentation states"
+    );
+
+    let stale = commit(&fixture, &key, &[&id], &[("if-match", "\"0x0\"")]);
+    stale.show("Put Block List, a stale If-Match");
+    assert_eq!(
+        (stale.status, stale.error_code()),
+        (412, Some("ConditionNotMet"))
+    );
+
+    // The object's real tag lets the commit through. That shows the two
+    // refusals above came from the condition and not from the request.
+    assert_eq!(
+        commit(&fixture, &key, &[&id], &[("if-match", &e_tag)]).status,
+        201
+    );
+    assert_eq!(contents(&fixture, &key).body, b"again");
+
+    discard(&fixture, &key);
+}
+
+/// Measures three block lists that Azure may refuse, and the code each refusal
+/// answers with. The error mapping will be written from these.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn the_block_lists_azure_refuses_and_the_codes_it_refuses_them_with() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "refused.bin");
+    discard(&fixture, &key);
+
+    // Identifiers that decode to different lengths. Azure requires one length
+    // for the whole upload. Measured: it refuses the second identifier when
+    // it is staged, before any block list names it. So the core never has to
+    // check the lengths itself, and this is the code a stage is refused with.
+    let short = base64(b"ab");
+    let long = base64(b"abcd");
+    let first = stage(&fixture, &key, &short, b"x");
+    first.show("Put Block, a four-character identifier");
+    assert_eq!(first.status, 201);
+    let second = stage(&fixture, &key, &long, b"y");
+    second.show("Put Block, an identifier of another length beside it");
+    assert_eq!(
+        (second.status, second.error_code()),
+        (400, Some("InvalidBlobOrBlock"))
+    );
+
+    // A commit that names a block nobody staged.
+    let absent = commit(&fixture, &key, &[&short, &block_id(9)], &[]);
+    absent.show("Put Block List, a block that was never staged");
+    assert_eq!(
+        (absent.status, absent.error_code()),
+        (400, Some("InvalidBlockList"))
+    );
+
+    // A commit that names no blocks. Whether Azure refuses this or creates an
+    // empty object decides whether a plan may have no parts.
+    let empty = commit(&fixture, &key, &[], &[]);
+    empty.show("Put Block List, naming no blocks");
+    assert_eq!(empty.status, 201, "an empty commit creates an empty object");
+    assert_eq!(contents(&fixture, &key).size, Some(0));
+
+    discard(&fixture, &key);
+}
+
+/// Measures whether an escaped block identifier is read back as written.
+///
+/// The identifiers this crate writes are base64, which holds `+`, `/` and
+/// `=`. All three have a meaning in a query, so all three are escaped. This
+/// checks that Azure reads the escaped form back as the identifier. It also
+/// checks what Azure does with an empty block.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_identifier_that_a_query_cannot_carry_is_escaped_and_read_back() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "escaped.bin");
+    discard(&fixture, &key);
+
+    // Bytes chosen so that the base64 holds all three characters that have a
+    // meaning in a query.
+    let id = base64(&[0xFB, 0xFF]);
+    assert!(
+        id.contains('+') && id.contains('/') && id.contains('='),
+        "{id}"
+    );
+    let staged = stage(&fixture, &key, &id, b"x");
+    staged.show("Put Block, an escaped identifier");
+    assert_eq!(staged.status, 201);
+
+    let all = block_list(&fixture, &key, "uncommitted");
+    all.show("Get Block List, uncommitted, an escaped identifier");
+    assert_eq!(blocks(&all.body, "UncommittedBlocks"), [(id.clone(), 1)]);
+    assert_eq!(commit(&fixture, &key, &[&id], &[]).status, 201);
+    assert_eq!(contents(&fixture, &key).size, Some(1));
+
+    // Measured: Azure refuses to stage an empty block. An empty object is
+    // made by a commit that names no blocks, which the probe above measures.
+    let nothing = stage(&fixture, &key, &block_id(7), b"");
+    nothing.show("Put Block, no content at all");
+    assert_eq!(
+        (nothing.status, nothing.error_code()),
+        (400, Some("InvalidHeaderValue"))
+    );
+
+    discard(&fixture, &key);
+}
+
+/// Measures what staging the same identifier twice does. If the last content
+/// wins, a retried part need not be given a new identifier.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn staging_one_identifier_twice_keeps_the_content_staged_last() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "restaged.bin");
+    discard(&fixture, &key);
+    let id = block_id(1);
+
+    assert_eq!(stage(&fixture, &key, &id, b"first attempt").status, 201);
+    assert_eq!(stage(&fixture, &key, &id, b"second").status, 201);
+    let staged = block_list(&fixture, &key, "uncommitted");
+    staged.show("Get Block List, uncommitted, one identifier staged twice");
+    assert_eq!(blocks(&staged.body, "UncommittedBlocks"), [(id.clone(), 6)]);
+
+    assert_eq!(commit(&fixture, &key, &[&id], &[]).status, 201);
+    assert_eq!(contents(&fixture, &key).body, b"second");
+
+    discard(&fixture, &key);
+}
+
+/// Measures what happens to an upload that is never committed. There is no
+/// abort operation on Azure, and this shows why none is needed.
+///
+/// Blocks staged against a key that already holds an object are invisible to
+/// every read of it. A whole-object write to that key discards them.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_upload_that_is_never_committed_is_ended_by_a_whole_object_write() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "abandoned.bin");
+    let owner = Fixture {
+        put_key: key.clone(),
+        ..clone(&fixture)
+    };
+    discard(&fixture, &key);
+
+    assert_eq!(
+        write(&owner, PutShape::default(), None, b"the object")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+    let id = block_id(1);
+    assert_eq!(stage(&fixture, &key, &id, b"never committed").status, 201);
+
+    // A staged block changes nothing about the object.
+    assert_eq!(contents(&fixture, &key).body, b"the object");
+    let staged = block_list(&fixture, &key, "all");
+    staged.show("Get Block List, all, on an object with blocks staged against it");
+    // An object written whole is not made of blocks, so its committed section
+    // is empty however large the object is.
+    assert_eq!(blocks(&staged.body, "CommittedBlocks"), []);
+    assert_eq!(blocks(&staged.body, "UncommittedBlocks"), [(id, 15)]);
+
+    // A whole-object write to the key discards them.
+    assert_eq!(
+        write(&owner, PutShape::default(), None, b"written whole")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+    let after = block_list(&fixture, &key, "all");
+    after.show("Get Block List, all, after a whole-object write");
+    assert_eq!(blocks(&after.body, "UncommittedBlocks"), []);
+
+    discard(&fixture, &key);
+}
+
+/// Resumes an upload from the blocks the service says it holds.
+///
+/// A host needs this after a crash. The parts it already staged are named in
+/// the uncommitted section, so it stages only the missing ones and commits
+/// the whole sequence.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn an_upload_is_resumed_from_the_blocks_the_service_still_holds() {
+    let fixture = Fixture::from_env();
+    let key = scratch(&fixture, "resumed.bin");
+    discard(&fixture, &key);
+    let ids: Vec<String> = (1..=3).map(block_id).collect();
+
+    assert_eq!(stage(&fixture, &key, &ids[0], b"one ").status, 201);
+    assert_eq!(stage(&fixture, &key, &ids[1], b"two ").status, 201);
+
+    // What a host that lost its state asks the service.
+    let held = block_list(&fixture, &key, "uncommitted");
+    let staged: Vec<String> = blocks(&held.body, "UncommittedBlocks")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(staged, ids[..2]);
+
+    for id in &ids {
+        if !staged.contains(id) {
+            assert_eq!(stage(&fixture, &key, id, b"three").status, 201);
+        }
+    }
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(commit(&fixture, &key, &ids, &[]).status, 201);
+    assert_eq!(contents(&fixture, &key).body, b"one two three");
+
+    discard(&fixture, &key);
+}
+
+/// Lists the objects a multipart upload made, two entries at a time, on
+/// whichever account the suite is running against.
+///
+/// The listing tests above own their own prefix. This test lists the
+/// multipart prefix instead, and checks how a delimited listing reports the
+/// level below on both kinds of account.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_listing_of_the_multipart_prefix_reports_what_the_commits_wrote() {
+    let fixture = Fixture::from_env();
+    let keys = ["listed/a.bin", "listed/b.bin"];
+    for suffix in keys {
+        let key = scratch(&fixture, suffix);
+        discard(&fixture, &key);
+        let id = block_id(1);
+        assert_eq!(stage(&fixture, &key, &id, b"0123456789").status, 201);
+        assert_eq!(commit(&fixture, &key, &[&id], &[]).status, 201);
+    }
+
+    let prefix = format!("{}listed/", fixture.multipart_prefix);
+    let listed = Fixture {
+        list_prefix: prefix.clone(),
+        ..clone(&fixture)
+    };
+    let entries = walk(&listed, false);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.kind, entry.key.clone(), entry.size))
+            .collect::<Vec<_>>(),
+        keys.map(|suffix| (
+            EntryKind::Object,
+            format!("{prefix}{}", &suffix[7..]),
+            Some(10)
+        ))
+        .to_vec()
+    );
+
+    // The level above, delimited.
+    let above = Fixture {
+        list_prefix: fixture.multipart_prefix.clone(),
+        ..clone(&fixture)
+    };
+    let groups: Vec<(EntryKind, String)> = walk(&above, true)
+        .into_iter()
+        .filter(|entry| entry.key.starts_with(&prefix) || entry.key == prefix.trim_end_matches('/'))
+        .map(|entry| (entry.kind, entry.key))
+        .collect();
+    println!("--- the level above, delimited: {groups:?}");
+    // Measured on both accounts: a delimited listing reports the level below
+    // as a group, with the delimiter at the end of its name. That is true
+    // whether or not the account keeps a directory for it. Only an
+    // undelimited listing on a hierarchical account reports a directory
+    // entry, and that name has no delimiter. The two shapes never appear in
+    // the same page.
+    assert_eq!(groups, [(EntryKind::Prefix, prefix)]);
+
+    for suffix in keys {
+        discard(&fixture, &scratch(&fixture, suffix));
+    }
+}
+
 /// Measures what a hierarchical account does with snapshots.
 ///
 /// `DeleteKind` already writes `x-ms-delete-snapshots`. The flat account
@@ -1752,15 +2295,14 @@ fn a_hierarchical_account_answers_for_the_snapshots_a_delete_asks_about() {
     if !fixture.hierarchical {
         return;
     }
-    // The write tests own the put key, so this probe writes it too, and
-    // starts from its absence.
-    let key = fixture.put_key.clone();
-    match remove(&fixture, DeleteShape::default(), None).unwrap() {
-        RemoveOutcome::Accepted | RemoveOutcome::NotFound(_) => {}
-        outcome => panic!("{key}: {outcome:?}"),
-    }
+    let key = scratch(&fixture, "snapshotted.bin");
+    let owner = Fixture {
+        put_key: key.clone(),
+        ..clone(&fixture)
+    };
+    discard(&fixture, &key);
     assert_eq!(
-        write(&fixture, PutShape::default(), None, b"snapshot me")
+        write(&owner, PutShape::default(), None, b"snapshot me")
             .unwrap()
             .outcome,
         WriteOutcome::Created
@@ -1782,7 +2324,7 @@ fn a_hierarchical_account_answers_for_the_snapshots_a_delete_asks_about() {
     // The delete header that mentions snapshots is still accepted, so
     // `DeleteKind` need not be refused before the request is sent.
     let removed = remove(
-        &fixture,
+        &owner,
         DeleteShape {
             kind: DeleteKind::ObjectAndSnapshots,
             ..DeleteShape::default()

@@ -1,61 +1,57 @@
 //! Loopback integration test for the listing of the synchronous `ureq` host.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
+mod loopback;
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
+use borink_object_storage_proto::{Blobs, Container, EntryKind, ListEntry, PhysicalList};
+use test_support::azure::{CONTAINER, FIXTURES_PREFIX};
 
-const PAGE: &str = "<EnumerationResults><Blobs>\
-                    <Blob><Name>directory/a.txt</Name><Properties>\
-                    <Etag>0x1</Etag><Content-Length>4</Content-Length></Properties></Blob>\
-                    <BlobPrefix><Name>directory/nested/</Name></BlobPrefix>\
-                    </Blobs><NextMarker>next</NextMarker></EnumerationResults>";
-
+/// The host sends the request that produced `azure-listing/list-page`, as the
+/// notes beside that file spell it, and reads the page Azure answered with.
 #[test]
 fn reads_the_page_that_the_generated_request_asked_for() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0; 1024];
-        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-            let count = stream.read(&mut chunk).unwrap();
-            assert_ne!(count, 0);
-            request.extend_from_slice(&chunk[..count]);
-        }
-        let request = String::from_utf8(request).unwrap();
-        assert!(request.starts_with(
-            "GET /container?restype=container&comp=list&prefix=directory%2F\
-             &delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"
-        ));
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
-                    PAGE.len()
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-    });
+    let server =
+        loopback::Server::answering(test_support::recorded::load("azure-listing/list-page"));
 
-    let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
-    let plan = PhysicalList {
-        delimited: true,
-        max_results: Some(1000),
-        ..PhysicalList::new("directory/")
-    };
+    let board = format!("{FIXTURES_PREFIX}board/");
+    let blobs = Blobs::new(
+        Container::new(&server.endpoint, CONTAINER).unwrap(),
+        "token",
+    )
+    .unwrap();
     let mut body = Vec::new();
     let mut entries = [ListEntry::default(); 4];
-    let page = borink_azure_get_ureq::list(&blobs, &plan, &mut body, &mut entries).unwrap();
-    assert_eq!(page.filled, 2);
-    assert_eq!(entries[0].key, "directory/a.txt");
-    assert_eq!(entries[0].size, Some(4));
-    // A delimited listing reports the level below as one group.
-    assert_eq!(entries[1].key, "directory/nested/");
-    assert_eq!(entries[1].size, None);
-    assert_eq!(page.next_marker, Some("next"));
-    server.join().unwrap();
+    let page =
+        borink_azure_get_ureq::list(&blobs, &PhysicalList::new(&board), &mut body, &mut entries)
+            .unwrap();
+
+    assert_eq!(page.filled, 3);
+    assert_eq!(page.next_marker, None);
+    assert_eq!(
+        entries[..3]
+            .iter()
+            .map(|entry| (entry.kind, entry.key, entry.size))
+            .collect::<Vec<_>>(),
+        [
+            (EntryKind::Object, format!("{board}a.txt").as_str(), Some(8)),
+            (
+                EntryKind::Object,
+                format!("{board}nested/c.txt").as_str(),
+                Some(1)
+            ),
+            (EntryKind::Object, format!("{board}z.txt").as_str(), Some(2)),
+        ]
+    );
+
+    let request = server.request();
+    assert!(
+        request.starts_with(&format!(
+            "GET /{CONTAINER}?restype=container&comp=list&prefix=borink-object-storage%2Ffixtures%2Fboard%2F HTTP/1.1\r\n"
+        )),
+        "{request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer token\r\n")
+    );
 }

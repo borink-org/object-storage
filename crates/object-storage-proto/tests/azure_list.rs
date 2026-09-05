@@ -252,6 +252,24 @@ fn a_success_announces_the_page_and_a_failure_names_the_error() {
         })
     );
 
+    // A token the service could not read at all. Like every refusal, the head
+    // names the code, so the body is never asked for.
+    let unauthenticated = Recorded::load("azure-listing/list-unauthenticated");
+    assert_eq!(unauthenticated.status(), 401);
+    assert_eq!(
+        unauthenticated.header("x-ms-error-code"),
+        Some(b"InvalidAuthenticationInfo".as_slice())
+    );
+    assert_eq!(
+        blobs.accept_list_head(unauthenticated.head()),
+        Ok(ListHeadOutcome::ServiceFailure(Failure {
+            status: 401,
+            class: FailureClass::Auth,
+            kind: Some(ServiceErrorKind::Unauthorized),
+            request_id: unauthenticated.header("x-ms-request-id"),
+        }))
+    );
+
     // A status that a listing never answers with is a fault, not an outcome.
     assert_eq!(
         blobs.accept_list_head(ResponseHead::new(206)),

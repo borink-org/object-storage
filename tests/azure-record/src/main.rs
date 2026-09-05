@@ -7,9 +7,8 @@
 //! response to the corpus, and run it again when a new service version is
 //! worth recording: the corpus is then a diff, not a rewrite.
 //!
-//! See `docs/AZURE-FIXTURES.md` for what to set and how to run it.
+//! See `docs/AZURE-TESTING.md` for what to set and how to run it.
 
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borink_object_storage_proto::{
     Blobs, Container, ListEntry, PhysicalList, Timestamps, WireRequest, layered,
 };
+use test_support::azure;
 
 mod corpus;
 mod wire;
@@ -28,7 +28,7 @@ use wire::{Request, Response};
 /// It is a constant rather than a setting, because a recorded name is part of
 /// the response and so part of what the tests read back. A run that used
 /// another prefix would rewrite every file for no reason.
-pub const PREFIX: &str = "borink-object-storage/fixtures/";
+pub const PREFIX: &str = azure::FIXTURES_PREFIX;
 
 fn main() {
     if let Err(error) = run() {
@@ -40,25 +40,10 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Two identities, because the same request gets a different answer under
     // each and both answers belong in the corpus. See `Account::account_scoped`.
-    let token = var("AZURE_STORAGE_ACCESS_TOKEN")?;
-    let account_token = var("AZURE_STORAGE_ACCESS_TOKEN_ACCOUNT")?;
-    let container = var("AZURE_STORAGE_CONTAINER")?;
-    let flat = Account {
-        endpoint: var("AZURE_STORAGE_ENDPOINT")?,
-        container: container.clone(),
-        token: token.clone(),
-        account_token: account_token.clone(),
-        identity: CONTAINER_SCOPED,
-        hierarchical: false,
-    };
-    let hierarchical = Account {
-        endpoint: var("AZURE_HIERARCHICAL_ENDPOINT")?,
-        container,
-        token,
-        account_token,
-        identity: CONTAINER_SCOPED,
-        hierarchical: true,
-    };
+    let token = azure::token();
+    let account_token = azure::token_from("AZURE_STORAGE_ACCESS_TOKEN_ACCOUNT");
+    let flat = Account::new(azure::Account::flat(), &token, &account_token);
+    let hierarchical = Account::new(azure::Account::hierarchical(), &token, &account_token);
 
     let mut session = Session::new(fixtures_dir()?);
     // Both accounts are recorded in one run, because a group holds files from
@@ -72,10 +57,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("azure-record: wrote {} responses", session.written);
     Ok(())
-}
-
-fn var(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    env::var(name).map_err(|_| format!("{name} is not set").into())
 }
 
 // The corpus sits beside the tests that read it, not beside this program.
@@ -111,6 +92,19 @@ pub struct Account {
 }
 
 impl Account {
+    // The account as every suite names it, seen by the container-scoped
+    // identity, which records everything the corpus does not say otherwise.
+    fn new(account: azure::Account, token: &str, account_token: &str) -> Self {
+        Self {
+            endpoint: account.endpoint,
+            container: account.container,
+            token: token.to_owned(),
+            account_token: account_token.to_owned(),
+            identity: CONTAINER_SCOPED,
+            hierarchical: account.hierarchical,
+        }
+    }
+
     /// The account's own name, as the recorded notes name it.
     pub fn name(&self) -> &str {
         self.endpoint
@@ -299,7 +293,7 @@ impl Session {
         let group = self.groups.last_mut().ok_or("no group was declared")?;
         let path = self.dir.join(group.dir).join(format!("{file}.http"));
         fs::create_dir_all(path.parent().expect("a file is in a directory"))?;
-        fs::write(&path, serialize(&response))?;
+        fs::write(&path, response.to_bytes())?;
         self.written += 1;
 
         group.recorded.push(Recorded {
@@ -418,7 +412,7 @@ impl Session {
                  arrived in chunks is joined; the header that records the framing is kept as it \
                  arrived. Nothing in them is a secret. A request identifier names a request that \
                  is over, and the accounts hold nothing but this suite's own keys.\n\n\
-                 Do not edit these files. `docs/AZURE-FIXTURES.md` says how to record them \
+                 Do not edit these files. `docs/AZURE-TESTING.md` says how to record them \
                  again.\n\n",
                 borink_object_storage_proto::VERSION
             ));
@@ -463,20 +457,4 @@ fn target(request: &Request, container: &str) -> String {
     // taken off only when it is the container this run records into.
     let path = path.strip_prefix(container).unwrap_or(path);
     format!("{} /{}", request.method, path.trim_start_matches('/'))
-}
-
-// The file: the status line, the headers, a blank line, and the body.
-fn serialize(response: &Response) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(response.status_line.as_bytes());
-    out.push(b'\n');
-    for (name, value) in &response.headers {
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value);
-        out.push(b'\n');
-    }
-    out.push(b'\n');
-    out.extend_from_slice(&response.body);
-    out
 }

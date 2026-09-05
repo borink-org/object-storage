@@ -11,3 +11,9 @@ readme = "../../README.md"
 
 [lints.rust]
 missing_docs = "deny"
+
+# The recorded Azure responses under `tests/fixtures` are read through the
+# format their recorder writes them in, which `tests/support` spells once.
+# A path-only dev-dependency is left out of the published crate.
+[dev-dependencies]
+test-support = { path = "../../tests/support" }
