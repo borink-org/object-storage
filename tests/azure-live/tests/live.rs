@@ -917,6 +917,80 @@ fn a_delimited_listing_reports_the_level_below_as_a_group() {
     assert_eq!(entries[2].size, None);
 }
 
+/// Measures what a listing writes inside a group of keys.
+///
+/// The reader takes only the name of a group and skips whatever else the
+/// element holds, so this records what it skips, by walking the entry's
+/// properties the way a caller can. The response is printed whole; run with
+/// `--nocapture` to see it.
+///
+/// Measured: a flat account writes a `<Name>` and nothing else. A
+/// hierarchical account keeps a directory for the group and writes the
+/// directory's own `<Properties>` block after the name, the same block an
+/// undelimited listing gives that directory as a `<Blob>`: its creation time,
+/// last-modified and entity tag, `<ResourceType>directory</ResourceType>`, a
+/// length of zero and the content headers empty. So on such an account a
+/// delimited listing is where a directory's own timestamps and entity tag
+/// come from, and a caller who wants them reads them from `ListEntry::raw`.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_group_of_keys_carries_what_the_account_keeps_for_it() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+
+    let plan = PhysicalList {
+        delimited: true,
+        ..PhysicalList::new(&fixture.list_prefix)
+    };
+    let raw = raw_page(&fixture, &plan);
+    raw.show(if fixture.hierarchical {
+        "List Blobs, delimited, hierarchical account"
+    } else {
+        "List Blobs, delimited, flat account"
+    });
+    assert_eq!(raw.status, 200);
+
+    let blobs = fixture.blobs();
+    let mut body = raw.body.clone();
+    let mut into = [ListEntry::default(); 8];
+    let page = blobs.fill_listing(&mut body, &mut into).unwrap();
+    let group = into[..page.filled]
+        .iter()
+        .find(|entry| entry.kind == EntryKind::Prefix)
+        .expect("the level below, reported as a group");
+    assert_eq!(group.key, format!("{}nested/", fixture.list_prefix));
+    let properties: Vec<(String, String)> = group
+        .properties()
+        .map(|(name, value)| {
+            (
+                String::from_utf8_lossy(name).into_owned(),
+                String::from_utf8_lossy(value).into_owned(),
+            )
+        })
+        .collect();
+    println!("--- the group's properties: {properties:?}");
+    let names: Vec<&str> = properties.iter().map(|(name, _)| name.as_str()).collect();
+    if fixture.hierarchical {
+        let value = |wanted: &str| {
+            properties
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(names[0], "Name");
+        assert_eq!(value("ResourceType"), Some("directory"));
+        assert_eq!(value("Content-Length"), Some("0"));
+        for stamp in ["Creation-Time", "Last-Modified", "Etag"] {
+            assert!(
+                value(stamp).is_some_and(|value| !value.is_empty()),
+                "the group carries no {stamp}"
+            );
+        }
+    } else {
+        assert_eq!(names, ["Name"]);
+    }
+}
+
 /// The two ways a listing is split, against the same three objects: the
 /// service splitting it into pages, and the caller's array splitting each page
 /// into rounds. Neither may lose a key or report one twice.
@@ -1559,6 +1633,28 @@ struct Raw {
 }
 
 impl Raw {
+    // Keeps a response whole: the status, the headers in the order they
+    // arrived, and the body.
+    fn read(mut incoming: ureq::http::Response<ureq::Body>) -> Self {
+        let status = incoming.status().as_u16();
+        let headers = incoming
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let body = incoming.body_mut().read_to_vec().unwrap_or_default();
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -1611,7 +1707,7 @@ fn raw(
     let head: Vec<(&str, &str)> = request.headers().chain(extra.iter().copied()).collect();
     // In ureq a request with a body and one without are different types, so
     // the header loop is written twice.
-    let mut incoming = match method {
+    let incoming = match method {
         Method::Put => {
             let mut outgoing = ureq::put(&url);
             for (name, value) in head {
@@ -1641,23 +1737,7 @@ fn raw(
                 .unwrap()
         }
     };
-    let status = incoming.status().as_u16();
-    let headers = incoming
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_owned(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
-            )
-        })
-        .collect();
-    let body = incoming.body_mut().read_to_vec().unwrap_or_default();
-    Raw {
-        status,
-        headers,
-        body,
-    }
+    Raw::read(incoming)
 }
 
 /// Measures what a hierarchical account does with snapshots.
@@ -1741,29 +1821,39 @@ fn raw_list(fixture: &Fixture, query: &str) -> Raw {
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
     }
-    let mut incoming = outgoing
+    let incoming = outgoing
         .config()
         .http_status_as_error(false)
         .build()
         .call()
         .unwrap();
-    let status = incoming.status().as_u16();
-    let headers = incoming
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_owned(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
-            )
-        })
-        .collect();
-    let body = incoming.body_mut().read_to_vec().unwrap_or_default();
-    Raw {
-        status,
-        headers,
-        body,
+    Raw::read(incoming)
+}
+
+// Fetches one page the way `fetch` does, but keeps the whole response rather
+// than the body alone, so that a probe can print it in the form a fixture
+// records.
+fn raw_page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, plan, &now).unwrap();
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
     }
+    let incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    Raw::read(incoming)
 }
 
 /// Measures why the reader may treat a body that is not UTF-8 as a fault.
