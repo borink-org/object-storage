@@ -130,8 +130,14 @@ fn required(result: Result<()>) -> Result<usize> {
 /// than `value`. Returns [`None`] if `into` is shorter than `value`, and for a
 /// reference that no listing declares.
 ///
-/// The values that an entry carries need none of this. Reading the page
-/// decoded them where they stood.
+/// This undoes XML references and nothing else. It does not percent-decode.
+/// Azure escapes the metadata it returns for XML but never percent-encodes
+/// it, so `already%80escaped` is the text itself and not an escape. Only a
+/// name that the service marked as encoded is percent-decoded, and reading
+/// the page did that already.
+///
+/// The fields of a [`ListEntry`](crate::ListEntry) do not need this. Reading
+/// the page decoded them in place.
 pub fn decode_into<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
     let into = into.get_mut(..value.len())?;
     into.copy_from_slice(value);

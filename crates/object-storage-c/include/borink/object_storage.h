@@ -434,28 +434,196 @@ typedef uint16_t borink_entry_kind;
 #endif // __cplusplus
 
 /**
- * How much of a page one fill read.
+ * An element that a listing writes for a blob, other than the four that
+ * every `borink_list_entry` carries.
+ *
+ * Name the ones you want in a `borink_property_set` and read the page with
+ * `borink_fill_listing_with`, which keeps their values as it goes. Most are
+ * written under the properties element; the ones marked otherwise stand
+ * beside it. Read anything not listed here with `borink_entry_property`.
+ *
+ * These are the numbers that the core crate's `BlobProperty` uses. A
+ * `const` block in `layout.rs` fails the build if the two lists drift.
  */
-enum borink_fill_kind
+enum borink_blob_property
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : uint16_t
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * The page was read to its end. `next_marker` names the page after it.
+     * The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
      */
-    BORINK_FILL_KIND_PAGE = 1,
+    BORINK_BLOB_PROPERTY_ACCESS_TIER,
     /**
-     * The array filled before the page ended. Read the rest of the same body
-     * with `borink_resume_listing`, passing the `resume` beside this number.
+     * Whether the tier was inferred rather than set.
      */
-    BORINK_FILL_KIND_PARTIAL = 2,
+    BORINK_BLOB_PROPERTY_ACCESS_TIER_INFERRED,
+    /**
+     * When the tier was last changed.
+     */
+    BORINK_BLOB_PROPERTY_ACCESS_TIER_CHANGE_TIME,
+    /**
+     * The progress of a rehydration out of the archive tier.
+     */
+    BORINK_BLOB_PROPERTY_ARCHIVE_STATUS,
+    /**
+     * The access control list, on a hierarchical account listing with permissions.
+     */
+    BORINK_BLOB_PROPERTY_ACL,
+    /**
+     * `BlockBlob`, `PageBlob` or `AppendBlob`.
+     */
+    BORINK_BLOB_PROPERTY_BLOB_TYPE,
+    /**
+     * When the blob was created, in the form of the `Last-Modified` header.
+     */
+    BORINK_BLOB_PROPERTY_CREATION_TIME,
+    /**
+     * The media type, as stored with the blob.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_TYPE,
+    /**
+     * The content encoding, as stored with the blob.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_ENCODING,
+    /**
+     * The content language, as stored with the blob.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_LANGUAGE,
+    /**
+     * The CRC64 of the content, if the service holds one.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_CRC64,
+    /**
+     * The MD5 of the content, base64, if the service holds one.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_MD5,
+    /**
+     * The cache control directives, as stored with the blob.
+     */
+    BORINK_BLOB_PROPERTY_CACHE_CONTROL,
+    /**
+     * The content disposition, as stored with the blob.
+     */
+    BORINK_BLOB_PROPERTY_CONTENT_DISPOSITION,
+    /**
+     * The identifier of the last copy operation onto this blob.
+     */
+    BORINK_BLOB_PROPERTY_COPY_ID,
+    /**
+     * The state of that copy: `pending`, `success`, `aborted` or `failed`.
+     */
+    BORINK_BLOB_PROPERTY_COPY_STATUS,
+    /**
+     * The URL that copy read from.
+     */
+    BORINK_BLOB_PROPERTY_COPY_SOURCE,
+    /**
+     * The bytes copied so far and the total, as `copied/total`.
+     */
+    BORINK_BLOB_PROPERTY_COPY_PROGRESS,
+    /**
+     * When that copy finished.
+     */
+    BORINK_BLOB_PROPERTY_COPY_COMPLETION_TIME,
+    /**
+     * Why that copy failed or was aborted.
+     */
+    BORINK_BLOB_PROPERTY_COPY_STATUS_DESCRIPTION,
+    /**
+     * When a soft-deleted blob was deleted.
+     */
+    BORINK_BLOB_PROPERTY_DELETED_TIME,
+    /**
+     * Whether the entry is a soft-deleted blob. Written beside the properties element.
+     */
+    BORINK_BLOB_PROPERTY_DELETED,
+    /**
+     * The encryption scope the blob is stored under.
+     */
+    BORINK_BLOB_PROPERTY_ENCRYPTION_SCOPE,
+    /**
+     * When the blob expires, on a hierarchical account.
+     */
+    BORINK_BLOB_PROPERTY_EXPIRY_TIME,
+    /**
+     * The owning group, on a hierarchical account listing with permissions.
+     */
+    BORINK_BLOB_PROPERTY_GROUP,
+    /**
+     * Whether this version is the current one. Written beside the properties element.
+     */
+    BORINK_BLOB_PROPERTY_IS_CURRENT_VERSION,
+    /**
+     * Whether the blob is an incremental copy of a page blob snapshot.
+     */
+    BORINK_BLOB_PROPERTY_INCREMENTAL_COPY,
+    /**
+     * Until when the immutability policy holds.
+     */
+    BORINK_BLOB_PROPERTY_IMMUTABILITY_POLICY_UNTIL_DATE,
+    /**
+     * The immutability policy: `unlocked` or `locked`.
+     */
+    BORINK_BLOB_PROPERTY_IMMUTABILITY_POLICY_MODE,
+    /**
+     * Whether the blob is leased: `locked` or `unlocked`.
+     */
+    BORINK_BLOB_PROPERTY_LEASE_STATUS,
+    /**
+     * The state of the lease: `available`, `leased`, `expired`, `breaking` or `broken`.
+     */
+    BORINK_BLOB_PROPERTY_LEASE_STATE,
+    /**
+     * Whether the lease is `infinite` or `fixed`.
+     */
+    BORINK_BLOB_PROPERTY_LEASE_DURATION,
+    /**
+     * Whether a legal hold is set.
+     */
+    BORINK_BLOB_PROPERTY_LEGAL_HOLD,
+    /**
+     * The owner, on a hierarchical account listing with permissions.
+     */
+    BORINK_BLOB_PROPERTY_OWNER,
+    /**
+     * The POSIX permissions, on a hierarchical account listing with permissions.
+     */
+    BORINK_BLOB_PROPERTY_PERMISSIONS,
+    /**
+     * How many days a soft-deleted blob is kept.
+     */
+    BORINK_BLOB_PROPERTY_REMAINING_RETENTION_DAYS,
+    /**
+     * The priority of a rehydration out of the archive tier.
+     */
+    BORINK_BLOB_PROPERTY_REHYDRATE_PRIORITY,
+    /**
+     * Whether the blob is encrypted at rest.
+     */
+    BORINK_BLOB_PROPERTY_SERVER_ENCRYPTED,
+    /**
+     * The snapshot's timestamp, on an entry that names a snapshot. Written beside the properties element.
+     */
+    BORINK_BLOB_PROPERTY_SNAPSHOT,
+    /**
+     * How many tags the blob has.
+     */
+    BORINK_BLOB_PROPERTY_TAG_COUNT,
+    /**
+     * The version's identifier, on an account that keeps versions. Written beside the properties element.
+     */
+    BORINK_BLOB_PROPERTY_VERSION_ID,
+    /**
+     * The sequence number of a page blob.
+     */
+    BORINK_BLOB_PROPERTY_BLOB_SEQUENCE_NUMBER,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
-typedef enum borink_fill_kind borink_fill_kind;
+typedef enum borink_blob_property borink_blob_property;
 #else
-typedef uint16_t borink_fill_kind;
+typedef uint16_t borink_blob_property;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -885,45 +1053,6 @@ typedef struct borink_list_shape {
 } borink_list_shape;
 
 /**
- * A range of a response body that a page may not name.
- */
-typedef struct borink_maybe_span {
-    /**
-     * Whether the page named a range.
-     */
-    bool present;
-    /**
-     * The range.
-     */
-    struct borink_span span;
-} borink_maybe_span;
-
-/**
- * Where a fill stopped in a page.
- *
- * `borink_fill_listing` reports one when your array fills before the page
- * ends, and `borink_resume_listing` takes it back. Store it and pass it back
- * unchanged.
- *
- * One value describes one body. Passed with another body, it names no entry
- * of it.
- */
-typedef struct borink_resume {
-    /**
-     * The offset into the body that reading continues from.
-     */
-    size_t at;
-    /**
-     * Whether that offset stands inside the entries of the page.
-     */
-    bool within;
-    /**
-     * The range of the body that holds the text naming the next page.
-     */
-    struct borink_maybe_span marker;
-} borink_resume;
-
-/**
  * What one call to `borink_fill_listing` read.
  *
  * # Lifetime
@@ -933,17 +1062,13 @@ typedef struct borink_resume {
  */
 typedef struct borink_fill {
     /**
-     * Whether the page could be read, and what stopped it.
+     * Whether the page could be read.
      *
-     * A `code` of 0 means that the entries are in your array. Every other
-     * field is absent when it is not 0.
+     * A `code` of 0 means that the entries are in your array. When it is
+     * `Capacity`, `required` is set; every other field is absent when the
+     * code is not 0.
      */
     struct borink_status status;
-    /**
-     * Whether the page ended or the array filled first, as a
-     * `borink_fill_kind`.
-     */
-    uint16_t kind;
     /**
      * The number of entries written into your array.
      *
@@ -951,11 +1076,16 @@ typedef struct borink_fill {
      */
     size_t filled;
     /**
-     * Where the rest of the page starts, for a `Partial` fill.
+     * The number of entries that the page holds, when the array had no room
+     * for all of them.
+     *
+     * The body has been decoded by then and cannot be read again. Ask the
+     * service for the page again, with an array of this many entries, or ask
+     * for a page no larger than your array.
      */
-    struct borink_resume resume;
+    size_t required;
     /**
-     * The text that names the next page, for a `Page` fill.
+     * The text that names the next page.
      *
      * Absent when the listing is complete. Copy the bytes into your own
      * storage and pass them as the marker of the next request.
@@ -1008,6 +1138,19 @@ typedef struct borink_list_entry {
      */
     struct borink_bytes raw;
 } borink_list_entry;
+
+/**
+ * The properties that one `borink_fill_listing_with` call is asked for.
+ *
+ * One bit per property, at the bit that the property's number names. Start
+ * from a zeroed value and add each property with `borink_property_set_with`.
+ */
+typedef struct borink_property_set {
+    /**
+     * The bits. Bit `n` stands for the property numbered `n`.
+     */
+    uint64_t mask;
+} borink_property_set;
 
 /**
  * A walk over the values that one entry holds.
@@ -1121,9 +1264,6 @@ typedef struct borink_layout {
     size_t sizeof_maybe_u32;
     size_t alignof_maybe_u32;
     size_t offsetof_maybe_u32_value;
-    size_t sizeof_maybe_span;
-    size_t alignof_maybe_span;
-    size_t offsetof_maybe_span_span;
     size_t sizeof_list_shape;
     size_t offsetof_list_shape_max_results;
     size_t sizeof_list_entry;
@@ -1140,16 +1280,13 @@ typedef struct borink_layout {
     size_t alignof_property;
     size_t offsetof_property_name;
     size_t offsetof_property_value;
-    size_t sizeof_resume;
-    size_t alignof_resume;
-    size_t offsetof_resume_within;
-    size_t offsetof_resume_marker;
     size_t sizeof_fill;
     size_t alignof_fill;
-    size_t offsetof_fill_kind;
     size_t offsetof_fill_filled;
-    size_t offsetof_fill_resume;
+    size_t offsetof_fill_required;
     size_t offsetof_fill_next_marker;
+    size_t sizeof_property_set;
+    size_t alignof_property_set;
 } borink_layout;
 
 #ifdef __cplusplus
@@ -1390,10 +1527,9 @@ struct borink_outcome borink_finish_list_error_body(const struct borink_session 
  * decodes the text of the body where it stands, so a body that has been read
  * is no longer a document.
  *
- * Your array is the budget. A page that does not fit fills the array and
- * reports `Partial`. Read the rest of that page with `borink_resume_listing`
- * and the `resume` it reported. An array of `max_results` entries always
- * holds a whole page.
+ * Your array must hold the whole page. An array of `max_results` entries
+ * always does. A smaller one is refused with `Capacity`, and `required` says
+ * how many entries the page holds; the body cannot be read again by then.
  *
  * # Safety
  *
@@ -1412,25 +1548,66 @@ struct borink_fill borink_fill_listing(const struct borink_session *session,
                                        size_t capacity);
 
 /**
- * Reads the rest of a page that a fill stopped in.
+ * Reads a page the way `borink_fill_listing` does, and keeps the values of
+ * the properties in `wanted` as it goes.
  *
- * Pass the same `body`, unchanged, and the `resume` that came with the
- * entries you have finished with.
+ * `values` is your array of rows: one row per entry of `into`, each
+ * `borink_property_set_len(wanted)` values long, so `capacity` rows in all.
+ * The value that entry `i` gave for a property `p` is
+ * `values[i * len + borink_property_slot(wanted, p)]`. It is absent where
+ * the entry wrote no such element, and present and empty where it wrote the
+ * element empty. A group of keys has every value absent. If `values` holds
+ * fewer rows than `capacity`, that many rows is the capacity.
+ *
+ * Reading the page costs the same as `borink_fill_listing`, whatever the
+ * set holds.
  *
  * # Safety
  *
- * As `borink_fill_listing`, and `from` must be null or point at one readable
- * value.
+ * As `borink_fill_listing`, and `values` must address `value_capacity`
+ * writable values.
  *
  * # Lifetime
  *
- * As `borink_fill_listing`.
+ * Every value points into `body`, like the entries.
  */
-struct borink_fill borink_resume_listing(const struct borink_session *session,
-                                         struct borink_bytes_mut body,
-                                         const struct borink_resume *from,
-                                         struct borink_list_entry *into,
-                                         size_t capacity);
+struct borink_fill borink_fill_listing_with(const struct borink_session *session,
+                                            struct borink_bytes_mut body,
+                                            struct borink_list_entry *into,
+                                            size_t capacity,
+                                            struct borink_property_set wanted,
+                                            struct borink_maybe_bytes *values,
+                                            size_t value_capacity);
+
+/**
+ * Adds a property to a set.
+ *
+ * `property` is a `borink_blob_property`. A number that names no property
+ * leaves the set as it was.
+ */
+struct borink_property_set borink_property_set_with(struct borink_property_set set,
+                                                    uint16_t property);
+
+/**
+ * Returns how many properties a set holds, which is how many values each
+ * row of `borink_fill_listing_with` has.
+ */
+size_t borink_property_set_len(struct borink_property_set set);
+
+/**
+ * Returns where a property's value stands in a row: its rank among the
+ * set's members, in the order of their numbers.
+ *
+ * For a property the set does not hold, or a number that names none, this
+ * is the length of the row, which is one past its last value.
+ */
+size_t borink_property_slot(struct borink_property_set set, uint16_t property);
+
+/**
+ * Returns the element name of a property, as the service writes it. Empty
+ * for a number that names no property.
+ */
+struct borink_bytes borink_property_name(uint16_t property);
 
 /**
  * Returns the value that one entry gave for a property.

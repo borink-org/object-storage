@@ -1,0 +1,22 @@
+# Its own workspace, so that `libc` stays out of the main lockfile and the
+# bench is never a build input of anything a consumer depends on.
+[workspace]
+
+[package]
+name = "borink-object-storage-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+borink-object-storage-proto = { path = "../crates/object-storage-proto" }
+borink-object-storage-c = { path = "../crates/object-storage-c" }
+# Only for `perf_event_open`, `ioctl` and `read` in `counters.rs`.
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Line tables only, so that cachegrind and callgrind can name functions.
+debug = 1

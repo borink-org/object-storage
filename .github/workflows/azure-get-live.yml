@@ -1,8 +1,8 @@
 name: azure-live
 # This suite spends the storage account, so opening a pull request must not be
 # enough to run it. The `azure-live` environment requires a reviewer: a run
-# waits for that approval before it holds a token, and until then it is a
-# pending check, which is what stops the merge.
+# waits for that approval before it gets a token, and until then it is a
+# pending check, which blocks the merge.
 #
 # A pull request from a fork is given no `id-token` permission whatever the
 # reviewer says, so the job fails there rather than passing untested. Push the
@@ -24,7 +24,6 @@ env:
   AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-  AZURE_STORAGE_ENDPOINT: https://borinkstoragetest.blob.core.windows.net
   AZURE_STORAGE_CONTAINER: borink-object-test
   AZURE_BLOB_KEY: borink-object-storage/azure-get-reference/a key+é.txt
   # The write tests own this key and overwrite it on every run. It must never
@@ -34,9 +33,26 @@ env:
   # each test. It must not contain either key above.
   AZURE_LIST_PREFIX: borink-object-storage/azure-list-scratch/
 jobs:
+  # The suite runs against both accounts, because the two behave differently:
+  # a hierarchical namespace lists its directories as entries, drops an empty
+  # path segment, allows a quarter of the path segments, and has no snapshots.
+  # Each job owns its own keys on its own account, so the two can run at the
+  # same time.
   test:
     runs-on: ubuntu-latest
     environment: azure-live
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - account: borinkstoragetest
+            hierarchical: ""
+          - account: borinkstoragehnstest
+            hierarchical: "1"
+    name: test (${{ matrix.account }})
+    env:
+      AZURE_STORAGE_ENDPOINT: https://${{ matrix.account }}.blob.core.windows.net
+      AZURE_HIERARCHICAL: ${{ matrix.hierarchical }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch

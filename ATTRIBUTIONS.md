@@ -4,7 +4,7 @@
 
 <https://github.com/paolobarbolini/rusty-s3>, 0.10.1, by Paolo Barbolini and Federico Guerinoni.
 
-`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/path.rs`, the `OBJECT_KEY_ESCAPE` percent-encoding `AsciiSet`, is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, added to the same `CONTROLS` base. 
+`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/path.rs`, the set of bytes that `OBJECT_KEY_ESCAPE` percent-encodes is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, plus the same control characters. 
 
 `rusty-s3` is not a dependency of any crate here. When SigV4 signing lands, the canonical-query-string rules and the AWS test vectors are expected to come from the same source, and this section is where that gets recorded.
 
@@ -40,11 +40,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Inspiration and reference projects
 
-None of the projects below is a dependency, and no code from any of them is in this tree. They were read while the API was designed: the object-storage SDKs for what an operation and its options are called, and the sans-I/O, serialization and allocator families for how a library takes its memory and its bytes from the caller. `docs/DESIGN.md` states the constraints they were read against.
+None of the projects below is a dependency, and no code from any of them is in this tree. `docs/DESIGN.md` states the constraints that were taken into account while studying the dependencies. In many cases, studying revealed what not to do or helped narrow our goals.
 
-Each row says what was read and whether this crate does the same thing. Many rows say it does not: a pattern that was rejected after reading it is still a debt to the project that stated it clearly.
-
-Licenses are named so a reader can check them. Two of them (wolfSSL, mbedTLS) are not permissive in the way the rest are, which is a further reason nothing was copied from any of them.
 
 ### Object-storage SDKs
 
@@ -88,6 +85,22 @@ The rest were read and are not used:
 | Boost.Beast | `BSL-1.0` | <https://github.com/boostorg/beast> | A message layer with no I/O, the allocator as a template parameter, and explicit header and body limits. Same rejection as nghttp2. |
 | mbedTLS | `Apache-2.0 OR GPL-2.0-or-later` | <https://github.com/Mbed-TLS/mbedtls> | Three separable knobs: I/O callbacks, a global calloc/free override, and a heap seeded from a static buffer. None applies to a crate with no heap. |
 | wolfSSL | `GPL-3.0-or-later` (or commercial) | <https://github.com/wolfSSL/wolfssl> | `WOLFSSL_STATIC_MEMORY`: one caller buffer carved into size-bucketed pools. Read for the shape of the configuration only. |
+
+### XML parsers
+
+Read and benchmarked for the listing reader in `crates/object-storage-proto/src/xml/`. The reader takes its scanning technique from pugixml, but no code: it uses a 256-entry byte class table, scans names four bytes at a time, reads past the end of the buffer as a NUL sentinel, and decodes escapes in place because a value only ever shrinks. 
+
+| Project | License (SPDX) | Upstream | Read for |
+| --- | --- | --- | --- |
+| pugixml | `MIT` | <https://github.com/zeux/pugixml> | Served as inspiration and speed target, and used for various performance techniques. However, we do not build a tree, while pugixml does. |
+| tinyxml2 | `Zlib` | <https://github.com/leethomason/tinyxml2> | The other single-file C++ DOM parser, read and benchmarked beside pugixml as the cost of the tree without the scanning. |
+| libxml2 (through libs3) | `MIT` | <https://gitlab.gnome.org/GNOME/libxml2> | A SAX callback parser as the shape a C client uses. Not used: a callback per element inverts control, and this crate hands the caller an array instead. |
+| libs3 | `LGPL-3.0-or-later OR GPL-2.0-or-later`, with a linking exception | <https://github.com/bji/libs3> | How a C S3 client reads a listing: libxml2 SAX callbacks writing into fixed buffers. Read and benchmarked only, and its license rules out taking anything from it. |
+| aws-c-common | `Apache-2.0` | <https://github.com/awslabs/aws-c-common> | `xml_parser`, the CRT's own reader, for what the AWS C libraries settle for. |
+| quick-xml | `MIT` | <https://github.com/tafia/quick-xml> | The fastest Rust pull parser measured, and the borrowed-event API that avoids copying names. |
+| roxmltree | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/roxmltree> | An arena DOM as the middle ground between a pull parser and a tree with its own allocator. |
+| xmlparser | `MIT OR Apache-2.0` | <https://github.com/RazrFalcon/xmlparser> | A dependency of this crate until the current reader replaced it. The old reader tokenised the body twice with it, and its speed was the ceiling the new reader had to beat. |
+| aws-smithy-xml | `Apache-2.0` | <https://github.com/smithy-lang/smithy-rs> | `ScopedDecoder`, how the generated AWS SDK reads a listing. Benchmarked as the shape this crate would have had by following the SDK. |
 
 ### Serialization and parsers
 

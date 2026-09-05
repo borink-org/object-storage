@@ -1,9 +1,10 @@
 use std::env;
+use std::str;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind, Fill,
-    GetHeadOutcome, GetKind, GetShape, ListHeadOutcome, Method, Payload, PhysicalDelete,
+    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
+    GetHeadOutcome, GetKind, GetShape, ListEntry, ListHeadOutcome, Method, Payload, PhysicalDelete,
     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
     ServiceErrorKind, Timestamps, layered,
 };
@@ -22,6 +23,9 @@ struct Fixture {
     // The listing tests own everything under this prefix, and empty it before
     // each test so that what a page holds is what the test wrote.
     list_prefix: String,
+    // Whether the account under test has a hierarchical namespace. The suite
+    // runs against both kinds, and some tests only apply to one of them.
+    hierarchical: bool,
     token: String,
 }
 
@@ -33,6 +37,11 @@ impl Fixture {
             key: env::var("AZURE_BLOB_KEY").unwrap(),
             put_key: env::var("AZURE_PUT_KEY").unwrap(),
             list_prefix: env::var("AZURE_LIST_PREFIX").unwrap(),
+            // Only the exact value "1" counts. An exported but empty value
+            // must mean a flat account. Otherwise tests that only a
+            // hierarchical account can pass would run against a flat one, and
+            // fail for the wrong reason.
+            hierarchical: env::var("AZURE_HIERARCHICAL").is_ok_and(|value| value == "1"),
             token: env::var("AZURE_STORAGE_ACCESS_TOKEN").unwrap(),
         }
     }
@@ -326,12 +335,8 @@ fn seed(fixture: &Fixture, content: &[u8]) -> String {
 // against the key they own.
 fn read_put_key(fixture: &Fixture, shape: GetShape) -> ReadResult {
     let swapped = Fixture {
-        endpoint: fixture.endpoint.clone(),
-        container: fixture.container.clone(),
         key: fixture.put_key.clone(),
-        put_key: fixture.put_key.clone(),
-        list_prefix: fixture.list_prefix.clone(),
-        token: fixture.token.clone(),
+        ..clone(fixture)
     };
     read(&swapped, shape, None).unwrap()
 }
@@ -604,6 +609,11 @@ fn a_stale_entity_tag_refuses_the_removal() {
 #[ignore = "requires Azure credentials"]
 fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
     let fixture = Fixture::from_env();
+    // A hierarchical account has no snapshots, as the probe near the end of
+    // this file measured.
+    if fixture.hierarchical {
+        return;
+    }
     seed(&fixture, b"the object with a snapshot");
     snapshot(&fixture).unwrap();
 
@@ -642,6 +652,9 @@ fn an_object_with_snapshots_is_refused_until_the_plan_asks_for_them() {
 #[ignore = "requires Azure credentials"]
 fn removing_only_the_snapshots_keeps_the_object() {
     let fixture = Fixture::from_env();
+    if fixture.hierarchical {
+        return;
+    }
     seed(&fixture, b"the object that outlives its snapshot");
     snapshot(&fixture).unwrap();
 
@@ -674,7 +687,7 @@ fn removing_only_the_snapshots_keeps_the_object() {
 // test wrote and nothing a previous run left behind.
 
 // One page: what it held, and where the next one starts.
-type Page = (Vec<Entry>, Option<Vec<u8>>);
+type Page = (Vec<Entry>, Option<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
@@ -685,10 +698,7 @@ struct Entry {
     last_modified: Option<u64>,
 }
 
-// One page, read into an array of `room` entries at a time. `room` is what
-// proves the resuming path against a real body: a page that does not fit is
-// read in as many rounds as it takes, and no round asks the service again.
-// The response body of one listing request, as it came off the wire.
+// Returns the response body of one listing request, as it came off the wire.
 fn fetch(
     fixture: &Fixture,
     plan: &PhysicalList<'_>,
@@ -725,49 +735,33 @@ fn fetch(
     Ok(body)
 }
 
-fn page(
-    fixture: &Fixture,
-    plan: &PhysicalList<'_>,
-    room: usize,
-) -> Result<Page, Box<dyn std::error::Error>> {
+// Reads one page into an array that holds it whole: as many entries as the
+// plan asked for, or the most the service writes when it asked for none.
+fn page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Result<Page, Box<dyn std::error::Error>> {
     let blobs = fixture.blobs();
     let mut body = fetch(fixture, plan)?;
-
-    let mut entries = Vec::new();
-    let mut resume = None;
-    loop {
-        let mut into = vec![Default::default(); room];
-        let fill = match resume {
-            None => blobs.fill_listing(&mut body, &mut into)?,
-            Some(at) => blobs.resume_listing(&mut body, at, &mut into)?,
-        };
-        let (filled, done) = match fill {
-            Fill::Partial { filled, resume: at } => {
-                resume = Some(at);
-                (filled, None)
-            }
-            Fill::Page(page) => (page.filled, Some(page.next_marker.map(<[u8]>::to_vec))),
-        };
-        entries.extend(into[..filled].iter().map(|entry| {
-            Entry {
-                kind: entry.kind,
-                key: entry.key.to_owned(),
-                size: entry.size,
-                e_tag: entry
-                    .e_tag
-                    .map(|value| String::from_utf8(value.to_vec()).unwrap()),
-                last_modified: entry.last_modified.and_then(layered::http_date_ms),
-            }
-        }));
-        if let Some(marker) = done {
-            return Ok((entries, marker));
-        }
-    }
+    let room = plan.max_results.map_or(5000, |most| most as usize);
+    let mut into = vec![ListEntry::default(); room];
+    let page = blobs.fill_listing(&mut body, &mut into)?;
+    let entries = into[..page.filled]
+        .iter()
+        .map(|entry| Entry {
+            kind: entry.kind,
+            key: entry.key.to_owned(),
+            size: entry.size,
+            e_tag: entry.e_tag.map(str::to_owned),
+            last_modified: entry
+                .last_modified
+                .map(str::as_bytes)
+                .and_then(layered::http_date_ms),
+        })
+        .collect();
+    Ok((entries, page.next_marker.map(str::to_owned)))
 }
 
 // Every key under the prefix, page by page, the way a caller walks a listing.
-fn walk(fixture: &Fixture, delimited: bool, room: usize) -> Vec<Entry> {
-    let mut marker: Option<Vec<u8>> = None;
+fn walk(fixture: &Fixture, delimited: bool) -> Vec<Entry> {
+    let mut marker: Option<String> = None;
     let mut all = Vec::new();
     loop {
         let plan = PhysicalList {
@@ -775,7 +769,7 @@ fn walk(fixture: &Fixture, delimited: bool, room: usize) -> Vec<Entry> {
             delimited,
             ..PhysicalList::new(&fixture.list_prefix)
         };
-        let (entries, next) = page(fixture, &plan, room).unwrap();
+        let (entries, next) = page(fixture, &plan).unwrap();
         all.extend(entries);
         match next {
             Some(next) => marker = Some(next),
@@ -805,13 +799,20 @@ fn clone(fixture: &Fixture) -> Fixture {
         key: fixture.key.clone(),
         put_key: fixture.put_key.clone(),
         list_prefix: fixture.list_prefix.clone(),
+        hierarchical: fixture.hierarchical,
         token: fixture.token.clone(),
     }
 }
 
-// Removes whatever is under the prefix, so the tests below start from nothing.
+// Removes everything under the prefix, so the tests below start from nothing.
 fn empty(fixture: &Fixture) {
-    for entry in walk(fixture, false, 1000) {
+    // A hierarchical account lists its directories as entries beside the
+    // objects under them. It refuses to delete a directory that still holds
+    // anything, with a 409. Deleting the longest key first puts every child
+    // before the directory that holds it.
+    let mut entries = walk(fixture, false);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.key.len()));
+    for entry in entries {
         let owner = Fixture {
             put_key: entry.key.clone(),
             ..clone(fixture)
@@ -823,7 +824,7 @@ fn empty(fixture: &Fixture) {
             entry.key
         );
     }
-    assert_eq!(walk(fixture, false, 1000), []);
+    assert_eq!(walk(fixture, false), []);
 }
 
 // The three objects that the listing tests read.
@@ -837,44 +838,48 @@ fn seed_listing(fixture: &Fixture) {
 /// The undelimited page: every key under the prefix, with what the listing
 /// says about each one.
 ///
-/// This is also what settles that the last page of a real listing is read at
-/// all. Azure closes it with an empty `<NextMarker />`, written with a space
-/// before the slash, and a reader that matches the tag byte for byte faults on
-/// every listing that ends.
+/// This also checks that the last page of a real listing can be read at all.
+/// Azure closes it with an empty `<NextMarker />`, written with a space before
+/// the slash. A reader that matched the tag byte for byte would fault on every
+/// listing that ends.
 #[test]
 #[ignore = "requires Azure credentials"]
 fn lists_every_key_under_the_prefix() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
 
-    let entries = walk(&fixture, false, 1000);
+    let prefix = &fixture.list_prefix;
+    let mut expected = vec![
+        (EntryKind::Object, format!("{prefix}a.txt"), Some(8)),
+        (EntryKind::Object, format!("{prefix}b.txt"), Some(10)),
+        (EntryKind::Object, format!("{prefix}nested/c.txt"), Some(1)),
+    ];
+    // Measured on the hierarchical account: an undelimited listing reports the
+    // directory that holds `nested/c.txt` as an entry of its own. It is named
+    // without a trailing separator and has no length. A flat account never
+    // writes this shape. It sorts by its name like any other entry.
+    if fixture.hierarchical {
+        expected.insert(2, (EntryKind::Directory, format!("{prefix}nested"), None));
+    }
+
+    let entries = walk(&fixture, false);
     assert_eq!(
         entries
             .iter()
-            .map(|entry| (entry.kind, entry.key.as_str(), entry.size))
+            .map(|entry| (entry.kind, entry.key.clone(), entry.size))
             .collect::<Vec<_>>(),
-        [
-            (
-                EntryKind::Object,
-                format!("{}a.txt", fixture.list_prefix).as_str(),
-                Some(8)
-            ),
-            (
-                EntryKind::Object,
-                format!("{}b.txt", fixture.list_prefix).as_str(),
-                Some(10)
-            ),
-            (
-                EntryKind::Object,
-                format!("{}nested/c.txt", fixture.list_prefix).as_str(),
-                Some(1)
-            ),
-        ]
+        expected
     );
-    // Every object carries the two values that a listing is read for besides
-    // the key, so a caller need not head each one.
+    // Every object has an entity tag and a last-modified time in the listing,
+    // so a caller need not HEAD each one. A directory is not an object, and
+    // this crate reports no entity tag for one.
     for entry in &entries {
-        assert!(entry.e_tag.is_some(), "{}", entry.key);
+        assert_eq!(
+            entry.e_tag.is_some(),
+            entry.kind != EntryKind::Directory,
+            "{}",
+            entry.key
+        );
         assert!(entry.last_modified.is_some(), "{}", entry.key);
     }
 }
@@ -887,7 +892,7 @@ fn a_delimited_listing_reports_the_level_below_as_a_group() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
 
-    let entries = walk(&fixture, true, 1000);
+    let entries = walk(&fixture, true);
     assert_eq!(
         entries
             .iter()
@@ -912,19 +917,95 @@ fn a_delimited_listing_reports_the_level_below_as_a_group() {
     assert_eq!(entries[2].size, None);
 }
 
+/// Measures what a listing writes inside a group of keys.
+///
+/// The reader takes only the name of a group and skips whatever else the
+/// element holds, so this records what it skips, by walking the entry's
+/// properties the way a caller can. The response is printed whole; run with
+/// `--nocapture` to see it.
+///
+/// Measured: a flat account writes a `<Name>` and nothing else. A
+/// hierarchical account keeps a directory for the group and writes the
+/// directory's own `<Properties>` block after the name, the same block an
+/// undelimited listing gives that directory as a `<Blob>`: its creation time,
+/// last-modified and entity tag, `<ResourceType>directory</ResourceType>`, a
+/// length of zero and the content headers empty. So on such an account a
+/// delimited listing is where a directory's own timestamps and entity tag
+/// come from, and a caller who wants them reads them from `ListEntry::raw`.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_group_of_keys_carries_what_the_account_keeps_for_it() {
+    let fixture = Fixture::from_env();
+    seed_listing(&fixture);
+
+    let plan = PhysicalList {
+        delimited: true,
+        ..PhysicalList::new(&fixture.list_prefix)
+    };
+    let raw = raw_page(&fixture, &plan);
+    raw.show(if fixture.hierarchical {
+        "List Blobs, delimited, hierarchical account"
+    } else {
+        "List Blobs, delimited, flat account"
+    });
+    assert_eq!(raw.status, 200);
+
+    let blobs = fixture.blobs();
+    let mut body = raw.body.clone();
+    let mut into = [ListEntry::default(); 8];
+    let page = blobs.fill_listing(&mut body, &mut into).unwrap();
+    let group = into[..page.filled]
+        .iter()
+        .find(|entry| entry.kind == EntryKind::Prefix)
+        .expect("the level below, reported as a group");
+    assert_eq!(group.key, format!("{}nested/", fixture.list_prefix));
+    let properties: Vec<(String, String)> = group
+        .properties()
+        .map(|(name, value)| {
+            (
+                String::from_utf8_lossy(name).into_owned(),
+                String::from_utf8_lossy(value).into_owned(),
+            )
+        })
+        .collect();
+    println!("--- the group's properties: {properties:?}");
+    let names: Vec<&str> = properties.iter().map(|(name, _)| name.as_str()).collect();
+    if fixture.hierarchical {
+        let value = |wanted: &str| {
+            properties
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(names[0], "Name");
+        assert_eq!(value("ResourceType"), Some("directory"));
+        assert_eq!(value("Content-Length"), Some("0"));
+        for stamp in ["Creation-Time", "Last-Modified", "Etag"] {
+            assert!(
+                value(stamp).is_some_and(|value| !value.is_empty()),
+                "the group carries no {stamp}"
+            );
+        }
+    } else {
+        assert_eq!(names, ["Name"]);
+    }
+}
+
 /// The two ways a listing is split, against the same three objects: the
 /// service splitting it into pages, and the caller's array splitting each page
 /// into rounds. Neither may lose a key or report one twice.
 #[test]
 #[ignore = "requires Azure credentials"]
-fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
+fn a_listing_split_into_pages_reads_the_same_keys() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
-    let whole = walk(&fixture, false, 1000);
-    assert_eq!(whole.len(), 3);
+    let whole = walk(&fixture, false);
+    // Three objects, and on a hierarchical account the directory that holds
+    // one of them.
+    assert_eq!(whole.len(), if fixture.hierarchical { 4 } else { 3 });
 
     // One entry per page, so the service names a next page twice.
-    let mut marker: Option<Vec<u8>> = None;
+    let mut marker: Option<String> = None;
     let mut paged = Vec::new();
     let mut pages = 0;
     loop {
@@ -933,7 +1014,7 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
             max_results: Some(1),
             ..PhysicalList::new(&fixture.list_prefix)
         };
-        let (entries, next) = page(&fixture, &plan, 1000).unwrap();
+        let (entries, next) = page(&fixture, &plan).unwrap();
         pages += 1;
         paged.extend(entries);
         match next {
@@ -943,11 +1024,11 @@ fn a_listing_split_into_pages_and_into_rounds_reads_the_same_keys() {
         assert!(pages < 10, "a page of one is not making progress");
     }
     assert_eq!(paged, whole);
-    assert!(pages >= 3, "three objects, one per page: {pages} pages");
-
-    // One entry per round, against whole pages. The body is read once and the
-    // service is asked nothing extra.
-    assert_eq!(walk(&fixture, false, 1), whole);
+    assert!(
+        pages >= whole.len(),
+        "{} entries, one per page: {pages} pages",
+        whole.len()
+    );
 }
 
 /// A listing lists a container; a container that is not there is the one thing
@@ -1015,14 +1096,14 @@ fn listing_a_container_that_is_not_there_reports_that() {
 ///
 /// The assertion that matters is the last: an unquoted tag that does not match
 /// must still refuse the read. If it does not, Azure is discarding a header it
-/// cannot parse rather than reading it, a condition written that way has no
-/// effect at all, and quoting becomes required rather than merely correct.
+/// cannot parse rather than reading it. A condition written that way has no
+/// effect at all, and quoting becomes required.
 #[test]
 #[ignore = "requires Azure credentials"]
 fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     let fixture = Fixture::from_env();
     seed_listing(&fixture);
-    let entry = walk(&fixture, false, 1000).remove(0);
+    let entry = walk(&fixture, false).remove(0);
     let listed = entry.e_tag.unwrap();
     assert!(
         !listed.starts_with('"'),
@@ -1041,7 +1122,7 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     assert_eq!(result.outcome, Outcome::Body);
     assert_eq!(result.body, b"01234567");
 
-    // Measured: Azure reads the listed tag as it stands.
+    // Measured: Azure accepts the listed tag unquoted.
     let result = read(&owner, shape, Some(listed.as_bytes())).unwrap();
     assert_eq!(
         result.outcome,
@@ -1067,13 +1148,13 @@ fn an_entity_tag_from_a_listing_conditions_a_read_quoted_or_not() {
     }
 }
 
-/// Holds what a listed name looks like when Azure says it is encoded, which is
-/// what lets `xml::decode_percent` refuse a `%` that is not an escape.
+/// Measures what a listed name looks like when Azure marks it as encoded. That
+/// is why `xml::decode_percent` may refuse a `%` that is not an escape.
 ///
 /// Measured. Azure refuses the C0 controls in a name outright, with 400, but
-/// takes `U+FFFE` and `U+FFFF`, which XML 1.0 forbids a document to hold. It
-/// lists such a name with `Encoded="true"` and encodes the whole of it, down
-/// to the separators between its segments: the name below comes back reading
+/// stores `U+FFFE` and `U+FFFF`, which XML 1.0 forbids in a document. It lists
+/// such a name with `Encoded="true"` and encodes the whole of it, including
+/// the separators between its segments. The name below comes back as
 /// `borink-object-storage%2Fazure-list-scratch%2F100%25-%EF%BF%BE-name.txt`.
 /// So every `%` in an encoded name begins an escape.
 #[test]
@@ -1108,13 +1189,13 @@ fn an_encoded_name_is_encoded_whole_and_comes_back_whole() {
     assert!(xml.contains("Encoded=\"true\""), "{xml}");
     assert!(
         xml.contains("100%25-") && xml.contains("azure-list-scratch%2F"),
-        "an encoded name is encoded whole, separators included, which is what \
-         makes every `%` in one an escape. If this fails, xml::decode_percent \
-         must stop refusing a `%` that is not one: {xml}"
+        "an encoded name is encoded whole, separators included, so every `%` \
+         in one is an escape. If this fails, xml::decode_percent must stop \
+         refusing a `%` that is not one: {xml}"
     );
 
     // And the name comes back as it was written.
-    let listed: Vec<String> = walk(&fixture, false, 1000)
+    let listed: Vec<String> = walk(&fixture, false)
         .into_iter()
         .map(|entry| entry.key)
         .collect();
@@ -1140,8 +1221,8 @@ fn a_key_is_as_long_as_its_utf_16_and_this_crate_counts_the_same() {
     let units = |key: &str| key.encode_utf16().count();
     let prefix = units(&fixture.list_prefix);
 
-    // Exactly the limit, spelled two ways: all two-byte characters, and
-    // four-byte characters that reach it in half as many.
+    // Exactly the limit, reached two ways: with two-byte characters, and with
+    // half as many four-byte characters.
     let widest = format!("{}{}", fixture.list_prefix, "é".repeat(1024 - prefix));
     let deepest = format!(
         "{}a{}",
@@ -1214,8 +1295,9 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         took
     };
 
-    // Between the largest that was taken and the smallest that was refused.
-    let (mut taken, mut refused) = (255, 494);
+    // The two accounts have different limits, so the search starts below both
+    // and above both rather than at either answer.
+    let (mut taken, mut refused) = (3, 494);
     assert!(takes(taken), "{taken} segments was taken before");
     assert!(!takes(refused), "{refused} segments was refused before");
     while taken + 1 < refused {
@@ -1227,18 +1309,31 @@ fn a_key_holds_the_segments_azure_says_it_may() {
         }
     }
 
+    println!("--- the largest name taken has {taken} segments");
+    let expected = if fixture.hierarchical {
+        MAX_SEGMENTS_HIERARCHICAL
+    } else {
+        MAX_SEGMENTS
+    };
     assert_eq!(
-        taken, MAX_SEGMENTS,
-        "the largest name Azure takes has {taken} segments, not {MAX_SEGMENTS}. \
-         Correct MAX_SEGMENTS here and the segment rule in `addressable`"
+        taken, expected,
+        "the largest name Azure takes has {taken} segments, not {expected}. \
+         Correct the constant here and the segment rule in `addressable`"
     );
 }
 
 // Measured by the bisection above, and the number `addressable` holds.
 const MAX_SEGMENTS: usize = 255;
 
-/// Settles what Azure does with the slashes this crate leaves literal in the
-/// URL path, which is what makes a hierarchical-namespace path work.
+// The same limit measured on a hierarchical account. There a name is a path
+// through directories the service keeps, not a name that happens to hold
+// separators. It is a quarter of the flat limit. `addressable` enforces
+// neither yet, because the limit depends on the kind of account, and this
+// crate is not told which kind it is talking to.
+const MAX_SEGMENTS_HIERARCHICAL: usize = 61;
+
+/// Measures what Azure does with the slashes this crate leaves literal in the
+/// URL path. A hierarchical-namespace path needs them literal.
 ///
 /// The question is not whether Azure takes these keys but whether it stores
 /// them under the name it was given. A service that quietly folded `a//b` into
@@ -1280,11 +1375,26 @@ fn a_key_that_leans_on_a_slash_is_stored_under_the_name_it_was_given() {
     }
     assert!(!created.is_empty(), "Azure took none of the slash edges");
 
-    let listed: Vec<String> = walk(&fixture, false, 1000)
+    let listed: Vec<String> = walk(&fixture, false)
         .into_iter()
         .map(|entry| entry.key)
         .collect();
+    println!("--- the names the account stored: {listed:?}");
     for key in &created {
+        // Measured on the hierarchical account, where a name is a path: an
+        // empty segment is removed, so `double//slash` is stored as
+        // `double/slash`. That is a name the caller did not write, and the
+        // rule `addressable` enforces for a flat account does not cover it.
+        // So the two accounts disagree about which keys are addressable. This
+        // test records that, and no code acts on it yet.
+        if fixture.hierarchical && key.contains("//") {
+            assert!(
+                !listed.contains(key) && listed.contains(&key.replace("//", "/")),
+                "{key:?} was not stored with its empty segment removed, as \
+                 was measured before. The listing reports {listed:?}"
+            );
+            continue;
+        }
         assert!(
             listed.contains(key),
             "{key:?} was taken and stored under another name, so `addressable` \
@@ -1366,9 +1476,8 @@ fn raw_delete(fixture: &Fixture, escaped: &str) -> u16 {
 ///
 /// Measured: Azure refuses `U+0001`, `U+000B`, `U+000C`, `U+000E` and
 /// `U+007F` with 400. This crate refuses every ASCII control character on that
-/// evidence, which is a wider claim than the measurement, so this checks the
-/// rest of the class — including the three that XML itself allows, which are
-/// where a narrower rule would have to stop.
+/// evidence, which is wider than the measurement. So this checks the rest of
+/// the class, including the three that XML itself allows.
 ///
 /// It also checks one just outside the class, so the rule is no wider than the
 /// service's. `U+0085` is a control character that is not an ASCII one, and
@@ -1424,7 +1533,7 @@ fn the_control_characters_azure_refuses_are_the_ones_this_crate_refuses() {
 fn a_marker_the_service_did_not_write_is_refused_by_it() {
     let fixture = Fixture::from_env();
     let blobs = fixture.blobs();
-    let refused = list_status(&fixture, Some(b"not-a-marker"));
+    let refused = list_status(&fixture, Some("not-a-marker"));
     assert_eq!(refused.0, 400);
     assert_eq!(
         blobs.accept_list_error_body(refused.0, None, &refused.1),
@@ -1443,15 +1552,15 @@ fn a_marker_the_service_did_not_write_is_refused_by_it() {
         ..PhysicalList::new(&fixture.list_prefix)
     };
     seed_listing(&fixture);
-    let (_, marker) = page(&fixture, &plan, 4).unwrap();
+    let (_, marker) = page(&fixture, &plan).unwrap();
     let marker = marker.expect("a first page of one entry names the next");
     let again = PhysicalList {
         marker: Some(&marker),
         ..plan
     };
     assert_eq!(
-        page(&fixture, &again, 4).unwrap().0,
-        page(&fixture, &again, 4).unwrap().0,
+        page(&fixture, &again).unwrap().0,
+        page(&fixture, &again).unwrap().0,
         "a marker names a place in the container, not a session"
     );
 
@@ -1464,7 +1573,7 @@ fn a_marker_the_service_did_not_write_is_refused_by_it() {
 /// service gives.
 ///
 /// Measured on 2026-09-01: Azure answers 200 and echoes `<MaxResults>5000`,
-/// which is what `PhysicalList::max_results` documents. A caller that asks for
+/// as `PhysicalList::max_results` documents. A caller that asks for
 /// more is not refused; it is answered with the maximum and a marker.
 #[test]
 #[ignore = "requires Azure credentials"]
@@ -1487,7 +1596,7 @@ fn a_page_larger_than_the_service_gives_is_answered_with_its_maximum() {
 // One listing request, as the status and the body that answered it. The
 // listing helpers above read a page; this one is for the answers that are not
 // pages.
-fn list_status(fixture: &Fixture, marker: Option<&[u8]>) -> (u16, Vec<u8>) {
+fn list_status(fixture: &Fixture, marker: Option<&str>) -> (u16, Vec<u8>) {
     let now = Timestamps::from_unix(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1513,4 +1622,297 @@ fn list_status(fixture: &Fixture, marker: Option<&[u8]>) -> (u16, Vec<u8>) {
         .unwrap();
     let status = incoming.status().as_u16();
     (status, incoming.body_mut().read_to_vec().unwrap())
+}
+
+// One whole response, in the form a fixture records it.
+#[derive(Debug)]
+struct Raw {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Raw {
+    // Keeps a response whole: the status, the headers in the order they
+    // arrived, and the body.
+    fn read(mut incoming: ureq::http::Response<ureq::Body>) -> Self {
+        let status = incoming.status().as_u16();
+        let headers = incoming
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let body = incoming.body_mut().read_to_vec().unwrap_or_default();
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn error_code(&self) -> Option<&str> {
+        self.header("x-ms-error-code")
+    }
+
+    // Prints the head and the body in the form the core tests quote them in.
+    // Run the suite with `--nocapture` to see them.
+    fn show(&self, what: &str) {
+        println!("--- {what}: {}", self.status);
+        for (name, value) in &self.headers {
+            // No response holds the token, and the request identifiers reveal
+            // nothing about the account, so every header is safe to print.
+            println!("{name}: {value}");
+        }
+        if !self.body.is_empty() {
+            println!("{}", String::from_utf8_lossy(&self.body));
+        }
+        println!("---");
+    }
+}
+
+// Sends a request this crate cannot encode, for a key it can.
+fn raw(
+    fixture: &Fixture,
+    method: Method,
+    key: &str,
+    query: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalDelete::new(key);
+    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
+
+    let url = format!("{}{query}", request.url());
+    // The head this crate wrote, plus whatever the probe adds to it.
+    let head: Vec<(&str, &str)> = request.headers().chain(extra.iter().copied()).collect();
+    // In ureq a request with a body and one without are different types, so
+    // the header loop is written twice.
+    let incoming = match method {
+        Method::Put => {
+            let mut outgoing = ureq::put(&url);
+            for (name, value) in head {
+                outgoing = outgoing.header(name, value);
+            }
+            outgoing
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send(body)
+                .unwrap()
+        }
+        _ => {
+            let mut outgoing = match method {
+                Method::Get => ureq::get(&url),
+                Method::Head => ureq::head(&url),
+                _ => ureq::delete(&url),
+            };
+            for (name, value) in head {
+                outgoing = outgoing.header(name, value);
+            }
+            outgoing
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .call()
+                .unwrap()
+        }
+    };
+    Raw::read(incoming)
+}
+
+/// Measures what a hierarchical account does with snapshots.
+///
+/// `DeleteKind` already writes `x-ms-delete-snapshots`. The flat account
+/// accepts that header, and this checks whether a hierarchical account
+/// refuses it.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_hierarchical_account_answers_for_the_snapshots_a_delete_asks_about() {
+    let fixture = Fixture::from_env();
+    if !fixture.hierarchical {
+        return;
+    }
+    // The write tests own the put key, so this probe writes it too, and
+    // starts from its absence.
+    let key = fixture.put_key.clone();
+    match remove(&fixture, DeleteShape::default(), None).unwrap() {
+        RemoveOutcome::Accepted | RemoveOutcome::NotFound(_) => {}
+        outcome => panic!("{key}: {outcome:?}"),
+    }
+    assert_eq!(
+        write(&fixture, PutShape::default(), None, b"snapshot me")
+            .unwrap()
+            .outcome,
+        WriteOutcome::Created
+    );
+
+    // Measured: a hierarchical account has no snapshots at all. It refuses to
+    // take one with 409 and a code that names the missing feature. So the two
+    // snapshot tests above only run on the flat account.
+    let snapshot = raw(&fixture, Method::Put, &key, "?comp=snapshot", &[], b"");
+    snapshot.show("Snapshot Blob, on a hierarchical account");
+    assert_eq!(
+        (snapshot.status, snapshot.error_code()),
+        (
+            409,
+            Some("FeatureNotYetSupportedForHierarchicalNamespaceAccounts")
+        )
+    );
+
+    // The delete header that mentions snapshots is still accepted, so
+    // `DeleteKind` need not be refused before the request is sent.
+    let removed = remove(
+        &fixture,
+        DeleteShape {
+            kind: DeleteKind::ObjectAndSnapshots,
+            ..DeleteShape::default()
+        },
+        None,
+    )
+    .unwrap();
+    println!(
+        "--- Delete Blob asking for the snapshots too, on a hierarchical account: {removed:?}"
+    );
+    assert_eq!(removed, RemoveOutcome::Accepted);
+}
+
+// Sends a listing request whose query this crate cannot write.
+// `PhysicalList::prefix` is a `&str`, so it cannot hold a byte that is not
+// UTF-8, and a `%` in it is escaped as `%25`. The probe below needs the
+// escape to reach the service as written. The head comes from a plan this
+// crate does encode.
+fn raw_list(fixture: &Fixture, query: &str) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let plan = PhysicalList::new("");
+    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+
+    let url = format!(
+        "{}/{}?restype=container&comp=list{query}",
+        fixture.endpoint, fixture.container
+    );
+    let mut outgoing = ureq::get(&url);
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    Raw::read(incoming)
+}
+
+// Fetches one page the way `fetch` does, but keeps the whole response rather
+// than the body alone, so that a probe can print it in the form a fixture
+// records.
+fn raw_page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Raw {
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now).unwrap()];
+    let request = blobs.encode_list(&mut buf, plan, &now).unwrap();
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    Raw::read(incoming)
+}
+
+/// Measures why the reader may treat a body that is not UTF-8 as a fault.
+///
+/// The reader checks the whole body before it reads anything from it, and
+/// refuses one that is not valid UTF-8. That relies on the service, not on
+/// XML. A key is percent-encoded bytes in a path. Nothing in the wire format
+/// stops a percent escape from naming a byte that is not UTF-8. This measures
+/// the two ways such a byte could get into a page.
+///
+/// Measured: Azure refuses the key outright, and replaces the byte in a query
+/// value with `U+FFFD` before echoing it. So a byte that is not UTF-8 never
+/// reaches a listing body. One that does is a protocol violation rather than
+/// a key some caller holds.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn a_listing_body_is_always_utf_8() {
+    let fixture = Fixture::from_env();
+
+    // The key. `ObjectKey` is a `&str` and cannot hold these bytes, so the
+    // request is written by hand, like every probe of a key this crate
+    // refuses.
+    for escaped in ["%80", "%FF", "%C3%28", "%ED%A0%80", "%F4%90%80%80"] {
+        let key = format!("{}nonutf8-{escaped}.txt", fixture.list_prefix);
+        let status = raw_put(&fixture, &key);
+        if (200..300).contains(&status) {
+            assert!(raw_delete(&fixture, &key) < 300, "left {key} behind");
+        }
+        assert_eq!(
+            status, 400,
+            "Azure stored a key that is not UTF-8 ({escaped}), so a listing \
+             can carry one and the reader may not refuse a body for it"
+        );
+    }
+
+    // The query. The prefix is echoed into the page, which is the only way a
+    // caller's bytes reach the body without being a key first.
+    let echoed = raw_list(&fixture, "&prefix=nonutf8-%80-probe");
+    echoed.show("List Blobs, a prefix that is not UTF-8");
+    assert_eq!(echoed.status, 200);
+    assert!(
+        str::from_utf8(&echoed.body).is_ok(),
+        "the body Azure wrote is not UTF-8"
+    );
+    // U+FFFD, where the byte was.
+    assert!(
+        echoed
+            .body
+            .windows(3)
+            .any(|window| window == [0xEF, 0xBF, 0xBD]),
+        "Azure echoed the byte as something other than a replacement character"
+    );
+
+    // A control character is valid UTF-8 but XML forbids it. Azure refuses it
+    // rather than writing it into the page.
+    let refused = raw_list(&fixture, "&prefix=nonutf8-%01-probe");
+    refused.show("List Blobs, a prefix XML cannot carry");
+    assert_eq!(
+        (refused.status, refused.error_code()),
+        (400, Some("InvalidQueryParameterValue"))
+    );
 }

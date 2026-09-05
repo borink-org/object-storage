@@ -34,7 +34,6 @@ using Span          = borink_span;
 using MaybeBytes    = borink_maybe_bytes;
 using MaybeU64      = borink_maybe_u64;
 using MaybeU32      = borink_maybe_u32;
-using MaybeSpan     = borink_maybe_span;
 using Status        = borink_status;
 using Session       = borink_session;
 using Range         = borink_range;
@@ -45,7 +44,6 @@ using ListShape     = borink_list_shape;
 using ListEntry     = borink_list_entry;
 using Properties    = borink_properties;
 using Property      = borink_property;
-using Resume        = borink_resume;
 using Fill          = borink_fill;
 using RequestHeader = borink_request_header;
 using RequestHead   = borink_request_head;
@@ -65,7 +63,8 @@ using FailureClass  = borink_failure_class;
 using ServiceError  = borink_service_error;
 using OutcomeKind   = borink_outcome_kind;
 using EntryKind     = borink_entry_kind;
-using FillKind      = borink_fill_kind;
+using BlobProperty  = borink_blob_property;
+using PropertySet   = borink_property_set;
 
 inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
 
@@ -134,8 +133,48 @@ inline constexpr EntryKind EntryKindObject    = BORINK_ENTRY_KIND_OBJECT;
 inline constexpr EntryKind EntryKindPrefix    = BORINK_ENTRY_KIND_PREFIX;
 inline constexpr EntryKind EntryKindDirectory = BORINK_ENTRY_KIND_DIRECTORY;
 
-inline constexpr FillKind FillKindPage    = BORINK_FILL_KIND_PAGE;
-inline constexpr FillKind FillKindPartial = BORINK_FILL_KIND_PARTIAL;
+inline constexpr BlobProperty BlobPropertyAccessTier = BORINK_BLOB_PROPERTY_ACCESS_TIER;
+inline constexpr BlobProperty BlobPropertyAccessTierInferred = BORINK_BLOB_PROPERTY_ACCESS_TIER_INFERRED;
+inline constexpr BlobProperty BlobPropertyAccessTierChangeTime = BORINK_BLOB_PROPERTY_ACCESS_TIER_CHANGE_TIME;
+inline constexpr BlobProperty BlobPropertyArchiveStatus = BORINK_BLOB_PROPERTY_ARCHIVE_STATUS;
+inline constexpr BlobProperty BlobPropertyAcl = BORINK_BLOB_PROPERTY_ACL;
+inline constexpr BlobProperty BlobPropertyBlobType = BORINK_BLOB_PROPERTY_BLOB_TYPE;
+inline constexpr BlobProperty BlobPropertyCreationTime = BORINK_BLOB_PROPERTY_CREATION_TIME;
+inline constexpr BlobProperty BlobPropertyContentType = BORINK_BLOB_PROPERTY_CONTENT_TYPE;
+inline constexpr BlobProperty BlobPropertyContentEncoding = BORINK_BLOB_PROPERTY_CONTENT_ENCODING;
+inline constexpr BlobProperty BlobPropertyContentLanguage = BORINK_BLOB_PROPERTY_CONTENT_LANGUAGE;
+inline constexpr BlobProperty BlobPropertyContentCrc64 = BORINK_BLOB_PROPERTY_CONTENT_CRC64;
+inline constexpr BlobProperty BlobPropertyContentMd5 = BORINK_BLOB_PROPERTY_CONTENT_MD5;
+inline constexpr BlobProperty BlobPropertyCacheControl = BORINK_BLOB_PROPERTY_CACHE_CONTROL;
+inline constexpr BlobProperty BlobPropertyContentDisposition = BORINK_BLOB_PROPERTY_CONTENT_DISPOSITION;
+inline constexpr BlobProperty BlobPropertyCopyId = BORINK_BLOB_PROPERTY_COPY_ID;
+inline constexpr BlobProperty BlobPropertyCopyStatus = BORINK_BLOB_PROPERTY_COPY_STATUS;
+inline constexpr BlobProperty BlobPropertyCopySource = BORINK_BLOB_PROPERTY_COPY_SOURCE;
+inline constexpr BlobProperty BlobPropertyCopyProgress = BORINK_BLOB_PROPERTY_COPY_PROGRESS;
+inline constexpr BlobProperty BlobPropertyCopyCompletionTime = BORINK_BLOB_PROPERTY_COPY_COMPLETION_TIME;
+inline constexpr BlobProperty BlobPropertyCopyStatusDescription = BORINK_BLOB_PROPERTY_COPY_STATUS_DESCRIPTION;
+inline constexpr BlobProperty BlobPropertyDeletedTime = BORINK_BLOB_PROPERTY_DELETED_TIME;
+inline constexpr BlobProperty BlobPropertyDeleted = BORINK_BLOB_PROPERTY_DELETED;
+inline constexpr BlobProperty BlobPropertyEncryptionScope = BORINK_BLOB_PROPERTY_ENCRYPTION_SCOPE;
+inline constexpr BlobProperty BlobPropertyExpiryTime = BORINK_BLOB_PROPERTY_EXPIRY_TIME;
+inline constexpr BlobProperty BlobPropertyGroup = BORINK_BLOB_PROPERTY_GROUP;
+inline constexpr BlobProperty BlobPropertyIsCurrentVersion = BORINK_BLOB_PROPERTY_IS_CURRENT_VERSION;
+inline constexpr BlobProperty BlobPropertyIncrementalCopy = BORINK_BLOB_PROPERTY_INCREMENTAL_COPY;
+inline constexpr BlobProperty BlobPropertyImmutabilityPolicyUntilDate = BORINK_BLOB_PROPERTY_IMMUTABILITY_POLICY_UNTIL_DATE;
+inline constexpr BlobProperty BlobPropertyImmutabilityPolicyMode = BORINK_BLOB_PROPERTY_IMMUTABILITY_POLICY_MODE;
+inline constexpr BlobProperty BlobPropertyLeaseStatus = BORINK_BLOB_PROPERTY_LEASE_STATUS;
+inline constexpr BlobProperty BlobPropertyLeaseState = BORINK_BLOB_PROPERTY_LEASE_STATE;
+inline constexpr BlobProperty BlobPropertyLeaseDuration = BORINK_BLOB_PROPERTY_LEASE_DURATION;
+inline constexpr BlobProperty BlobPropertyLegalHold = BORINK_BLOB_PROPERTY_LEGAL_HOLD;
+inline constexpr BlobProperty BlobPropertyOwner = BORINK_BLOB_PROPERTY_OWNER;
+inline constexpr BlobProperty BlobPropertyPermissions = BORINK_BLOB_PROPERTY_PERMISSIONS;
+inline constexpr BlobProperty BlobPropertyRemainingRetentionDays = BORINK_BLOB_PROPERTY_REMAINING_RETENTION_DAYS;
+inline constexpr BlobProperty BlobPropertyRehydratePriority = BORINK_BLOB_PROPERTY_REHYDRATE_PRIORITY;
+inline constexpr BlobProperty BlobPropertyServerEncrypted = BORINK_BLOB_PROPERTY_SERVER_ENCRYPTED;
+inline constexpr BlobProperty BlobPropertySnapshot = BORINK_BLOB_PROPERTY_SNAPSHOT;
+inline constexpr BlobProperty BlobPropertyTagCount = BORINK_BLOB_PROPERTY_TAG_COUNT;
+inline constexpr BlobProperty BlobPropertyVersionId = BORINK_BLOB_PROPERTY_VERSION_ID;
+inline constexpr BlobProperty BlobPropertyBlobSequenceNumber = BORINK_BLOB_PROPERTY_BLOB_SEQUENCE_NUMBER;
 
 // Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }
@@ -289,6 +328,30 @@ inline MaybeU64 http_date_ms(const MaybeBytes &value) {
 inline std::span<const ListEntry> entries_of(std::span<const ListEntry> entries,
                                              const Fill &fill) {
     return entries.subspan(0, fill.filled);
+}
+
+// Returns a set of these properties, for `borink_fill_listing_with`.
+inline PropertySet property_set(std::initializer_list<BlobProperty> properties) {
+    PropertySet set{0};
+    for (const BlobProperty property : properties) {
+        set = borink_property_set_with(set, property);
+    }
+    return set;
+}
+
+// Returns the row of `values` that `borink_fill_listing_with` wrote for the
+// entry at `index`: one value per member of `set`.
+inline std::span<const MaybeBytes> values_of(std::span<const MaybeBytes> values, PropertySet set,
+                                             std::size_t index) {
+    const std::size_t width = borink_property_set_len(set);
+    return values.subspan(index * width, width);
+}
+
+// Returns the value in a row for one property of the set. Absent for a
+// property the set does not hold, as for one the entry did not write.
+inline MaybeBytes value(std::span<const MaybeBytes> row, PropertySet set, BlobProperty property) {
+    const std::size_t slot = borink_property_slot(set, property);
+    return slot < row.size() ? row[slot] : MaybeBytes{};
 }
 
 // Returns the value that one entry gave for a property.

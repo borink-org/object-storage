@@ -34,6 +34,7 @@ include = [
     "OutcomeKind",
     "EntryKind",
     "FillKind",
+    "BlobProperty",
 ]
 renaming_overrides_prefixing = true
 
@@ -46,7 +47,6 @@ renaming_overrides_prefixing = true
 "MaybeBytes" = "borink_maybe_bytes"
 "MaybeU64" = "borink_maybe_u64"
 "MaybeU32" = "borink_maybe_u32"
-"MaybeSpan" = "borink_maybe_span"
 "Status" = "borink_status"
 "Session" = "borink_session"
 "Range" = "borink_range"
@@ -57,8 +57,8 @@ renaming_overrides_prefixing = true
 "ListEntry" = "borink_list_entry"
 "Properties" = "borink_properties"
 "Property" = "borink_property"
-"Resume" = "borink_resume"
 "Fill" = "borink_fill"
+"PropertySet" = "borink_property_set"
 "RequestHeader" = "borink_request_header"
 "RequestHead" = "borink_request_head"
 "HeaderRef" = "borink_header_ref"
@@ -77,6 +77,7 @@ renaming_overrides_prefixing = true
 "ServiceError" = "borink_service_error"
 "OutcomeKind" = "borink_outcome_kind"
 "EntryKind" = "borink_entry_kind"
+"BlobProperty" = "borink_blob_property"
 "FillKind" = "borink_fill_kind"
 # `class` is a C++ keyword.
 "class" = "class_"

@@ -76,8 +76,7 @@ void board_main(void) {
                          "<NextMarker>next</NextMarker></EnumerationResults>";
     static borink_list_entry entries[1];
     const borink_bytes_mut body = {(uint8_t *)page, sizeof page - 1};
-    borink_fill fill = borink_fill_listing(&session, body, entries, 1);
-    fill = borink_resume_listing(&session, body, &fill.resume, entries, 1);
+    const borink_fill fill = borink_fill_listing(&session, body, entries, 1);
     sink = (unsigned)(fill.filled + entries[0].key.len + fill.next_marker.bytes.len);
 
     // What a listing lends back, read by the two calls that read it.
@@ -98,6 +97,23 @@ void board_main(void) {
     sink = (unsigned)borink_decode_into(as_bytes("a&amp;b"),
                                         (borink_bytes_mut){quoted, sizeof quoted})
                .bytes.len;
+
+    // The same page read again, keeping two properties of the entry in the
+    // board's own row of values.
+    static char page_again[] = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name><Properties>"
+                               "<Content-Length>4</Content-Length><AccessTier>Hot</AccessTier>"
+                               "</Properties></Blob></Blobs><NextMarker /></EnumerationResults>";
+    borink_property_set wanted = {0};
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER);
+    wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_CREATION_TIME);
+    static borink_maybe_bytes values[2];
+    const borink_fill again = borink_fill_listing_with(
+        &session, (borink_bytes_mut){(uint8_t *)page_again, sizeof page_again - 1}, entries, 1,
+        wanted, values, borink_property_set_len(wanted));
+    sink = (unsigned)(again.filled +
+                      values[borink_property_slot(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER)]
+                          .bytes.len +
+                      borink_property_name(BORINK_BLOB_PROPERTY_ACCESS_TIER).len);
 
     board_cxx();
 

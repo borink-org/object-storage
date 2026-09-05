@@ -347,14 +347,8 @@ void Client::list(std::string_view prefix, std::span<ListEntry> entries, const E
     marker_.assign(plan.marker);
     for (;;) {
         asking.marker = marker_;
-        Page current = page(prefix, entries, asking);
-        for (;;) {
-            sink(current.entries);
-            if (current.complete) {
-                break;
-            }
-            current = more(current.resume, entries);
-        }
+        const Page current = page(prefix, entries, asking);
+        sink(current.entries);
         if (current.next_marker.empty()) {
             return;
         }
@@ -398,19 +392,11 @@ Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const L
                 entries);
 }
 
-Page Client::more(const Resume &resume, std::span<ListEntry> entries) {
-    const Session session = this->session();
-    return read(
-        borink_resume_listing(&session, page_buffer(), &resume, entries.data(), entries.size()),
-        entries);
-}
-
 Page Client::read(const Fill &fill, std::span<ListEntry> entries) {
     if (fill.status.code != 0) {
         throw std::runtime_error(std::string(describe_whole(message_, fill.status)));
     }
-    return Page{entries_of(entries, fill), fill.kind == FillKindPage, fill.resume,
-                text_of(fill.next_marker)};
+    return Page{entries_of(entries, fill), text_of(fill.next_marker)};
 }
 
 void Client::remove(std::string_view key, const Removal &removal) {

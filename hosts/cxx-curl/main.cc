@@ -80,8 +80,8 @@ int main(int argc, char **argv) {
         } else if (command == "delete") {
             client.remove(key);
         } else if (command == "list") {
-            // The array is this program's budget: the client reads every page
-            // into it, an arrayful at a time, and holds no more than that.
+            // The array holds a whole page: as many entries as each request
+            // asks for.
             std::vector<borink::ListEntry> entries(1000);
             client.list(key, entries, write_keys, borink::List{false, borink::at_most(1000), {}});
         } else {

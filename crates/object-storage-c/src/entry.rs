@@ -10,10 +10,12 @@ use crate::outcome::{
     delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, properties_view,
     property_view, put_outcome, refused_fill, status_of,
 };
-use crate::plan::{delete_shape, get_shape, list_shape, put_shape, resume};
+use crate::plan::{delete_shape, get_shape, list_shape, put_shape};
 use crate::ptr;
 use crate::sentence::{describe, describe_status};
-use crate::step::{filling, finishing, head_of, open, optional, ready, text, written};
+use crate::step::{
+    filling, filling_with, finishing, head_of, open, optional, ready, text, written,
+};
 use crate::types::*;
 
 use borink_object_storage_proto::{
@@ -373,7 +375,9 @@ pub unsafe extern "C" fn borink_encode_list(
             let list = PhysicalList::from_shape(
                 shape,
                 text(prefix, InvalidPlan::Prefix)?,
-                optional(marker),
+                optional(marker)
+                    .map(|marker| text(marker, InvalidPlan::Marker))
+                    .transpose()?,
             );
             blobs.encode_list(buf, &list, &Timestamps::from_unix(unix_seconds))
         }),
@@ -444,10 +448,9 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
 /// decodes the text of the body where it stands, so a body that has been read
 /// is no longer a document.
 ///
-/// Your array is the budget. A page that does not fit fills the array and
-/// reports `Partial`. Read the rest of that page with `borink_resume_listing`
-/// and the `resume` it reported. An array of `max_results` entries always
-/// holds a whole page.
+/// Your array must hold the whole page. An array of `max_results` entries
+/// always does. A smaller one is refused with `Capacity`, and `required` says
+/// how many entries the page holds; the body cannot be read again by then.
 ///
 /// # Safety
 ///
@@ -475,46 +478,112 @@ pub unsafe extern "C" fn borink_fill_listing(
         )
     };
     open(session)
-        .and_then(|blobs| filling(&blobs, body, None, into))
+        .and_then(|blobs| filling(&blobs, body, into))
         .unwrap_or_else(|error| refused_fill(&error))
 }
 
-/// Reads the rest of a page that a fill stopped in.
+/// Reads a page the way `borink_fill_listing` does, and keeps the values of
+/// the properties in `wanted` as it goes.
 ///
-/// Pass the same `body`, unchanged, and the `resume` that came with the
-/// entries you have finished with.
+/// `values` is your array of rows: one row per entry of `into`, each
+/// `borink_property_set_len(wanted)` values long, so `capacity` rows in all.
+/// The value that entry `i` gave for a property `p` is
+/// `values[i * len + borink_property_slot(wanted, p)]`. It is absent where
+/// the entry wrote no such element, and present and empty where it wrote the
+/// element empty. A group of keys has every value absent. If `values` holds
+/// fewer rows than `capacity`, that many rows is the capacity.
+///
+/// Reading the page costs the same as `borink_fill_listing`, whatever the
+/// set holds.
 ///
 /// # Safety
 ///
-/// As `borink_fill_listing`, and `from` must be null or point at one readable
-/// value.
+/// As `borink_fill_listing`, and `values` must address `value_capacity`
+/// writable values.
 ///
 /// # Lifetime
 ///
-/// As `borink_fill_listing`.
+/// Every value points into `body`, like the entries.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_resume_listing(
+pub unsafe extern "C" fn borink_fill_listing_with(
     session: *const Session,
     body: BytesMut,
-    from: *const Resume,
     into: *mut ListEntry,
     capacity: usize,
+    wanted: PropertySet,
+    values: *mut MaybeBytes,
+    value_capacity: usize,
 ) -> Fill {
+    let wanted = proto::PropertySet::from_bits(wanted.mask);
+    let width = wanted.len();
+    // Rows the values array has room for, when the set names anything.
+    let rows = value_capacity
+        .checked_div(width)
+        .map_or(capacity, |held| capacity.min(held));
     // SAFETY: the caller states the contract of this function.
-    let (session, body, from, into) = unsafe {
+    let (session, body, into, values) = unsafe {
         (
             ptr::session(session),
             ptr::slice_mut(body),
-            from.as_ref(),
-            ptr::items_mut(into, capacity),
+            ptr::items_mut(into, rows),
+            ptr::items_mut(values, rows * width),
         )
     };
     open(session)
-        .and_then(|blobs| {
-            let from = from.ok_or(crate::plan::UNKNOWN)?;
-            filling(&blobs, body, Some(resume(from)), into)
-        })
+        .and_then(|blobs| filling_with(&blobs, body, into, wanted, values))
         .unwrap_or_else(|error| refused_fill(&error))
+}
+
+/// Adds a property to a set.
+///
+/// `property` is a `borink_blob_property`. A number that names no property
+/// leaves the set as it was.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_property_set_with(set: PropertySet, property: u16) -> PropertySet {
+    match blob_property(property) {
+        Some(property) => PropertySet {
+            mask: set.mask | proto::PropertySet::of(&[property]).bits(),
+        },
+        None => set,
+    }
+}
+
+/// Returns how many properties a set holds, which is how many values each
+/// row of `borink_fill_listing_with` has.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_property_set_len(set: PropertySet) -> usize {
+    proto::PropertySet::from_bits(set.mask).len()
+}
+
+/// Returns where a property's value stands in a row: its rank among the
+/// set's members, in the order of their numbers.
+///
+/// For a property the set does not hold, or a number that names none, this
+/// is the length of the row, which is one past its last value.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_property_slot(set: PropertySet, property: u16) -> usize {
+    let set = proto::PropertySet::from_bits(set.mask);
+    match blob_property(property) {
+        Some(property) if set.contains(property) => set.slot(property),
+        _ => set.len(),
+    }
+}
+
+/// Returns the element name of a property, as the service writes it. Empty
+/// for a number that names no property.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_property_name(property: u16) -> Bytes {
+    let name = blob_property(property).map_or("", proto::BlobProperty::name);
+    Bytes {
+        ptr: name.as_ptr(),
+        len: name.len(),
+    }
+}
+
+// The core crate's property with this number, which is its position in the
+// list both crates are built from.
+fn blob_property(number: u16) -> Option<proto::BlobProperty> {
+    proto::BlobProperty::ALL.get(usize::from(number)).copied()
 }
 
 /// Returns the value that one entry gave for a property.

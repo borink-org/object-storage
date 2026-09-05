@@ -288,7 +288,6 @@ void lists_one_page_of_keys() {
     CHECK(server.head().starts_with(
         "GET /container?restype=container&comp=list&prefix=directory%2F"
         "&delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"));
-    CHECK(page.complete);
     CHECK(page.entries.size() == 2);
     CHECK(borink::text_of(page.entries[0].key) == "directory/a.txt");
     CHECK(page.entries[0].kind == borink::EntryKindObject);
@@ -299,9 +298,9 @@ void lists_one_page_of_keys() {
     CHECK(page.next_marker == "next");
 }
 
-// The array the caller passed is the budget. What did not fit stays in the
-// page the host holds, and the next call reads it from there.
-void reads_the_rest_of_a_page_that_did_not_fit() {
+// The array must hold the whole page. One that does not is refused, and the
+// sentence says how many entries the page holds.
+void an_array_smaller_than_the_page_is_refused() {
     const std::string body = "<EnumerationResults><Blobs>"
                              "<Blob><Name>a.txt</Name><Properties>"
                              "<Content-Length>4</Content-Length></Properties></Blob>"
@@ -313,15 +312,14 @@ void reads_the_rest_of_a_page_that_did_not_fit() {
 
     borink::host::Client client = open(server);
     std::vector<borink::ListEntry> entries(1);
-    borink::host::Page page = client.page("", entries);
-    CHECK(!page.complete);
-    CHECK(borink::text_of(page.entries[0].key) == "a.txt");
-
-    page = client.more(page.resume, entries);
-    CHECK(page.complete);
-    CHECK(borink::text_of(page.entries[0].key) == "b.txt");
-    // The service named no next page, so the listing is complete.
-    CHECK(page.next_marker.empty());
+    std::string reported;
+    try {
+        client.page("", entries);
+        CHECK(false);
+    } catch (const std::exception &failure) {
+        reported = failure.what();
+    }
+    CHECK(reported.find("too small") != std::string::npos);
 }
 
 // A whole listing is one call: the client asks for the next page on the marker
@@ -344,9 +342,8 @@ void lists_every_key_over_two_pages() {
     Server server(std::vector<std::string>{answer(first), answer(second)});
 
     borink::host::Client client = open(server);
-    // One entry of room, so the first page is read in two rounds and the sink
-    // is called once per round.
-    std::vector<borink::ListEntry> entries(1);
+    // Room for the larger page, and the sink is called once per page.
+    std::vector<borink::ListEntry> entries(2);
     std::vector<std::string> keys;
     std::size_t rounds = 0;
     client.list("", entries, [&](std::span<const borink::ListEntry> read) {
@@ -357,7 +354,7 @@ void lists_every_key_over_two_pages() {
     });
 
     CHECK(keys == std::vector<std::string>({"a.txt", "b.txt", "c.txt"}));
-    CHECK(rounds == 3);
+    CHECK(rounds == 2);
     // The second request asks for the page that the first one named.
     CHECK(server.head(0).find("&marker=") == std::string_view::npos);
     CHECK(server.head(1).find("&marker=page-2") != std::string_view::npos);
@@ -532,7 +529,7 @@ int main() {
         removes_an_object();
         removes_an_object_and_its_snapshots();
         lists_one_page_of_keys();
-        reads_the_rest_of_a_page_that_did_not_fit();
+        an_array_smaller_than_the_page_is_refused();
         lists_every_key_over_two_pages();
         reports_a_container_that_is_not_there();
         names_an_error_that_only_the_body_carries();

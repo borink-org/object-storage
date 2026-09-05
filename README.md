@@ -30,6 +30,7 @@ For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `exter
   - Takes the object alone, the object and its snapshots, or the snapshots alone
 - Object listing (GET request on the container, one page at a time)
   - Supports delimiters, prefixes
+  - Supports registering properties you want to read into your own entry type in the main parsing pass
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 
 ## Development status and roadmap

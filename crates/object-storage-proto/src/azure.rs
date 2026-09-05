@@ -1,10 +1,10 @@
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, FailureClass, Fill, GetHeadOutcome, GetKind, GetShape,
-    InvalidPlan, ListEntry, ListHeadOutcome, Method, ObjectMeta, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseFault, ResponseHead, Result, Resume, ServiceErrorKind, Timestamps, WireRequest,
+    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
+    ListEntry, ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -183,7 +183,7 @@ impl<'a> Blobs<'a> {
             if let Some(key) = key {
                 out.push(b"/");
                 for part in crate::path::encode_object_key(key) {
-                    out.push(part.as_bytes());
+                    out.push(part);
                 }
             }
             for (index, (name, value)) in query.iter().flatten().enumerate() {
@@ -493,7 +493,7 @@ impl<'a> Blobs<'a> {
             list.delimited
                 .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
             list.marker
-                .map(|marker| ("marker", QueryValue::Encoded(marker))),
+                .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
             list.max_results
                 .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
         ];
@@ -560,47 +560,50 @@ impl<'a> Blobs<'a> {
     /// array to write the entries into. Reading is destructive: a body that
     /// has been read is no longer a document.
     ///
-    /// Your array is the budget. A page that does not fit fills the array and
-    /// returns [`Fill::Partial`], which carries the [`Resume`] that reads the
-    /// rest with [`Self::resume_listing`]; no entry is lost or read twice. An
-    /// array of `max_results` entries always holds the whole page.
-    ///
-    /// Only [`Fill::Page`] reports a marker, so continuing on the marker
-    /// cannot step over entries that were not read.
+    /// Your array must hold the whole page. An array of `max_results` entries
+    /// always does, because the service never writes more than it asked for.
+    /// The entries are written as [`ListEntry`], or as any type built from
+    /// one, so a binding fills its own array directly.
     ///
     /// # Errors
+    ///
+    /// Returns [`Error::Capacity`] if the page holds more entries than the
+    /// array, with `required` set to the number it holds. The body has been
+    /// decoded by then and cannot be read again: ask the service for the page
+    /// again, with a larger array.
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
     /// not a listing page. This reads the grammar that Azure writes, not XML
     /// at large: a namespace prefix, a reference to an entity no listing
     /// declares, an entry tag spelled with an attribute, and anything else
     /// Azure does not write are refused rather than guessed at.
-    pub fn fill_listing<'b>(
+    pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
         &self,
         body: &'b mut [u8],
-        into: &mut [ListEntry<'b>],
-    ) -> Result<Fill<'b>> {
-        crate::xml::fill_listing(body, into)
+        into: &mut [E],
+    ) -> Result<Listing<'b>> {
+        crate::xml::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
     }
 
-    /// Reads the rest of a page that [`Fill::Partial`] stopped in.
+    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
+    /// values of the properties in `wanted` as it goes.
     ///
-    /// Pass the same `body`, unchanged, and the [`Resume`] that came with the
-    /// entries you have finished with. Reading continues from where it
-    /// stopped, so no entry is read twice and none is lost.
+    /// `build` is called once per entry, with the entry and its values, and
+    /// what it returns is written into your array. So your entry type can
+    /// hold the two or three properties you care about, read in the same
+    /// pass as everything else. The values point into `body`, like the
+    /// entry. A group of keys gives no values.
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] as
-    /// [`Self::fill_listing`] does. A [`Resume`] describes one body: keep each
-    /// with the buffer it came from.
-    pub fn resume_listing<'b>(
+    /// Reading the page costs the same whatever the set holds, and the same
+    /// as reading it without one.
+    pub fn fill_listing_with<'b, E>(
         &self,
         body: &'b mut [u8],
-        resume: Resume,
-        into: &mut [ListEntry<'b>],
-    ) -> Result<Fill<'b>> {
-        crate::xml::resume_listing(body, resume, into)
+        into: &mut [E],
+        wanted: PropertySet,
+        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+    ) -> Result<Listing<'b>> {
+        crate::xml::fill_listing(body, into, wanted, build)
     }
 }
 
@@ -624,7 +627,7 @@ impl QueryValue<'_> {
             Self::Literal(value) => out.push(value.as_bytes()),
             Self::Encoded(value) => {
                 for part in crate::path::encode_query_value(value) {
-                    out.push(part.as_bytes());
+                    out.push(part);
                 }
             }
             Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),
@@ -987,7 +990,7 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     if name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::Prefix.into());
     }
-    if list.marker.is_some_and(<[u8]>::is_empty) {
+    if list.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
     }
     if list.max_results == Some(0) {

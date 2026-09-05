@@ -102,16 +102,6 @@ pub struct MaybeU32 {
     pub value: u32,
 }
 
-/// A range of a response body that a page may not name.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct MaybeSpan {
-    /// Whether the page named a range.
-    pub present: bool,
-    /// The range.
-    pub span: Span,
-}
-
 /// A failure, as the two numbers that describe every error of the core crate.
 ///
 /// `code` is a `borink_error_code`, and `detail` is the discriminant of the
@@ -224,17 +214,6 @@ pub enum EntryKind {
     /// A directory that the service keeps as its own entry. Only an Azure
     /// account with a hierarchical namespace reports one.
     Directory = 3,
-}
-
-/// How much of a page one fill read.
-#[repr(u16)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FillKind {
-    /// The page was read to its end. `next_marker` names the page after it.
-    Page = 1,
-    /// The array filled before the page ended. Read the rest of the same body
-    /// with `borink_resume_listing`, passing the `resume` beside this number.
-    Partial = 2,
 }
 
 /// The category of a service failure.
@@ -621,23 +600,114 @@ pub struct Property {
     pub value: Bytes,
 }
 
-/// Where a fill stopped in a page.
+/// An element that a listing writes for a blob, other than the four that
+/// every `borink_list_entry` carries.
 ///
-/// `borink_fill_listing` reports one when your array fills before the page
-/// ends, and `borink_resume_listing` takes it back. Store it and pass it back
-/// unchanged.
+/// Name the ones you want in a `borink_property_set` and read the page with
+/// `borink_fill_listing_with`, which keeps their values as it goes. Most are
+/// written under the properties element; the ones marked otherwise stand
+/// beside it. Read anything not listed here with `borink_entry_property`.
 ///
-/// One value describes one body. Passed with another body, it names no entry
-/// of it.
+/// These are the numbers that the core crate's `BlobProperty` uses. A
+/// `const` block in `layout.rs` fails the build if the two lists drift.
+#[repr(u16)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlobProperty {
+    /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
+    AccessTier,
+    /// Whether the tier was inferred rather than set.
+    AccessTierInferred,
+    /// When the tier was last changed.
+    AccessTierChangeTime,
+    /// The progress of a rehydration out of the archive tier.
+    ArchiveStatus,
+    /// The access control list, on a hierarchical account listing with permissions.
+    Acl,
+    /// `BlockBlob`, `PageBlob` or `AppendBlob`.
+    BlobType,
+    /// When the blob was created, in the form of the `Last-Modified` header.
+    CreationTime,
+    /// The media type, as stored with the blob.
+    ContentType,
+    /// The content encoding, as stored with the blob.
+    ContentEncoding,
+    /// The content language, as stored with the blob.
+    ContentLanguage,
+    /// The CRC64 of the content, if the service holds one.
+    ContentCrc64,
+    /// The MD5 of the content, base64, if the service holds one.
+    ContentMd5,
+    /// The cache control directives, as stored with the blob.
+    CacheControl,
+    /// The content disposition, as stored with the blob.
+    ContentDisposition,
+    /// The identifier of the last copy operation onto this blob.
+    CopyId,
+    /// The state of that copy: `pending`, `success`, `aborted` or `failed`.
+    CopyStatus,
+    /// The URL that copy read from.
+    CopySource,
+    /// The bytes copied so far and the total, as `copied/total`.
+    CopyProgress,
+    /// When that copy finished.
+    CopyCompletionTime,
+    /// Why that copy failed or was aborted.
+    CopyStatusDescription,
+    /// When a soft-deleted blob was deleted.
+    DeletedTime,
+    /// Whether the entry is a soft-deleted blob. Written beside the properties element.
+    Deleted,
+    /// The encryption scope the blob is stored under.
+    EncryptionScope,
+    /// When the blob expires, on a hierarchical account.
+    ExpiryTime,
+    /// The owning group, on a hierarchical account listing with permissions.
+    Group,
+    /// Whether this version is the current one. Written beside the properties element.
+    IsCurrentVersion,
+    /// Whether the blob is an incremental copy of a page blob snapshot.
+    IncrementalCopy,
+    /// Until when the immutability policy holds.
+    ImmutabilityPolicyUntilDate,
+    /// The immutability policy: `unlocked` or `locked`.
+    ImmutabilityPolicyMode,
+    /// Whether the blob is leased: `locked` or `unlocked`.
+    LeaseStatus,
+    /// The state of the lease: `available`, `leased`, `expired`, `breaking` or `broken`.
+    LeaseState,
+    /// Whether the lease is `infinite` or `fixed`.
+    LeaseDuration,
+    /// Whether a legal hold is set.
+    LegalHold,
+    /// The owner, on a hierarchical account listing with permissions.
+    Owner,
+    /// The POSIX permissions, on a hierarchical account listing with permissions.
+    Permissions,
+    /// How many days a soft-deleted blob is kept.
+    RemainingRetentionDays,
+    /// The priority of a rehydration out of the archive tier.
+    RehydratePriority,
+    /// Whether the blob is encrypted at rest.
+    ServerEncrypted,
+    /// The snapshot's timestamp, on an entry that names a snapshot. Written beside the properties element.
+    Snapshot,
+    /// How many tags the blob has.
+    TagCount,
+    /// The version's identifier, on an account that keeps versions. Written beside the properties element.
+    VersionId,
+    /// The sequence number of a page blob.
+    BlobSequenceNumber,
+}
+
+/// The properties that one `borink_fill_listing_with` call is asked for.
+///
+/// One bit per property, at the bit that the property's number names. Start
+/// from a zeroed value and add each property with `borink_property_set_with`.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct Resume {
-    /// The offset into the body that reading continues from.
-    pub at: usize,
-    /// Whether that offset stands inside the entries of the page.
-    pub within: bool,
-    /// The range of the body that holds the text naming the next page.
-    pub marker: MaybeSpan,
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct PropertySet {
+    /// The bits. Bit `n` stands for the property numbered `n`.
+    pub mask: u64,
 }
 
 /// What one call to `borink_fill_listing` read.
@@ -649,21 +719,24 @@ pub struct Resume {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Fill {
-    /// Whether the page could be read, and what stopped it.
+    /// Whether the page could be read.
     ///
-    /// A `code` of 0 means that the entries are in your array. Every other
-    /// field is absent when it is not 0.
+    /// A `code` of 0 means that the entries are in your array. When it is
+    /// `Capacity`, `required` is set; every other field is absent when the
+    /// code is not 0.
     pub status: Status,
-    /// Whether the page ended or the array filled first, as a
-    /// `borink_fill_kind`.
-    pub kind: u16,
     /// The number of entries written into your array.
     ///
     /// The entries after these are untouched.
     pub filled: usize,
-    /// Where the rest of the page starts, for a `Partial` fill.
-    pub resume: Resume,
-    /// The text that names the next page, for a `Page` fill.
+    /// The number of entries that the page holds, when the array had no room
+    /// for all of them.
+    ///
+    /// The body has been decoded by then and cannot be read again. Ask the
+    /// service for the page again, with an array of this many entries, or ask
+    /// for a page no larger than your array.
+    pub required: usize,
+    /// The text that names the next page.
     ///
     /// Absent when the listing is complete. Copy the bytes into your own
     /// storage and pass them as the marker of the next request.
