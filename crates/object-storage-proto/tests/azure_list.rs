@@ -1,9 +1,9 @@
 //! Azure listing encoding, response interpretation and page reading.
 
 use borink_object_storage_proto::{
-    Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass, InvalidPlan,
-    ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList, ResponseFault,
-    ResponseHead, ServiceErrorKind, Timestamps, layered,
+    BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass,
+    InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList, PropertySet,
+    PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -926,4 +926,186 @@ fn the_properties_element_is_never_reported_as_one_of_them() {
         entries[1].property("ResourceType"),
         Some(b"directory".as_slice())
     );
+}
+
+// An entry of a caller's own, holding what it asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Picked<'b> {
+    key: &'b str,
+    kind: EntryKind,
+    tier: Option<&'b [u8]>,
+    created: Option<&'b [u8]>,
+    encoding: Option<&'b [u8]>,
+    // Never in the set, so never given.
+    blob_type: Option<&'b [u8]>,
+}
+
+impl<'b> Picked<'b> {
+    fn build(entry: ListEntry<'b>, values: PropertyValues<'_, 'b>) -> Self {
+        Self {
+            key: entry.key,
+            kind: entry.kind,
+            tier: values.get(BlobProperty::AccessTier),
+            created: values.get(BlobProperty::CreationTime),
+            encoding: values.get(BlobProperty::ContentEncoding),
+            blob_type: values.get(BlobProperty::BlobType),
+        }
+    }
+}
+
+const WANTED: PropertySet = PropertySet::of(&[
+    BlobProperty::ContentEncoding,
+    BlobProperty::AccessTier,
+    BlobProperty::CreationTime,
+]);
+
+/// The values of the wanted properties are read in the same pass as the
+/// entry, one per member of the set, as the service wrote them.
+#[test]
+fn the_properties_a_caller_asks_for_are_read_with_the_page() {
+    let mut body = page(
+        "<Blob><Name>a.txt</Name><Properties>\
+         <Creation-Time>Sat, 22 Aug 2026 11:00:00 GMT</Creation-Time>\
+         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8DF</Etag><Content-Length>4</Content-Length>\
+         <Content-Type>text/plain</Content-Type><Content-Encoding>gzip</Content-Encoding>\
+         <BlobType>BlockBlob</BlobType><AccessTier>Cool</AccessTier>\
+         </Properties><OrMetadata /></Blob>\
+         <Blob><Name>b.txt</Name><Properties>\
+         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8E0</Etag><Content-Length>0</Content-Length>\
+         <Content-Encoding /><BlobType>BlockBlob</BlobType>\
+         </Properties></Blob>\
+         <BlobPrefix><Name>c/</Name></BlobPrefix>",
+        "",
+    );
+    let mut entries = [Picked::default(); 3];
+    let listing = blobs()
+        .fill_listing_with(&mut body, &mut entries, WANTED, Picked::build)
+        .unwrap();
+
+    assert_eq!(listing.filled, 3);
+    assert_eq!(
+        entries[0],
+        Picked {
+            key: "a.txt",
+            kind: EntryKind::Object,
+            tier: Some(b"Cool"),
+            created: Some(b"Sat, 22 Aug 2026 11:00:00 GMT"),
+            encoding: Some(b"gzip"),
+            blob_type: None,
+        }
+    );
+    // An element written empty is an empty value. One not written is none.
+    assert_eq!(
+        entries[1],
+        Picked {
+            key: "b.txt",
+            kind: EntryKind::Object,
+            tier: None,
+            created: None,
+            encoding: Some(b""),
+            blob_type: None,
+        }
+    );
+    // A group of keys gives no values.
+    assert_eq!(
+        entries[2],
+        Picked {
+            key: "c/",
+            kind: EntryKind::Prefix,
+            ..Picked::default()
+        }
+    );
+}
+
+/// The whole-tag match reads the spellings the service uses. Any other legal
+/// spelling reaches the general path, which still keeps the value.
+#[test]
+fn a_spelling_the_service_does_not_use_is_still_read() {
+    let mut body = page(
+        "<Blob><Name>a.txt</Name><Properties>\
+         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8DF</Etag><Content-Length>4</Content-Length>\
+         <Content-Encoding/>\
+         <AccessTier >Hot</AccessTier>\
+         <Creation-Time\n>Sat, 22 Aug 2026 11:00:00 GMT</Creation-Time >\
+         </Properties></Blob>",
+        "",
+    );
+    let mut entries = [Picked::default(); 1];
+    blobs()
+        .fill_listing_with(&mut body, &mut entries, WANTED, Picked::build)
+        .unwrap();
+    assert_eq!(entries[0].encoding, Some(b"".as_slice()));
+    assert_eq!(entries[0].tier, Some(b"Hot".as_slice()));
+    assert_eq!(
+        entries[0].created,
+        Some(b"Sat, 22 Aug 2026 11:00:00 GMT".as_slice())
+    );
+}
+
+/// The elements an account that keeps versions writes beside the properties
+/// element are properties too.
+#[test]
+fn an_element_beside_the_properties_element_is_read_the_same_way() {
+    let mut body = page(
+        "<Blob><Name>a.txt</Name>\
+         <VersionId>2026-09-05T06:22:39.3212012Z</VersionId>\
+         <IsCurrentVersion>true</IsCurrentVersion>\
+         <Properties><Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8DF</Etag><Content-Length>4</Content-Length></Properties>\
+         <OrMetadata /></Blob>",
+        "",
+    );
+    let set = PropertySet::of(&[BlobProperty::VersionId, BlobProperty::IsCurrentVersion]);
+    let mut entries = [[None; 2]; 1];
+    blobs()
+        .fill_listing_with(&mut body, &mut entries, set, |_, values| {
+            [
+                values.get(BlobProperty::VersionId),
+                values.get(BlobProperty::IsCurrentVersion),
+            ]
+        })
+        .unwrap();
+    assert_eq!(
+        entries[0],
+        [
+            Some(b"2026-09-05T06:22:39.3212012Z".as_slice()),
+            Some(b"true".as_slice())
+        ]
+    );
+}
+
+/// The values come in the order the enum lists the properties, whatever
+/// order the set named them in, and `all` has one per member.
+#[test]
+fn the_values_of_a_set_stand_in_the_order_the_enum_lists_them() {
+    let mut body = page(&object("a.txt", 4), "");
+    let set = PropertySet::of(&[BlobProperty::BlobType, BlobProperty::AccessTier]);
+    let mut all = [[None; 2]; 1];
+    blobs()
+        .fill_listing_with(&mut body, &mut all, set, |_, values| {
+            <[_; 2]>::try_from(values.all()).unwrap()
+        })
+        .unwrap();
+    // `AccessTier` is numbered before `BlobType`.
+    assert_eq!(all[0], [None, Some(b"BlockBlob".as_slice())]);
+}
+
+/// A value read with the page is the same bytes the walk reports, so the
+/// two ways of reading a property agree.
+#[test]
+fn a_value_read_with_the_page_is_what_the_walk_reports() {
+    let mut body = page(&object("a.txt", 4), "");
+    let set = PropertySet::of(&[BlobProperty::BlobType]);
+    let mut entries = [(ListEntry::default(), None); 1];
+    blobs()
+        .fill_listing_with(&mut body, &mut entries, set, |entry, values| {
+            (entry, values.get(BlobProperty::BlobType))
+        })
+        .unwrap();
+    let (entry, blob_type) = entries[0];
+    assert_eq!(blob_type, entry.property("BlobType"));
+    assert_eq!(blob_type, Some(b"BlockBlob".as_slice()));
 }

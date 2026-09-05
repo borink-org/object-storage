@@ -1,34 +1,56 @@
 // Reads an `EnumerationResults` document, using the scanner in `scan.rs`.
 //
 // The read is one pass over the body. Only the entries are kept. Each entry
-// is split off as its own borrow of the body. Its text is decoded in place and
-// then handed to the caller. The array the caller passed must hold the whole
-// page; one that does not is refused with the number of entries the page
-// holds.
+// is taken off the body as its own borrow the moment its close tag has been
+// read. Its text is decoded in place and then handed to the caller. The array
+// the caller passed must hold the whole page; one that does not is refused
+// with the number of entries the page holds.
 
 use super::decode::decode;
-use super::scan::{Child, Scan, Span, Tag, fault, split_off, trim};
-use crate::{CapacityError, EntryKind, Error, ListEntry, Listing, Result};
+use super::scan::{Child, Scan, Span, Tag, fault, trim};
+use crate::{
+    BlobProperty, CapacityError, EntryKind, Error, ListEntry, Listing, PropertySet, PropertyValues,
+    Result,
+};
 
 const ROOT: &[u8] = b"EnumerationResults";
-const ENTRIES: &[u8] = b"Blobs";
+const BLOBS: &[u8] = b"Blobs";
 
-pub(crate) fn fill_listing<'b, E: From<ListEntry<'b>>>(
+pub(crate) fn fill_listing<'b, E>(
     body: &'b mut [u8],
     into: &mut [E],
+    wanted: PropertySet,
+    mut build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
 ) -> Result<Listing<'b>> {
-    let at = open_root_element(body)?;
-    read_root_children_into(body, at, into)
+    check_body(body)?;
+    let mut scan = Scan::new(body);
+    open_root_element(&mut scan)?;
+    // The read below is written once, whatever the entry type: it hands each
+    // entry it builds to this closure, which makes the caller's and writes
+    // it. A generic read would be compiled once per entry type, and a program
+    // with several, such as the C crate with its two fill calls, would carry
+    // several copies of the reader. The indirect call costs one entry's worth
+    // of nothing measurable.
+    let room = into.len();
+    let mut built = 0;
+    let mut sink = |entry: ListEntry<'b>, values: PropertyValues<'_, 'b>| {
+        // In range: the read calls this only while `built` is below `room`.
+        into[built] = build(entry, values);
+        built += 1;
+    };
+    read_root_children_into(scan, room, wanted, &mut sink)
 }
 
-// Reads the prolog and the root's opening tag, and returns the offset just
-// after that tag, where the root's first child begins.
+// Receives each entry the read builds, with its values. See `fill_listing`.
+type Sink<'s, 'b> = dyn FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) + 's;
+
+// Checks the two properties of the whole body that the read relies on, once,
+// before anything is read from it.
 //
-// The whole body is checked for valid UTF-8 here, once, before anything is
-// read from it. A document that is not valid UTF-8 is not XML. The check runs
-// at 45 to 50 GB/s and the read at 1.7 GB/s, so it costs a few percent. It
-// does not replace the check each key gets after decoding, because a percent
-// escape can produce any byte.
+// The body must be valid UTF-8. A document that is not valid UTF-8 is not
+// XML. The check runs at 45 to 50 GB/s and the read at 1.7 GB/s, so it costs
+// a few percent. It does not replace the check each key gets after decoding,
+// because a percent escape can produce any byte.
 //
 // Refusing the body is safe because Azure never sends invalid UTF-8. This was
 // measured, not assumed. A key with an invalid byte is refused with
@@ -36,7 +58,7 @@ pub(crate) fn fill_listing<'b, E: From<ListEntry<'b>>>(
 // place. So invalid UTF-8 here is a protocol violation, not a key the caller
 // might hold. The measurement is `a_listing_body_is_always_utf_8` in the live
 // suite.
-fn open_root_element(body: &[u8]) -> Result<usize> {
+fn check_body(body: &[u8]) -> Result<()> {
     // The body is valid UTF-8 from here on, but the reader keeps working on
     // bytes rather than turning it into a `str`. Values are decoded in place,
     // and a percent escape writes whatever byte it names, which may not be
@@ -55,13 +77,16 @@ fn open_root_element(body: &[u8]) -> Result<usize> {
     if body.iter().fold(u8::MAX, |lowest, &byte| lowest.min(byte)) == 0 {
         return fault();
     }
-    let mut scan = Scan::new(body);
+    Ok(())
+}
+
+// Reads the prolog and the root's opening tag, and leaves the scan where the
+// root's first child begins.
+fn open_root_element(scan: &mut Scan<'_>) -> Result<()> {
     // Azure begins a listing with the UTF-8 byte order mark, U+FEFF encoded
     // as these three bytes, before the XML declaration. It is not part of the
     // document.
-    if body.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        scan.cursor = 3;
-    }
+    scan.lit(&[0xEF, 0xBB, 0xBF]);
     loop {
         scan.skip_space();
         if scan.cur() != b'<' {
@@ -77,17 +102,15 @@ fn open_root_element(body: &[u8]) -> Result<usize> {
     if scan.text(root.name) != ROOT || root.empty {
         return fault();
     }
-    Ok(scan.cursor)
+    Ok(())
 }
 
-// One child of the root element or of the entries element, as the loop in
-// `read_root_children_into` sees it.
+// One child of the root element, as the loop in `read_root_children_into`
+// sees it.
 enum Item {
-    Entry(Fields),
-    // The element that holds the entries, and whether it holds any.
-    Entries { within: bool },
-    // The entries element has ended.
-    Leave,
+    // The element that holds the entries, and whether it was written as an
+    // empty tag. Its children are read by `read_entries_into`.
+    Blobs { empty: bool },
     // The text that names the next page.
     Marker((Span, u8)),
     // An element this crate does not read.
@@ -96,68 +119,116 @@ enum Item {
     End,
 }
 
-// Reads one child from the bytes that begin with it, and returns how many
-// bytes it took. The caller has already skipped the whitespace before it, so
-// byte zero is the child's first byte.
-fn read_next_child(bytes: &[u8], within: bool) -> Result<(Item, usize)> {
-    let mut scan = Scan::new(bytes);
-    if !within {
-        let item = match scan.child(ROOT)? {
-            Child::Close => Item::End,
-            Child::Open(tag) => match scan.text(tag.name) {
-                ENTRIES => Item::Entries { within: !tag.empty },
-                // The marker names the next page, so it holds only text. The
-                // service writes it as `<NextMarker/>`, as `<NextMarker />`,
-                // or with text between two tags. All three are the same
-                // element.
-                b"NextMarker" => Item::Marker(scan.value(tag)?),
-                _ => {
-                    scan.skip(tag)?;
-                    Item::Skip
-                }
-            },
-        };
-        return Ok((item, scan.cursor));
-    }
-    // Inside the entries element, where only entries belong. A comment, a
-    // CDATA section and a processing instruction may each hold the tags that
-    // entries are read by. All three are refused here rather than skipped.
-    if scan.cur() != b'<' {
-        return fault();
-    }
-    match bytes.get(1).copied().unwrap_or(0) {
-        b'/' => {
-            scan.close(ENTRIES)?;
-            return Ok((Item::Leave, scan.cursor));
-        }
-        b'!' | b'?' => return fault(),
-        _ => {}
-    }
-    // Nearly every entry of a page starts with `<Blob>`, which is one six-byte
-    // compare. Anything else takes the general path below.
-    if scan.lit(b"<Blob>") {
-        let tag = Tag {
-            name: (1, 5),
-            attributes: (5, 5),
-            empty: false,
-        };
-        return Ok((Item::Entry(read_blob(&mut scan, tag)?), scan.cursor));
-    }
-    let tag = scan.open()?;
-    let fields = match scan.text(tag.name) {
-        b"Blob" => read_blob(&mut scan, tag)?,
-        b"BlobPrefix" => read_blob_prefix(&mut scan, tag)?,
-        // Any other element where an entry belongs makes this a page this
-        // crate cannot read. Skipping it would silently drop an entry that a
-        // later service version added.
-        _ => return fault(),
+// Reads one child of the root. The caller has already skipped the whitespace
+// before it and taken everything before that off the scan, so the child
+// begins at offset zero.
+fn read_root_child(scan: &mut Scan<'_>) -> Result<Item> {
+    let item = match scan.child(ROOT)? {
+        Child::Close => Item::End,
+        Child::Open(tag) => match scan.text(tag.name) {
+            BLOBS => Item::Blobs { empty: tag.empty },
+            // The marker names the next page, so it holds only text. The
+            // service writes it as `<NextMarker/>`, as `<NextMarker />`, or
+            // with text between two tags. All three are the same element.
+            b"NextMarker" => Item::Marker(scan.value(tag)?),
+            _ => {
+                scan.skip(tag)?;
+                Item::Skip
+            }
+        },
     };
-    Ok((Item::Entry(fields), scan.cursor))
+    Ok(item)
+}
+
+// What reading the entries element found.
+struct Entries {
+    // How many entries the element held.
+    held: usize,
+    // How many of them were built into the caller's array. Less than `held`
+    // only when the array was too small.
+    built: usize,
+}
+
+// Reads the entries. `<Blobs>` has been consumed, and the read ends after
+// `</Blobs>`. Each entry is written into `into` until the array is full.
+// After that an entry is still walked and counted, but not built, so that
+// the error can say how many entries the page holds.
+//
+// The values of the wanted properties are collected per entry into a scratch
+// of which only the first `wanted.len()` slots are used, so a set that names
+// nothing costs nothing here.
+fn read_entries_into<'b>(
+    scan: &mut Scan<'b>,
+    room: usize,
+    wanted: PropertySet,
+    sink: &mut Sink<'_, 'b>,
+) -> Result<Entries> {
+    let mut entries = Entries { held: 0, built: 0 };
+    let mut spans = [None; BlobProperty::COUNT];
+    let mut values: [Option<&'b [u8]>; BlobProperty::COUNT] = [None; BlobProperty::COUNT];
+    // At most `COUNT`: a set holds only bits that name a property.
+    let slots = wanted.len();
+    loop {
+        // Drop what was read before this entry, so that the entry begins at
+        // offset zero and the spans it records index its own bytes. Then,
+        // once it has been read, the bytes the scan has read are exactly the
+        // entry, from its opening tag to its closing one.
+        scan.skip_space();
+        scan.take();
+
+        // Only entries belong here. A comment, a CDATA section and a
+        // processing instruction may each hold the tags that entries are
+        // read by. All three are refused rather than skipped.
+        if scan.cur() != b'<' {
+            return fault();
+        }
+        match scan.peek(1) {
+            b'/' => {
+                scan.close(BLOBS)?;
+                return Ok(entries);
+            }
+            b'!' | b'?' => return fault(),
+            _ => {}
+        }
+        let captured = &mut spans[..slots];
+        captured.fill(None);
+        // Nearly every entry of a page starts with `<Blob>`, which is one
+        // six-byte compare. Anything else takes the general path below.
+        let fields = if scan.lit(b"<Blob>") {
+            read_blob(scan, wanted, captured)?
+        } else {
+            let tag = scan.open()?;
+            // An entry with nothing in it has no name, so it is not an entry.
+            if tag.empty {
+                return fault();
+            }
+            match scan.text(tag.name) {
+                b"Blob" => read_blob(scan, wanted, captured)?,
+                // A group of keys gives no values, so its slots stay empty.
+                b"BlobPrefix" => read_blob_prefix(scan)?,
+                // Any other element where an entry belongs makes this a page
+                // this crate cannot read. Skipping it would silently drop an
+                // entry that a later service version added.
+                _ => return fault(),
+            }
+        };
+        let chunk = scan.take();
+        entries.held += 1;
+        if entries.built < room {
+            let entry = build_entry(chunk, fields)?;
+            for (value, span) in values[..slots].iter_mut().zip(&spans[..slots]) {
+                // The spans were recorded on the chunk, which `raw` is.
+                *value = span.map(|(start, end)| &entry.raw[start..end]);
+            }
+            sink(entry, PropertyValues::new(wanted, &values[..slots]));
+            entries.built += 1;
+        }
+    }
 }
 
 // The fields of one entry, as ranges into the entry's own bytes. Ranges
 // rather than slices let the text be decoded later, after the entry has been
-// split off the body.
+// taken off the body.
 struct Fields {
     prefix: bool,
     key: Option<(Span, u8)>,
@@ -192,10 +263,24 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
     Ok(())
 }
 
-fn read_blob(scan: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
-    if tag.empty {
-        return fault();
-    }
+// The functions below are inlined into every instantiation of the entries
+// loop rather than shared between them. Shared, each has several callers
+// once a program uses more than one fill call, and LLVM then leaves them out
+// of line, which costs an eighth of the read. Measured; the bench has a row
+// through the C entry point for it.
+//
+// Reads a blob. `<Blob>` has been consumed. Each child the grammar wants is
+// matched twice: whole, as the service spells it, which is one compare, and
+// again by name on the general path, which any legal spelling reaches. A
+// field added to one list must be added to the other.
+//
+// `captured` has one slot per member of `wanted`, and receives the span of
+// each wanted property's value that this blob writes.
+fn read_blob(
+    scan: &mut Scan<'_>,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<Fields> {
     let mut fields = Fields::new(false);
     loop {
         scan.skip_space();
@@ -205,11 +290,16 @@ fn read_blob(scan: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
             continue;
         }
         if scan.lit(b"<Properties>") {
-            read_properties(scan, &mut fields)?;
+            read_properties(scan, &mut fields, wanted, captured)?;
             continue;
         }
         if scan.lit(b"</Blob>") {
             break;
+        }
+        // The element beside the properties that every blob carries, and
+        // the versioning elements an account that keeps versions adds.
+        if scan.lit(b"<OrMetadata />") || read_known_element(scan, wanted, captured)? {
+            continue;
         }
         match scan.child(b"Blob")? {
             Child::Close => break,
@@ -218,8 +308,10 @@ fn read_blob(scan: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
                 // Properties are read only under this element. A property
                 // that a later service version adds beside it is not
                 // mistaken for one of them.
-                b"Properties" if !tag.empty => read_properties(scan, &mut fields)?,
-                _ => scan.skip(tag)?,
+                b"Properties" if !tag.empty => {
+                    read_properties(scan, &mut fields, wanted, captured)?;
+                }
+                _ => read_other_element(scan, tag, wanted, captured)?,
             },
         }
     }
@@ -231,15 +323,21 @@ fn read_blob(scan: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
 }
 
 // Reads the properties of a blob into `fields`. `<Properties>` has been
-// consumed. Four of
-// its children matter. The rest, a dozen or so per blob, are most of an Azure
-// page and are skipped without being read.
-fn read_properties(scan: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
+// consumed. Four of its children are fields of every entry. The rest, a
+// dozen or so per blob, are most of an Azure page: each is matched whole by
+// `read_known_element`, which reads past it and keeps its value if the
+// caller asked for it. The four are listed twice, as in `read_blob`.
+fn read_properties(
+    scan: &mut Scan<'_>,
+    fields: &mut Fields,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<()> {
     loop {
         scan.skip_space();
         // The children the service writes, matched whole. The byte after the
         // `<` picks the compare, so one child costs one compare.
-        match scan.bytes.get(scan.cursor + 1).copied().unwrap_or(0) {
+        match scan.peek(1) {
             b'L' if scan.lit(b"<Last-Modified>") => {
                 let value = scan.value_of(b"Last-Modified")?;
                 set_once(&mut fields.last_modified, value)?;
@@ -257,6 +355,7 @@ fn read_properties(scan: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
                 set_once(&mut fields.resource_type, value.0)?;
             }
             b'/' if scan.lit(b"</Properties>") => return Ok(()),
+            _ if read_known_element(scan, wanted, captured)? => {}
             _ => match scan.child(b"Properties")? {
                 Child::Close => return Ok(()),
                 Child::Open(tag) => match scan.text(tag.name) {
@@ -276,20 +375,295 @@ fn read_properties(scan: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
                         let value = scan.value(tag)?;
                         set_once(&mut fields.resource_type, value.0)?;
                     }
-                    _ => scan.skip(tag)?,
+                    _ => read_other_element(scan, tag, wanted, captured)?,
                 },
             },
         }
     }
 }
 
-// Reads a group of keys. A hierarchical-namespace account writes a
-// `<Properties>` element here too. It is skipped, because a group has no size
-// and no entity tag.
-fn read_blob_prefix(scan: &mut Scan<'_>, tag: Tag) -> Result<Fields> {
-    if tag.empty {
-        return fault();
+// Reads past an element that the whole-tag match did not take: one this
+// crate does not know, or a known one in a spelling the service does not
+// use, such as `<AccessTier >` or `<Content-Type/>`. The second kind is
+// still kept if the caller asked for it.
+fn read_other_element(
+    scan: &mut Scan<'_>,
+    tag: Tag,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<()> {
+    if wanted.is_empty() {
+        return scan.skip(tag);
     }
+    match BlobProperty::identify(scan.text(tag.name)) {
+        Some(property) if wanted.contains(property) => {
+            let (span, _) = scan.value(tag)?;
+            // A slot is always in range: it is the property's rank in the set,
+            // and there is one slot per member. Written through `get_mut` so
+            // that no bounds check or panic path is compiled in.
+            if let Some(slot) = captured.get_mut(wanted.slot(property)) {
+                *slot = Some(span);
+            }
+            Ok(())
+        }
+        _ => scan.skip(tag),
+    }
+}
+
+// Reads past a known element whose start tag was matched whole, and keeps
+// its value if the caller asked for it. The value is found the way a field's
+// is: the text up to the close tag, which a leaf element is.
+// Returns true, for the match above.
+#[inline(always)]
+fn known(
+    scan: &mut Scan<'_>,
+    property: BlobProperty,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<bool> {
+    let (span, _) = scan.value_of(property.name().as_bytes())?;
+    if wanted.contains(property) {
+        // A slot is always in range: it is the property's rank in the set,
+        // and there is one slot per member. Written through `get_mut` so
+        // that no bounds check or panic path is compiled in.
+        if let Some(slot) = captured.get_mut(wanted.slot(property)) {
+            *slot = Some(span);
+        }
+    }
+    Ok(true)
+}
+
+// The same for the empty spelling, `<Name />`, which has no value to read
+// past. The empty span stands for an element written empty.
+#[inline(always)]
+fn known_empty(property: BlobProperty, wanted: PropertySet, captured: &mut [Option<Span>]) -> bool {
+    if wanted.contains(property)
+        && let Some(slot) = captured.get_mut(wanted.slot(property))
+    {
+        *slot = Some((0, 0));
+    }
+    true
+}
+
+// Reads past one known element if the bytes at the cursor are its start tag
+// as the service spells it, keeping its value if the caller asked for it,
+// and returns whether it did. The byte after the `<` picks the group, and
+// the names of that group are compared whole in the order a page writes
+// them, so the common ones cost one compare. A tag that is none of them is
+// left for the general path.
+//
+// Every member of `BlobProperty::ALL` has an arm here. The content headers,
+// which the service writes as `<Name />` when the blob has no such value,
+// have a second arm for that spelling, so a page from Azure never reaches
+// the general path for them. The tests below check both.
+#[inline(always)]
+fn read_known_element(
+    scan: &mut Scan<'_>,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<bool> {
+    use BlobProperty::*;
+    match scan.peek(1) {
+        b'A' => {
+            if scan.lit(b"<AccessTier>") {
+                return known(scan, AccessTier, wanted, captured);
+            }
+            if scan.lit(b"<AccessTierInferred>") {
+                return known(scan, AccessTierInferred, wanted, captured);
+            }
+            if scan.lit(b"<AccessTierChangeTime>") {
+                return known(scan, AccessTierChangeTime, wanted, captured);
+            }
+            if scan.lit(b"<ArchiveStatus>") {
+                return known(scan, ArchiveStatus, wanted, captured);
+            }
+            if scan.lit(b"<Acl>") {
+                return known(scan, Acl, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'B' => {
+            if scan.lit(b"<BlobType>") {
+                return known(scan, BlobType, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'C' => {
+            if scan.lit(b"<Creation-Time>") {
+                return known(scan, CreationTime, wanted, captured);
+            }
+            if scan.lit(b"<Content-Type />") {
+                return Ok(known_empty(ContentType, wanted, captured));
+            }
+            if scan.lit(b"<Content-Type>") {
+                return known(scan, ContentType, wanted, captured);
+            }
+            if scan.lit(b"<Content-Encoding />") {
+                return Ok(known_empty(ContentEncoding, wanted, captured));
+            }
+            if scan.lit(b"<Content-Encoding>") {
+                return known(scan, ContentEncoding, wanted, captured);
+            }
+            if scan.lit(b"<Content-Language />") {
+                return Ok(known_empty(ContentLanguage, wanted, captured));
+            }
+            if scan.lit(b"<Content-Language>") {
+                return known(scan, ContentLanguage, wanted, captured);
+            }
+            if scan.lit(b"<Content-CRC64 />") {
+                return Ok(known_empty(ContentCrc64, wanted, captured));
+            }
+            if scan.lit(b"<Content-CRC64>") {
+                return known(scan, ContentCrc64, wanted, captured);
+            }
+            if scan.lit(b"<Content-MD5 />") {
+                return Ok(known_empty(ContentMd5, wanted, captured));
+            }
+            if scan.lit(b"<Content-MD5>") {
+                return known(scan, ContentMd5, wanted, captured);
+            }
+            if scan.lit(b"<Cache-Control />") {
+                return Ok(known_empty(CacheControl, wanted, captured));
+            }
+            if scan.lit(b"<Cache-Control>") {
+                return known(scan, CacheControl, wanted, captured);
+            }
+            if scan.lit(b"<Content-Disposition />") {
+                return Ok(known_empty(ContentDisposition, wanted, captured));
+            }
+            if scan.lit(b"<Content-Disposition>") {
+                return known(scan, ContentDisposition, wanted, captured);
+            }
+            if scan.lit(b"<CopyId>") {
+                return known(scan, CopyId, wanted, captured);
+            }
+            if scan.lit(b"<CopyStatus>") {
+                return known(scan, CopyStatus, wanted, captured);
+            }
+            if scan.lit(b"<CopySource>") {
+                return known(scan, CopySource, wanted, captured);
+            }
+            if scan.lit(b"<CopyProgress>") {
+                return known(scan, CopyProgress, wanted, captured);
+            }
+            if scan.lit(b"<CopyCompletionTime>") {
+                return known(scan, CopyCompletionTime, wanted, captured);
+            }
+            if scan.lit(b"<CopyStatusDescription>") {
+                return known(scan, CopyStatusDescription, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'D' => {
+            if scan.lit(b"<DeletedTime>") {
+                return known(scan, DeletedTime, wanted, captured);
+            }
+            if scan.lit(b"<Deleted>") {
+                return known(scan, Deleted, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'E' => {
+            if scan.lit(b"<EncryptionScope>") {
+                return known(scan, EncryptionScope, wanted, captured);
+            }
+            if scan.lit(b"<Expiry-Time>") {
+                return known(scan, ExpiryTime, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'G' => {
+            if scan.lit(b"<Group>") {
+                return known(scan, Group, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'I' => {
+            if scan.lit(b"<IsCurrentVersion>") {
+                return known(scan, IsCurrentVersion, wanted, captured);
+            }
+            if scan.lit(b"<IncrementalCopy>") {
+                return known(scan, IncrementalCopy, wanted, captured);
+            }
+            if scan.lit(b"<ImmutabilityPolicyUntilDate>") {
+                return known(scan, ImmutabilityPolicyUntilDate, wanted, captured);
+            }
+            if scan.lit(b"<ImmutabilityPolicyMode>") {
+                return known(scan, ImmutabilityPolicyMode, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'L' => {
+            if scan.lit(b"<LeaseStatus>") {
+                return known(scan, LeaseStatus, wanted, captured);
+            }
+            if scan.lit(b"<LeaseState>") {
+                return known(scan, LeaseState, wanted, captured);
+            }
+            if scan.lit(b"<LeaseDuration>") {
+                return known(scan, LeaseDuration, wanted, captured);
+            }
+            if scan.lit(b"<LegalHold>") {
+                return known(scan, LegalHold, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'O' => {
+            if scan.lit(b"<Owner>") {
+                return known(scan, Owner, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'P' => {
+            if scan.lit(b"<Permissions>") {
+                return known(scan, Permissions, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'R' => {
+            if scan.lit(b"<RemainingRetentionDays>") {
+                return known(scan, RemainingRetentionDays, wanted, captured);
+            }
+            if scan.lit(b"<RehydratePriority>") {
+                return known(scan, RehydratePriority, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'S' => {
+            if scan.lit(b"<ServerEncrypted>") {
+                return known(scan, ServerEncrypted, wanted, captured);
+            }
+            if scan.lit(b"<Snapshot>") {
+                return known(scan, Snapshot, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'T' => {
+            if scan.lit(b"<TagCount>") {
+                return known(scan, TagCount, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'V' => {
+            if scan.lit(b"<VersionId>") {
+                return known(scan, VersionId, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'x' => {
+            if scan.lit(b"<x-ms-blob-sequence-number>") {
+                return known(scan, BlobSequenceNumber, wanted, captured);
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+// Reads a group of keys. `<BlobPrefix>` has been consumed. A
+// hierarchical-namespace account writes a `<Properties>` element here too. It
+// is skipped, because a group has no size and no entity tag.
+fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
     let mut fields = Fields::new(true);
     loop {
         match scan.child(b"BlobPrefix")? {
@@ -328,7 +702,8 @@ fn read_name(scan: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
 }
 
 // Builds one entry from the bytes it was written in, decoding its key, entity
-// tag and date in place.
+// tag and date in place. Every range below is a span the scanner recorded on
+// the chunk, or the part of one that decoding kept, which is never longer.
 fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let Some((key, key_flags)) = fields.key else {
         return fault();
@@ -422,49 +797,49 @@ fn decode_value_in_place(chunk: &mut [u8], field: Option<(Span, u8)>) -> Result<
     Ok(Some((start, start + len)))
 }
 
-// Reads the children of the root element from `at` on, writing each entry
-// into `into` until the root element ends. An entry the array has no room for
-// is walked and counted but not built, so that the error can say how many
-// entries the page holds.
-fn read_root_children_into<'b, E: From<ListEntry<'b>>>(
-    body: &'b mut [u8],
-    at: usize,
-    into: &mut [E],
+// Reads the children of the root element until it ends. The scan stands
+// where the root's first child begins. The entries are read by
+// `read_entries_into` when their element is opened.
+fn read_root_children_into<'b>(
+    mut scan: Scan<'b>,
+    room: usize,
+    wanted: PropertySet,
+    sink: &mut Sink<'_, 'b>,
 ) -> Result<Listing<'b>> {
-    let mut rest = body;
-    split_off(&mut rest, at);
-    let mut within = false;
-    let mut seen_entries = false;
+    // Set once the entries element has been read.
+    let mut entries: Option<Entries> = None;
     let mut seen_marker = false;
     let mut next_marker: Option<&'b str> = None;
-    let mut filled = 0;
-    let mut count = 0;
 
     loop {
-        let mut space = Scan::new(rest);
-        space.skip_space();
-        let space = space.cursor;
-        split_off(&mut rest, space);
+        // Drop what was read before this child, so that the child begins at
+        // offset zero.
+        scan.skip_space();
+        scan.take();
 
-        let (item, end) = read_next_child(rest, within)?;
-        match item {
-            Item::Entry(fields) => {
-                let chunk = split_off(&mut rest, end);
-                count += 1;
-                if filled < into.len() {
-                    into[filled] = build_entry(chunk, fields)?.into();
-                    filled += 1;
+        match read_root_child(&mut scan)? {
+            Item::Blobs { empty } => {
+                // A second entries element is refused the way a second name
+                // is. Azure writes one; this is for consistency, not for a
+                // case seen.
+                if entries.is_some() {
+                    return fault();
                 }
+                entries = Some(if empty {
+                    Entries { held: 0, built: 0 }
+                } else {
+                    read_entries_into(&mut scan, room, wanted, sink)?
+                });
             }
             Item::Marker((span, flags)) => {
-                // A second marker is refused the way a second name is. Azure
-                // writes one; this is for consistency, not for a case seen.
+                // The same for a second marker.
                 if seen_marker {
                     return fault();
                 }
                 seen_marker = true;
-                let chunk = split_off(&mut rest, end);
+                let chunk = scan.take();
                 let (start, stop) = trim(chunk, span);
+                // `decode` returns at most the length it was given.
                 let len = decode(&mut chunk[start..stop], flags, false)?;
                 let chunk: &'b [u8] = chunk;
                 // An empty marker means the listing is complete, so it is
@@ -474,38 +849,88 @@ fn read_root_children_into<'b, E: From<ListEntry<'b>>>(
                     .map(text)
                     .transpose()?;
             }
-            Item::Entries { within: held } => {
-                // The same for a second entries element.
-                if seen_entries {
-                    return fault();
-                }
-                within = held;
-                seen_entries = true;
-                split_off(&mut rest, end);
-            }
-            Item::Leave => {
-                within = false;
-                split_off(&mut rest, end);
-            }
-            Item::Skip => {
-                split_off(&mut rest, end);
-            }
+            Item::Skip => {}
             Item::End => {
                 // A document with no entries element is not a page.
-                if !seen_entries {
+                let Some(entries) = entries else {
                     return fault();
-                }
-                if count > into.len() {
+                };
+                if entries.held > room {
                     return Err(Error::Capacity(CapacityError {
-                        required: count,
-                        available: into.len(),
+                        required: entries.held,
+                        available: room,
                     }));
                 }
                 return Ok(Listing {
-                    filled,
+                    filled: entries.built,
                     next_marker,
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::{BlobProperty, PropertySet, Scan, read_known_element};
+
+    // The properties whose empty spelling the match tries.
+    const WRITTEN_EMPTY: [BlobProperty; 7] = [
+        BlobProperty::ContentType,
+        BlobProperty::ContentEncoding,
+        BlobProperty::ContentLanguage,
+        BlobProperty::ContentCrc64,
+        BlobProperty::ContentMd5,
+        BlobProperty::CacheControl,
+        BlobProperty::ContentDisposition,
+    ];
+
+    // Feeds one start tag to the whole-tag match and returns whether it was
+    // taken, with the span it recorded.
+    fn matched(document: &str, property: BlobProperty) -> (bool, Option<(usize, usize)>) {
+        let wanted = PropertySet::of(&[property]);
+        let mut captured = [None; 1];
+        let mut bytes = std::vec::Vec::from(document.as_bytes());
+        let mut scan = Scan::new(&mut bytes);
+        let taken = read_known_element(&mut scan, wanted, &mut captured).unwrap();
+        (taken, captured[0])
+    }
+
+    /// The match is written by hand, so this checks it against the enum:
+    /// every property is matched whole as the service spells it, and its
+    /// value is the text between the tags.
+    #[test]
+    fn every_property_is_matched_whole_as_the_service_spells_it() {
+        for property in BlobProperty::ALL {
+            let name = property.name();
+            let document = std::format!("<{name}>x</{name}>");
+            let start = name.len() + 2;
+            assert_eq!(
+                matched(&document, *property),
+                (true, Some((start, start + 1))),
+                "{name}"
+            );
+        }
+    }
+
+    /// The empty spelling is matched for the properties the service writes
+    /// that way, and recorded as an empty value.
+    #[test]
+    fn the_empty_spelling_is_matched_where_the_service_writes_it() {
+        for property in WRITTEN_EMPTY {
+            let document = std::format!("<{} />", property.name());
+            assert_eq!(matched(&document, property), (true, Some((0, 0))));
+        }
+        // Any other tag is left for the general path.
+        assert_eq!(
+            matched("<Metadata>", BlobProperty::AccessTier),
+            (false, None)
+        );
+        assert_eq!(
+            matched("<AccessTier >", BlobProperty::AccessTier),
+            (false, None)
+        );
     }
 }

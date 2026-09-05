@@ -8,14 +8,15 @@
 // the properties of an entry, so the caller can read the ones this crate
 // skips.
 //
-// A page is read in this order. `azure::open_root_element` checks the body is
-// UTF-8, skips the prolog and reads through the root's opening tag.
-// `azure::read_root_children_into` then loops over the root's children with
-// `azure::read_next_child`, which classifies each one and, for an entry,
-// collects the spans of its fields. Each entry is split off the body as its
-// own slice, and `azure::build_entry` decodes those spans in place and builds
-// the `ListEntry` from them. An entry the array has no room for is walked but
-// not built, so that the error can say how many entries the page holds.
+// A page is read in this order. `azure::check_body` checks the body is UTF-8
+// and holds no zero byte. `azure::open_root_element` skips the prolog and
+// reads through the root's opening tag. `azure::read_root_children_into` then
+// loops over the root's children, and on the one that holds the entries calls
+// `azure::read_entries_into`, which reads each entry's fields as spans, takes
+// the entry off the body as its own slice, and has `azure::build_entry`
+// decode those spans in place and build the `ListEntry` from them. An entry
+// the array has no room for is walked but not built, so that the error can
+// say how many entries the page holds.
 
 pub(crate) mod azure;
 pub(crate) mod decode;

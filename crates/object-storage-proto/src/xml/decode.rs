@@ -38,7 +38,9 @@ pub(crate) fn decode(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize
 
 fn decode_references(b: &mut [u8]) -> Result<usize> {
     // `r` reads and `w` writes. The two are equal up to the first escape, so
-    // nothing moves until something has shrunk.
+    // nothing moves until something has shrunk. `w` never passes `r`, and
+    // `r` is below the length wherever a byte is written, so the writes
+    // below are in range.
     let (mut r, mut w) = (0, 0);
     while r < b.len() {
         let run = find_byte(b, r, b'&') - r;
@@ -134,6 +136,7 @@ fn xml_char(code: u32) -> bool {
 }
 
 fn decode_percent(b: &mut [u8]) -> Result<usize> {
+    // The same two indexes as in `decode_references`.
     let (mut r, mut w) = (0, 0);
     while r < b.len() {
         let run = find_byte(b, r, b'%') - r;

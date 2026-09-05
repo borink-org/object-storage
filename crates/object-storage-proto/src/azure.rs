@@ -3,8 +3,8 @@ use crate::{
     BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
     DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
     ListEntry, ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
+    PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -582,7 +582,28 @@ impl<'a> Blobs<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::fill_listing(body, into)
+        crate::xml::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+    }
+
+    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
+    /// values of the properties in `wanted` as it goes.
+    ///
+    /// `build` is called once per entry, with the entry and its values, and
+    /// what it returns is written into your array. So your entry type can
+    /// hold the two or three properties you care about, read in the same
+    /// pass as everything else. The values point into `body`, like the
+    /// entry. A group of keys gives no values.
+    ///
+    /// Reading the page costs the same whatever the set holds, and the same
+    /// as reading it without one.
+    pub fn fill_listing_with<'b, E>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [E],
+        wanted: PropertySet,
+        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+    ) -> Result<Listing<'b>> {
+        crate::xml::fill_listing(body, into, wanted, build)
     }
 }
 

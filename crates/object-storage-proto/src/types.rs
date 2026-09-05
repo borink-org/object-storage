@@ -757,3 +757,352 @@ mod tests {
         assert_eq!(EntryKind::from_discriminant(0), None);
     }
 }
+
+/// An element that a listing writes for a blob, other than the four that
+/// every [`ListEntry`] carries.
+///
+/// Name the ones you want in a [`PropertySet`] and read a page with
+/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with), which
+/// hands you their values as it goes. Most are written under the properties
+/// element; the ones marked otherwise stand beside it. Read anything that is
+/// not listed here with [`ListEntry::properties`].
+///
+/// The page reader matches each of these by its whole start tag, in
+/// `xml/azure.rs`. A property added here is added to that match too, and a
+/// test there checks that every one of these is matched.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BlobProperty {
+    /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
+    AccessTier,
+    /// Whether the tier was inferred rather than set.
+    AccessTierInferred,
+    /// When the tier was last changed.
+    AccessTierChangeTime,
+    /// The progress of a rehydration out of the archive tier.
+    ArchiveStatus,
+    /// The access control list, on a hierarchical account listing with permissions.
+    Acl,
+    /// `BlockBlob`, `PageBlob` or `AppendBlob`.
+    BlobType,
+    /// When the blob was created, in the form of the `Last-Modified` header.
+    CreationTime,
+    /// The media type, as stored with the blob.
+    ContentType,
+    /// The content encoding, as stored with the blob.
+    ContentEncoding,
+    /// The content language, as stored with the blob.
+    ContentLanguage,
+    /// The CRC64 of the content, if the service holds one.
+    ContentCrc64,
+    /// The MD5 of the content, base64, if the service holds one.
+    ContentMd5,
+    /// The cache control directives, as stored with the blob.
+    CacheControl,
+    /// The content disposition, as stored with the blob.
+    ContentDisposition,
+    /// The identifier of the last copy operation onto this blob.
+    CopyId,
+    /// The state of that copy: `pending`, `success`, `aborted` or `failed`.
+    CopyStatus,
+    /// The URL that copy read from.
+    CopySource,
+    /// The bytes copied so far and the total, as `copied/total`.
+    CopyProgress,
+    /// When that copy finished.
+    CopyCompletionTime,
+    /// Why that copy failed or was aborted.
+    CopyStatusDescription,
+    /// When a soft-deleted blob was deleted.
+    DeletedTime,
+    /// Whether the entry is a soft-deleted blob. Written beside the properties element.
+    Deleted,
+    /// The encryption scope the blob is stored under.
+    EncryptionScope,
+    /// When the blob expires, on a hierarchical account.
+    ExpiryTime,
+    /// The owning group, on a hierarchical account listing with permissions.
+    Group,
+    /// Whether this version is the current one. Written beside the properties element.
+    IsCurrentVersion,
+    /// Whether the blob is an incremental copy of a page blob snapshot.
+    IncrementalCopy,
+    /// Until when the immutability policy holds.
+    ImmutabilityPolicyUntilDate,
+    /// The immutability policy: `unlocked` or `locked`.
+    ImmutabilityPolicyMode,
+    /// Whether the blob is leased: `locked` or `unlocked`.
+    LeaseStatus,
+    /// The state of the lease: `available`, `leased`, `expired`, `breaking` or `broken`.
+    LeaseState,
+    /// Whether the lease is `infinite` or `fixed`.
+    LeaseDuration,
+    /// Whether a legal hold is set.
+    LegalHold,
+    /// The owner, on a hierarchical account listing with permissions.
+    Owner,
+    /// The POSIX permissions, on a hierarchical account listing with permissions.
+    Permissions,
+    /// How many days a soft-deleted blob is kept.
+    RemainingRetentionDays,
+    /// The priority of a rehydration out of the archive tier.
+    RehydratePriority,
+    /// Whether the blob is encrypted at rest.
+    ServerEncrypted,
+    /// The snapshot's timestamp, on an entry that names a snapshot. Written beside the properties element.
+    Snapshot,
+    /// How many tags the blob has.
+    TagCount,
+    /// The version's identifier, on an account that keeps versions. Written beside the properties element.
+    VersionId,
+    /// The sequence number of a page blob.
+    BlobSequenceNumber,
+}
+
+impl BlobProperty {
+    /// Every property, in the order of their numbers.
+    pub const ALL: &[Self] = &[
+        Self::AccessTier,
+        Self::AccessTierInferred,
+        Self::AccessTierChangeTime,
+        Self::ArchiveStatus,
+        Self::Acl,
+        Self::BlobType,
+        Self::CreationTime,
+        Self::ContentType,
+        Self::ContentEncoding,
+        Self::ContentLanguage,
+        Self::ContentCrc64,
+        Self::ContentMd5,
+        Self::CacheControl,
+        Self::ContentDisposition,
+        Self::CopyId,
+        Self::CopyStatus,
+        Self::CopySource,
+        Self::CopyProgress,
+        Self::CopyCompletionTime,
+        Self::CopyStatusDescription,
+        Self::DeletedTime,
+        Self::Deleted,
+        Self::EncryptionScope,
+        Self::ExpiryTime,
+        Self::Group,
+        Self::IsCurrentVersion,
+        Self::IncrementalCopy,
+        Self::ImmutabilityPolicyUntilDate,
+        Self::ImmutabilityPolicyMode,
+        Self::LeaseStatus,
+        Self::LeaseState,
+        Self::LeaseDuration,
+        Self::LegalHold,
+        Self::Owner,
+        Self::Permissions,
+        Self::RemainingRetentionDays,
+        Self::RehydratePriority,
+        Self::ServerEncrypted,
+        Self::Snapshot,
+        Self::TagCount,
+        Self::VersionId,
+        Self::BlobSequenceNumber,
+    ];
+
+    /// The element name, as the service writes it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AccessTier => "AccessTier",
+            Self::AccessTierInferred => "AccessTierInferred",
+            Self::AccessTierChangeTime => "AccessTierChangeTime",
+            Self::ArchiveStatus => "ArchiveStatus",
+            Self::Acl => "Acl",
+            Self::BlobType => "BlobType",
+            Self::CreationTime => "Creation-Time",
+            Self::ContentType => "Content-Type",
+            Self::ContentEncoding => "Content-Encoding",
+            Self::ContentLanguage => "Content-Language",
+            Self::ContentCrc64 => "Content-CRC64",
+            Self::ContentMd5 => "Content-MD5",
+            Self::CacheControl => "Cache-Control",
+            Self::ContentDisposition => "Content-Disposition",
+            Self::CopyId => "CopyId",
+            Self::CopyStatus => "CopyStatus",
+            Self::CopySource => "CopySource",
+            Self::CopyProgress => "CopyProgress",
+            Self::CopyCompletionTime => "CopyCompletionTime",
+            Self::CopyStatusDescription => "CopyStatusDescription",
+            Self::DeletedTime => "DeletedTime",
+            Self::Deleted => "Deleted",
+            Self::EncryptionScope => "EncryptionScope",
+            Self::ExpiryTime => "Expiry-Time",
+            Self::Group => "Group",
+            Self::IsCurrentVersion => "IsCurrentVersion",
+            Self::IncrementalCopy => "IncrementalCopy",
+            Self::ImmutabilityPolicyUntilDate => "ImmutabilityPolicyUntilDate",
+            Self::ImmutabilityPolicyMode => "ImmutabilityPolicyMode",
+            Self::LeaseStatus => "LeaseStatus",
+            Self::LeaseState => "LeaseState",
+            Self::LeaseDuration => "LeaseDuration",
+            Self::LegalHold => "LegalHold",
+            Self::Owner => "Owner",
+            Self::Permissions => "Permissions",
+            Self::RemainingRetentionDays => "RemainingRetentionDays",
+            Self::RehydratePriority => "RehydratePriority",
+            Self::ServerEncrypted => "ServerEncrypted",
+            Self::Snapshot => "Snapshot",
+            Self::TagCount => "TagCount",
+            Self::VersionId => "VersionId",
+            Self::BlobSequenceNumber => "x-ms-blob-sequence-number",
+        }
+    }
+}
+
+// A set holds one bit per property.
+const _: () = assert!(BlobProperty::ALL.len() <= 64);
+
+impl BlobProperty {
+    /// How many properties there are, which is the most a set can hold.
+    pub const COUNT: usize = Self::ALL.len();
+
+    // The property that an element name stands for, if it is one of these.
+    // This is the slow way to find out and is used only where a tag was not
+    // matched whole: an unusual spelling, or an element that is none of them.
+    pub(crate) fn identify(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|property| property.name().as_bytes() == name)
+    }
+
+    const fn bit(self) -> u64 {
+        1 << (self as u8)
+    }
+}
+
+/// The properties that one page read is asked for.
+///
+/// Build one with [`Self::of`] and pass it to
+/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with). The values
+/// come back in the order that [`BlobProperty`] lists them, whatever order
+/// the set was built in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PropertySet(u64);
+
+impl PropertySet {
+    /// A set of these properties. Naming one twice is the same as once.
+    pub const fn of(properties: &[BlobProperty]) -> Self {
+        let mut mask = 0;
+        let mut i = 0;
+        while i < properties.len() {
+            mask |= properties[i].bit();
+            i += 1;
+        }
+        Self(mask)
+    }
+
+    /// A set from its bits, one per property in the order [`BlobProperty`]
+    /// numbers them. A bit that names no property is dropped.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits & ((1 << BlobProperty::COUNT) - 1))
+    }
+
+    /// The set's bits, as [`Self::from_bits`] reads them.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Whether the set holds this property.
+    pub const fn contains(self, property: BlobProperty) -> bool {
+        self.0 & property.bit() != 0
+    }
+
+    /// How many properties the set holds, which is how many values a read
+    /// reports for each entry.
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Whether the set holds nothing.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Where a property's value stands among the values of an entry: its
+    /// rank among the set's members, in the order [`BlobProperty`] lists
+    /// them. Meaningful only for a property the set holds.
+    pub const fn slot(self, property: BlobProperty) -> usize {
+        (self.0 & (property.bit() - 1)).count_ones() as usize
+    }
+}
+
+/// The values that one entry gave for the properties of a set.
+///
+/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with) hands one
+/// to the closure that builds each entry. Each value is the bytes between
+/// the element's tags, as the service wrote them, under the rules that
+/// [`ListEntry::property`] states. A group of keys gives no values.
+#[derive(Clone, Copy, Debug)]
+pub struct PropertyValues<'x, 'b> {
+    set: PropertySet,
+    values: &'x [Option<&'b [u8]>],
+}
+
+impl<'x, 'b> PropertyValues<'x, 'b> {
+    pub(crate) fn new(set: PropertySet, values: &'x [Option<&'b [u8]>]) -> Self {
+        Self { set, values }
+    }
+
+    /// The set that the page was read with.
+    pub const fn set(&self) -> PropertySet {
+        self.set
+    }
+
+    /// The value the entry gave for one property.
+    ///
+    /// [`None`] if the property is not in the set or the entry wrote no such
+    /// element; an empty slice if it wrote the element empty.
+    pub fn get(&self, property: BlobProperty) -> Option<&'b [u8]> {
+        if !self.set.contains(property) {
+            return None;
+        }
+        self.values[self.set.slot(property)]
+    }
+
+    /// Every value, one per member of the set, in the order [`BlobProperty`]
+    /// lists them.
+    pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
+        self.values
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::{BlobProperty, PropertySet};
+
+    #[test]
+    fn every_property_is_found_by_its_name_and_numbered_in_order() {
+        for (index, property) in BlobProperty::ALL.iter().enumerate() {
+            assert_eq!(*property as usize, index);
+            assert_eq!(
+                BlobProperty::identify(property.name().as_bytes()),
+                Some(*property)
+            );
+        }
+        assert_eq!(BlobProperty::identify(b"Name"), None);
+        assert_eq!(BlobProperty::identify(b""), None);
+    }
+
+    #[test]
+    fn a_set_numbers_its_members_in_the_order_the_enum_does() {
+        let set = PropertySet::of(&[
+            BlobProperty::ServerEncrypted,
+            BlobProperty::AccessTier,
+            BlobProperty::AccessTier,
+            BlobProperty::CreationTime,
+        ]);
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.slot(BlobProperty::AccessTier), 0);
+        assert_eq!(set.slot(BlobProperty::CreationTime), 1);
+        assert_eq!(set.slot(BlobProperty::ServerEncrypted), 2);
+        assert!(!set.contains(BlobProperty::BlobType));
+        assert!(PropertySet::default().is_empty());
+    }
+}

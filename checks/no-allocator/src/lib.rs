@@ -3,8 +3,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use borink_object_storage_proto::{
-    Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet, PhysicalList,
-    ResponseHead, Timestamps, layered,
+    BlobProperty, Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet,
+    PhysicalList, PropertySet, ResponseHead, Timestamps, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -75,5 +75,20 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
         .map_or(0, <[u8]>::len)
         + first[0].properties().count();
     let key = first[0].key.len() + first[1].key.len() + length;
-    url + key + page.filled + page.next_marker.unwrap_or_default().len()
+
+    // The same page read into the caller's own entry type, keeping one
+    // property of each entry as the page is read.
+    let mut body = *b"<EnumerationResults><Blobs><Blob><Name>a</Name><Properties>\
+<Content-Length>8</Content-Length><AccessTier>Hot</AccessTier></Properties></Blob></Blobs>\
+<NextMarker /></EnumerationResults>";
+    let wanted = PropertySet::of(&[BlobProperty::AccessTier]);
+    let mut picked = [(0usize, None); 1];
+    let Ok(again) = blobs.fill_listing_with(&mut body, &mut picked, wanted, |entry, values| {
+        (entry.key.len(), values.get(BlobProperty::AccessTier))
+    }) else {
+        return 8;
+    };
+    let tier = picked[0].1.map_or(0, <[u8]>::len);
+
+    url + key + page.filled + page.next_marker.unwrap_or_default().len() + again.filled + tier
 }
