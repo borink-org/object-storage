@@ -59,6 +59,7 @@ struct Limits {
     // The most that one request head may take. A request that needs more is
     // refused rather than served.
     std::size_t request_bytes = 8 * 1024;
+    // The most header slots to reserve; a request needing more is refused.
     std::size_t request_headers = 256;
     // The most of an error body to read. An error body is a diagnostic, and
     // the service decides how long it is: one that does not arrive costs the

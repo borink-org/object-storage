@@ -23,6 +23,7 @@ header = """
 [export]
 prefix = ""
 include = [
+    "AzureNamespace",
     "ErrorCode",
     "Method",
     "GetKind",
@@ -48,6 +49,8 @@ renaming_overrides_prefixing = true
 "MaybeU64" = "borink_maybe_u64"
 "MaybeU32" = "borink_maybe_u32"
 "Status" = "borink_status"
+"AzureNamespace" = "borink_azure_namespace"
+"AzureRejection" = "borink_azure_rejection"
 "Session" = "borink_session"
 "Range" = "borink_range"
 "GetShape" = "borink_get_shape"

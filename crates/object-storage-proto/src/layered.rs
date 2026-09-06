@@ -4,15 +4,16 @@
 //! version if you need different behaviour.
 
 use crate::{
-    Blobs, Error, HeaderSpan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    RequestSize, Result, Timestamps,
+    Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize,
+    Result, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
 
-/// Returns the byte and header-slot capacities that [`Blobs::encode_get`] needs for this plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_get`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -25,14 +26,11 @@ pub fn get_requirements(
     get: &PhysicalGet<'_>,
     now: &Timestamps,
 ) -> Result<RequestSize> {
-    required(
-        blobs
-            .encode_get(&mut [], &mut [] as &mut [HeaderSpan], get, now)
-            .map(drop),
-    )
+    required(blobs.encode_get(&mut [], &mut [], get, now).map(drop))
 }
 
-/// Returns the byte and header-slot capacities that [`Blobs::encode_put`] needs for this plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_put`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode. The answer covers the request
 /// head only, and never the content. Only the length of `content` reaches the
@@ -52,13 +50,13 @@ pub fn put_requirements(
     // the length of `content`. Its bytes are never read.
     required(
         blobs
-            .encode_put(&mut [], &mut [] as &mut [HeaderSpan], put, content, now)
+            .encode_put(&mut [], &mut [], put, content, now)
             .map(drop),
     )
 }
 
-/// Returns the byte and header-slot capacities that [`Blobs::encode_delete`] needs for this
-/// plan needs.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_delete`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -71,15 +69,11 @@ pub fn delete_requirements(
     delete: &PhysicalDelete<'_>,
     now: &Timestamps,
 ) -> Result<RequestSize> {
-    required(
-        blobs
-            .encode_delete(&mut [], &mut [] as &mut [HeaderSpan], delete, now)
-            .map(drop),
-    )
+    required(blobs.encode_delete(&mut [], &mut [], delete, now).map(drop))
 }
 
-/// Returns the byte and header-slot capacities that [`Blobs::encode_list`] needs for this
-/// plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_list`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -92,11 +86,7 @@ pub fn list_requirements(
     list: &PhysicalList<'_>,
     now: &Timestamps,
 ) -> Result<RequestSize> {
-    required(
-        blobs
-            .encode_list(&mut [], &mut [] as &mut [HeaderSpan], list, now)
-            .map(drop),
-    )
+    required(blobs.encode_list(&mut [], &mut [], list, now).map(drop))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.

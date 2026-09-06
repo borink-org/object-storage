@@ -3,8 +3,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use borink_object_storage_proto::{
-    BlobProperty, Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, PhysicalGet,
-    PhysicalList, PropertySet, ResponseHead, Timestamps, layered,
+    BlobProperty, Blobs, Container, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome,
+    PhysicalGet, PhysicalList, PropertySet, ResponseHead, Timestamps, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -19,7 +19,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 /// Exercises request construction and response interpretation in a reachable symbol.
 #[unsafe(no_mangle)]
 pub extern "C" fn object_storage_without_an_allocator() -> usize {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let Ok(container) = Container::new("https://account", "container") else {
         return 1;
     };
@@ -29,7 +29,7 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     let mut buf = [0; 256];
     let now = Timestamps::from_unix(1_787_400_000);
     let get = PhysicalGet::new("object");
-    let Ok(request) = blobs.encode_get(&mut buf, &mut request_headers_1, &get, &now) else {
+    let Ok(request) = blobs.encode_get(&mut buf, &mut request_headers, &get, &now) else {
         return 3;
     };
     let headers = [("content-length", b"4".as_slice())];
@@ -44,14 +44,14 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
 // A listing reads a document out of a buffer and decodes the text in it where
 // it stands, so it is the one operation that could want scratch. It does not.
 fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
-    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let mut buf = [0; 256];
     let list = PhysicalList {
         delimited: true,
         max_results: Some(2),
         ..PhysicalList::new("directory/")
     };
-    let Ok(request) = blobs.encode_list(&mut buf, &mut request_headers_5, &list, now) else {
+    let Ok(request) = blobs.encode_list(&mut buf, &mut request_headers, &list, now) else {
         return 5;
     };
     let url = request.url().len();

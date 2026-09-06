@@ -147,6 +147,7 @@ fn full_meta() -> CoreObjectMeta<'static> {
         last_modified: Some(&VALUES[6..35]),
         version: Some(&VALUES[35..44]),
         content_encoding: Some(&VALUES[44..]),
+        content_type: Some(b"text/plain; charset=utf-8"),
     }
 }
 
@@ -192,6 +193,11 @@ fn every_read_outcome_crosses_whole() {
     assert!(view.meta.last_modified.present);
     assert!(view.meta.version.present);
     assert!(view.meta.content_encoding.present);
+    assert_eq!(borrowed(view.meta.content_type), full_meta().content_type);
+    assert_eq!(
+        view.meta.content_type.bytes.ptr,
+        full_meta().content_type.unwrap().as_ptr()
+    );
     assert_eq!(view.body.object_offset, 2);
     assert_eq!(view.body.expected_len.value, 4);
     assert_eq!(view.body.object_size.value, 10);
@@ -456,11 +462,20 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     ] {
         let entry = proto::ListEntry {
             kind,
+            content_type: Some("application/octet-stream"),
             ..Default::default()
         };
         assert_eq!(
             proto::EntryKind::from_discriminant(entry_view(&entry).kind),
             Some(kind)
+        );
+        assert_eq!(
+            borrowed(entry_view(&entry).content_type),
+            entry.content_type.map(str::as_bytes)
+        );
+        assert_eq!(
+            entry_view(&entry).content_type.bytes.ptr,
+            entry.content_type.unwrap().as_ptr()
         );
     }
     // A listing plan carries no enum, and an absent count is not a zero one.
@@ -665,7 +680,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the three that carry no
     // inner value.
-    assert_eq!(checked, 3 + 11 + 4);
+    assert_eq!(checked, 3 + 16 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)
@@ -725,7 +740,7 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
 // the bytes that go with it.
 #[test]
 fn a_stored_shape_carries_the_whole_plan() {
-    let mut request_headers = [RequestHeader::default(); 8];
+    let mut request_headers = [core::mem::MaybeUninit::<RequestHeader>::uninit(); 8];
     let session = session();
     let shape = GetShape {
         kind: GetKind::Bytes as u16,
@@ -744,11 +759,16 @@ fn a_stored_shape_carries_the_whole_plan() {
             &shape,
             lent(b"object.bin"),
             lent(b"\"etag\""),
-            request_buffer(&mut buf, &mut request_headers),
+            RequestBuffer {
+                bytes: writable(&mut buf),
+                headers: request_headers.as_mut_ptr().cast(),
+                header_capacity: request_headers.len(),
+            },
             1_787_400_000,
         )
     };
     assert_eq!(head.status.code, 0);
+    assert_eq!(head.headers, request_headers.as_ptr().cast());
     let named = |name: &str| {
         (0..head.header_count).find_map(|index| {
             let header = unsafe { *head.headers.add(index) };
@@ -766,9 +786,11 @@ fn a_stored_shape_carries_the_whole_plan() {
 #[test]
 fn a_head_crosses_as_slices_of_whatever_holds_it() {
     let session = session();
+    let content_type = b"text/plain; charset=utf-8";
     let headers = [
         header("ETag", e_tag()),
         header("Content-Length", b"10"),
+        header("Content-Type", content_type),
         header("x-ms-request-id", IDENTIFIER),
         // A name that is not text is none of the ones the core crate reads,
         // so it is skipped rather than refused.
@@ -789,6 +811,11 @@ fn a_head_crosses_as_slices_of_whatever_holds_it() {
     };
     assert_eq!(outcome.kind, OutcomeKind::Body as u16);
     assert_eq!(outcome.meta.e_tag.bytes.ptr, e_tag().as_ptr());
+    assert_eq!(
+        borrowed(outcome.meta.content_type),
+        Some(content_type.as_slice())
+    );
+    assert_eq!(outcome.meta.content_type.bytes.ptr, content_type.as_ptr());
     assert!(outcome.body.expected_len.present);
     assert_eq!(outcome.body.expected_len.value, 10);
 }
@@ -1369,5 +1396,61 @@ fn request_buffer(bytes: &mut [u8], headers: &mut [RequestHeader]) -> RequestBuf
         bytes: writable(bytes),
         headers: headers.as_mut_ptr(),
         header_capacity: headers.len(),
+    }
+}
+
+#[test]
+fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
+    for namespace in [
+        AzureNamespace::Unknown,
+        AzureNamespace::Flat,
+        AzureNamespace::Hierarchical,
+    ] {
+        for reason in [
+            InvalidPlan::MaxResults,
+            InvalidPlan::KeyTooLong,
+            InvalidPlan::UnsupportedRange,
+        ] {
+            let status = status_of(&Error::InvalidPlan(reason));
+            let azure = borink_azure_rejection_for(status, namespace as u16);
+            let expected = match reason {
+                InvalidPlan::MaxResults => Some("OutOfRangeQueryParameterValue"),
+                InvalidPlan::KeyTooLong if namespace as u16 == AzureNamespace::Flat as u16 => {
+                    Some("OutOfRangeInput")
+                }
+                _ => None,
+            };
+            assert_eq!(azure.status, if expected.is_some() { 400 } else { 0 });
+            // SAFETY: a returned code points at static bytes, or has length zero.
+            assert_eq!(
+                unsafe { slice(azure.code) },
+                expected.unwrap_or("").as_bytes()
+            );
+        }
+    }
+    assert_eq!(borink_azure_rejection_for(Status::default(), 0).status, 0);
+    let status = status_of(&Error::InvalidPlan(InvalidPlan::MaxResults));
+    assert_eq!(borink_azure_rejection_for(status, u16::MAX).status, 0);
+
+    for (key, reason) in [
+        (b"".as_slice(), InvalidPlan::EmptyKey),
+        (b"\xff", InvalidPlan::KeyNotUtf8),
+    ] {
+        // SAFETY: inputs are live; both output capacities are zero.
+        let head = unsafe {
+            borink_encode_get(
+                &session(),
+                &read_shape(),
+                lent(key),
+                lent(b""),
+                RequestBuffer {
+                    bytes: writable(&mut []),
+                    headers: core::ptr::null_mut(),
+                    header_capacity: 0,
+                },
+                0,
+            )
+        };
+        assert_eq!(head.status, status_of(&Error::InvalidPlan(reason)));
     }
 }

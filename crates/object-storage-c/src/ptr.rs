@@ -7,6 +7,29 @@
 
 use crate::types::*;
 
+/// Initializes C header slots and borrows them with the core layout.
+///
+/// # Safety
+///
+/// `ptr` must address aligned, exclusive storage for `len` `RequestHeader`
+/// values in one allocation, with a byte size no greater than `isize::MAX`.
+/// The storage need not be initialized. Any pointer is accepted for zero slots.
+pub(crate) unsafe fn request_headers<'a>(
+    ptr: *mut RequestHeader,
+    len: usize,
+) -> &'a mut [borink_object_storage_proto::HeaderSpan] {
+    if len == 0 {
+        return &mut [];
+    }
+    // SAFETY: both types are repr(C), with identical integer fields. The
+    // layout assertions are in layout.rs. Zero initializes every field before
+    // a reference is formed; the caller supplies writable, exclusive storage.
+    unsafe {
+        ptr.write_bytes(0, len);
+        items_mut(ptr.cast(), len)
+    }
+}
+
 /// Reads `len` items at `ptr` as a slice.
 ///
 /// # Safety

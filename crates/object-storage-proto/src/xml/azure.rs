@@ -220,6 +220,11 @@ fn read_entries_into<'b>(
                 // The spans were recorded on the chunk, which `raw` is.
                 *value = span.map(|(start, end)| &entry.raw[start..end]);
             }
+            if wanted.contains(BlobProperty::ContentType) {
+                // This fixed field was decoded, so use its shortened slice.
+                let slot = wanted.slot(BlobProperty::ContentType);
+                values[slot] = entry.content_type.map(str::as_bytes);
+            }
             sink(entry, PropertyValues::new(wanted, &values[..slots]));
             entries.built += 1;
         }
@@ -236,6 +241,7 @@ struct Fields {
     size: Option<Span>,
     e_tag: Option<(Span, u8)>,
     last_modified: Option<(Span, u8)>,
+    content_type: Option<(Span, u8)>,
     resource_type: Option<Span>,
 }
 
@@ -248,6 +254,7 @@ impl Fields {
             size: None,
             e_tag: None,
             last_modified: None,
+            content_type: None,
             resource_type: None,
         }
     }
@@ -323,10 +330,10 @@ fn read_blob(
 }
 
 // Reads the properties of a blob into `fields`. `<Properties>` has been
-// consumed. Four of its children are fields of every entry. The rest, a
+// consumed. Five of its children are fields of every entry. The rest, a
 // dozen or so per blob, are most of an Azure page: each is matched whole by
 // `read_known_element`, which reads past it and keeps its value if the
-// caller asked for it. The four are listed twice, as in `read_blob`.
+// caller asked for it. The five are listed twice, as in `read_blob`.
 fn read_properties(
     scan: &mut Scan<'_>,
     fields: &mut Fields,
@@ -350,6 +357,13 @@ fn read_properties(
                 let value = scan.value_of(b"Content-Length")?;
                 set_once(&mut fields.size, value.0)?;
             }
+            b'C' if scan.lit(b"<Content-Type>") => {
+                let value = scan.value_of(b"Content-Type")?;
+                set_once(&mut fields.content_type, value)?;
+            }
+            b'C' if scan.lit(b"<Content-Type />") || scan.lit(b"<Content-Type/>") => {
+                set_once(&mut fields.content_type, ((0, 0), 0))?;
+            }
             b'R' if scan.lit(b"<ResourceType>") => {
                 let value = scan.value_of(b"ResourceType")?;
                 set_once(&mut fields.resource_type, value.0)?;
@@ -370,6 +384,10 @@ fn read_properties(
                     b"Content-Length" => {
                         let value = scan.value(tag)?;
                         set_once(&mut fields.size, value.0)?;
+                    }
+                    b"Content-Type" => {
+                        let value = scan.value(tag)?;
+                        set_once(&mut fields.content_type, value)?;
                     }
                     b"ResourceType" => {
                         let value = scan.value(tag)?;
@@ -760,6 +778,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     }
     let e_tag = decode_value_in_place(chunk, fields.e_tag)?;
     let last_modified = decode_value_in_place(chunk, fields.last_modified)?;
+    let content_type = decode_value_in_place(chunk, fields.content_type)?;
 
     let raw: &[u8] = chunk;
     Ok(ListEntry {
@@ -767,7 +786,9 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
         key: text(&raw[key.0..key.0 + key_len])?,
         size: if directory { None } else { size },
         e_tag: e_tag
-            .filter(|_| !directory)
+            .map(|(start, end)| text(&raw[start..end]))
+            .transpose()?,
+        content_type: content_type
             .map(|(start, end)| text(&raw[start..end]))
             .transpose()?,
         last_modified: last_modified
@@ -859,7 +880,6 @@ fn read_root_children_into<'b>(
                 if entries.held > room {
                     return Err(Error::Capacity(CapacityError {
                         required: entries.held,
-                        available: room,
                         ..CapacityError::default()
                     }));
                 }

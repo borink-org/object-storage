@@ -6,8 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-use borink_object_storage_proto as proto;
-
 /// Bytes that your program owns and lends to a call.
 ///
 /// A `len` of 0 is an empty value, and `ptr` may then be null.
@@ -111,6 +109,31 @@ pub struct Status {
     pub detail: u16,
 }
 
+/// The account namespace used to interpret a local rejection.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+pub enum AzureNamespace {
+    /// The account's namespace is not known.
+    Unknown = 0,
+    /// A flat-namespace account.
+    Flat = 1,
+    /// A hierarchical-namespace account.
+    Hierarchical = 2,
+}
+
+/// A corresponding Azure rejection, not a received response.
+///
+/// A zero status and empty code mean no mapping is known. The code points
+/// at static memory and does not need to be freed.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct AzureRejection {
+    /// The corresponding HTTP status, or zero if unknown.
+    pub status: u16,
+    /// The service error code, or empty if unknown.
+    pub code: Bytes,
+}
+
 /// Which kind of failure a `borink_status` carries.
 ///
 /// These are the numbers that the core crate's error code uses.
@@ -127,7 +150,8 @@ pub enum ErrorCode {
     InvalidToken = 3,
     /// The plan cannot become a request. `detail` says why.
     InvalidPlan = 4,
-    /// The buffer is too small. Grow it to `required` and call again.
+    /// Output storage is too small. Grow to the reported byte and slot
+    /// requirements and call again.
     Capacity = 5,
     /// The response cannot be read. `detail` says which part was wrong.
     Response = 6,
@@ -399,49 +423,23 @@ pub struct RequestHeader {
 }
 
 /// Caller-owned storage for an encoded request.
+///
 /// Both regions must be disjoint from all input strings and records.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RequestBuffer {
     /// Writable byte storage.
     pub bytes: BytesMut,
-    /// Initialized descriptor slots, disjoint from the byte storage.
+    /// Writable descriptor slots, disjoint from the byte storage.
+    ///
+    /// The encoder initializes these slots; uninitialized storage is allowed.
+    /// The pointer is ignored when `header_capacity` is zero.
     pub headers: *mut RequestHeader,
     /// Number of descriptor slots.
     pub header_capacity: usize,
 }
 
-impl From<proto::HeaderSpan> for RequestHeader {
-    fn from(header: proto::HeaderSpan) -> Self {
-        Self {
-            name: Span {
-                start: header.name.start,
-                len: header.name.len,
-            },
-            value: Span {
-                start: header.value.start,
-                len: header.value.len,
-            },
-        }
-    }
-}
-
-impl From<RequestHeader> for proto::HeaderSpan {
-    fn from(header: RequestHeader) -> Self {
-        Self {
-            name: proto::Span {
-                start: header.name.start,
-                len: header.name.len,
-            },
-            value: proto::Span {
-                start: header.value.start,
-                len: header.value.len,
-            },
-        }
-    }
-}
-
-/// A request head, as ranges of the buffer that holds it.
+/// A request head borrowing the caller's bytes and header slots.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RequestHead {
@@ -458,9 +456,13 @@ pub struct RequestHead {
     pub method: u16,
     /// The range that holds the complete object URL.
     pub url: Span,
-    /// How many of `headers` this request uses.
+    /// The number of meaningful entries in `headers`; zero on failure.
     pub header_count: usize,
-    /// The headers, in the order that the core crate wrote them.
+    /// Points at the slots passed in `RequestBuffer::headers` on success.
+    ///
+    /// Only `header_count` entries are meaningful. Keep that array alive and
+    /// unmoved until the request has been consumed. The pointer is meaningless
+    /// when the supplied capacity was zero or encoding failed.
     pub headers: *const RequestHeader,
     /// Header slots required, including on capacity failure.
     pub required_headers: usize,
@@ -503,6 +505,8 @@ pub struct ObjectMeta {
     pub version: MaybeBytes,
     /// The value of the `Content-Encoding` header.
     pub content_encoding: MaybeBytes,
+    /// Borrowed `Content-Type` header value; absent when not supplied.
+    pub content_type: MaybeBytes,
 }
 
 /// Where the bytes of the response body belong in the object.
@@ -575,7 +579,7 @@ pub struct Outcome {
 ///
 /// # Lifetime
 ///
-/// `key`, `e_tag` and `last_modified` point into the body that
+/// `key`, `e_tag`, `last_modified` and `content_type` point into the body that
 /// `borink_fill_listing` read. They are valid until you release or reuse that
 /// buffer, or until the next call that reads it.
 #[repr(C)]
@@ -597,6 +601,8 @@ pub struct ListEntry {
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
     pub last_modified: MaybeBytes,
+    /// Borrowed media type, decoded from the listing when present.
+    pub content_type: MaybeBytes,
     /// This entry as the service wrote it, from its opening tag to its closing
     /// one.
     ///

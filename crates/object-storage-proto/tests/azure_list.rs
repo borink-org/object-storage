@@ -381,10 +381,71 @@ fn a_hierarchical_account_reports_its_directories_as_such() {
 
     assert_eq!(entries[0].kind, EntryKind::Directory);
     assert_eq!(entries[0].key, "directory");
-    assert_eq!((entries[0].size, entries[0].e_tag), (None, None));
+    assert_eq!((entries[0].size, entries[0].e_tag), (None, Some("0x8DF")));
+    assert_eq!(
+        entries[0].property("Etag"),
+        entries[0].e_tag.map(str::as_bytes)
+    );
     // The properties that such an account attaches to a group are skipped.
     assert_eq!(entries[1].kind, EntryKind::Prefix);
     assert_eq!(entries[1].e_tag, None);
+}
+
+#[test]
+fn content_type_is_decoded_and_shared_by_each_listing_access_path() {
+    for (xml, expected) in [
+        ("", None),
+        (
+            "<Content-Type>application/octet-stream</Content-Type>",
+            Some("application/octet-stream"),
+        ),
+        (
+            "<Content-Type>text/plain; charset=utf-8</Content-Type>",
+            Some("text/plain; charset=utf-8"),
+        ),
+        (
+            "<Content-Type > application/vnd.example+xml; p=&quot;a&amp;b&quot; </Content-Type >",
+            Some("application/vnd.example+xml; p=\"a&b\""),
+        ),
+        ("<Content-Type/>", Some("")),
+        ("<Content-Type />", Some("")),
+        ("<Content-Type\n/>", Some("")),
+        ("<Content-Type></Content-Type>", Some("")),
+    ] {
+        for wanted in [
+            PropertySet::default(),
+            PropertySet::of(&[BlobProperty::ContentType]),
+        ] {
+            let mut body = page(
+                &format!(
+                    "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>{xml}</Properties></Blob>"
+                ),
+                "",
+            );
+            let mut entries = [(ListEntry::default(), None)];
+            blobs()
+                .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+                    (entry, values.get(BlobProperty::ContentType))
+                })
+                .unwrap();
+            let (entry, selected) = entries[0];
+            assert_eq!(entry.content_type, expected, "{xml}");
+            assert_eq!(
+                entry.property("Content-Type").map(<[u8]>::trim_ascii),
+                expected.map(str::as_bytes),
+                "{xml}"
+            );
+            if wanted.contains(BlobProperty::ContentType) {
+                assert_eq!(selected, expected.map(str::as_bytes), "{xml}");
+                assert_eq!(
+                    selected.map(<[u8]>::as_ptr),
+                    entry.content_type.map(str::as_ptr)
+                );
+            } else {
+                assert_eq!(selected, None);
+            }
+        }
+    }
 }
 
 #[test]
@@ -516,7 +577,6 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
         blobs().fill_listing(&mut body, &mut entries),
         Err(Error::Capacity(CapacityError {
             required: 3,
-            available: 2,
             ..CapacityError::default()
         }))
     );
@@ -537,7 +597,6 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
         blobs().fill_listing(&mut body, &mut none),
         Err(Error::Capacity(CapacityError {
             required: 1,
-            available: 0,
             ..CapacityError::default()
         }))
     );
@@ -641,6 +700,12 @@ fn a_body_that_is_not_a_page_is_a_fault() {
         page(
             "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>\
              <Content-Length>2</Content-Length></Properties></Blob>",
+            "",
+        ),
+        page(
+            "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>\
+             <Content-Type>text/plain</Content-Type><Content-Type/>\
+             </Properties></Blob>",
             "",
         ),
         // A comment or a character-data section may hold the very tags that

@@ -30,6 +30,10 @@ static borink_bytes as_bytes(const char *text) {
 // compares it with what Rust compiled, field by field.
 static void the_two_compilers_agree_on_every_struct(void) {
     const borink_layout measured = {
+        .sizeof_azure_rejection = sizeof(borink_azure_rejection),
+        .alignof_azure_rejection = _Alignof(borink_azure_rejection),
+        .offsetof_azure_rejection_status = offsetof(borink_azure_rejection, status),
+        .offsetof_azure_rejection_code = offsetof(borink_azure_rejection, code),
         .sizeof_request_buffer = sizeof(borink_request_buffer),
         .alignof_request_buffer = _Alignof(borink_request_buffer),
         .offsetof_request_buffer_bytes = offsetof(borink_request_buffer, bytes),
@@ -80,6 +84,7 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_object_meta_last_modified = offsetof(borink_object_meta, last_modified),
         .offsetof_object_meta_version = offsetof(borink_object_meta, version),
         .offsetof_object_meta_content_encoding = offsetof(borink_object_meta, content_encoding),
+        .offsetof_object_meta_content_type = offsetof(borink_object_meta, content_type),
         .sizeof_body_window = sizeof(borink_body_window),
         .offsetof_body_window_expected_len = offsetof(borink_body_window, expected_len),
         .offsetof_body_window_object_size = offsetof(borink_body_window, object_size),
@@ -104,6 +109,7 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_list_entry_size = offsetof(borink_list_entry, size),
         .offsetof_list_entry_e_tag = offsetof(borink_list_entry, e_tag),
         .offsetof_list_entry_last_modified = offsetof(borink_list_entry, last_modified),
+        .offsetof_list_entry_content_type = offsetof(borink_list_entry, content_type),
         .offsetof_list_entry_raw = offsetof(borink_list_entry, raw),
         .sizeof_properties = sizeof(borink_properties),
         .alignof_properties = _Alignof(borink_properties),

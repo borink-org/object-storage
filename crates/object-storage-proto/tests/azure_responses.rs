@@ -41,6 +41,7 @@ fn accepts_a_whole_object_read() {
             ("ETag", b"\"etag\""),
             ("Last-Modified", b"Fri, 24 May 2013 00:00:00 GMT"),
             ("Content-Encoding", b"gzip"),
+            ("Content-Type", b"text/plain; charset=utf-8"),
         ],
     );
     let GetHeadOutcome::Body { meta, body, .. } = accept(GetShape::default(), head).unwrap() else {
@@ -56,6 +57,7 @@ fn accepts_a_whole_object_read() {
             // Ranges cover the stored representation, so an encoding is
             // surfaced rather than rejected.
             content_encoding: Some(b"gzip"),
+            content_type: Some(b"text/plain; charset=utf-8"),
         }
     );
     assert_eq!(
@@ -88,6 +90,50 @@ fn a_metadata_plan_completes_without_a_body() {
             }
         })
     );
+}
+
+#[test]
+fn content_type_is_borrowed_on_reads_ranges_and_metadata_without_a_default() {
+    for value in [
+        None,
+        Some(b"application/octet-stream".as_slice()),
+        Some(b"application/vnd.example+json; profile=custom".as_slice()),
+        Some(b"text/plain; custom=\xff".as_slice()),
+    ] {
+        for shape in [
+            GetShape::default(),
+            GetShape {
+                kind: GetKind::Metadata,
+                ..GetShape::default()
+            },
+            ranged(RequestedRange::Bounded { start: 0, end: 1 }),
+        ] {
+            let status = if shape.range == RequestedRange::Whole {
+                200
+            } else {
+                206
+            };
+            let mut head = ResponseHead::from_headers(
+                status,
+                [
+                    ("Content-Length", b"1".as_slice()),
+                    ("Content-Range", b"bytes 0-0/1".as_slice()),
+                ],
+            );
+            if let Some(value) = value {
+                head.insert("Content-Type", value);
+            }
+            let meta = match accept(shape, head).unwrap() {
+                GetHeadOutcome::Body { meta, .. } | GetHeadOutcome::Complete { meta } => meta,
+                other => panic!("unexpected outcome: {other:?}"),
+            };
+            assert_eq!(meta.content_type, value);
+            assert_eq!(
+                meta.content_type.map(<[u8]>::as_ptr),
+                value.map(<[u8]>::as_ptr)
+            );
+        }
+    }
 }
 
 #[test]

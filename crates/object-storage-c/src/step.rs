@@ -109,7 +109,7 @@ pub(crate) fn head_of<'a>(
 
 // The written head, or the exact size that it needed, or why the plan was
 // refused. All three are one status and one `required`.
-pub(crate) fn written(request: proto::Result<WireRequest<'_, RequestHeader>>) -> RequestHead {
+pub(crate) fn written(request: proto::Result<WireRequest<'_>>) -> RequestHead {
     let request = match request {
         Ok(request) => request,
         Err(error) => return refused(&error),
@@ -119,7 +119,7 @@ pub(crate) fn written(request: proto::Result<WireRequest<'_, RequestHeader>>) ->
         url: span(request.url_span()),
         header_count: request.header_spans().len(),
         required_headers: request.header_spans().len(),
-        headers: request.header_descriptors().as_ptr(),
+        headers: request.header_descriptors().as_ptr().cast(),
         ..Default::default()
     };
     head.required = head.url.start + head.url.len;

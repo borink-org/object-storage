@@ -580,6 +580,12 @@ impl<'h> PhysicalList<'h> {
 /// [`ObjectMeta`] holds as bytes. Read `last_modified` with
 /// [`layered::http_date_ms`](crate::layered::http_date_ms).
 ///
+/// Azure version and snapshot fields are available through
+/// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and
+/// `entry.property("Snapshot")`. To select these while reading the page, use
+/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with) and
+/// [`BlobProperty`](crate::BlobProperty).
+///
 /// [`ObjectMeta`]: crate::ObjectMeta
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListEntry<'b> {
@@ -599,13 +605,15 @@ pub struct ListEntry<'b> {
     /// The value that the listing gave for the last modification, in the form
     /// that the `Last-Modified` header uses.
     pub last_modified: Option<&'b str>,
+    /// The stored media type, decoded from `Content-Type` when present.
+    pub content_type: Option<&'b str>,
     /// This entry as the service wrote it, from its opening tag to its closing
     /// one.
     ///
     /// Read a value that the fields above do not carry with [`Self::property`]
     /// or [`Self::properties`], which read these bytes.
     ///
-    /// Reading the page decoded the key, the entity tag and the date in place
+    /// Reading the page decoded the key, entity tag, date and content type in place
     /// and set the bytes each no longer needed to zero.
     pub raw: &'b [u8],
 }
@@ -625,10 +633,10 @@ impl<'b> ListEntry<'b> {
     /// A value that holds `&amp;` or another reference is decoded by
     /// [`layered::decode_into`](crate::layered::decode_into).
     ///
-    /// The key, the entity tag and the date were decoded when the page was
-    /// read, so for those three elements this reports the decoded text and
+    /// The key, entity tag, date and content type were decoded when the page was
+    /// read, so for those elements this reports the decoded text and
     /// not what the service wrote. Read them from `key`, `e_tag` and
-    /// `last_modified` instead.
+    /// `last_modified` and `content_type` instead.
     pub fn property(&self, name: &str) -> Option<&'b [u8]> {
         self.properties()
             .find(|(found, _)| *found == name.as_bytes())

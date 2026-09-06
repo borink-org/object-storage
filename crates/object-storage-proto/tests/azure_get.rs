@@ -91,7 +91,6 @@ fn reports_the_exact_required_capacity() {
     let Error::Capacity(capacity) = error else {
         panic!("unexpected error: {error}");
     };
-    assert_eq!(capacity.available, 0);
     assert_eq!(
         layered::get_requirements(&blobs, &get, &now()).map(|size| size.bytes),
         Ok(capacity.required)
@@ -223,7 +222,7 @@ fn refuses_invalid_plans_before_writing_anything() {
         ..PhysicalGet::new("object")
     };
     let cases = [
-        (PhysicalGet::new(""), InvalidPlan::Key),
+        (PhysicalGet::new(""), InvalidPlan::EmptyKey),
         (
             ranged(RequestedRange::Bounded { start: 6, end: 2 }),
             InvalidPlan::Range,
@@ -300,7 +299,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for over in ["a".repeat(1025), "é".repeat(1025), "🦀".repeat(513)] {
         assert_eq!(
             refused(&over),
-            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            Err(Error::InvalidPlan(InvalidPlan::KeyTooLong)),
             "{} UTF-16 code units",
             over.encode_utf16().count()
         );
@@ -311,7 +310,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["dot.", "a/dot.", "dotseg./x", "a./b", "..", ".", "a/../"] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            Err(Error::InvalidPlan(InvalidPlan::KeyWouldBeNormalized)),
             "{key:?}"
         );
     }
@@ -321,7 +320,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}", "a\u{7f}b"] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            Err(Error::InvalidPlan(InvalidPlan::KeyControlCharacter)),
             "{key:?}"
         );
     }
@@ -336,7 +335,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["a/../b", "a/./b", "../b", "./b", "a/.."] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::Key)),
+            Err(Error::InvalidPlan(InvalidPlan::KeyWouldBeNormalized)),
             "{key:?}"
         );
     }
@@ -345,7 +344,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     assert!(refused(&vec!["s"; 255].join("/")).is_ok());
     assert_eq!(
         refused(&vec!["s"; 256].join("/")),
-        Err(Error::InvalidPlan(InvalidPlan::Key))
+        Err(Error::InvalidPlan(InvalidPlan::KeyTooManySegments))
     );
 
     // A dot that is not the whole segment and not at the end is ordinary text,

@@ -86,7 +86,7 @@ fn a_removal_plan_is_validated_before_any_byte_is_written() {
     let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     for (delete, expected) in [
-        (PhysicalDelete::new(""), InvalidPlan::Key),
+        (PhysicalDelete::new(""), InvalidPlan::EmptyKey),
         (
             PhysicalDelete {
                 condition: ConditionKind::IfMatch,

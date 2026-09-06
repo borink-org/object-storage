@@ -30,6 +30,8 @@ pub struct ResponseHead<'h> {
     /// This crate does not decode the body. It returns this value so that you
     /// know how the bytes are encoded.
     pub content_encoding: Option<&'h [u8]>,
+    /// The value of the `Content-Type` header, without an inferred default.
+    pub content_type: Option<&'h [u8]>,
     /// The value of the `ETag` header.
     pub e_tag: Option<&'h [u8]>,
     /// The value of the `Last-Modified` header.
@@ -84,6 +86,8 @@ impl<'h> ResponseHead<'h> {
             &mut self.content_range
         } else if name.eq_ignore_ascii_case("content-encoding") {
             &mut self.content_encoding
+        } else if name.eq_ignore_ascii_case("content-type") {
+            &mut self.content_type
         } else if name.eq_ignore_ascii_case("etag") {
             &mut self.e_tag
         } else if name.eq_ignore_ascii_case("last-modified") {
@@ -116,6 +120,8 @@ mod tests {
                 ("Content-Range", b"bytes 2-5/10"),
                 ("content-range", b"bytes 0-1/10"),
                 ("ETAG", b"\"etag\""),
+                ("CONTENT-TYPE", b"text/plain; charset=utf-8"),
+                ("content-type", b"application/octet-stream"),
             ],
         );
 
@@ -123,6 +129,10 @@ mod tests {
         assert_eq!(head.content_range, Some(b"bytes 2-5/10".as_slice()));
         assert_eq!(head.e_tag, Some(b"\"etag\"".as_slice()));
         assert_eq!(head.content_length, None);
+        assert_eq!(
+            head.content_type,
+            Some(b"text/plain; charset=utf-8".as_slice())
+        );
     }
 
     #[test]

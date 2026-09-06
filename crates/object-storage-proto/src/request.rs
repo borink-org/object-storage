@@ -13,6 +13,7 @@ pub struct RequestSize {
 
 /// One header's name and value in the request buffer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct HeaderSpan {
     /// The header name.
     pub name: Span,
@@ -25,6 +26,7 @@ pub struct HeaderSpan {
 /// [`WireRequest::url_span`] and [`WireRequest::header_spans`] return these,
 /// for a host that addresses the request head by range instead of by slice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct Span {
     /// The offset of the first byte.
     pub start: usize,
@@ -34,8 +36,7 @@ pub struct Span {
 
 impl Span {
     fn of(self, bytes: &str) -> &str {
-        // HeadWriter bounds spans by the finished buffer; custom H conversions
-        // must preserve them, as required by WireRequest's descriptor contract.
+        // HeadWriter bounds start + len by the finished buffer's length.
         &bytes[self.start..self.start + self.len]
     }
 }
@@ -83,25 +84,22 @@ impl core::fmt::Display for Method {
 /// passed to them, and each of those arguments can be a temporary. The content
 /// stays where you put it, or is streamed separately by the host.
 ///
-/// Custom header descriptor types must preserve both spans when converting
-/// from and back into [`HeaderSpan`].
-///
 /// # Lifetime
 ///
 /// The request borrows both storage regions until transport consumption ends.
 /// Drop the request before reusing either region.
 #[derive(Debug, Clone, Copy)]
-pub struct WireRequest<'r, H = HeaderSpan> {
+pub struct WireRequest<'r> {
     bytes: &'r str,
     method: Method,
     url: Span,
-    headers: &'r [H],
+    headers: &'r [HeaderSpan],
     payload: Payload<'r>,
 }
 
-impl<'r, H: Copy + Into<HeaderSpan>> WireRequest<'r, H> {
+impl<'r> WireRequest<'r> {
     /// Returns the caller-owned descriptor array used by this request.
-    pub fn header_descriptors(&self) -> &'r [H] {
+    pub fn header_descriptors(&self) -> &'r [HeaderSpan] {
         self.headers
     }
 
@@ -141,7 +139,7 @@ impl<'r, H: Copy + Into<HeaderSpan>> WireRequest<'r, H> {
     /// Returns each header name and value as a range of that same buffer.
     pub fn header_spans(&self) -> impl ExactSizeIterator<Item = (Span, Span)> {
         self.headers.iter().copied().map(|header| {
-            let HeaderSpan { name, value } = header.into();
+            let HeaderSpan { name, value } = header;
             (name, value)
         })
     }
@@ -180,15 +178,15 @@ impl<'a> Writer<'a> {
 
 // The head as it is written: every byte of it goes into the caller's buffer,
 // and every part of it is recorded as a range of that buffer.
-pub(crate) struct HeadWriter<'a, H> {
+pub(crate) struct HeadWriter<'a> {
     out: Writer<'a>,
     url: Span,
-    headers: &'a mut [H],
+    headers: &'a mut [HeaderSpan],
     count: usize,
 }
 
-impl<'a, H: Copy + From<HeaderSpan> + Into<HeaderSpan>> HeadWriter<'a, H> {
-    pub(crate) fn new(bytes: &'a mut [u8], headers: &'a mut [H]) -> Self {
+impl<'a> HeadWriter<'a> {
+    pub(crate) fn new(bytes: &'a mut [u8], headers: &'a mut [HeaderSpan]) -> Self {
         Self {
             out: Writer::new(bytes),
             url: Span::default(),
@@ -201,12 +199,10 @@ impl<'a, H: Copy + From<HeaderSpan> + Into<HeaderSpan>> HeadWriter<'a, H> {
         self.out.position()
     }
 
-    pub(crate) fn capacity(&self, available: usize) -> crate::CapacityError {
+    pub(crate) fn capacity(&self) -> crate::CapacityError {
         crate::CapacityError {
             required: self.position(),
-            available,
             required_headers: self.count,
-            available_headers: self.headers.len(),
         }
     }
 
@@ -226,14 +222,14 @@ impl<'a, H: Copy + From<HeaderSpan> + Into<HeaderSpan>> HeadWriter<'a, H> {
         let name = self.part(name);
         let value = self.part(value);
         if let Some(slot) = self.headers.get_mut(self.count) {
-            *slot = HeaderSpan { name, value }.into();
+            *slot = HeaderSpan { name, value };
         }
         // Headers are counted even after descriptor capacity is exhausted; continue
         // without wrapping, just as Writer does for bytes.
         self.count = self.count.saturating_add(1);
     }
 
-    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a, H>> {
+    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
         if self.count > self.headers.len() {
             return None;
         }
@@ -301,11 +297,9 @@ mod tests {
             let mut writer =
                 HeadWriter::new(&mut bytes[..byte_capacity], &mut headers[..header_capacity]);
             writer.header("name", |out| out.push(b"value"));
-            let capacity = writer.capacity(byte_capacity);
+            let capacity = writer.capacity();
             assert_eq!(capacity.required, 9);
             assert_eq!(capacity.required_headers, 1);
-            assert_eq!(capacity.available, byte_capacity);
-            assert_eq!(capacity.available_headers, header_capacity);
             assert_eq!(
                 writer
                     .finish(Method::Get, crate::Payload::Slice(b""))
@@ -354,10 +348,10 @@ mod tests {
         assert_eq!(writer.position(), usize::MAX);
         assert!(writer.finish().is_none());
 
-        let mut head = HeadWriter::new(&mut [], &mut [] as &mut [HeaderSpan]);
+        let mut head = HeadWriter::new(&mut [], &mut []);
         head.count = usize::MAX;
         head.header("name", |out| out.push(b"value"));
-        assert_eq!(head.capacity(0).required_headers, usize::MAX);
+        assert_eq!(head.capacity().required_headers, usize::MAX);
         assert!(
             head.finish(Method::Get, crate::Payload::Slice(b""))
                 .is_none()

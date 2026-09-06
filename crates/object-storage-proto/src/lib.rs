@@ -35,8 +35,9 @@
 //!
 //! ```
 //! use borink_object_storage_proto::{
-//!     Blobs, Container, GetHeadOutcome, ListEntry, ListHeadOutcome, Method, Payload,
-//!     PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps,
+//!     Blobs, Container, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome,
+//!     Method, Payload, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome,
+//!     ResponseHead, Timestamps,
 //!     layered,
 //! };
 //!
@@ -51,7 +52,7 @@
 //! // 2. Encode the request head into your own buffer, then send it.
 //! let size = layered::get_requirements(&blobs, &get, &now)?;
 //! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
 //! let request = blobs.encode_get(&mut buffer, &mut headers, &get, &now)?;
 //! assert_eq!(request.method(), Method::Get);
 //! for (name, value) in request.headers() {
@@ -76,7 +77,7 @@
 //! };
 //! let size = layered::list_requirements(&blobs, &list, &now)?;
 //! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
 //! let request = blobs.encode_list(&mut buffer, &mut headers, &list, &now)?;
 //! assert_eq!(
 //!     request.url(),
@@ -107,8 +108,10 @@
 //! let content = Payload::Slice(b"contents");
 //! let size = layered::put_requirements(&blobs, &put, content, &now)?;
 //! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
-//! let request = blobs.encode_put(&mut buffer, &mut headers, &put, content, &now)?;
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request = blobs.encode_put(
+//!     &mut buffer, &mut headers, &put, content, &now,
+//! )?;
 //! assert_eq!(request.method(), Method::Put);
 //! assert_eq!(request.payload().bytes(), Some(b"contents".as_slice()));
 //!
@@ -126,7 +129,8 @@
 //! # Sizing the buffer
 //!
 //! The encoding methods refuse a buffer that is too small and state the exact
-//! numbers of bytes and header slots that they need. You can grow the buffer and call again, or
+//! numbers of bytes and header slots that they need. Grow both buffers and
+//! call again, or
 //! call [`layered::get_requirements`], [`layered::put_requirements`] or
 //! [`layered::list_requirements`] first, as the example does.
 //!
@@ -156,7 +160,7 @@ mod time;
 mod types;
 mod xml;
 
-pub use azure::{Blobs, Container, VERSION, classify_error};
+pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, classify_error};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{

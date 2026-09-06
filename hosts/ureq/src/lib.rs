@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, DeleteHeadOutcome, GetHeadOutcome, ListEntry, ListHeadOutcome, Listing, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
+    Blobs, DeleteHeadOutcome, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome, Listing,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
     Timestamps, layered,
 };
 
@@ -21,7 +21,7 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     let get = PhysicalGet::new(key);
     let size = layered::get_requirements(blobs, &get, &now)?;
     let mut buf = vec![0; size.bytes];
-    let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs.encode_get(&mut buf, &mut headers, &get, &now)?;
 
     let mut outgoing = ureq::get(request.url());
@@ -83,7 +83,7 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
     let content = Payload::Slice(content);
     let size = layered::put_requirements(blobs, &put, content, &now)?;
     let mut buf = vec![0; size.bytes];
-    let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs.encode_put(&mut buf, &mut headers, &put, content, &now)?;
 
     let mut outgoing = ureq::put(request.url());
@@ -137,7 +137,7 @@ pub fn delete(blobs: &Blobs<'_>, key: &str) -> Result<(), Box<dyn std::error::Er
     let delete = PhysicalDelete::new(key);
     let size = layered::delete_requirements(blobs, &delete, &now)?;
     let mut buf = vec![0; size.bytes];
-    let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs.encode_delete(&mut buf, &mut headers, &delete, &now)?;
 
     let mut outgoing = ureq::delete(request.url());
@@ -201,7 +201,7 @@ pub fn list<'b>(
     let now = Timestamps::from_unix(unix);
     let size = layered::list_requirements(blobs, plan, &now)?;
     let mut buf = vec![0; size.bytes];
-    let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs.encode_list(&mut buf, &mut headers, plan, &now)?;
 
     let mut outgoing = ureq::get(request.url());

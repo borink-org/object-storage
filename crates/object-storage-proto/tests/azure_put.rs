@@ -176,7 +176,7 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
     let mut request_headers_6 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     for (put, expected) in [
-        (PhysicalPut::new(""), InvalidPlan::Key),
+        (PhysicalPut::new(""), InvalidPlan::EmptyKey),
         (
             PhysicalPut {
                 key: "object.bin",
@@ -221,7 +221,7 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
                 &now()
             )
             .err(),
-        Some(Error::InvalidPlan(InvalidPlan::Key))
+        Some(Error::InvalidPlan(InvalidPlan::KeyTooLong))
     );
 }
 
