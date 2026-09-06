@@ -20,6 +20,7 @@
 
 pub(crate) mod azure;
 pub(crate) mod decode;
+pub(crate) mod parts;
 pub(crate) mod scan;
 
 pub(crate) use azure::fill_listing;

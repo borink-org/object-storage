@@ -267,6 +267,13 @@ pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize 
 // Every enum above crosses as a number. These pin the two lists to each other:
 // a value renumbered on either side stops this build.
 const _: () = {
+    assert!(BlockListKind::Staged as u16 == proto::azure::BlockListKind::Staged as u16);
+    assert!(BlockListKind::Committed as u16 == proto::azure::BlockListKind::Committed as u16);
+    assert!(BlockListKind::All as u16 == proto::azure::BlockListKind::All as u16);
+    assert!(BlockState::Staged as u16 == proto::azure::BlockState::Staged as u16);
+    assert!(BlockState::Committed as u16 == proto::azure::BlockState::Committed as u16);
+    assert!(ServiceError::InvalidUpload as u16 == proto::ServiceErrorKind::InvalidUpload as u16);
+
     assert!(ErrorCode::InvalidEndpoint as u16 == proto::ErrorCode::InvalidEndpoint as u16);
     assert!(ErrorCode::InvalidContainer as u16 == proto::ErrorCode::InvalidContainer as u16);
     assert!(ErrorCode::InvalidToken as u16 == proto::ErrorCode::InvalidToken as u16);
@@ -389,4 +396,90 @@ const _: () = {
     assert!(ServiceError::Throttled as u16 == proto::ServiceErrorKind::Throttled as u16);
     assert!(ServiceError::Timeout as u16 == proto::ServiceErrorKind::Timeout as u16);
     assert!(ServiceError::Service as u16 == proto::ServiceErrorKind::Service as u16);
+};
+
+const _: () = {
+    assert!(BlockSource::Uncommitted as u16 == proto::azure::BlockSource::Uncommitted as u16);
+    assert!(BlockSource::Committed as u16 == proto::azure::BlockSource::Committed as u16);
+    assert!(BlockSource::Latest as u16 == proto::azure::BlockSource::Latest as u16);
+    assert!(BlockOptionKind::LeaseId as u16 == proto::azure::BlockOptionKind::LeaseId as u16);
+    assert!(BlockOptionKind::ContentMd5 as u16 == proto::azure::BlockOptionKind::ContentMd5 as u16);
+    assert!(
+        BlockOptionKind::ContentCrc64 as u16 == proto::azure::BlockOptionKind::ContentCrc64 as u16
+    );
+    assert!(
+        BlockOptionKind::EncryptionKey as u16
+            == proto::azure::BlockOptionKind::EncryptionKey as u16
+    );
+    assert!(
+        BlockOptionKind::EncryptionKeySha256 as u16
+            == proto::azure::BlockOptionKind::EncryptionKeySha256 as u16
+    );
+    assert!(
+        BlockOptionKind::EncryptionAlgorithm as u16
+            == proto::azure::BlockOptionKind::EncryptionAlgorithm as u16
+    );
+    assert!(
+        BlockOptionKind::EncryptionScope as u16
+            == proto::azure::BlockOptionKind::EncryptionScope as u16
+    );
+    assert!(
+        BlockOptionKind::ClientRequestId as u16
+            == proto::azure::BlockOptionKind::ClientRequestId as u16
+    );
+    assert!(
+        BlockOptionKind::ContentType as u16 == proto::azure::BlockOptionKind::ContentType as u16
+    );
+    assert!(
+        BlockOptionKind::ContentEncoding as u16
+            == proto::azure::BlockOptionKind::ContentEncoding as u16
+    );
+    assert!(
+        BlockOptionKind::ContentLanguage as u16
+            == proto::azure::BlockOptionKind::ContentLanguage as u16
+    );
+    assert!(
+        BlockOptionKind::CacheControl as u16 == proto::azure::BlockOptionKind::CacheControl as u16
+    );
+    assert!(
+        BlockOptionKind::BlobContentMd5 as u16
+            == proto::azure::BlockOptionKind::BlobContentMd5 as u16
+    );
+    assert!(
+        BlockOptionKind::ContentDisposition as u16
+            == proto::azure::BlockOptionKind::ContentDisposition as u16
+    );
+    assert!(BlockOptionKind::Tags as u16 == proto::azure::BlockOptionKind::Tags as u16);
+    assert!(BlockOptionKind::AccessTier as u16 == proto::azure::BlockOptionKind::AccessTier as u16);
+    assert!(
+        BlockOptionKind::IfModifiedSince as u16
+            == proto::azure::BlockOptionKind::IfModifiedSince as u16
+    );
+    assert!(
+        BlockOptionKind::IfUnmodifiedSince as u16
+            == proto::azure::BlockOptionKind::IfUnmodifiedSince as u16
+    );
+    assert!(BlockOptionKind::IfTags as u16 == proto::azure::BlockOptionKind::IfTags as u16);
+    assert!(
+        BlockOptionKind::ImmutabilityUntil as u16
+            == proto::azure::BlockOptionKind::ImmutabilityUntil as u16
+    );
+    assert!(
+        BlockOptionKind::ImmutabilityMode as u16
+            == proto::azure::BlockOptionKind::ImmutabilityMode as u16
+    );
+    assert!(BlockOptionKind::LegalHold as u16 == proto::azure::BlockOptionKind::LegalHold as u16);
+    assert!(
+        BlockOptionKind::ExpiryOption as u16 == proto::azure::BlockOptionKind::ExpiryOption as u16
+    );
+    assert!(BlockOptionKind::ExpiryTime as u16 == proto::azure::BlockOptionKind::ExpiryTime as u16);
+    assert!(BlockOptionKind::Metadata as u16 == proto::azure::BlockOptionKind::Metadata as u16);
+};
+
+const _: () = {
+    assert!(
+        BlockOptionKind::EncryptionContext as u16
+            == proto::azure::BlockOptionKind::EncryptionContext as u16
+    );
+    assert!(BlockOptionKind::Timeout as u16 == proto::azure::BlockOptionKind::Timeout as u16);
 };

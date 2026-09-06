@@ -26,6 +26,8 @@
 // Enough for the largest page Azure sends, plus its groups of keys.
 #define CAPACITY 8192
 
+static volatile size_t property_checksum;
+
 static int counter(unsigned config) {
     struct perf_event_attr attr;
     memset(&attr, 0, sizeof attr);
@@ -84,7 +86,8 @@ static size_t with(const Round *r) {
     for (size_t i = 0; i < fill.filled; i++) {
         seen += r->values[i * width + created].bytes.len;
     }
-    return fill.filled + (seen != 0);
+    property_checksum = seen;
+    return fill.filled;
 }
 
 static void measure(const char *name, const uint8_t *page, size_t len, int rounds,

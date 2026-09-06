@@ -18,6 +18,117 @@ use crate::step::{
 };
 use crate::types::*;
 
+use crate::outcome::{commit_outcome, list_parts_outcome, page_fill, stage_outcome};
+use crate::plan::{UNKNOWN, condition_kind};
+
+/// Reads the entire body. Returned IDs borrow it until it is reused.
+/// # Safety
+/// Session is readable; body and initialized output entries must be exclusive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_fill_blocks(
+    session: *const Session,
+    body: BytesMut,
+    into: *mut Block,
+    capacity: usize,
+) -> Fill {
+    // SAFETY: the caller supplies exclusive buffers and a readable session.
+    let (session, body, into) = unsafe {
+        (
+            ptr::session(session),
+            ptr::slice_mut(body),
+            ptr::items_mut(into, capacity),
+        )
+    };
+    open(session)
+        .and_then(|blobs| blobs.fill_blocks(body, into))
+        .map(|page| page_fill(page.filled, None))
+        .unwrap_or_else(|error| refused_fill(&error))
+}
+
+/// Upper bound on parts accepted in a body of this byte length.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_azure_max_blocks_in(len: usize) -> usize {
+    proto::Blobs::max_blocks_in(len)
+}
+
+/// Finishes an error response with its body.
+/// # Safety
+/// Session, failure, body and the failure's request ID must remain readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_finish_stage_error_body(
+    session: *const Session,
+    failure: *const Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller supplies readable values.
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .map(|(blobs, status, id)| blobs.accept_stage_block_error_body(status, id, body))
+        .map_or_else(invalid, |outcome| stage_outcome(&outcome))
+}
+
+/// Finishes an error response with its body.
+/// # Safety
+/// Session, failure, body and the failure's request ID must remain readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_finish_commit_error_body(
+    session: *const Session,
+    shape: *const CommitShape,
+    failure: *const Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller supplies readable values.
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .and_then(|(blobs, status, id)| {
+            // SAFETY: the caller supplies a readable saved shape.
+            let shape = unsafe { shape.as_ref() }.ok_or(UNKNOWN)?;
+            Ok(blobs.accept_commit_blocks_error_body(
+                proto::CommitShape {
+                    condition: condition_kind(shape.condition)?,
+                },
+                status,
+                id,
+                body,
+            ))
+        })
+        .map_or_else(invalid, |outcome| commit_outcome(&outcome))
+}
+
+/// Finishes an error response with its body.
+/// # Safety
+/// Session, failure, body and the failure's request ID must remain readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_finish_list_blocks_error_body(
+    session: *const Session,
+    failure: *const Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller supplies readable values.
+    let (session, failure, body) = unsafe {
+        (
+            ptr::session(session),
+            ptr::failure(failure),
+            ptr::slice(body),
+        )
+    };
+    finishing(session, failure)
+        .map(|(blobs, status, id)| blobs.accept_list_blocks_error_body(status, id, body))
+        .map_or_else(invalid, |outcome| list_parts_outcome(&outcome))
+}
+
 use borink_object_storage_proto::{
     self as proto, InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
     Timestamps, layered,
@@ -838,4 +949,278 @@ pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut
 pub unsafe extern "C" fn borink_describe_status(status: Status, into: BytesMut) -> usize {
     // SAFETY: the caller states the contract of this function.
     describe_status(status, unsafe { ptr::slice_mut(into) })
+}
+
+// SAFETY: option records and every string they name remain readable for 'a.
+unsafe fn native_options<'a>(
+    options: BlockOptions,
+) -> proto::Result<impl Iterator<Item = proto::azure::BlockOption<'a>> + Clone> {
+    // SAFETY: the caller supplies a readable options array.
+    let options = unsafe { ptr::items(options.items, options.count) };
+    for option in options {
+        proto::azure::BlockOptionKind::from_discriminant(option.kind).ok_or(UNKNOWN)?;
+        // SAFETY: every option string is readable.
+        let (name, value) = unsafe { (ptr::slice(option.name), ptr::slice(option.value)) };
+        text(name, InvalidPlan::Option)?;
+        text(value, InvalidPlan::Option)?;
+    }
+    Ok(options.iter().map(|option| {
+        // SAFETY: the validated strings remain readable and unchanged.
+        let (name, value) = unsafe { (ptr::slice(option.name), ptr::slice(option.value)) };
+        proto::azure::BlockOption {
+            kind: proto::azure::BlockOptionKind::from_discriminant(option.kind)
+                .expect("validated kind"),
+            name: core::str::from_utf8(name).expect("validated name"),
+            value: core::str::from_utf8(value).expect("validated value"),
+        }
+    }))
+}
+
+/// Encodes native Azure Put Block with typed options.
+///
+/// # Safety
+///
+/// Plans and option arrays are readable. As `borink_encode_get` for output
+/// storage; header slots need only be writable and are initialized here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_encode_stage_block(
+    session: *const Session,
+    plan: *const StageBlock,
+    buf: RequestBuffer,
+    content_len: u64,
+    unix_seconds: u64,
+) -> RequestHead {
+    // SAFETY: the caller supplies readable plans and exclusive output.
+    let (session, plan, bytes, headers) = unsafe {
+        (
+            ptr::session(session),
+            plan.as_ref(),
+            ptr::slice_mut(buf.bytes),
+            ptr::request_headers(buf.headers, buf.header_capacity),
+        )
+    };
+    written(open(session).and_then(|blobs| {
+        let plan = plan.ok_or(UNKNOWN)?;
+        // SAFETY: the plan's strings and options are readable.
+        let (key, id, options) = unsafe {
+            (
+                ptr::slice(plan.key),
+                ptr::slice(plan.id),
+                native_options(plan.options)?,
+            )
+        };
+        blobs.encode_stage_options(
+            bytes,
+            headers,
+            &proto::azure::StageBlock {
+                key: text(key, InvalidPlan::KeyNotUtf8)?,
+                id: text(id, InvalidPlan::PartId)?,
+            },
+            Payload::Streamed { len: content_len },
+            options,
+            &Timestamps::from_unix(unix_seconds),
+        )
+    }))
+}
+
+/// Encodes exact Azure selectors, preserving order and repetition.
+///
+/// # Safety
+///
+/// Plans, options, parts and their strings are readable. As `borink_encode_get`
+/// for output storage; header slots need only be writable and are initialized
+/// here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_encode_commit_blocks(
+    session: *const Session,
+    plan: *const CommitBlocks,
+    parts: *const BlockRef,
+    count: usize,
+    buf: RequestBuffer,
+    unix_seconds: u64,
+) -> RequestHead {
+    // SAFETY: the caller supplies readable inputs and exclusive output.
+    let (session, plan, parts, bytes, headers) = unsafe {
+        (
+            ptr::session(session),
+            plan.as_ref(),
+            ptr::items(parts, count),
+            ptr::slice_mut(buf.bytes),
+            ptr::request_headers(buf.headers, buf.header_capacity),
+        )
+    };
+    written(open(session).and_then(|blobs| {
+        let plan = plan.ok_or(UNKNOWN)?;
+        // SAFETY: plan strings and options are readable throughout this call.
+        let (key, value, options) = unsafe {
+            (
+                ptr::slice(plan.key),
+                ptr::maybe_slice(plan.condition_value),
+                native_options(plan.options)?,
+            )
+        };
+        for part in parts {
+            proto::azure::BlockSource::from_discriminant(part.source).ok_or(UNKNOWN)?;
+            // SAFETY: each ID is readable.
+            text(unsafe { ptr::slice(part.id) }, InvalidPlan::PartId)?;
+        }
+        let parts = parts.iter().map(|part| {
+            // SAFETY: IDs validated above remain readable and unchanged.
+            let id = core::str::from_utf8(unsafe { ptr::slice(part.id) }).expect("validated ID");
+            (
+                id,
+                proto::azure::BlockSource::from_discriminant(part.source)
+                    .expect("validated selector"),
+            )
+        });
+        blobs.encode_block_options(
+            bytes,
+            headers,
+            &proto::azure::CommitBlocks {
+                key: text(key, InvalidPlan::KeyNotUtf8)?,
+                condition: condition_kind(plan.condition)?,
+                condition_value: value,
+            },
+            parts,
+            options,
+            &Timestamps::from_unix(unix_seconds),
+        )
+    }))
+}
+
+/// Encodes a targeted Azure block-list read with native options.
+///
+/// # Safety
+///
+/// Plans, strings and options are readable. As `borink_encode_get` for output
+/// storage; header slots need only be writable and are initialized here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_encode_list_blocks(
+    session: *const Session,
+    plan: *const ListBlocks,
+    buf: RequestBuffer,
+    unix_seconds: u64,
+) -> RequestHead {
+    // SAFETY: the caller supplies readable inputs and exclusive output.
+    let (session, plan, bytes, headers) = unsafe {
+        (
+            ptr::session(session),
+            plan.as_ref(),
+            ptr::slice_mut(buf.bytes),
+            ptr::request_headers(buf.headers, buf.header_capacity),
+        )
+    };
+    written(open(session).and_then(|blobs| {
+        let plan = plan.ok_or(UNKNOWN)?;
+        // SAFETY: plan strings and options remain readable.
+        let (key, snapshot, version, options) = unsafe {
+            (
+                ptr::slice(plan.key),
+                ptr::maybe_slice(plan.snapshot),
+                ptr::maybe_slice(plan.version),
+                native_options(plan.options)?,
+            )
+        };
+        let plan = proto::azure::ListBlocks {
+            key: text(key, InvalidPlan::KeyNotUtf8)?,
+            kind: proto::azure::BlockListKind::from_discriminant(plan.kind).ok_or(UNKNOWN)?,
+            snapshot: snapshot.map(|s| text(s, InvalidPlan::Option)).transpose()?,
+            version: version.map(|s| text(s, InvalidPlan::Option)).transpose()?,
+        };
+        blobs.encode_list_blocks(
+            bytes,
+            headers,
+            &plan,
+            options,
+            &Timestamps::from_unix(unix_seconds),
+        )
+    }))
+}
+
+/// Reads shared and native fields in one pass.
+/// # Safety
+/// Session, headers and their values remain readable for the returned outcome.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_accept_stage_head(
+    session: *const Session,
+    status: u16,
+    headers: *const HeaderRef,
+    count: usize,
+) -> AzureBlockOutcome {
+    // SAFETY: the caller supplies readable inputs.
+    let (session, headers) = unsafe { (ptr::session(session), ptr::headers(headers, count)) };
+    let head = proto::azure::BlockResponseHead::from_headers(
+        status,
+        headers.filter_map(|(name, value)| Some((core::str::from_utf8(name).ok()?, value))),
+    );
+    let outcome = open(session)
+        .and_then(|blobs| blobs.accept_stage_block_head(head.common))
+        .map_or_else(invalid, |outcome| stage_outcome(&outcome));
+    crate::outcome::block_outcome(outcome, head)
+}
+
+/// Reads shared and native fields in one pass.
+/// # Safety
+/// Session, shape, headers and their values remain readable for the returned outcome.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_accept_commit_head(
+    session: *const Session,
+    shape: *const CommitShape,
+    status: u16,
+    headers: *const HeaderRef,
+    count: usize,
+) -> AzureBlockOutcome {
+    // SAFETY: the caller supplies readable inputs.
+    let (session, headers) = unsafe { (ptr::session(session), ptr::headers(headers, count)) };
+    let head = proto::azure::BlockResponseHead::from_headers(
+        status,
+        headers.filter_map(|(name, value)| Some((core::str::from_utf8(name).ok()?, value))),
+    );
+    let outcome = open(session)
+        .and_then(|blobs| {
+            // SAFETY: the saved shape is readable.
+            let shape = unsafe { shape.as_ref() }.ok_or(UNKNOWN)?;
+            let shape = proto::CommitShape {
+                condition: condition_kind(shape.condition)?,
+            };
+            blobs.accept_commit_blocks_head(shape, head.common)
+        })
+        .map_or_else(invalid, |outcome| commit_outcome(&outcome));
+    crate::outcome::block_outcome(outcome, head)
+}
+
+/// Reads shared and native fields in one pass.
+/// # Safety
+/// Session, headers and their values remain readable for the returned outcome.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_accept_list_blocks_head(
+    session: *const Session,
+    status: u16,
+    headers: *const HeaderRef,
+    count: usize,
+) -> AzureBlockOutcome {
+    // SAFETY: the caller supplies readable inputs.
+    let (session, headers) = unsafe { (ptr::session(session), ptr::headers(headers, count)) };
+    let head = proto::azure::BlockResponseHead::from_headers(
+        status,
+        headers.filter_map(|(name, value)| Some((core::str::from_utf8(name).ok()?, value))),
+    );
+    let outcome = open(session)
+        .and_then(|blobs| blobs.accept_list_blocks_head(head.common))
+        .map_or_else(invalid, |outcome| list_parts_outcome(&outcome));
+    crate::outcome::block_outcome(outcome, head)
+}
+
+/// Retains the native error code, including codes with no shared classification.
+/// # Safety
+/// Header values and body stay readable while the returned view is used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_azure_error_code(
+    headers: *const HeaderRef,
+    count: usize,
+    body: Bytes,
+) -> MaybeBytes {
+    // SAFETY: the caller supplies readable header values and body.
+    let (headers, body) = unsafe { (ptr::headers(headers, count), ptr::slice(body)) };
+    maybe_bytes(proto::azure::error_code(&head_of(0, headers), body))
 }

@@ -1,3 +1,10 @@
+/// The part of a commit plan retained while the request is in flight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitShape {
+    /// The precondition on the object being committed.
+    pub condition: ConditionKind,
+}
+
 /// What a plan asks the service to return.
 ///
 /// The provider chooses the request that delivers it. Azure Blob Storage sends
@@ -963,8 +970,8 @@ impl BlobProperty {
     }
 }
 
-// A set holds one bit per property.
-const _: () = assert!(BlobProperty::ALL.len() <= 64);
+// from_bits shifts by COUNT, which must be below the u64 shift width.
+const _: () = assert!(BlobProperty::ALL.len() < 64);
 
 impl BlobProperty {
     /// How many properties there are, which is the most a set can hold.
@@ -981,6 +988,7 @@ impl BlobProperty {
     }
 
     const fn bit(self) -> u64 {
+        // Dense enum discriminants are below COUNT, which is checked above.
         1 << (self as u8)
     }
 }
@@ -1009,6 +1017,7 @@ impl PropertySet {
     /// A set from its bits, one per property in the order [`BlobProperty`]
     /// numbers them. A bit that names no property is dropped.
     pub const fn from_bits(bits: u64) -> Self {
+        // COUNT < 64 is checked above; shifting 1 leaves a nonzero value.
         Self(bits & ((1 << BlobProperty::COUNT) - 1))
     }
 
@@ -1037,6 +1046,7 @@ impl PropertySet {
     /// rank among the set's members, in the order [`BlobProperty`] lists
     /// them. Meaningful only for a property the set holds.
     pub const fn slot(self, property: BlobProperty) -> usize {
+        // bit() returns a nonzero power of two, so subtracting one is safe.
         (self.0 & (property.bit() - 1)).count_ones() as usize
     }
 }

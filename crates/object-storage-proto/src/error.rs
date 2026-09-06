@@ -61,8 +61,10 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    // 8, 9 and 13 belong to part operations on the stacked multipart branch.
-    // RequestTooLarge uses 14 so the header prerequisite leaves those slots free.
+    /// The part identifier is empty, is not base64, or decodes to over 64 bytes.
+    PartId = 8,
+    /// The part list violates the operation's count, order, ownership, or size rules.
+    Parts = 9,
     /// The listing prefix is longer than an object key may be.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
@@ -74,6 +76,8 @@ pub enum InvalidPlan {
     ///
     /// Azure answers `maxresults=0` with HTTP 400 `OutOfRangeQueryParameterValue`.
     MaxResults = 12,
+    /// A provider option is invalid, repeated, or inapplicable to the operation.
+    Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,
     /// The object key is not UTF-8.
@@ -107,6 +111,9 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
+            Self::PartId => "invalid part identifier",
+            Self::Parts => "invalid multipart part list",
+            Self::Option => "invalid provider option",
             Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
             Self::Marker => "invalid listing marker",
@@ -126,9 +133,12 @@ impl InvalidPlan {
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
+            8 => Self::PartId,
+            9 => Self::Parts,
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,
+            13 => Self::Option,
             14 => Self::RequestTooLarge,
             15 => Self::KeyNotUtf8,
             16 => Self::KeyTooLong,

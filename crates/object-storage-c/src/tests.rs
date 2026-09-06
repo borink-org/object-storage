@@ -345,6 +345,9 @@ fn every_outcome_kind_says_something_of_its_own() {
         OutcomeKind::Done,
         OutcomeKind::Accepted,
         OutcomeKind::Page,
+        OutcomeKind::Staged,
+        OutcomeKind::Committed,
+        OutcomeKind::Parts,
     ] {
         let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());
@@ -353,7 +356,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     }
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 7);
+    assert_eq!(said.len(), 10);
 
     // A kind from a later version of this crate names nothing here.
     let mut later = only(OutcomeKind::Body);
@@ -382,7 +385,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     assert_eq!(kind_of(4095), None);
     assert_eq!(class_of(4095), None);
     assert!(outcome_kind_of(0).is_none());
-    assert!(outcome_kind_of(14).is_none());
+    assert!(outcome_kind_of(17).is_none());
 
     // The plan side, which crosses inwards and must refuse.
     for (kind, expected) in [
@@ -680,7 +683,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the three that carry no
     // inner value.
-    assert_eq!(checked, 3 + 16 + 4);
+    assert_eq!(checked, 3 + 19 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

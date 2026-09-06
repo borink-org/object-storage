@@ -115,6 +115,12 @@ pub(crate) fn written(request: proto::Result<WireRequest<'_>>) -> RequestHead {
         Err(error) => return refused(&error),
     };
     let mut head = RequestHead {
+        body: request
+            .body_span()
+            .map_or_else(Default::default, |body| MaybeSpan {
+                present: true,
+                span: span(body),
+            }),
         method: request.method() as u16,
         url: span(request.url_span()),
         header_count: request.header_spans().len(),
@@ -125,6 +131,9 @@ pub(crate) fn written(request: proto::Result<WireRequest<'_>>) -> RequestHead {
     head.required = head.url.start + head.url.len;
     for (_, value) in request.header_spans() {
         head.required = head.required.max(value.start + value.len);
+    }
+    if head.body.present {
+        head.required = head.required.max(head.body.span.start + head.body.span.len);
     }
     head
 }

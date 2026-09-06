@@ -148,7 +148,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-mod azure;
+pub mod azure;
+mod block_options;
 mod error;
 mod head;
 mod http;
@@ -164,13 +165,14 @@ pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, class
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,
-    ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, ServiceErrorKind,
+    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
+    GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
+    ServiceErrorKind, StageHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind, GetShape, ListEntry,
-    ListShape, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Properties,
-    PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange,
+    BlobProperty, CommitShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
+    GetShape, ListEntry, ListShape, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
+    PhysicalPut, Properties, PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange,
 };

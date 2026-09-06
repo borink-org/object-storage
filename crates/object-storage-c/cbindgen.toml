@@ -24,6 +24,10 @@ header = """
 prefix = ""
 include = [
     "AzureNamespace",
+    "BlockSource",
+    "BlockOptionKind",
+    "BlockListKind",
+    "BlockState",
     "ErrorCode",
     "Method",
     "GetKind",
@@ -42,6 +46,20 @@ renaming_overrides_prefixing = true
 # Rust spells a type in camel case and C spells it in snake case. Every type
 # that crosses is listed, so a new one is named here on purpose.
 [export.rename]
+"AzureBlockOutcome" = "borink_azure_block_outcome"
+"BlockSource" = "borink_block_source"
+"BlockOptionKind" = "borink_block_option_kind"
+"BlockOption" = "borink_block_option"
+"BlockOptions" = "borink_block_options"
+"StageBlock" = "borink_stage_block"
+"BlockRef" = "borink_block_ref"
+"CommitBlocks" = "borink_commit_blocks"
+"ListBlocks" = "borink_list_blocks"
+"CommitShape" = "borink_commit_shape"
+"Block" = "borink_block"
+"BlockListKind" = "borink_block_list_kind"
+"BlockState" = "borink_block_state"
+"MaybeSpan" = "borink_maybe_span"
 "Bytes" = "borink_bytes"
 "BytesMut" = "borink_bytes_mut"
 "Span" = "borink_span"
@@ -62,8 +80,8 @@ renaming_overrides_prefixing = true
 "Property" = "borink_property"
 "Fill" = "borink_fill"
 "PropertySet" = "borink_property_set"
-"RequestBuffer" = "borink_request_buffer"
 "RequestHeader" = "borink_request_header"
+"RequestBuffer" = "borink_request_buffer"
 "RequestHead" = "borink_request_head"
 "HeaderRef" = "borink_header_ref"
 "ObjectMeta" = "borink_object_meta"

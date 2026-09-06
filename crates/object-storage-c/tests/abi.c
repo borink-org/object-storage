@@ -431,7 +431,25 @@ static void the_properties_a_program_asks_for_are_read_with_the_page(void) {
     CHECK(borink_property_name(60000).len == 0);
 }
 
+static void native_blocks_borrow_the_body(void) {
+    const borink_session session = {
+        as_bytes("https://account.blob.core.windows.net"), as_bytes("container"), as_bytes("token")
+    };
+    char body[] = "<BlockList><CommittedBlocks><Block><Name>YQ==</Name>"
+                  "<Size>4294967296</Size></Block></CommittedBlocks></BlockList>";
+    borink_block block = {0};
+    const borink_fill fill = borink_azure_fill_blocks(
+        &session, (borink_bytes_mut){(uint8_t *)body, strlen(body)}, &block, 1);
+    CHECK(fill.status.code == 0 && fill.filled == 1);
+    CHECK(block.id.len == 4 && memcmp(block.id.ptr, "YQ==", 4) == 0);
+    CHECK(block.id.ptr >= (uint8_t *)body && block.id.ptr < (uint8_t *)body + strlen(body));
+    CHECK(block.size == UINT64_C(4294967296));
+    CHECK(block.state == BORINK_BLOCK_STATE_COMMITTED);
+    CHECK(borink_azure_max_blocks_in(strlen(body)) >= fill.filled);
+}
+
 int main(void) {
+    native_blocks_borrow_the_body();
     the_two_compilers_agree_on_every_struct();
     one_request_head_is_written_into_a_stack_buffer();
     a_buffer_that_is_too_small_reports_the_size_it_needs();

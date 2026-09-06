@@ -1,5 +1,104 @@
 use core::fmt;
 
+/// The result of a stage response head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StageHeadOutcome<'h> {
+    /// the service holds the part.
+    Staged {
+        /// The entity tag, when the service returns one.
+        e_tag: Option<&'h [u8]>,
+    },
+    /// The object or container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for StageHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Staged { .. } => f.write_str("the service holds the part"),
+            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+/// The result of a commit response head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommitHeadOutcome<'h> {
+    /// the object is committed.
+    Committed {
+        /// The committed object's metadata.
+        meta: ObjectMeta<'h>,
+    },
+    /// The commit's condition failed.
+    PreconditionFailed,
+    /// The object or container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for CommitHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Committed { .. } => f.write_str("the object is committed"),
+            Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
+            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+/// The result of a listparts response head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListPartsHeadOutcome<'h> {
+    /// the parts follow in the response body.
+    #[non_exhaustive]
+    Parts {
+        /// Metadata of the committed object, if any.
+        meta: ObjectMeta<'h>,
+        /// The result body's byte length.
+        expected_len: Option<u64>,
+    },
+    /// The object or container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for ListPartsHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parts { .. } => f.write_str("the parts follow in the response body"),
+            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
 /// Object metadata borrowed from a response head.
 ///
 /// Each field holds the bytes that the service sent. To read `last_modified`
@@ -384,6 +483,8 @@ pub enum ServiceErrorKind {
     Timeout = 8,
     /// The service failed, or it was unavailable.
     Service = 9,
+    /// The named parts do not match what the service can commit.
+    InvalidUpload = 10,
 }
 
 impl ServiceErrorKind {
@@ -400,6 +501,7 @@ impl ServiceErrorKind {
             Self::Throttled => "the service throttled the request",
             Self::Timeout => "the service timed out while it processed the request",
             Self::Service => "the service failed, or it was unavailable",
+            Self::InvalidUpload => "the service refused the upload's parts",
         }
     }
 
@@ -417,6 +519,7 @@ impl ServiceErrorKind {
             7 => Self::Throttled,
             8 => Self::Timeout,
             9 => Self::Service,
+            10 => Self::InvalidUpload,
             _ => return None,
         })
     }

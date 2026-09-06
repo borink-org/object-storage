@@ -19,6 +19,59 @@ fn now() -> Timestamps {
 }
 
 #[test]
+fn response_ranges_must_have_representable_exclusive_ends() {
+    let blobs = blobs();
+    let get = PhysicalGet {
+        range: RequestedRange::Offset(0),
+        ..PhysicalGet::new("key")
+    };
+    let mut bytes = [0; 512];
+    let mut headers = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    blobs
+        .encode_get(&mut bytes, &mut headers, &get, &now())
+        .unwrap();
+    for value in [
+        "bytes 0-18446744073709551615/*",
+        "bytes 1-18446744073709551615/*",
+        "bytes 0-18446744073709551615/18446744073709551615",
+    ] {
+        let head = ResponseHead::from_headers(206, [("content-range", value.as_bytes())]);
+        assert_eq!(
+            blobs.accept_get_head(get.shape(), head),
+            Err(Error::Response(
+                borink_object_storage_proto::ResponseFault::Head
+            ))
+        );
+    }
+    for value in [
+        "bytes 0-18446744073709551614/*",
+        "bytes 0-18446744073709551614/18446744073709551615",
+    ] {
+        let head = ResponseHead::from_headers(206, [("content-range", value.as_bytes())]);
+        let GetHeadOutcome::Body { body, .. } = blobs.accept_get_head(get.shape(), head).unwrap()
+        else {
+            panic!("expected a body");
+        };
+        assert_eq!(body.expected_len, Some(u64::MAX));
+    }
+}
+
+#[test]
+fn an_unvalidated_suffix_shape_returns_an_error() {
+    let get = PhysicalGet {
+        range: RequestedRange::Suffix(1),
+        ..PhysicalGet::new("key")
+    };
+    let head = ResponseHead::from_headers(206, [("content-range", b"bytes 0-0/1".as_slice())]);
+    assert_eq!(
+        blobs().accept_get_head(get.shape(), head),
+        Err(Error::Response(
+            borink_object_storage_proto::ResponseFault::Range
+        ))
+    );
+}
+
+#[test]
 fn encodes_a_bearer_get_in_caller_memory() {
     let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
