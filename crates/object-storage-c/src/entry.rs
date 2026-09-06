@@ -18,7 +18,7 @@ use crate::step::{
 };
 use crate::types::*;
 
-use crate::outcome::{commit_outcome, list_parts_outcome, page_fill, stage_outcome};
+use crate::outcome::{commit_outcome, list_blocks_outcome, page_fill, stage_outcome};
 use crate::plan::{UNKNOWN, condition_kind};
 
 /// Reads the entire body. Returned IDs borrow it until it is reused.
@@ -45,10 +45,10 @@ pub unsafe extern "C" fn borink_azure_fill_blocks(
         .unwrap_or_else(|error| refused_fill(&error))
 }
 
-/// Upper bound on parts accepted in a body of this byte length.
+/// The most blocks a Get Block List body of this byte length can hold.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_azure_max_blocks_in(len: usize) -> usize {
-    proto::Blobs::max_blocks_in(len)
+    layered::max_blocks_in(len)
 }
 
 /// Finishes an error response with its body.
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn borink_azure_finish_stage_error_body(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_azure_finish_commit_error_body(
     session: *const Session,
-    shape: *const CommitShape,
+    shape: *const CommitBlocksShape,
     failure: *const Failure,
     body: Bytes,
 ) -> Outcome {
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn borink_azure_finish_commit_error_body(
             // SAFETY: the caller supplies a readable saved shape.
             let shape = unsafe { shape.as_ref() }.ok_or(UNKNOWN)?;
             Ok(blobs.accept_commit_blocks_error_body(
-                proto::CommitShape {
+                proto::CommitBlocksShape {
                     condition: condition_kind(shape.condition)?,
                 },
                 status,
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn borink_azure_finish_list_blocks_error_body(
     };
     finishing(session, failure)
         .map(|(blobs, status, id)| blobs.accept_list_blocks_error_body(status, id, body))
-        .map_or_else(invalid, |outcome| list_parts_outcome(&outcome))
+        .map_or_else(invalid, |outcome| list_blocks_outcome(&outcome))
 }
 
 use borink_object_storage_proto::{
@@ -1009,12 +1009,12 @@ pub unsafe extern "C" fn borink_azure_encode_stage_block(
                 native_options(plan.options)?,
             )
         };
-        blobs.encode_stage_options(
+        blobs.encode_stage_block(
             bytes,
             headers,
-            &proto::azure::StageBlock {
+            &proto::azure::PhysicalStageBlock {
                 key: text(key, InvalidPlan::KeyNotUtf8)?,
-                id: text(id, InvalidPlan::PartId)?,
+                id: text(id, InvalidPlan::BlockId)?,
             },
             Payload::Streamed { len: content_len },
             options,
@@ -1023,28 +1023,29 @@ pub unsafe extern "C" fn borink_azure_encode_stage_block(
     }))
 }
 
-/// Encodes exact Azure selectors, preserving order and repetition.
+/// Encodes Azure Put Block List with the blocks in this order, selectors and
+/// repetition included. The body is written after the head; see `body`.
 ///
 /// # Safety
 ///
-/// Plans, options, parts and their strings are readable. As `borink_encode_get`
+/// Plans, options, blocks and their strings are readable. As `borink_encode_get`
 /// for output storage; header slots need only be writable and are initialized
 /// here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_azure_encode_commit_blocks(
     session: *const Session,
     plan: *const CommitBlocks,
-    parts: *const BlockRef,
+    blocks: *const BlockRef,
     count: usize,
     buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
     // SAFETY: the caller supplies readable inputs and exclusive output.
-    let (session, plan, parts, bytes, headers) = unsafe {
+    let (session, plan, blocks, bytes, headers) = unsafe {
         (
             ptr::session(session),
             plan.as_ref(),
-            ptr::items(parts, count),
+            ptr::items(blocks, count),
             ptr::slice_mut(buf.bytes),
             ptr::request_headers(buf.headers, buf.header_capacity),
         )
@@ -1059,29 +1060,31 @@ pub unsafe extern "C" fn borink_azure_encode_commit_blocks(
                 native_options(plan.options)?,
             )
         };
-        for part in parts {
-            proto::azure::BlockSource::from_discriminant(part.source).ok_or(UNKNOWN)?;
+        for block in blocks {
+            proto::azure::BlockSource::from_discriminant(block.source).ok_or(UNKNOWN)?;
             // SAFETY: each ID is readable.
-            text(unsafe { ptr::slice(part.id) }, InvalidPlan::PartId)?;
+            text(unsafe { ptr::slice(block.id) }, InvalidPlan::BlockId)?;
         }
-        let parts = parts.iter().map(|part| {
+        // The C array is read in place, twice, rather than copied into an
+        // array of the core's own references.
+        let blocks = blocks.iter().map(|block| {
             // SAFETY: IDs validated above remain readable and unchanged.
-            let id = core::str::from_utf8(unsafe { ptr::slice(part.id) }).expect("validated ID");
+            let id = core::str::from_utf8(unsafe { ptr::slice(block.id) }).expect("validated ID");
             (
                 id,
-                proto::azure::BlockSource::from_discriminant(part.source)
+                proto::azure::BlockSource::from_discriminant(block.source)
                     .expect("validated selector"),
             )
         });
-        blobs.encode_block_options(
+        blobs.encode_commit_blocks_from_iter(
             bytes,
             headers,
-            &proto::azure::CommitBlocks {
+            &proto::azure::PhysicalCommitBlocks {
                 key: text(key, InvalidPlan::KeyNotUtf8)?,
                 condition: condition_kind(plan.condition)?,
                 condition_value: value,
             },
-            parts,
+            blocks,
             options,
             &Timestamps::from_unix(unix_seconds),
         )
@@ -1121,7 +1124,7 @@ pub unsafe extern "C" fn borink_azure_encode_list_blocks(
                 native_options(plan.options)?,
             )
         };
-        let plan = proto::azure::ListBlocks {
+        let plan = proto::azure::PhysicalListBlocks {
             key: text(key, InvalidPlan::KeyNotUtf8)?,
             kind: proto::azure::BlockListKind::from_discriminant(plan.kind).ok_or(UNKNOWN)?,
             snapshot: snapshot.map(|s| text(s, InvalidPlan::Option)).transpose()?,
@@ -1165,7 +1168,7 @@ pub unsafe extern "C" fn borink_azure_accept_stage_head(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_azure_accept_commit_head(
     session: *const Session,
-    shape: *const CommitShape,
+    shape: *const CommitBlocksShape,
     status: u16,
     headers: *const HeaderRef,
     count: usize,
@@ -1180,7 +1183,7 @@ pub unsafe extern "C" fn borink_azure_accept_commit_head(
         .and_then(|blobs| {
             // SAFETY: the saved shape is readable.
             let shape = unsafe { shape.as_ref() }.ok_or(UNKNOWN)?;
-            let shape = proto::CommitShape {
+            let shape = proto::CommitBlocksShape {
                 condition: condition_kind(shape.condition)?,
             };
             blobs.accept_commit_blocks_head(shape, head.common)
@@ -1207,7 +1210,7 @@ pub unsafe extern "C" fn borink_azure_accept_list_blocks_head(
     );
     let outcome = open(session)
         .and_then(|blobs| blobs.accept_list_blocks_head(head.common))
-        .map_or_else(invalid, |outcome| list_parts_outcome(&outcome));
+        .map_or_else(invalid, |outcome| list_blocks_outcome(&outcome));
     crate::outcome::block_outcome(outcome, head)
 }
 

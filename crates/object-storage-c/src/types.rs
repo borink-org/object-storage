@@ -8,38 +8,38 @@
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-/// Commit condition retained for the response.
-pub struct CommitShape {
+/// The part of a `borink_commit_blocks` that reading the response needs.
+pub struct CommitBlocksShape {
     /// A borink_condition.
     pub condition: u16,
 }
 #[repr(u16)]
 #[derive(Clone, Copy)]
-/// Which list holds the part.
+/// Which blocks a block-list read enumerates.
 pub enum BlockListKind {
-    /// Not committed yet.
+    /// Staged and not yet committed.
     Staged = 1,
-    /// Part of the object.
+    /// Blocks of the committed object; empty before the first commit.
     Committed = 2,
-    /// Both lists.
+    /// Both lists; succeeds even when only staged blocks exist.
     All = 3,
 }
 #[repr(u16)]
 #[derive(Clone, Copy)]
-/// Which list holds the part.
+/// Which list held a listed block.
 pub enum BlockState {
-    /// Not committed yet.
+    /// Staged and not yet committed.
     Staged = 1,
-    /// Part of the object.
+    /// Block of the committed object.
     Committed = 2,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-/// Listed part, borrowing the response body.
+/// One listed block, borrowing the response body.
 pub struct Block {
-    /// Part identifier as the service writes it.
+    /// The block ID as the service writes it; pass it back unchanged.
     pub id: Bytes,
-    /// Part length in bytes.
+    /// The block's length in bytes.
     pub size: u64,
     /// A borink_block_state.
     pub state: u16,
@@ -332,7 +332,7 @@ pub enum ServiceError {
     Timeout = 8,
     /// The service failed, or it was unavailable.
     Service = 9,
-    /// The service refused the upload's parts.
+    /// The service refused the block list, or a block that it names.
     InvalidUpload = 10,
 }
 
@@ -376,12 +376,16 @@ pub enum OutcomeKind {
     /// `borink_fill_listing`. `body.expected_len` is the length of that body,
     /// and the other two values of `body` are absent.
     Page = 13,
-    /// The service holds the part.
+    /// The service holds the block. Put Block answers no entity tag.
     Staged = 14,
     /// The object is committed.
     Committed = 15,
-    /// The parts follow in the response body.
-    Parts = 16,
+    /// The blocks follow in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// `borink_azure_fill_blocks`; `borink_azure_max_blocks_in` sizes the
+    /// array from `body.expected_len`.
+    Blocks = 16,
 }
 
 /// One container, and the token that opens it.
@@ -943,11 +947,12 @@ pub struct BlockOptions {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-/// Native stage plan, with no synthetic upload ID.
+/// Native Put Block plan.
 pub struct StageBlock {
     /// Object key.
     pub key: Bytes,
-    /// Base64 block ID.
+    /// Base64 block ID: at most 88 characters, at most 64 bytes decoded, the
+    /// same decoded length for every block of one blob.
     pub id: Bytes,
     /// Native options.
     pub options: BlockOptions,
@@ -965,7 +970,7 @@ pub struct BlockRef {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-/// Native publication plan.
+/// Native Put Block List plan.
 pub struct CommitBlocks {
     /// Object key.
     pub key: Bytes,

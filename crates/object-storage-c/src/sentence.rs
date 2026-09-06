@@ -53,9 +53,9 @@ pub(crate) fn settled_sentence(kind: Option<OutcomeKind>) -> &'static str {
     match kind {
         Some(OutcomeKind::Body) => "the object follows in the response body",
         Some(OutcomeKind::Page) => "the page follows in the response body",
-        Some(OutcomeKind::Staged) => "the service holds the part",
+        Some(OutcomeKind::Staged) => "the service holds the block",
         Some(OutcomeKind::Committed) => "the object is committed",
-        Some(OutcomeKind::Parts) => "the parts follow in the response body",
+        Some(OutcomeKind::Blocks) => "the blocks follow in the response body",
         Some(OutcomeKind::Complete) => "the response carries no body and is complete",
         Some(OutcomeKind::NotModified) => "the object is not modified",
         Some(OutcomeKind::PreconditionFailed) => "the condition did not hold",
@@ -123,7 +123,7 @@ pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
         K::Page,
         K::Staged,
         K::Committed,
-        K::Parts,
+        K::Blocks,
     ]
     .into_iter()
     .find(|kind| *kind as u16 == value)

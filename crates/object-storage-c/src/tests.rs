@@ -347,7 +347,7 @@ fn every_outcome_kind_says_something_of_its_own() {
         OutcomeKind::Page,
         OutcomeKind::Staged,
         OutcomeKind::Committed,
-        OutcomeKind::Parts,
+        OutcomeKind::Blocks,
     ] {
         let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());

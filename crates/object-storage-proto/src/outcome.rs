@@ -1,14 +1,15 @@
 use core::fmt;
 
-/// The result of a stage response head.
+/// The result of a Put Block response head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StageHeadOutcome<'h> {
-    /// the service holds the part.
-    Staged {
-        /// The entity tag, when the service returns one.
-        e_tag: Option<&'h [u8]>,
-    },
+pub enum StageBlockHeadOutcome<'h> {
+    /// The service holds the block.
+    ///
+    /// Put Block answers no entity tag. The checksum and encryption headers
+    /// it does answer are on
+    /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
+    Staged,
     /// The object or container does not exist.
     NotFound {
         /// The service's reason, if known.
@@ -20,10 +21,10 @@ pub enum StageHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for StageHeadOutcome<'_> {
+impl fmt::Display for StageBlockHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Staged { .. } => f.write_str("the service holds the part"),
+            Self::Staged => f.write_str("the service holds the block"),
             Self::NotFound { .. } => f.write_str("the object or container does not exist"),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
@@ -31,11 +32,11 @@ impl fmt::Display for StageHeadOutcome<'_> {
     }
 }
 
-/// The result of a commit response head.
+/// The result of a Put Block List response head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CommitHeadOutcome<'h> {
-    /// the object is committed.
+pub enum CommitBlocksHeadOutcome<'h> {
+    /// The object is committed.
     Committed {
         /// The committed object's metadata.
         meta: ObjectMeta<'h>,
@@ -53,7 +54,7 @@ pub enum CommitHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for CommitHeadOutcome<'_> {
+impl fmt::Display for CommitBlocksHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Committed { .. } => f.write_str("the object is committed"),
@@ -65,13 +66,16 @@ impl fmt::Display for CommitHeadOutcome<'_> {
     }
 }
 
-/// The result of a listparts response head.
+/// The result of a Get Block List response head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ListPartsHeadOutcome<'h> {
-    /// the parts follow in the response body.
+pub enum ListBlocksHeadOutcome<'h> {
+    /// The blocks follow in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Blobs::fill_blocks`](crate::Blobs::fill_blocks).
     #[non_exhaustive]
-    Parts {
+    Blocks {
         /// Metadata of the committed object, if any.
         meta: ObjectMeta<'h>,
         /// The result body's byte length.
@@ -88,10 +92,10 @@ pub enum ListPartsHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for ListPartsHeadOutcome<'_> {
+impl fmt::Display for ListBlocksHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Parts { .. } => f.write_str("the parts follow in the response body"),
+            Self::Blocks { .. } => f.write_str("the blocks follow in the response body"),
             Self::NotFound { .. } => f.write_str("the object or container does not exist"),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),

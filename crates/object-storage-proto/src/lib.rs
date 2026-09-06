@@ -31,6 +31,12 @@
 //! content with a [`Payload`], which names a length whether or not you hold
 //! the bytes, so a write can stream from a file or a socket.
 //!
+//! An object can also be written in blocks: stage each block with
+//! [`azure::PhysicalStageBlock`], then publish an ordered list of them with
+//! [`azure::PhysicalCommitBlocks`], and read what is staged with
+//! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
+//! [`azure`] module with their options.
+//!
 //! # Example
 //!
 //! ```
@@ -131,8 +137,9 @@
 //! The encoding methods refuse a buffer that is too small and state the exact
 //! numbers of bytes and header slots that they need. Grow both buffers and
 //! call again, or
-//! call [`layered::get_requirements`], [`layered::put_requirements`] or
-//! [`layered::list_requirements`] first, as the example does.
+//! call [`layered::get_requirements`], [`layered::put_requirements`],
+//! [`layered::list_requirements`] or their block-operation siblings first, as
+//! the example does.
 //!
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
@@ -165,14 +172,14 @@ pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, class
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
-    GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
-    ServiceErrorKind, StageHeadOutcome,
+    BodyWindow, Classification, CommitBlocksHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
+    GetHeadOutcome, ListBlocksHeadOutcome, ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
+    ServiceErrorKind, StageBlockHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, CommitShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
+    BlobProperty, CommitBlocksShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
     GetShape, ListEntry, ListShape, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
     PhysicalPut, Properties, PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange,
 };

@@ -276,17 +276,17 @@ void Client::stage_block(std::string_view key, std::string_view id, std::span<co
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
         outcome_ = borink_azure_finish_stage_error_body(&session, &outcome_.failure, kept_body());
     }
-    if (outcome_.kind != OutcomeKindStaged) { fail("Azure staged no part"); }
+    if (outcome_.kind != OutcomeKindStaged) { fail("Azure staged no block"); }
 }
 
-void Client::commit_blocks(std::string_view key, std::span<const BlockRef> parts, const Write &write) {
+void Client::commit_blocks(std::string_view key, std::span<const BlockRef> blocks, const Write &write) {
     const Session session = this->session();
     const CommitBlocks plan{as_bytes(key), write.shape().condition,
                       {!write.condition_value.empty(), as_bytes(write.condition_value)}, {}};
-    const CommitShape shape{plan.condition};
+    const CommitBlocksShape shape{plan.condition};
     const auto now = now_unix();
     const auto &request = encode([&] {
-        return borink_azure_encode_commit_blocks(&session, &plan, parts.data(), parts.size(), request_buffer(), now);
+        return borink_azure_encode_commit_blocks(&session, &plan, blocks.data(), blocks.size(), request_buffer(), now);
     });
     send_upload(request, std::span<const std::uint8_t>(request_.data() + request.body.span.start,
                                                       request.body.span.len));
@@ -319,7 +319,7 @@ std::span<const Block> Client::list_blocks(std::string_view key,
         outcome_ = borink_azure_finish_list_blocks_error_body(&session, &outcome_.failure,
             borrow(std::span<const std::uint8_t>(page_.data(), std::min(page_.size(), limits_.error_bytes))));
     }
-    if (outcome_.kind != OutcomeKindParts) { fail("Azure listed no parts"); }
+    if (outcome_.kind != OutcomeKindBlocks) { fail("Azure listed no blocks"); }
     const auto fill = borink_azure_fill_blocks(&session, page_buffer(), entries.data(), entries.size());
     if (fill.status.code != 0) {
         throw std::runtime_error(std::string(describe_whole(message_, fill.status)));

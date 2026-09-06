@@ -195,7 +195,7 @@ typedef uint16_t borink_block_option_kind;
 #endif // __cplusplus
 
 /**
- * Which list holds the part.
+ * Which blocks a block-list read enumerates.
  */
 enum borink_block_list_kind
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -203,15 +203,15 @@ enum borink_block_list_kind
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * Not committed yet.
+     * Staged and not yet committed.
      */
     BORINK_BLOCK_LIST_KIND_STAGED = 1,
     /**
-     * Part of the object.
+     * Blocks of the committed object; empty before the first commit.
      */
     BORINK_BLOCK_LIST_KIND_COMMITTED = 2,
     /**
-     * Both lists.
+     * Both lists; succeeds even when only staged blocks exist.
      */
     BORINK_BLOCK_LIST_KIND_ALL = 3,
 };
@@ -224,7 +224,7 @@ typedef uint16_t borink_block_list_kind;
 #endif // __cplusplus
 
 /**
- * Which list holds the part.
+ * Which list held a listed block.
  */
 enum borink_block_state
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -232,11 +232,11 @@ enum borink_block_state
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * Not committed yet.
+     * Staged and not yet committed.
      */
     BORINK_BLOCK_STATE_STAGED = 1,
     /**
-     * Part of the object.
+     * Block of the committed object.
      */
     BORINK_BLOCK_STATE_COMMITTED = 2,
 };
@@ -545,7 +545,7 @@ enum borink_service_error
      */
     BORINK_SERVICE_ERROR_SERVICE = 9,
     /**
-     * The service refused the upload's parts.
+     * The service refused the block list, or a block that it names.
      */
     BORINK_SERVICE_ERROR_INVALID_UPLOAD = 10,
 };
@@ -628,7 +628,7 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_PAGE = 13,
     /**
-     * The service holds the part.
+     * The service holds the block. Put Block answers no entity tag.
      */
     BORINK_OUTCOME_KIND_STAGED = 14,
     /**
@@ -636,9 +636,13 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_COMMITTED = 15,
     /**
-     * The parts follow in the response body.
+     * The blocks follow in the response body.
+     *
+     * Read the whole body into one buffer and pass it to
+     * `borink_azure_fill_blocks`; `borink_azure_max_blocks_in` sizes the
+     * array from `body.expected_len`.
      */
-    BORINK_OUTCOME_KIND_PARTS = 16,
+    BORINK_OUTCOME_KIND_BLOCKS = 16,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -1018,15 +1022,15 @@ typedef struct borink_bytes_mut {
 } borink_bytes_mut;
 
 /**
- * Listed part, borrowing the response body.
+ * One listed block, borrowing the response body.
  */
 typedef struct borink_block {
     /**
-     * Part identifier as the service writes it.
+     * The block ID as the service writes it; pass it back unchanged.
      */
     struct borink_bytes id;
     /**
-     * Part length in bytes.
+     * The block's length in bytes.
      */
     uint64_t size;
     /**
@@ -1175,14 +1179,14 @@ typedef struct borink_outcome {
 } borink_outcome;
 
 /**
- * Commit condition retained for the response.
+ * The part of a `borink_commit_blocks` that reading the response needs.
  */
-typedef struct borink_commit_shape {
+typedef struct borink_commit_blocks_shape {
     /**
      * A borink_condition.
      */
     uint16_t condition;
-} borink_commit_shape;
+} borink_commit_blocks_shape;
 
 /**
  * A corresponding Azure rejection, not a received response.
@@ -1577,7 +1581,7 @@ typedef struct borink_block_options {
 } borink_block_options;
 
 /**
- * Native stage plan, with no synthetic upload ID.
+ * Native Put Block plan.
  */
 typedef struct borink_stage_block {
     /**
@@ -1585,7 +1589,8 @@ typedef struct borink_stage_block {
      */
     struct borink_bytes key;
     /**
-     * Base64 block ID.
+     * Base64 block ID: at most 88 characters, at most 64 bytes decoded, the
+     * same decoded length for every block of one blob.
      */
     struct borink_bytes id;
     /**
@@ -1595,7 +1600,7 @@ typedef struct borink_stage_block {
 } borink_stage_block;
 
 /**
- * Native publication plan.
+ * Native Put Block List plan.
  */
 typedef struct borink_commit_blocks {
     /**
@@ -1837,7 +1842,7 @@ struct borink_fill borink_azure_fill_blocks(const struct borink_session *session
                                             size_t capacity);
 
 /**
- * Upper bound on parts accepted in a body of this byte length.
+ * The most blocks a Get Block List body of this byte length can hold.
  */
 size_t borink_azure_max_blocks_in(size_t len);
 
@@ -1856,7 +1861,7 @@ struct borink_outcome borink_azure_finish_stage_error_body(const struct borink_s
  * Session, failure, body and the failure's request ID must remain readable.
  */
 struct borink_outcome borink_azure_finish_commit_error_body(const struct borink_session *session,
-                                                            const struct borink_commit_shape *shape,
+                                                            const struct borink_commit_blocks_shape *shape,
                                                             const struct borink_failure *failure,
                                                             struct borink_bytes body);
 
@@ -2362,17 +2367,18 @@ struct borink_request_head borink_azure_encode_stage_block(const struct borink_s
                                                            uint64_t unix_seconds);
 
 /**
- * Encodes exact Azure selectors, preserving order and repetition.
+ * Encodes Azure Put Block List with the blocks in this order, selectors and
+ * repetition included. The body is written after the head; see `body`.
  *
  * # Safety
  *
- * Plans, options, parts and their strings are readable. As `borink_encode_get`
+ * Plans, options, blocks and their strings are readable. As `borink_encode_get`
  * for output storage; header slots need only be writable and are initialized
  * here.
  */
 struct borink_request_head borink_azure_encode_commit_blocks(const struct borink_session *session,
                                                              const struct borink_commit_blocks *plan,
-                                                             const struct borink_block_ref *parts,
+                                                             const struct borink_block_ref *blocks,
                                                              size_t count,
                                                              struct borink_request_buffer buf,
                                                              uint64_t unix_seconds);
@@ -2406,7 +2412,7 @@ struct borink_azure_block_outcome borink_azure_accept_stage_head(const struct bo
  * Session, shape, headers and their values remain readable for the returned outcome.
  */
 struct borink_azure_block_outcome borink_azure_accept_commit_head(const struct borink_session *session,
-                                                                  const struct borink_commit_shape *shape,
+                                                                  const struct borink_commit_blocks_shape *shape,
                                                                   uint16_t status,
                                                                   const struct borink_header_ref *headers,
                                                                   size_t count);

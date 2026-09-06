@@ -78,7 +78,7 @@ using StageBlock = borink_stage_block;
 using BlockRef = borink_block_ref;
 using CommitBlocks = borink_commit_blocks;
 using ListBlocks = borink_list_blocks;
-using CommitShape = borink_commit_shape;
+using CommitBlocksShape = borink_commit_blocks_shape;
 using Block = borink_block;
 using BlockListKind = borink_block_list_kind;
 using BlockState = borink_block_state;
@@ -90,7 +90,7 @@ inline constexpr BlockState BlockStateStaged = BORINK_BLOCK_STATE_STAGED;
 inline constexpr BlockState BlockStateCommitted = BORINK_BLOCK_STATE_COMMITTED;
 inline constexpr OutcomeKind OutcomeKindStaged = BORINK_OUTCOME_KIND_STAGED;
 inline constexpr OutcomeKind OutcomeKindCommitted = BORINK_OUTCOME_KIND_COMMITTED;
-inline constexpr OutcomeKind OutcomeKindParts = BORINK_OUTCOME_KIND_PARTS;
+inline constexpr OutcomeKind OutcomeKindBlocks = BORINK_OUTCOME_KIND_BLOCKS;
 inline constexpr ServiceError ServiceErrorInvalidUpload = BORINK_SERVICE_ERROR_INVALID_UPLOAD;
 
 inline constexpr ErrorCode ErrorCodeNone             = BORINK_ERROR_CODE_NONE;

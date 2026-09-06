@@ -7,47 +7,41 @@
 
 use crate::types::*;
 
-pub(crate) fn stage_outcome(outcome: &proto::StageHeadOutcome<'_>) -> Outcome {
+pub(crate) fn stage_outcome(outcome: &proto::StageBlockHeadOutcome<'_>) -> Outcome {
     match *outcome {
-        proto::StageHeadOutcome::Staged { e_tag } => Outcome {
-            meta: ObjectMeta {
-                e_tag: maybe_bytes(e_tag),
-                ..Default::default()
-            },
-            ..only(OutcomeKind::Staged)
-        },
-        proto::StageHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::StageHeadOutcome::NeedErrorBody(failure) => {
+        proto::StageBlockHeadOutcome::Staged => only(OutcomeKind::Staged),
+        proto::StageBlockHeadOutcome::NotFound { kind } => not_found(kind),
+        proto::StageBlockHeadOutcome::NeedErrorBody(failure) => {
             failed(OutcomeKind::NeedErrorBody, &failure)
         }
-        proto::StageHeadOutcome::ServiceFailure(failure) => {
+        proto::StageBlockHeadOutcome::ServiceFailure(failure) => {
             failed(OutcomeKind::ServiceFailure, &failure)
         }
         _ => only(OutcomeKind::Unsupported),
     }
 }
 
-pub(crate) fn commit_outcome(outcome: &proto::CommitHeadOutcome<'_>) -> Outcome {
+pub(crate) fn commit_outcome(outcome: &proto::CommitBlocksHeadOutcome<'_>) -> Outcome {
     match *outcome {
-        proto::CommitHeadOutcome::Committed { meta } => Outcome {
+        proto::CommitBlocksHeadOutcome::Committed { meta } => Outcome {
             meta: meta_view(&meta),
             ..only(OutcomeKind::Committed)
         },
-        proto::CommitHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
-        proto::CommitHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::CommitHeadOutcome::NeedErrorBody(failure) => {
+        proto::CommitBlocksHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        proto::CommitBlocksHeadOutcome::NotFound { kind } => not_found(kind),
+        proto::CommitBlocksHeadOutcome::NeedErrorBody(failure) => {
             failed(OutcomeKind::NeedErrorBody, &failure)
         }
-        proto::CommitHeadOutcome::ServiceFailure(failure) => {
+        proto::CommitBlocksHeadOutcome::ServiceFailure(failure) => {
             failed(OutcomeKind::ServiceFailure, &failure)
         }
         _ => only(OutcomeKind::Unsupported),
     }
 }
 
-pub(crate) fn list_parts_outcome(outcome: &proto::ListPartsHeadOutcome<'_>) -> Outcome {
+pub(crate) fn list_blocks_outcome(outcome: &proto::ListBlocksHeadOutcome<'_>) -> Outcome {
     match *outcome {
-        proto::ListPartsHeadOutcome::Parts {
+        proto::ListBlocksHeadOutcome::Blocks {
             meta, expected_len, ..
         } => Outcome {
             meta: meta_view(&meta),
@@ -55,13 +49,13 @@ pub(crate) fn list_parts_outcome(outcome: &proto::ListPartsHeadOutcome<'_>) -> O
                 expected_len: maybe_number(expected_len),
                 ..Default::default()
             },
-            ..only(OutcomeKind::Parts)
+            ..only(OutcomeKind::Blocks)
         },
-        proto::ListPartsHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::ListPartsHeadOutcome::NeedErrorBody(failure) => {
+        proto::ListBlocksHeadOutcome::NotFound { kind } => not_found(kind),
+        proto::ListBlocksHeadOutcome::NeedErrorBody(failure) => {
             failed(OutcomeKind::NeedErrorBody, &failure)
         }
-        proto::ListPartsHeadOutcome::ServiceFailure(failure) => {
+        proto::ListBlocksHeadOutcome::ServiceFailure(failure) => {
             failed(OutcomeKind::ServiceFailure, &failure)
         }
         _ => only(OutcomeKind::Unsupported),
@@ -69,11 +63,11 @@ pub(crate) fn list_parts_outcome(outcome: &proto::ListPartsHeadOutcome<'_>) -> O
 }
 
 impl From<proto::azure::Block<'_>> for Block {
-    fn from(part: proto::azure::Block<'_>) -> Self {
+    fn from(block: proto::azure::Block<'_>) -> Self {
         Self {
-            id: bytes(part.id.as_bytes()),
-            size: part.size,
-            state: part.state as u16,
+            id: bytes(block.id.as_bytes()),
+            size: block.size,
+            state: block.state as u16,
         }
     }
 }

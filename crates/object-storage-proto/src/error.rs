@@ -61,10 +61,10 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    /// The part identifier is empty, is not base64, or decodes to over 64 bytes.
-    PartId = 8,
-    /// The part list violates the operation's count, order, ownership, or size rules.
-    Parts = 9,
+    /// The block ID is empty, is not base64, or decodes to over 64 bytes.
+    BlockId = 8,
+    /// The block list holds more entries than the service accepts.
+    Blocks = 9,
     /// The listing prefix is longer than an object key may be.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
@@ -111,8 +111,8 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
-            Self::PartId => "invalid part identifier",
-            Self::Parts => "invalid multipart part list",
+            Self::BlockId => "invalid block identifier",
+            Self::Blocks => "invalid block list",
             Self::Option => "invalid provider option",
             Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
@@ -133,8 +133,8 @@ impl InvalidPlan {
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
-            8 => Self::PartId,
-            9 => Self::Parts,
+            8 => Self::BlockId,
+            9 => Self::Blocks,
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,

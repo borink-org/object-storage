@@ -3,10 +3,15 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
+use crate::azure::{
+    BlockOption, BlockRef, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock,
+};
 use crate::{
     Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize,
     Result, Timestamps,
 };
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
@@ -87,6 +92,122 @@ pub fn list_requirements(
     now: &Timestamps,
 ) -> Result<RequestSize> {
     required(blobs.encode_list(&mut [], &mut [], list, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_stage_block`] needs for this plan.
+///
+/// As [`put_requirements`]: the answer covers the head, and only the length
+/// of `content` reaches it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_stage_block`].
+pub fn stage_block_requirements<'o>(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalStageBlock<'_>,
+    content: Payload<'_>,
+    options: impl Iterator<Item = BlockOption<'o>> + Clone,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_stage_block(&mut [], &mut [], plan, content, options, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_commit_blocks`] needs for this plan.
+///
+/// Call this to size a buffer before you encode; the answer is exact, and
+/// the bytes include the XML body that the request carries.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_commit_blocks`].
+pub fn commit_blocks_requirements<'o>(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalCommitBlocks<'_>,
+    blocks: &[BlockRef<'_>],
+    options: impl Iterator<Item = BlockOption<'o>> + Clone,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_commit_blocks(&mut [], &mut [], plan, blocks, options, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_list_blocks`] needs for this plan.
+///
+/// Call this to size a buffer before you encode; the answer is exact.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_list_blocks`].
+pub fn list_blocks_requirements<'o>(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalListBlocks<'_>,
+    options: impl Iterator<Item = BlockOption<'o>> + Clone,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_list_blocks(&mut [], &mut [], plan, options, now)
+            .map(drop),
+    )
+}
+
+/// The most blocks that a Get Block List body of `len` bytes can hold.
+///
+/// Use it to size the array for [`Blobs::fill_blocks`] from the
+/// `expected_len` of
+/// [`ListBlocksHeadOutcome::Blocks`](crate::ListBlocksHeadOutcome::Blocks).
+/// The smallest element the reader accepts is
+/// `<Block><Name>x</Name><Size>0</Size></Block>`, 43 bytes: it requires a
+/// name and a size, and does not check that the name is base64, because the
+/// service decided what it stored.
+pub const fn max_blocks_in(len: usize) -> usize {
+    len / 43
+}
+
+/// Writes the block ID for `bytes` in the base64 form that Azure stores.
+///
+/// A block ID is base64 text on the wire, of at most 64 decoded bytes, and
+/// every block of one blob must decode to the same length. Choose the bytes
+/// however you number blocks, keep them the same length within one blob, and
+/// pass what this returns as [`BlockRef::id`] or
+/// [`PhysicalStageBlock::id`].
+///
+/// Copies the encoding into `into` and returns it. Returns [`None`] if
+/// `bytes` is empty or longer than 64 bytes, or if `into` is shorter than
+/// the encoding, which is four characters for every three bytes, rounded up.
+pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
+    if bytes.is_empty() || bytes.len() > 64 {
+        return None;
+    }
+    let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
+    for (group, out) in bytes.chunks(3).zip(into.chunks_mut(4)) {
+        // A group is 1 to 3 bytes; the missing ones read as zero and are
+        // written as padding below. Each sextet index is at most 63.
+        let bits = (u32::from(group[0]) << 16)
+            | (u32::from(*group.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*group.get(2).unwrap_or(&0));
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = if i <= group.len() {
+                BASE64[((bits >> (18 - 6 * i)) & 63) as usize]
+            } else {
+                b'='
+            };
+        }
+    }
+    core::str::from_utf8(into).ok()
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
@@ -218,7 +339,20 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{http_date_ms, quoted_etag};
+    use super::{block_id, http_date_ms, quoted_etag};
+
+    #[test]
+    fn writes_the_base64_of_chosen_bytes() {
+        let mut into = [0; 12];
+        assert_eq!(block_id(&[0, 0, 0, 0], &mut into), Some("AAAAAA=="));
+        assert_eq!(block_id(&[0, 0, 0, 1], &mut into), Some("AAAAAQ=="));
+        assert_eq!(block_id(b"ab", &mut into), Some("YWI="));
+        assert_eq!(block_id(b"abc", &mut into), Some("YWJj"));
+        assert_eq!(block_id(&[0xfb, 0xff], &mut into), Some("+/8="));
+        assert_eq!(block_id(b"", &mut into), None);
+        assert_eq!(block_id(&[0; 65], &mut [0; 88]), None);
+        assert_eq!(block_id(b"abc", &mut [0; 3]), None);
+    }
 
     #[test]
     fn reads_an_azure_last_modified_header() {

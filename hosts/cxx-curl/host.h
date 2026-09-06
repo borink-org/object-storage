@@ -182,7 +182,7 @@ class Client {
              const Write &write = {});
 
     void stage_block(std::string_view key, std::string_view id, std::span<const std::uint8_t> content);
-    void commit_blocks(std::string_view key, std::span<const BlockRef> parts, const Write &write = {});
+    void commit_blocks(std::string_view key, std::span<const BlockRef> blocks, const Write &write = {});
     // Entries borrow this client's body buffer until the next blocks/list request.
     std::span<const Block> list_blocks(std::string_view key, std::span<Block> entries,
                                              BlockListKind kind = BlockListKindStaged);

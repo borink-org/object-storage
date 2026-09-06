@@ -1,6 +1,7 @@
-/// The part of a commit plan retained while the request is in flight.
+/// The part of a [`PhysicalCommitBlocks`](crate::azure::PhysicalCommitBlocks)
+/// that reading the response needs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CommitShape {
+pub struct CommitBlocksShape {
     /// The precondition on the object being committed.
     pub condition: ConditionKind,
 }

@@ -1,3 +1,17 @@
+// The Azure Get Block List body, read whole into a caller's array.
+//
+// This is the reading half only: `azure.rs` writes the Put Block List body
+// that a commit sends, and nothing here is shared with it beyond the names
+// of the tags. As for a listing, the scanner in `scan.rs` walks the
+// structure, IDs are decoded in place with `decode.rs`, and each entry
+// borrows the body.
+//
+// The reader requires every `<Block>` to carry a non-empty `<Name>` and a
+// decimal `<Size>`, and refuses a repeated field or a section it does not
+// know. It does not check that a name is base64: the service decided what it
+// stored, and a listed ID is passed back to it unchanged. That is what fixes
+// the 43-byte minimum element that `layered::max_blocks_in` divides by.
+
 use super::azure::check_body;
 use super::decode::decode;
 use super::scan::{Child, Scan, fault, trim};
@@ -9,9 +23,9 @@ pub(crate) fn fill_blocks<'b, E: From<Block<'b>>>(
     into: &mut [E],
 ) -> Result<Listing<'b>> {
     let mut filled = 0;
-    read(body, into.len(), &mut |part| {
+    read(body, into.len(), &mut |block| {
         if let Some(slot) = into.get_mut(filled) {
-            *slot = part.into();
+            *slot = block.into();
         }
         // Each call consumes a distinct Block element, so filled <= body.len().
         filled += 1;

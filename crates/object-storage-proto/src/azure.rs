@@ -5,12 +5,12 @@
 pub use crate::block_options::{BlockOption, BlockOptionKind};
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
-    BodyWindow, Classification, CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome,
-    DeleteKind, DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
-    HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListPartsHeadOutcome, Listing, Method,
-    ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PropertySet,
-    PropertyValues, PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result,
-    ServiceErrorKind, StageHeadOutcome, Timestamps, WireRequest,
+    BodyWindow, Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind,
+    DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure, FailureClass, GetHeadOutcome,
+    GetKind, GetShape, HeaderSpan, InvalidPlan, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome,
+    Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+    PropertySet, PropertyValues, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
+    ResponseHead, Result, ServiceErrorKind, StageBlockHeadOutcome, Timestamps, WireRequest,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -168,10 +168,21 @@ impl BlockSource {
     }
 }
 
-/// An ordered entry in Azure's block list. Repetition is allowed.
+/// One entry of the ordered block list that a commit writes.
+///
+/// The same ID may appear more than once, and entries with different
+/// [`BlockSource`]s may be mixed in one list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockRef<'a> {
-    /// Caller-supplied base64 block ID.
+    /// The block ID, as the base64 text that the service stores.
+    ///
+    /// Choose the bytes yourself and write them with
+    /// [`layered::block_id`](crate::layered::block_id), or pass a listed
+    /// [`Block::id`] unchanged. Encoding checks the text locally: not empty,
+    /// at most 88 characters of standard base64 with at most two `=` of
+    /// padding, so at most 64 decoded bytes. The encoder percent-encodes it
+    /// into the query itself. Only the service checks that every block of one
+    /// blob decodes to the same length, and that a referenced block exists.
     pub id: &'a str,
     /// The stored version to select.
     pub source: BlockSource,
@@ -237,18 +248,19 @@ pub struct Block<'b> {
     pub state: BlockState,
 }
 
-/// A native Put Block plan, without a synthetic upload ID.
+/// A native Put Block plan: stage one block of an object.
 #[derive(Debug, Clone, Copy)]
-pub struct StageBlock<'a> {
+pub struct PhysicalStageBlock<'a> {
     /// Object key.
     pub key: &'a str,
-    /// Caller-supplied base64 block ID.
+    /// The block ID, as base64 text. See [`BlockRef::id`] for the rules.
     pub id: &'a str,
 }
 
-/// A native Put Block List plan.
+/// A native Put Block List plan: publish an ordered list of blocks as the
+/// object.
 #[derive(Debug, Clone, Copy)]
-pub struct CommitBlocks<'a> {
+pub struct PhysicalCommitBlocks<'a> {
     /// Object key.
     pub key: &'a str,
     /// Object precondition.
@@ -257,7 +269,7 @@ pub struct CommitBlocks<'a> {
     pub condition_value: Option<&'a [u8]>,
 }
 
-impl<'a> CommitBlocks<'a> {
+impl<'a> PhysicalCommitBlocks<'a> {
     /// An unconditional block-list write.
     pub const fn new(key: &'a str) -> Self {
         Self {
@@ -266,11 +278,18 @@ impl<'a> CommitBlocks<'a> {
             condition_value: None,
         }
     }
+
+    /// The part of the plan that reading the response needs.
+    pub const fn shape(&self) -> CommitBlocksShape {
+        CommitBlocksShape {
+            condition: self.condition,
+        }
+    }
 }
 
-/// A native block-list read.
+/// A native Get Block List plan: read which blocks an object holds.
 #[derive(Debug, Clone, Copy)]
-pub struct ListBlocks<'a> {
+pub struct PhysicalListBlocks<'a> {
     /// Object key.
     pub key: &'a str,
     /// Committed, staged, or both lists.
@@ -281,13 +300,34 @@ pub struct ListBlocks<'a> {
     pub version: Option<&'a str>,
 }
 
+impl<'a> PhysicalListBlocks<'a> {
+    /// A read of the current object's blocks of `kind`.
+    pub const fn new(key: &'a str, kind: BlockListKind) -> Self {
+        Self {
+            key,
+            kind,
+            snapshot: None,
+            version: None,
+        }
+    }
+}
+
 impl<'a> Blobs<'a> {
-    /// Encodes a native block-list read with typed options.
+    /// Writes the request head for an Azure Get Block List into `buf`.
+    ///
+    /// `options` is as for [`Blobs::encode_stage_block`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
+    /// if it names both a snapshot and a version, or if an option does not
+    /// apply to Get Block List. Returns [`Error::Capacity`] as
+    /// [`Blobs::encode_get`] does.
     pub fn encode_list_blocks<'r, 'o>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
-        plan: &ListBlocks<'_>,
+        plan: &PhysicalListBlocks<'_>,
         options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
@@ -325,77 +365,47 @@ impl<'a> Blobs<'a> {
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
-    /// Encodes Azure Put Block with a caller-supplied base64 ID.
-    pub fn encode_stage_block<'r>(
+    /// Writes the request head for an Azure Put Block into `buf`.
+    ///
+    /// The head states the length of `content`, which stays where you put it,
+    /// as for [`Blobs::encode_put`]. `options` is any cloneable iterator over
+    /// [`BlockOption`]s, and `core::iter::empty()` when there are none. It is
+    /// read more than once, so every pass must yield the same options in the
+    /// same order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
+    /// if `content` is longer than one block may be, or if an option does not
+    /// apply to Put Block. Returns [`Error::Capacity`] as [`Blobs::encode_put`]
+    /// does, or call
+    /// [`layered::stage_block_requirements`](crate::layered::stage_block_requirements)
+    /// first.
+    pub fn encode_stage_block<'r, 'o>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
-        plan: &StageBlock<'_>,
-        content: Payload<'r>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        self.encode_stage_options(buf, headers, plan, content, core::iter::empty(), now)
-    }
-
-    /// Encodes mixed Azure selectors in caller order, including duplicates.
-    pub fn encode_commit_blocks<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &CommitBlocks<'_>,
-        parts: &[BlockRef<'_>],
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        self.encode_commit_blocks_from(buf, headers, plan, parts.iter().copied(), now)
-    }
-
-    /// Reads a repeatable native sequence directly, without copying its array.
-    pub fn encode_commit_blocks_from<'r, 'p>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &CommitBlocks<'_>,
-        parts: impl Iterator<Item = BlockRef<'p>> + Clone,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        self.encode_block_options(
-            buf,
-            headers,
-            plan,
-            parts.map(|p| (p.id, p.source)),
-            core::iter::empty(),
-            now,
-        )
-    }
-
-    /// Encodes native stage options from a caller-owned sequence.
-    /// Cloned iterators must yield identical values.
-    #[allow(clippy::too_many_arguments)]
-    pub fn encode_stage_options<'r, 'o>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        stage: &StageBlock<'_>,
+        plan: &PhysicalStageBlock<'_>,
         content: Payload<'r>,
         options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         crate::block_options::validate(options.clone(), 1)?;
-        validate_block_key(stage.key)?;
-        validate_part_id(stage.id)?;
+        validate_block_key(plan.key)?;
+        validate_block_id(plan.id)?;
         if content.len() > MAX_STAGE_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
         let mut head = HeadWriter::new(buf, headers);
         let query = [
             Some(("comp", QueryValue::Literal("block"))),
-            Some(("blockid", QueryValue::Encoded(stage.id.as_bytes()))),
+            Some(("blockid", QueryValue::Encoded(plan.id.as_bytes()))),
             crate::block_options::timeout(options.clone())
                 .map(|seconds| ("timeout", QueryValue::Number(seconds))),
         ];
         self.build(
             &mut head,
-            Some(stage.key),
+            Some(plan.key),
             &query,
             RequestedRange::Whole,
             now,
@@ -407,38 +417,88 @@ impl<'a> Blobs<'a> {
         encoded(head, Method::Put, content)
     }
 
-    /// Encodes an ordered native sequence and typed provider options.
-    /// Cloned iterators must yield identical values.
-    #[allow(clippy::too_many_arguments)]
-    pub fn encode_block_options<'r, 'o, P>(
+    /// Writes an Azure Put Block List into `buf`: the head, then the XML
+    /// body after it.
+    ///
+    /// `blocks` become the object in this order, each looked up where its
+    /// [`BlockSource`] says. The body is written into `buf` after the head,
+    /// so [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// borrows it; send both before reusing `buf`. `options` is as for
+    /// [`Blobs::encode_stage_block`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
+    /// if `blocks` holds more than 50,000 entries or an ID that fails the
+    /// checks on [`BlockRef::id`], or if an option does not apply to Put Block
+    /// List. Returns [`Error::Capacity`] with the bytes that the head and the
+    /// body need together, or call
+    /// [`layered::commit_blocks_requirements`](crate::layered::commit_blocks_requirements)
+    /// first.
+    pub fn encode_commit_blocks<'r, 'o>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
-        commit: &CommitBlocks<'_>,
-        parts: impl Iterator<Item = (P, BlockSource)> + Clone,
+        plan: &PhysicalCommitBlocks<'_>,
+        blocks: &[BlockRef<'_>],
+        options: impl Iterator<Item = BlockOption<'o>> + Clone,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        self.encode_commit_blocks_from_iter(
+            buf,
+            headers,
+            plan,
+            blocks.iter().map(|block| (block.id, block.source)),
+            options,
+            now,
+        )
+    }
+
+    /// [`Blobs::encode_commit_blocks`] over block references that are not in
+    /// one array.
+    ///
+    /// Use this when the references are produced rather than stored, such as
+    /// from an array in another language or from an ID derived per index, so
+    /// that no second array of references is built. The IDs themselves are
+    /// still copied into the body, as any encoding does.
+    ///
+    /// `blocks` is traversed twice: once to validate the IDs and size the
+    /// body, once to write it. Every traversal must yield the same items in
+    /// the same order, because the head states the body length that the first
+    /// traversal measured.
+    ///
+    /// # Errors
+    ///
+    /// As [`Blobs::encode_commit_blocks`].
+    pub fn encode_commit_blocks_from_iter<'r, 'o, I>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        plan: &PhysicalCommitBlocks<'_>,
+        blocks: impl Iterator<Item = (I, BlockSource)> + Clone,
         options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>>
     where
-        P: AsRef<str>,
+        I: AsRef<str>,
     {
         crate::block_options::validate(options.clone(), 2)?;
-        validate_block_key(commit.key)?;
-        validate_condition(commit.condition, commit.condition_value)?;
+        validate_block_key(plan.key)?;
+        validate_condition(plan.condition, plan.condition_value)?;
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
-        for (index, part) in parts.clone().enumerate() {
-            if index >= MAX_PARTS {
-                return Err(InvalidPlan::Parts.into());
+        for (index, (id, source)) in blocks.clone().enumerate() {
+            if index >= MAX_BLOCKS {
+                return Err(InvalidPlan::Blocks.into());
             }
-            validate_part_id(part.0.as_ref())?;
+            validate_block_id(id.as_ref())?;
             // At most 50,000 IDs of 88 bytes and tags of 11 bytes: < 6 MiB,
             // including the wrapper, so this fits usize on our 32-bit targets.
-            length += 5 + 2 * part.1.tag().len() + part.0.as_ref().len();
+            length += 5 + 2 * source.tag().len() + id.as_ref().len();
         }
         let mut head = HeadWriter::new(buf, headers);
         self.build(
             &mut head,
-            Some(commit.key),
+            Some(plan.key),
             &[
                 Some(("comp", QueryValue::Literal("blocklist"))),
                 crate::block_options::timeout(options.clone())
@@ -450,17 +510,17 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(length as u64).as_bytes())
         });
-        push_condition(&mut head, commit.condition, commit.condition_value);
+        push_condition(&mut head, plan.condition, plan.condition_value);
         crate::block_options::write(&mut head, options);
         let body = head.body(|out| {
             out.push(COMMIT_OPEN);
-            for part in parts {
+            for (id, source) in blocks {
                 out.push(b"<");
-                out.push(part.1.tag().as_bytes());
+                out.push(source.tag().as_bytes());
                 out.push(b">");
-                out.push(part.0.as_ref().as_bytes());
+                out.push(id.as_ref().as_bytes());
                 out.push(b"</");
-                out.push(part.1.tag().as_bytes());
+                out.push(source.tag().as_bytes());
                 out.push(b">");
             }
             out.push(COMMIT_CLOSE);
@@ -470,21 +530,27 @@ impl<'a> Blobs<'a> {
             .ok_or_else(|| capacity_error(capacity))
     }
 
-    /// Reads the complete block list, decoding IDs in place.
-    /// Entries borrow the body. On error, discard entries and fetch a new
-    /// body before retrying. Capacity reports the total number of blocks.
+    /// Reads a Get Block List body whole into `into`.
+    ///
+    /// Both sections are read in the order the service wrote them, and each
+    /// entry names its section in [`Block::state`]. IDs are decoded in place,
+    /// so the entries borrow `body`, and the body cannot be read again. On an
+    /// error nothing in `into` is meaningful; fetch the body again before
+    /// retrying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Capacity`] with the number of blocks the body holds if
+    /// `into` is shorter than that;
+    /// [`layered::max_blocks_in`](crate::layered::max_blocks_in) bounds it
+    /// from the body's length. Returns [`Error::Response`] if the body is not
+    /// a block list.
     pub fn fill_blocks<'b, E: From<Block<'b>>>(
         &self,
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::parts::fill_blocks(body, into)
-    }
-
-    /// An upper bound on the blocks accepted in a body of this byte length.
-    /// The smallest accepted block element occupies 43 bytes.
-    pub const fn max_blocks_in(len: usize) -> usize {
-        len / 43
+        crate::xml::azure_blocks::fill_blocks(body, into)
     }
 
     /// Reads the response head. A shape is needed only when a condition
@@ -492,22 +558,20 @@ impl<'a> Blobs<'a> {
     pub fn accept_stage_block_head<'h>(
         &self,
         head: ResponseHead<'h>,
-    ) -> Result<StageHeadOutcome<'h>> {
+    ) -> Result<StageBlockHeadOutcome<'h>> {
         match head.status {
-            201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
-            404 if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
+            201 => Ok(StageBlockHeadOutcome::Staged),
+            404 if head.error_code.is_none() => Ok(StageBlockHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
                 head.request_id,
             ))),
-            404 => Ok(StageHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(StageBlockHeadOutcome::NotFound { kind: named(&head) }),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(StageHeadOutcome::ServiceFailure(failure(
+            status if head.error_code.is_none() => Ok(StageBlockHeadOutcome::NeedErrorBody(
+                failure(status, None, head.request_id),
+            )),
+            status => Ok(StageBlockHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -521,11 +585,11 @@ impl<'a> Blobs<'a> {
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
-    ) -> StageHeadOutcome<'h> {
+    ) -> StageBlockHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
-            404 => StageHeadOutcome::NotFound { kind },
-            status => StageHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+            404 => StageBlockHeadOutcome::NotFound { kind },
+            status => StageBlockHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 
@@ -533,31 +597,27 @@ impl<'a> Blobs<'a> {
     /// changes the meaning of the response.
     pub fn accept_commit_blocks_head<'h>(
         &self,
-        shape: CommitShape,
+        shape: CommitBlocksShape,
         head: ResponseHead<'h>,
-    ) -> Result<CommitHeadOutcome<'h>> {
+    ) -> Result<CommitBlocksHeadOutcome<'h>> {
         match head.status {
-            201 => Ok(CommitHeadOutcome::Committed {
+            201 => Ok(CommitBlocksHeadOutcome::Committed {
                 meta: multipart_meta(head),
             }),
             412 if shape.condition != ConditionKind::None
                 && named(&head) == Some(ServiceErrorKind::Precondition) =>
             {
-                Ok(CommitHeadOutcome::PreconditionFailed)
+                Ok(CommitBlocksHeadOutcome::PreconditionFailed)
             }
-            404 if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(CommitHeadOutcome::NotFound { kind: named(&head) }),
+            404 if head.error_code.is_none() => Ok(CommitBlocksHeadOutcome::NeedErrorBody(
+                failure(404, None, head.request_id),
+            )),
+            404 => Ok(CommitBlocksHeadOutcome::NotFound { kind: named(&head) }),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(CommitHeadOutcome::ServiceFailure(failure(
+            status if head.error_code.is_none() => Ok(CommitBlocksHeadOutcome::NeedErrorBody(
+                failure(status, None, head.request_id),
+            )),
+            status => Ok(CommitBlocksHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -568,20 +628,20 @@ impl<'a> Blobs<'a> {
     /// Finishes a missing error code with the response body.
     pub fn accept_commit_blocks_error_body<'h>(
         &self,
-        shape: CommitShape,
+        shape: CommitBlocksShape,
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
-    ) -> CommitHeadOutcome<'h> {
+    ) -> CommitBlocksHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
             412 if shape.condition != ConditionKind::None
                 && kind == Some(ServiceErrorKind::Precondition) =>
             {
-                CommitHeadOutcome::PreconditionFailed
+                CommitBlocksHeadOutcome::PreconditionFailed
             }
-            404 => CommitHeadOutcome::NotFound { kind },
-            status => CommitHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+            404 => CommitBlocksHeadOutcome::NotFound { kind },
+            status => CommitBlocksHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 
@@ -590,24 +650,24 @@ impl<'a> Blobs<'a> {
     pub fn accept_list_blocks_head<'h>(
         &self,
         head: ResponseHead<'h>,
-    ) -> Result<ListPartsHeadOutcome<'h>> {
+    ) -> Result<ListBlocksHeadOutcome<'h>> {
         match head.status {
-            200 => Ok(ListPartsHeadOutcome::Parts {
+            200 => Ok(ListBlocksHeadOutcome::Blocks {
                 meta: multipart_meta(head),
                 expected_len: decimal_header(head.content_length)?,
             }),
 
-            404 if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(failure(
+            404 if head.error_code.is_none() => Ok(ListBlocksHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
                 head.request_id,
             ))),
-            404 => Ok(ListPartsHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(ListBlocksHeadOutcome::NotFound { kind: named(&head) }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(
+            status if head.error_code.is_none() => Ok(ListBlocksHeadOutcome::NeedErrorBody(
                 failure(status, None, head.request_id),
             )),
-            status => Ok(ListPartsHeadOutcome::ServiceFailure(failure(
+            status => Ok(ListBlocksHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -621,11 +681,11 @@ impl<'a> Blobs<'a> {
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
-    ) -> ListPartsHeadOutcome<'h> {
+    ) -> ListBlocksHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
-            404 => ListPartsHeadOutcome::NotFound { kind },
-            status => ListPartsHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+            404 => ListBlocksHeadOutcome::NotFound { kind },
+            status => ListBlocksHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
 
@@ -1182,7 +1242,7 @@ impl<'a> Blobs<'a> {
 const DELIMITER: &[u8] = b"/";
 
 const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
-const MAX_PARTS: usize = 50_000;
+const MAX_BLOCKS: usize = 50_000;
 const COMMIT_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
 const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
@@ -1201,7 +1261,9 @@ fn validate_block_key(key: &str) -> Result<()> {
     validate_key(key)
 }
 
-fn validate_part_id(id: &str) -> Result<()> {
+// The local half of the rules on `BlockRef::id`. Equal decoded lengths
+// within one blob, and whether a block exists, are the service's to check.
+pub(crate) fn validate_block_id(id: &str) -> Result<()> {
     let data = id.trim_end_matches('=');
     // Trimming returns a subslice, so its length cannot exceed id.len().
     let padding = id.len() - data.len();
@@ -1215,7 +1277,7 @@ fn validate_part_id(id: &str) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
     {
-        return Err(InvalidPlan::PartId.into());
+        return Err(InvalidPlan::BlockId.into());
     }
     Ok(())
 }
