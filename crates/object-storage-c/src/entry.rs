@@ -39,6 +39,35 @@ pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
     open(session).map_or_else(|error| status_of(&error), |_| Status::default())
 }
 
+/// Looks up Azure's corresponding rejection for a local validation failure.
+///
+/// `namespace` is a `borink_azure_namespace`. Unknown discriminants, other
+/// error kinds and unmapped reasons return a zero status and empty code.
+/// No request was sent; authentication or another fault could take precedence.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_azure_rejection_for(error: Status, namespace: u16) -> AzureRejection {
+    let namespace = match namespace {
+        0 => proto::AzureNamespace::Unknown,
+        1 => proto::AzureNamespace::Flat,
+        2 => proto::AzureNamespace::Hierarchical,
+        _ => return AzureRejection::default(),
+    };
+    let reason = proto::ErrorCode::from_discriminant(error.code)
+        .and_then(|code| proto::Error::from_parts(code, error.detail));
+    let Some(proto::Error::InvalidPlan(reason)) = reason else {
+        return AzureRejection::default();
+    };
+    reason
+        .azure_rejection(namespace)
+        .map_or_else(AzureRejection::default, |rejection| AzureRejection {
+            status: rejection.status,
+            code: Bytes {
+                ptr: rejection.code.as_ptr(),
+                len: rejection.code.len(),
+            },
+        })
+}
+
 /// Writes the request head of a read into `buf`.
 ///
 /// Pass an empty `condition_value` if `shape` carries no condition. Pass an
@@ -49,15 +78,21 @@ pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
 /// `session` and `shape` must each be null or point at one readable value.
 /// `key`, `condition_value` and `buf` must each address their stated length,
 /// and `buf` must be reached through nothing else during the call.
+/// Byte storage and header slots must be exclusive and disjoint from all
+/// inputs. Header slots need only be writable; this call initializes them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_get(
     session: *const Session,
     shape: *const GetShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: the header slots are writable, exclusive and disjoint.
+    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -71,10 +106,10 @@ pub unsafe extern "C" fn borink_encode_get(
     written(ready(session, shape, get_shape).and_then(|(blobs, shape)| {
         let get = PhysicalGet::from_shape(
             shape,
-            text(key, InvalidPlan::Key)?,
+            text(key, InvalidPlan::KeyNotUtf8)?,
             optional(condition_value),
         );
-        blobs.encode_get(buf, &get, &Timestamps::from_unix(unix_seconds))
+        blobs.encode_get(buf, headers, &get, &Timestamps::from_unix(unix_seconds))
     }))
 }
 
@@ -91,10 +126,14 @@ pub unsafe extern "C" fn borink_encode_put(
     shape: *const PutShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     content_len: u64,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: the header slots are writable, exclusive and disjoint.
+    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -108,14 +147,20 @@ pub unsafe extern "C" fn borink_encode_put(
     written(ready(session, shape, put_shape).and_then(|(blobs, shape)| {
         let put = PhysicalPut::from_shape(
             shape,
-            text(key, InvalidPlan::Key)?,
+            text(key, InvalidPlan::KeyNotUtf8)?,
             optional(condition_value),
         );
         // The content stays in your program. Only its length reaches the
         // head, so the request borrows no content and you send the bytes
         // yourself.
         let content = Payload::Streamed { len: content_len };
-        blobs.encode_put(buf, &put, content, &Timestamps::from_unix(unix_seconds))
+        blobs.encode_put(
+            buf,
+            headers,
+            &put,
+            content,
+            &Timestamps::from_unix(unix_seconds),
+        )
     }))
 }
 
@@ -130,9 +175,13 @@ pub unsafe extern "C" fn borink_encode_delete(
     shape: *const DeleteShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: the header slots are writable, exclusive and disjoint.
+    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -147,10 +196,10 @@ pub unsafe extern "C" fn borink_encode_delete(
         ready(session, shape, delete_shape).and_then(|(blobs, shape)| {
             let delete = PhysicalDelete::from_shape(
                 shape,
-                text(key, InvalidPlan::Key)?,
+                text(key, InvalidPlan::KeyNotUtf8)?,
                 optional(condition_value),
             );
-            blobs.encode_delete(buf, &delete, &Timestamps::from_unix(unix_seconds))
+            blobs.encode_delete(buf, headers, &delete, &Timestamps::from_unix(unix_seconds))
         }),
     )
 }
@@ -351,15 +400,21 @@ pub unsafe extern "C" fn borink_finish_delete_error_body(
 /// `session` and `shape` must each be null or point at one readable value.
 /// `prefix`, `marker` and `buf` must each address their stated length, and
 /// `buf` must be reached through nothing else during the call.
+/// Byte storage and header slots must be exclusive and disjoint from all
+/// inputs. Header slots need only be writable; this call initializes them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_list(
     session: *const Session,
     shape: *const ListShape,
     prefix: Bytes,
     marker: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: the header slots are writable, exclusive and disjoint.
+    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, prefix, marker, buf) = unsafe {
         (
@@ -379,7 +434,7 @@ pub unsafe extern "C" fn borink_encode_list(
                     .map(|marker| text(marker, InvalidPlan::Marker))
                     .transpose()?,
             );
-            blobs.encode_list(buf, &list, &Timestamps::from_unix(unix_seconds))
+            blobs.encode_list(buf, headers, &list, &Timestamps::from_unix(unix_seconds))
         }),
     )
 }
@@ -526,6 +581,7 @@ pub unsafe extern "C" fn borink_fill_listing_with(
             ptr::session(session),
             ptr::slice_mut(body),
             ptr::items_mut(into, rows),
+            // width == 0 gives zero; otherwise rows <= value_capacity / width.
             ptr::items_mut(values, rows * width),
         )
     };

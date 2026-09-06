@@ -241,6 +241,7 @@ void reads_the_values_a_head_lent_back() {
         {borink::as_bytes("ETag"), borink::as_bytes("\"tag\"")},
         {borink::as_bytes("Content-Range"), borink::as_bytes("bytes 2-5/10")},
         {borink::as_bytes("Content-Length"), borink::as_bytes("4")},
+        {borink::as_bytes("Content-Type"), borink::as_bytes("text/plain; charset=utf-8")},
     };
 
     const borink::Outcome outcome =
@@ -251,6 +252,7 @@ void reads_the_values_a_head_lent_back() {
     CHECK(outcome.body.object_size.value == 10);
     CHECK(borink::text_of(outcome.meta.e_tag) == "\"tag\"");
     CHECK(borink::bytes_of(outcome.meta.e_tag).size() == 5);
+    CHECK(borink::text_of(outcome.meta.content_type) == "text/plain; charset=utf-8");
 
     // A value the head did not carry reads as empty.
     CHECK(borink::bytes_of(outcome.meta.content_encoding).empty());

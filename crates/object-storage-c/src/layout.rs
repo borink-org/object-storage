@@ -9,6 +9,22 @@
 use crate::{ptr::items, types::*};
 
 use borink_object_storage_proto as proto;
+use core::mem::offset_of;
+
+// The C boundary casts these arrays without copying their descriptors.
+const _: () = {
+    assert!(AzureNamespace::Unknown as u16 == proto::AzureNamespace::Unknown as u16);
+    assert!(AzureNamespace::Flat as u16 == proto::AzureNamespace::Flat as u16);
+    assert!(AzureNamespace::Hierarchical as u16 == proto::AzureNamespace::Hierarchical as u16);
+    assert!(size_of::<Span>() == size_of::<proto::Span>());
+    assert!(align_of::<Span>() == align_of::<proto::Span>());
+    assert!(offset_of!(Span, start) == offset_of!(proto::Span, start));
+    assert!(offset_of!(Span, len) == offset_of!(proto::Span, len));
+    assert!(size_of::<RequestHeader>() == size_of::<proto::HeaderSpan>());
+    assert!(align_of::<RequestHeader>() == align_of::<proto::HeaderSpan>());
+    assert!(offset_of!(RequestHeader, name) == offset_of!(proto::HeaderSpan, name));
+    assert!(offset_of!(RequestHeader, value) == offset_of!(proto::HeaderSpan, value));
+};
 
 /// What a C compiler computes for the structs that cross this boundary.
 ///
@@ -18,6 +34,16 @@ use borink_object_storage_proto as proto;
 #[derive(Clone, Copy)]
 #[allow(missing_docs, reason = "each field is named by what it measures")]
 pub struct Layout {
+    pub sizeof_azure_rejection: usize,
+    pub alignof_azure_rejection: usize,
+    pub offsetof_azure_rejection_status: usize,
+    pub offsetof_azure_rejection_code: usize,
+    pub sizeof_request_buffer: usize,
+    pub alignof_request_buffer: usize,
+    pub offsetof_request_buffer_bytes: usize,
+    pub offsetof_request_buffer_headers: usize,
+    pub offsetof_request_buffer_header_capacity: usize,
+    pub offsetof_request_head_required_headers: usize,
     pub sizeof_bytes: usize,
     pub alignof_bytes: usize,
     pub offsetof_bytes_len: usize,
@@ -62,6 +88,7 @@ pub struct Layout {
     pub offsetof_object_meta_last_modified: usize,
     pub offsetof_object_meta_version: usize,
     pub offsetof_object_meta_content_encoding: usize,
+    pub offsetof_object_meta_content_type: usize,
     pub sizeof_body_window: usize,
     pub offsetof_body_window_expected_len: usize,
     pub offsetof_body_window_object_size: usize,
@@ -86,6 +113,7 @@ pub struct Layout {
     pub offsetof_list_entry_size: usize,
     pub offsetof_list_entry_e_tag: usize,
     pub offsetof_list_entry_last_modified: usize,
+    pub offsetof_list_entry_content_type: usize,
     pub offsetof_list_entry_raw: usize,
     pub sizeof_properties: usize,
     pub alignof_properties: usize,
@@ -105,8 +133,17 @@ pub struct Layout {
 
 /// The layout that this crate compiled to.
 pub(crate) fn layout() -> Layout {
-    use core::mem::offset_of;
     Layout {
+        sizeof_azure_rejection: size_of::<AzureRejection>(),
+        alignof_azure_rejection: align_of::<AzureRejection>(),
+        offsetof_azure_rejection_status: offset_of!(AzureRejection, status),
+        offsetof_azure_rejection_code: offset_of!(AzureRejection, code),
+        sizeof_request_buffer: size_of::<RequestBuffer>(),
+        alignof_request_buffer: align_of::<RequestBuffer>(),
+        offsetof_request_buffer_bytes: offset_of!(RequestBuffer, bytes),
+        offsetof_request_buffer_headers: offset_of!(RequestBuffer, headers),
+        offsetof_request_buffer_header_capacity: offset_of!(RequestBuffer, header_capacity),
+        offsetof_request_head_required_headers: offset_of!(RequestHead, required_headers),
         sizeof_bytes: size_of::<Bytes>(),
         alignof_bytes: align_of::<Bytes>(),
         offsetof_bytes_len: offset_of!(Bytes, len),
@@ -151,6 +188,7 @@ pub(crate) fn layout() -> Layout {
         offsetof_object_meta_last_modified: offset_of!(ObjectMeta, last_modified),
         offsetof_object_meta_version: offset_of!(ObjectMeta, version),
         offsetof_object_meta_content_encoding: offset_of!(ObjectMeta, content_encoding),
+        offsetof_object_meta_content_type: offset_of!(ObjectMeta, content_type),
         sizeof_body_window: size_of::<BodyWindow>(),
         offsetof_body_window_expected_len: offset_of!(BodyWindow, expected_len),
         offsetof_body_window_object_size: offset_of!(BodyWindow, object_size),
@@ -175,6 +213,7 @@ pub(crate) fn layout() -> Layout {
         offsetof_list_entry_size: offset_of!(ListEntry, size),
         offsetof_list_entry_e_tag: offset_of!(ListEntry, e_tag),
         offsetof_list_entry_last_modified: offset_of!(ListEntry, last_modified),
+        offsetof_list_entry_content_type: offset_of!(ListEntry, content_type),
         offsetof_list_entry_raw: offset_of!(ListEntry, raw),
         sizeof_properties: size_of::<Properties>(),
         alignof_properties: align_of::<Properties>(),
@@ -228,8 +267,6 @@ pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize 
 // Every enum above crosses as a number. These pin the two lists to each other:
 // a value renumbered on either side stops this build.
 const _: () = {
-    assert!(BORINK_MAX_HEADERS == proto::MAX_HEADERS);
-
     assert!(ErrorCode::InvalidEndpoint as u16 == proto::ErrorCode::InvalidEndpoint as u16);
     assert!(ErrorCode::InvalidContainer as u16 == proto::ErrorCode::InvalidContainer as u16);
     assert!(ErrorCode::InvalidToken as u16 == proto::ErrorCode::InvalidToken as u16);

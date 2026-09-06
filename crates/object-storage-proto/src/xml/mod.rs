@@ -138,7 +138,7 @@ pub(crate) fn next_property<'b>(
 }
 
 // The elements whose text reading the page decodes in place.
-const DECODED: [&[u8]; 3] = [b"Name", b"Etag", b"Last-Modified"];
+const DECODED: [&[u8]; 4] = [b"Name", b"Etag", b"Last-Modified", b"Content-Type"];
 
 // Returns the decoded text of an element that reading the page decoded in
 // place, and the bytes after its close tag. Returns `None` if this element

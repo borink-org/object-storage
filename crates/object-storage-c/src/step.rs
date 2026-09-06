@@ -118,14 +118,12 @@ pub(crate) fn written(request: proto::Result<WireRequest<'_>>) -> RequestHead {
         method: request.method() as u16,
         url: span(request.url_span()),
         header_count: request.header_spans().len(),
+        required_headers: request.header_spans().len(),
+        headers: request.header_descriptors().as_ptr().cast(),
         ..Default::default()
     };
     head.required = head.url.start + head.url.len;
-    for (slot, (name, value)) in head.headers.iter_mut().zip(request.header_spans()) {
-        *slot = RequestHeader {
-            name: span(name),
-            value: span(value),
-        };
+    for (_, value) in request.header_spans() {
         head.required = head.required.max(value.start + value.len);
     }
     head
@@ -136,6 +134,9 @@ fn refused(error: &Error) -> RequestHead {
         status: status_of(error),
         // A capacity error carries the exact size. No other error has one.
         required: error.capacity().map_or(0, |capacity| capacity.required),
+        required_headers: error
+            .capacity()
+            .map_or(0, |capacity| capacity.required_headers),
         method: Method::Get as u16,
         ..Default::default()
     }

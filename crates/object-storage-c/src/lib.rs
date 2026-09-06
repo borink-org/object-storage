@@ -67,15 +67,17 @@
 //! # Sizing the buffer
 //!
 //! `borink_encode_get` refuses a buffer that is too small. It reports
-//! `Capacity` in `status`, and the number of bytes it needs in `required`.
-//! Call it with an empty buffer to learn that number, then size one buffer per
-//! session and reuse it.
+//! `Capacity` in `status`, with byte and descriptor counts in `required` and
+//! `required_headers`. Both storage regions are caller-owned and reusable.
 //!
 //! # Where each value lives
 //!
-//! The request head is in your buffer, so `borink_request_head` names its
-//! parts by offset rather than by pointer. Resizing the buffer moves the
-//! bytes; the offsets still address them.
+//! The URL and header bytes are in your byte buffer, addressed by offsets.
+//! Resizing that buffer moves the bytes; the offsets still address them.
+//! `borink_request_head.headers` points at the caller's header-slot array,
+//! which must stay alive and unmoved while the head is used. Only
+//! `header_count` entries are meaningful, and the pointer is meaningless
+//! when the supplied slot capacity was zero or encoding failed.
 //!
 //! The response head stays wherever your HTTP library put it. A
 //! `borink_header_ref` points at those bytes, and every borrowed field of the

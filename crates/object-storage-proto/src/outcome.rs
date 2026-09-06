@@ -23,6 +23,8 @@ pub struct ObjectMeta<'h> {
     /// This crate does not decode the body. It returns this value so that you
     /// know how the bytes are encoded.
     pub content_encoding: Option<&'h [u8]>,
+    /// The value of the `Content-Type` header, without an inferred default.
+    pub content_type: Option<&'h [u8]>,
 }
 
 /// Where the bytes of the response body belong in the object.

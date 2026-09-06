@@ -12,13 +12,33 @@
 #include <stdint.h>
 
 /**
- * The most headers that one request head carries.
- *
- * This is the core crate's own bound, and the array in `borink_request_head`
- * has exactly this many slots. A compile-time assertion stops the build if
- * the core crate raises it.
+ * The account namespace used to interpret a local rejection.
  */
-#define BORINK_MAX_HEADERS 6
+enum borink_azure_namespace
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * The account's namespace is not known.
+     */
+    BORINK_AZURE_NAMESPACE_UNKNOWN = 0,
+    /**
+     * A flat-namespace account.
+     */
+    BORINK_AZURE_NAMESPACE_FLAT = 1,
+    /**
+     * A hierarchical-namespace account.
+     */
+    BORINK_AZURE_NAMESPACE_HIERARCHICAL = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_azure_namespace borink_azure_namespace;
+#else
+typedef uint16_t borink_azure_namespace;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 /**
  * Which kind of failure a `borink_status` carries.
@@ -51,7 +71,8 @@ enum borink_error_code
      */
     BORINK_ERROR_CODE_INVALID_PLAN = 4,
     /**
-     * The buffer is too small. Grow it to `required` and call again.
+     * Output storage is too small. Grow to the reported byte and slot
+     * requirements and call again.
      */
     BORINK_ERROR_CODE_CAPACITY = 5,
     /**
@@ -693,6 +714,23 @@ typedef struct borink_session {
 } borink_session;
 
 /**
+ * A corresponding Azure rejection, not a received response.
+ *
+ * A zero status and empty code mean no mapping is known. The code points
+ * at static memory and does not need to be freed.
+ */
+typedef struct borink_azure_rejection {
+    /**
+     * The corresponding HTTP status, or zero if unknown.
+     */
+    uint16_t status;
+    /**
+     * The service error code, or empty if unknown.
+     */
+    struct borink_bytes code;
+} borink_azure_rejection;
+
+/**
  * A range of bytes, as an offset from the start of your request buffer.
  */
 typedef struct borink_span {
@@ -721,7 +759,7 @@ typedef struct borink_request_header {
 } borink_request_header;
 
 /**
- * A request head, as ranges of the buffer that holds it.
+ * A request head borrowing the caller's bytes and header slots.
  */
 typedef struct borink_request_head {
     /**
@@ -746,13 +784,21 @@ typedef struct borink_request_head {
      */
     struct borink_span url;
     /**
-     * How many of `headers` this request uses.
+     * The number of meaningful entries in `headers`; zero on failure.
      */
     size_t header_count;
     /**
-     * The headers, in the order that the core crate wrote them.
+     * Points at the slots passed in `RequestBuffer::headers` on success.
+     *
+     * Only `header_count` entries are meaningful. Keep that array alive and
+     * unmoved until the request has been consumed. The pointer is meaningless
+     * when the supplied capacity was zero or encoding failed.
      */
-    struct borink_request_header headers[BORINK_MAX_HEADERS];
+    const struct borink_request_header *headers;
+    /**
+     * Header slots required, including on capacity failure.
+     */
+    size_t required_headers;
 } borink_request_head;
 
 /**
@@ -811,6 +857,29 @@ typedef struct borink_bytes_mut {
      */
     size_t len;
 } borink_bytes_mut;
+
+/**
+ * Caller-owned storage for an encoded request.
+ *
+ * Both regions must be disjoint from all input strings and records.
+ */
+typedef struct borink_request_buffer {
+    /**
+     * Writable byte storage.
+     */
+    struct borink_bytes_mut bytes;
+    /**
+     * Writable descriptor slots, disjoint from the byte storage.
+     *
+     * The encoder initializes these slots; uninitialized storage is allowed.
+     * The pointer is ignored when `header_capacity` is zero.
+     */
+    struct borink_request_header *headers;
+    /**
+     * Number of descriptor slots.
+     */
+    size_t header_capacity;
+} borink_request_buffer;
 
 /**
  * The part of a write plan that holds no borrows.
@@ -902,6 +971,10 @@ typedef struct borink_object_meta {
      * The value of the `Content-Encoding` header.
      */
     struct borink_maybe_bytes content_encoding;
+    /**
+     * Borrowed `Content-Type` header value; absent when not supplied.
+     */
+    struct borink_maybe_bytes content_type;
 } borink_object_meta;
 
 /**
@@ -1098,7 +1171,7 @@ typedef struct borink_fill {
  *
  * # Lifetime
  *
- * `key`, `e_tag` and `last_modified` point into the body that
+ * `key`, `e_tag`, `last_modified` and `content_type` point into the body that
  * `borink_fill_listing` read. They are valid until you release or reuse that
  * buffer, or until the next call that reads it.
  */
@@ -1129,6 +1202,10 @@ typedef struct borink_list_entry {
      * that the `Last-Modified` header uses.
      */
     struct borink_maybe_bytes last_modified;
+    /**
+     * Borrowed media type, decoded from the listing when present.
+     */
+    struct borink_maybe_bytes content_type;
     /**
      * This entry as the service wrote it, from its opening tag to its closing
      * one.
@@ -1204,6 +1281,16 @@ typedef struct borink_property {
  * gives, and pass it to `borink_layout_disagrees`.
  */
 typedef struct borink_layout {
+    size_t sizeof_azure_rejection;
+    size_t alignof_azure_rejection;
+    size_t offsetof_azure_rejection_status;
+    size_t offsetof_azure_rejection_code;
+    size_t sizeof_request_buffer;
+    size_t alignof_request_buffer;
+    size_t offsetof_request_buffer_bytes;
+    size_t offsetof_request_buffer_headers;
+    size_t offsetof_request_buffer_header_capacity;
+    size_t offsetof_request_head_required_headers;
     size_t sizeof_bytes;
     size_t alignof_bytes;
     size_t offsetof_bytes_len;
@@ -1248,6 +1335,7 @@ typedef struct borink_layout {
     size_t offsetof_object_meta_last_modified;
     size_t offsetof_object_meta_version;
     size_t offsetof_object_meta_content_encoding;
+    size_t offsetof_object_meta_content_type;
     size_t sizeof_body_window;
     size_t offsetof_body_window_expected_len;
     size_t offsetof_body_window_object_size;
@@ -1272,6 +1360,7 @@ typedef struct borink_layout {
     size_t offsetof_list_entry_size;
     size_t offsetof_list_entry_e_tag;
     size_t offsetof_list_entry_last_modified;
+    size_t offsetof_list_entry_content_type;
     size_t offsetof_list_entry_raw;
     size_t sizeof_properties;
     size_t alignof_properties;
@@ -1307,6 +1396,16 @@ extern "C" {
 struct borink_status borink_validate(const struct borink_session *session);
 
 /**
+ * Looks up Azure's corresponding rejection for a local validation failure.
+ *
+ * `namespace` is a `borink_azure_namespace`. Unknown discriminants, other
+ * error kinds and unmapped reasons return a zero status and empty code.
+ * No request was sent; authentication or another fault could take precedence.
+ */
+struct borink_azure_rejection borink_azure_rejection_for(struct borink_status error,
+                                                         uint16_t namespace_);
+
+/**
  * Writes the request head of a read into `buf`.
  *
  * Pass an empty `condition_value` if `shape` carries no condition. Pass an
@@ -1317,12 +1416,14 @@ struct borink_status borink_validate(const struct borink_session *session);
  * `session` and `shape` must each be null or point at one readable value.
  * `key`, `condition_value` and `buf` must each address their stated length,
  * and `buf` must be reached through nothing else during the call.
+ * Byte storage and header slots must be exclusive and disjoint from all
+ * inputs. Header slots need only be writable; this call initializes them.
  */
 struct borink_request_head borink_encode_get(const struct borink_session *session,
                                              const struct borink_get_shape *shape,
                                              struct borink_bytes key,
                                              struct borink_bytes condition_value,
-                                             struct borink_bytes_mut buf,
+                                             struct borink_request_buffer buf,
                                              uint64_t unix_seconds);
 
 /**
@@ -1338,7 +1439,7 @@ struct borink_request_head borink_encode_put(const struct borink_session *sessio
                                              const struct borink_put_shape *shape,
                                              struct borink_bytes key,
                                              struct borink_bytes condition_value,
-                                             struct borink_bytes_mut buf,
+                                             struct borink_request_buffer buf,
                                              uint64_t content_len,
                                              uint64_t unix_seconds);
 
@@ -1353,7 +1454,7 @@ struct borink_request_head borink_encode_delete(const struct borink_session *ses
                                                 const struct borink_delete_shape *shape,
                                                 struct borink_bytes key,
                                                 struct borink_bytes condition_value,
-                                                struct borink_bytes_mut buf,
+                                                struct borink_request_buffer buf,
                                                 uint64_t unix_seconds);
 
 /**
@@ -1475,12 +1576,14 @@ struct borink_outcome borink_finish_delete_error_body(const struct borink_sessio
  * `session` and `shape` must each be null or point at one readable value.
  * `prefix`, `marker` and `buf` must each address their stated length, and
  * `buf` must be reached through nothing else during the call.
+ * Byte storage and header slots must be exclusive and disjoint from all
+ * inputs. Header slots need only be writable; this call initializes them.
  */
 struct borink_request_head borink_encode_list(const struct borink_session *session,
                                               const struct borink_list_shape *shape,
                                               struct borink_bytes prefix,
                                               struct borink_bytes marker,
-                                              struct borink_bytes_mut buf,
+                                              struct borink_request_buffer buf,
                                               uint64_t unix_seconds);
 
 /**

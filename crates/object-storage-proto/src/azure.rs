@@ -1,8 +1,8 @@
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
-    BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
-    ListEntry, ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    BodyWindow, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
+    Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
+    ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
     PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
     RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
@@ -77,6 +77,58 @@ impl core::fmt::Debug for Blobs<'_> {
     }
 }
 
+/// The account namespace used to interpret a local rejection.
+///
+/// This does not change request validation or discover account capabilities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u16)]
+pub enum AzureNamespace {
+    /// The account's namespace is not known.
+    #[default]
+    Unknown = 0,
+    /// A flat-namespace account.
+    Flat = 1,
+    /// A hierarchical-namespace account.
+    Hierarchical = 2,
+}
+
+/// Azure's corresponding rejection for one local validation failure.
+///
+/// No request was sent. Other failures, such as authentication, may take
+/// precedence if the request is sent. This is not a received response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AzureRejection {
+    /// The corresponding HTTP status.
+    pub status: u16,
+    /// The service error code, stored in static memory.
+    pub code: &'static str,
+}
+
+impl InvalidPlan {
+    /// Returns the known Azure rejection corresponding to this reason.
+    ///
+    /// Returns `None` when no mapping is established for the namespace,
+    /// including names or ranges Azure may accept with unwanted behavior.
+    /// The local reason remains authoritative; this predicts neither error
+    /// precedence nor the outcome of a request containing other faults.
+    ///
+    /// ```
+    /// use borink_object_storage_proto::{AzureNamespace, InvalidPlan};
+    /// let reason = InvalidPlan::KeyTooLong;
+    /// let azure = reason.azure_rejection(AzureNamespace::Flat).unwrap();
+    /// assert_eq!((azure.status, azure.code), (400, "OutOfRangeInput"));
+    /// assert_eq!(reason.azure_rejection(AzureNamespace::Hierarchical), None);
+    /// ```
+    pub const fn azure_rejection(self, namespace: AzureNamespace) -> Option<AzureRejection> {
+        let code = match (self, namespace) {
+            (Self::MaxResults, _) => "OutOfRangeQueryParameterValue",
+            (Self::KeyTooLong, AzureNamespace::Flat) => "OutOfRangeInput",
+            _ => return None,
+        };
+        Some(AzureRejection { status: 400, code })
+    }
+}
+
 impl<'a> Blobs<'a> {
     /// Creates a client from a container and a bearer token.
     ///
@@ -94,7 +146,8 @@ impl<'a> Blobs<'a> {
     /// Writes the request head for `get` into `buf`.
     ///
     /// This method allocates nothing. It writes the URL and the header values
-    /// into `buf`, and returns a [`WireRequest`] that borrows them.
+    /// into `buf`, records their spans in `headers`, and returns a
+    /// [`WireRequest`] that borrows both buffers.
     ///
     /// # Errors
     ///
@@ -102,26 +155,25 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
-    /// method again, or call
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or call
     /// [`layered::get_requirements`](crate::layered::get_requirements) first.
     pub fn encode_get<'r>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
         get: &PhysicalGet<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_get(get)?;
-        let available = buf.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(get.key), &[], get.range, now);
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
             GetKind::Metadata => Method::Head,
         };
-        encoded(head, available, method, Payload::Slice(&[]))
+        encoded(head, method, Payload::Slice(&[]))
     }
 
     /// Writes the request head for `put` into `buf`.
@@ -138,21 +190,20 @@ impl<'a> Blobs<'a> {
     /// validates the plan before it writes any byte, so it never reports an
     /// invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
-    /// method again, or call
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or call
     /// [`layered::put_requirements`](crate::layered::put_requirements) first.
     pub fn encode_put<'r>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
         put: &PhysicalPut<'_>,
         content: Payload<'r>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content.len())?;
-        let available = buf.len();
         let length = content.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
         head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
@@ -161,7 +212,7 @@ impl<'a> Blobs<'a> {
             out.push(U64Decimal::new(length).as_bytes());
         });
         push_condition(&mut head, put.condition, put.condition_value);
-        encoded(head, available, Method::Put, content)
+        encoded(head, Method::Put, content)
     }
 
     // The parts that every request head carries, in the order that they are
@@ -308,26 +359,25 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
-    /// method again, or call
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or call
     /// [`layered::delete_requirements`](crate::layered::delete_requirements)
     /// first.
     pub fn encode_delete<'r>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
         delete: &PhysicalDelete<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete)?;
-        let available = buf.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
             head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
         }
         push_condition(&mut head, delete.condition, delete.condition_value);
-        encoded(head, available, Method::Delete, Payload::Slice(&[]))
+        encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
     /// Reads the response head of a removal and reports what Azure did.
@@ -417,6 +467,7 @@ impl<'a> Blobs<'a> {
                     last_modified: head.last_modified,
                     version: head.version,
                     content_encoding: head.content_encoding,
+                    content_type: head.content_type,
                 },
             }),
             // Nothing in an unconditional write explains a failed condition.
@@ -470,19 +521,18 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
-    /// method again, or call
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or call
     /// [`layered::list_requirements`](crate::layered::list_requirements)
     /// first.
     pub fn encode_list<'r>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
         list: &PhysicalList<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list)?;
-        let available = buf.len();
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
         let query = [
@@ -498,9 +548,9 @@ impl<'a> Blobs<'a> {
                 .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
         ];
 
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, None, &query, RequestedRange::Whole, now);
-        encoded(head, available, Method::Get, Payload::Slice(&[]))
+        encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
     /// Reads the response head of a listing and reports what Azure did.
@@ -565,6 +615,10 @@ impl<'a> Blobs<'a> {
     /// The entries are written as [`ListEntry`], or as any type built from
     /// one, so a binding fills its own array directly.
     ///
+    /// For fields not carried by `ListEntry`, use [`ListEntry::property`] or
+    /// [`Self::fill_listing_with`], selecting [`BlobProperty`](crate::BlobProperty)
+    /// values such as `VersionId`, `IsCurrentVersion` and `Snapshot`.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Capacity`] if the page holds more entries than the
@@ -596,6 +650,23 @@ impl<'a> Blobs<'a> {
     ///
     /// Reading the page costs the same whatever the set holds, and the same
     /// as reading it without one.
+    ///
+    /// ```
+    /// # use borink_object_storage_proto::{
+    /// #     Blobs, ListEntry, PropertySet, BlobProperty, Result,
+    /// # };
+    /// # fn read(blobs: &Blobs<'_>, body: &mut [u8]) -> Result<()> {
+    /// let wanted = PropertySet::of(&[
+    ///     BlobProperty::VersionId, BlobProperty::IsCurrentVersion,
+    /// ]);
+    /// let mut entries = [(ListEntry::default(), None, None); 100];
+    /// blobs.fill_listing_with(body, &mut entries, wanted, |entry, values| {
+    ///     (entry, values.get(BlobProperty::VersionId),
+    ///         values.get(BlobProperty::IsCurrentVersion))
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn fill_listing_with<'b, E>(
         &self,
         body: &'b mut [u8],
@@ -683,6 +754,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
         last_modified: head.last_modified,
         version: head.version,
         content_encoding: head.content_encoding,
+        content_type: head.content_type,
     };
     if head.status == 200 {
         // An unranged plan reads from byte zero, and Azure states the whole
@@ -866,18 +938,52 @@ fn write_range(out: &mut Writer<'_>, range: RequestedRange) {
 }
 
 // The written head, or the exact number of bytes that it needed.
+fn capacity_error(capacity: crate::CapacityError) -> Error {
+    // A slice's byte size must fit isize, including descriptor arrays on 32-bit.
+    // HeaderSpan is nonzero-sized; divide before comparing to avoid overflow.
+    let max_headers = isize::MAX as usize / core::mem::size_of::<HeaderSpan>();
+    if capacity.required > isize::MAX as usize || capacity.required_headers > max_headers {
+        InvalidPlan::RequestTooLarge.into()
+    } else {
+        Error::Capacity(capacity)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_request_larger_than_a_slice_is_not_a_recoverable_capacity_error() {
+    let capacity = crate::CapacityError {
+        required: isize::MAX as usize + 1,
+        ..crate::CapacityError::default()
+    };
+    assert_eq!(
+        capacity_error(capacity),
+        InvalidPlan::RequestTooLarge.into()
+    );
+    let max_headers = isize::MAX as usize / core::mem::size_of::<HeaderSpan>();
+    let capacity = crate::CapacityError {
+        required_headers: max_headers,
+        ..crate::CapacityError::default()
+    };
+    assert_eq!(capacity_error(capacity), Error::Capacity(capacity));
+    let capacity = crate::CapacityError {
+        required_headers: max_headers + 1,
+        ..capacity
+    };
+    assert_eq!(
+        capacity_error(capacity),
+        InvalidPlan::RequestTooLarge.into()
+    );
+}
+
 fn encoded<'r>(
     head: HeadWriter<'r>,
-    available: usize,
     method: Method,
     payload: Payload<'r>,
 ) -> Result<WireRequest<'r>> {
-    let required = head.position();
+    let capacity = head.capacity();
     head.finish(method, payload)
-        .ok_or(Error::Capacity(CapacityError {
-            required,
-            available,
-        }))
+        .ok_or_else(|| capacity_error(capacity))
 }
 
 fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
@@ -903,25 +1009,27 @@ fn name_units(value: &str) -> usize {
     value.chars().map(char::len_utf16).sum()
 }
 
-// Whether a key names one object and goes on naming it. Each rule here is a
-// name that would otherwise be stored, silently, under a name the caller did
-// not ask for.
-fn addressable(key: &str) -> bool {
-    if key.is_empty() || name_units(key) > MAX_BLOB_NAME_UNITS {
-        return false;
+// Reject unsupported names before encoding, without losing the reason.
+fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(InvalidPlan::EmptyKey.into());
+    }
+    if name_units(key) > MAX_BLOB_NAME_UNITS {
+        return Err(InvalidPlan::KeyTooLong.into());
     }
     // Azure refuses an ASCII control character in a name, with 400. Measured
     // for U+0001, U+000B, U+000C, U+000E and U+007F. Testing the bytes is
     // testing the characters: every byte of a character outside ASCII is 0x80
     // or above, and none of those is an ASCII control.
     if key.bytes().any(|byte| byte.is_ascii_control()) {
-        return false;
+        return Err(InvalidPlan::KeyControlCharacter.into());
     }
     // Azure takes a name of 255 `/`-delimited segments and refuses 256,
     // whatever the 254 in its documentation says. Measured by bisection; see
     // the live suite.
+    // At most one segment per byte plus one; str lengths fit isize.
     if key.matches('/').count() + 1 > MAX_BLOB_NAME_SEGMENTS {
-        return false;
+        return Err(InvalidPlan::KeyTooManySegments.into());
     }
     // Azure drops a dot from the end of every segment of a name: `dot.` is
     // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
@@ -931,13 +1039,14 @@ fn addressable(key: &str) -> bool {
     // and `..` out of the URL before it sends it, as the standard for URLs
     // requires, so those would name another object entirely; measured, as
     // `dots/../up` wrote `up`.
-    !key.split('/').any(|segment| segment.ends_with('.'))
+    if key.split('/').any(|segment| segment.ends_with('.')) {
+        return Err(InvalidPlan::KeyWouldBeNormalized.into());
+    }
+    Ok(())
 }
 
 fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
-    if !addressable(get.key) {
-        return Err(InvalidPlan::Key.into());
-    }
+    validate_key(get.key)?;
     match get.range {
         RequestedRange::Bounded { start, end } if start >= end => {
             return Err(InvalidPlan::Range.into());
@@ -971,9 +1080,7 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
 fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
-    if !addressable(put.key) {
-        return Err(InvalidPlan::Key.into());
-    }
+    validate_key(put.key)?;
     if len > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
@@ -984,7 +1091,7 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     // A prefix is the start of a key, so it is bounded like one. An empty
     // prefix lists the whole container and is valid.
     // A prefix is the start of a key, so it is bounded like one. The rest of
-    // `addressable` does not apply: a prefix is written into the query, where
+    // `validate_key` does not apply: a prefix is written into the query, where
     // nothing resolves a `..` and nothing drops a trailing dot, and `dir.` is
     // an honest prefix of `dir.txt`.
     if name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
@@ -1000,9 +1107,7 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
 }
 
 fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {
-    if !addressable(delete.key) {
-        return Err(InvalidPlan::Key.into());
-    }
+    validate_key(delete.key)?;
     validate_condition(delete.condition, delete.condition_value)
 }
 

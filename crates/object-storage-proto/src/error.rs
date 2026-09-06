@@ -5,28 +5,27 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// The exact capacity that your buffer needs.
 ///
-/// For an encoding method the two counts are bytes of the request buffer.
-/// Grow the buffer to `required` bytes and call the same method again. To
-/// learn the requirement before the first call, use
+/// For encoding, grow the byte buffer to `required` and the descriptor array
+/// to `required_headers`, then retry. To size both before the first call, use
 /// [`layered::get_requirements`](crate::layered::get_requirements).
 ///
-/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing) the two counts are
-/// entries of the array, and `required` is the number that the page holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing), `required` counts
+/// entries, not bytes, and `required_headers` is zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapacityError {
-    /// The smallest buffer that the call accepts, in bytes.
+    /// Required bytes for encoding, or entries for a listing fill.
     pub required: usize,
-    /// The size of the buffer that you supplied, in bytes.
-    pub available: usize,
+    /// Header slots required by an encoder; zero for a body fill.
+    pub required_headers: usize,
 }
 
 impl fmt::Display for CapacityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the buffer needs {} but has {}",
-            self.required, self.available
-        )
+        write!(f, "the buffer needs {}", self.required)?;
+        if self.required_headers != 0 {
+            write!(f, "; headers need {}", self.required_headers)?;
+        }
+        Ok(())
     }
 }
 
@@ -40,8 +39,8 @@ impl core::error::Error for CapacityError {}
 #[non_exhaustive]
 #[repr(u16)]
 pub enum InvalidPlan {
-    /// The object key is empty, or it is longer than the service allows.
-    Key = 1,
+    /// The object key is empty.
+    EmptyKey = 1,
     /// A bounded range is empty, or its end is before its start.
     Range = 2,
     /// The service does not accept this form of range.
@@ -62,8 +61,8 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    // 8, 9 and 13 name the part operations, which this crate does not write
-    // yet. Every number here is assigned once, so the holes stay open.
+    // 8, 9 and 13 belong to part operations on the stacked multipart branch.
+    // RequestTooLarge uses 14 so the header prerequisite leaves those slots free.
     /// The listing prefix is longer than an object key may be.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
@@ -72,7 +71,21 @@ pub enum InvalidPlan {
     /// at all.
     Marker = 11,
     /// The listing asks for zero entries.
+    ///
+    /// Azure answers `maxresults=0` with HTTP 400 `OutOfRangeQueryParameterValue`.
     MaxResults = 12,
+    /// The encoded request cannot be addressed on this target.
+    RequestTooLarge = 14,
+    /// The object key is not UTF-8.
+    KeyNotUtf8 = 15,
+    /// The object key exceeds the supported 1,024 UTF-16 code units.
+    KeyTooLong = 16,
+    /// The object key contains an ASCII control character.
+    KeyControlCharacter = 17,
+    /// The object key exceeds the supported 255 path segments.
+    KeyTooManySegments = 18,
+    /// A path segment ends in a dot and would not be addressed unchanged.
+    KeyWouldBeNormalized = 19,
 }
 
 impl InvalidPlan {
@@ -80,7 +93,12 @@ impl InvalidPlan {
     /// reason.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Key => "invalid object key",
+            Self::EmptyKey => "the object key is empty",
+            Self::KeyNotUtf8 => "the object key is not UTF-8",
+            Self::KeyTooLong => "the object key exceeds the supported length",
+            Self::KeyControlCharacter => "the object key contains a control character",
+            Self::KeyTooManySegments => "the object key has too many path segments",
+            Self::KeyWouldBeNormalized => "the object key would be normalized",
             Self::Range => "invalid byte range",
             Self::UnsupportedRange => {
                 "the service does not support Range: bytes=-N suffix requests"
@@ -89,6 +107,7 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
+            Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
             Self::Marker => "invalid listing marker",
             Self::MaxResults => "a listing cannot ask for zero entries",
@@ -100,7 +119,7 @@ impl InvalidPlan {
     /// Returns [`None`] for a discriminant that this version does not define.
     pub const fn from_discriminant(value: u16) -> Option<Self> {
         Some(match value {
-            1 => Self::Key,
+            1 => Self::EmptyKey,
             2 => Self::Range,
             3 => Self::UnsupportedRange,
             4 => Self::RangedMetadata,
@@ -110,6 +129,12 @@ impl InvalidPlan {
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,
+            14 => Self::RequestTooLarge,
+            15 => Self::KeyNotUtf8,
+            16 => Self::KeyTooLong,
+            17 => Self::KeyControlCharacter,
+            18 => Self::KeyTooManySegments,
+            19 => Self::KeyWouldBeNormalized,
             _ => return None,
         })
     }
@@ -435,12 +460,21 @@ mod tests {
     fn a_capacity_error_carries_its_sizes_instead_of_a_discriminant() {
         let error = Error::Capacity(CapacityError {
             required: 96,
-            available: 64,
+            required_headers: 6,
         });
         assert_eq!(error.code(), ErrorCode::Capacity);
         assert_eq!(error.detail(), 0);
         assert_eq!(Error::from_parts(ErrorCode::Capacity, 0), None);
         assert_eq!(error.capacity().unwrap().required, 96);
+        assert_eq!(error.to_string(), "the buffer needs 96; headers need 6");
+        assert_eq!(
+            CapacityError {
+                required: 2,
+                required_headers: 0
+            }
+            .to_string(),
+            "the buffer needs 2"
+        );
     }
 
     #[test]

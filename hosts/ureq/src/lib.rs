@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
-    Blobs, DeleteHeadOutcome, GetHeadOutcome, ListEntry, ListHeadOutcome, Listing, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
+    Blobs, DeleteHeadOutcome, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome, Listing,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
     Timestamps, layered,
 };
 
@@ -19,8 +19,10 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let get = PhysicalGet::new(key);
-    let mut buf = vec![0; layered::get_requirements(blobs, &get, &now)?];
-    let request = blobs.encode_get(&mut buf, &get, &now)?;
+    let size = layered::get_requirements(blobs, &get, &now)?;
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs.encode_get(&mut buf, &mut headers, &get, &now)?;
 
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
@@ -79,8 +81,10 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
     let now = Timestamps::from_unix(unix);
     let put = PhysicalPut::new(key);
     let content = Payload::Slice(content);
-    let mut buf = vec![0; layered::put_requirements(blobs, &put, content, &now)?];
-    let request = blobs.encode_put(&mut buf, &put, content, &now)?;
+    let size = layered::put_requirements(blobs, &put, content, &now)?;
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs.encode_put(&mut buf, &mut headers, &put, content, &now)?;
 
     let mut outgoing = ureq::put(request.url());
     for (name, value) in request.headers() {
@@ -131,8 +135,10 @@ pub fn delete(blobs: &Blobs<'_>, key: &str) -> Result<(), Box<dyn std::error::Er
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let delete = PhysicalDelete::new(key);
-    let mut buf = vec![0; layered::delete_requirements(blobs, &delete, &now)?];
-    let request = blobs.encode_delete(&mut buf, &delete, &now)?;
+    let size = layered::delete_requirements(blobs, &delete, &now)?;
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs.encode_delete(&mut buf, &mut headers, &delete, &now)?;
 
     let mut outgoing = ureq::delete(request.url());
     for (name, value) in request.headers() {
@@ -193,8 +199,10 @@ pub fn list<'b>(
 ) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
-    let mut buf = vec![0; layered::list_requirements(blobs, plan, &now)?];
-    let request = blobs.encode_list(&mut buf, plan, &now)?;
+    let size = layered::list_requirements(blobs, plan, &now)?;
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs.encode_list(&mut buf, &mut headers, plan, &now)?;
 
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {

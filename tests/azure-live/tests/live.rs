@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, EntryKind,
-    GetHeadOutcome, GetKind, GetShape, ListEntry, ListHeadOutcome, Method, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+    GetHeadOutcome, GetKind, GetShape, HeaderSpan, ListEntry, ListHeadOutcome, Method, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 // `#[ignore]` is built into Rust's test harness: ordinary test runs compile but
@@ -81,12 +81,13 @@ fn read(
     shape: GetShape,
     condition_value: Option<&[u8]>,
 ) -> Result<ReadResult, Box<dyn std::error::Error>> {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     // The scheduler path: a stored shape plus the bytes it needs.
     let get = PhysicalGet::from_shape(shape, &fixture.key, condition_value);
-    let mut buf = vec![0; layered::get_requirements(&blobs, &get, &now)?];
-    let request = blobs.encode_get(&mut buf, &get, &now)?;
+    let mut buf = vec![0; layered::get_requirements(&blobs, &get, &now).map(|size| size.bytes)?];
+    let request = blobs.encode_get(&mut buf, &mut request_headers, &get, &now)?;
     let mut outgoing = match request.method() {
         Method::Get => ureq::get(request.url()),
         Method::Head => ureq::head(request.url()),
@@ -257,6 +258,7 @@ fn write_as(
     content: &[u8],
     stream: bool,
 ) -> Result<WriteResult, Box<dyn std::error::Error>> {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     let put = PhysicalPut::from_shape(shape, &fixture.put_key, condition_value);
@@ -267,8 +269,9 @@ fn write_as(
     } else {
         Payload::Slice(content)
     };
-    let mut buf = vec![0; layered::put_requirements(&blobs, &put, described, &now)?];
-    let request = blobs.encode_put(&mut buf, &put, described, &now)?;
+    let mut buf =
+        vec![0; layered::put_requirements(&blobs, &put, described, &now).map(|size| size.bytes)?];
+    let request = blobs.encode_put(&mut buf, &mut request_headers, &put, described, &now)?;
     let mut outgoing = ureq::put(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
@@ -468,11 +471,13 @@ enum RemoveOutcome {
 // request itself. The URL comes from an encoded plan, so the key is escaped
 // exactly as the crate escapes it rather than by a second implementation.
 fn snapshot(fixture: &Fixture) -> Result<(), Box<dyn std::error::Error>> {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     let plan = PhysicalDelete::new(&fixture.put_key);
-    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now)?];
-    let request = blobs.encode_delete(&mut buf, &plan, &now)?;
+    let mut buf =
+        vec![0; layered::delete_requirements(&blobs, &plan, &now).map(|size| size.bytes)?];
+    let request = blobs.encode_delete(&mut buf, &mut request_headers, &plan, &now)?;
     let url = format!("{}?comp=snapshot", request.url());
     let mut outgoing = ureq::put(&url);
     for (name, value) in request.headers() {
@@ -492,11 +497,13 @@ fn remove(
     shape: DeleteShape,
     condition_value: Option<&[u8]>,
 ) -> Result<RemoveOutcome, Box<dyn std::error::Error>> {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
     let delete = PhysicalDelete::from_shape(shape, &fixture.put_key, condition_value);
-    let mut buf = vec![0; layered::delete_requirements(&blobs, &delete, &now)?];
-    let request = blobs.encode_delete(&mut buf, &delete, &now)?;
+    let mut buf =
+        vec![0; layered::delete_requirements(&blobs, &delete, &now).map(|size| size.bytes)?];
+    let request = blobs.encode_delete(&mut buf, &mut request_headers, &delete, &now)?;
     let mut outgoing = ureq::delete(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
@@ -703,10 +710,11 @@ fn fetch(
     fixture: &Fixture,
     plan: &PhysicalList<'_>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let now = Timestamps::from_unix(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
     let blobs = fixture.blobs();
-    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now)?];
-    let request = blobs.encode_list(&mut buf, plan, &now)?;
+    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now).map(|size| size.bytes)?];
+    let request = blobs.encode_list(&mut buf, &mut request_headers, plan, &now)?;
     assert_eq!(request.method(), Method::Get);
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
@@ -1056,8 +1064,16 @@ fn listing_a_container_that_is_not_there_reports_that() {
     );
     let blobs = absent.blobs();
     let plan = PhysicalList::new("");
-    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
-    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, &plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_list(&mut buf, &mut remaining_headers, &plan, &now)
+        .unwrap();
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
@@ -1421,8 +1437,16 @@ fn raw_put(fixture: &Fixture, escaped: &str) -> u16 {
     let blobs = fixture.blobs();
     let plan = PhysicalPut::new(&fixture.put_key);
     let content = Payload::Slice(b"x");
-    let mut buf = vec![0; layered::put_requirements(&blobs, &plan, content, &now).unwrap()];
-    let request = blobs.encode_put(&mut buf, &plan, content, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::put_requirements(&blobs, &plan, content, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_put(&mut buf, &mut remaining_headers, &plan, content, &now)
+        .unwrap();
 
     let mut outgoing = ureq::put(&format!(
         "{}/{}/{escaped}",
@@ -1452,8 +1476,16 @@ fn raw_delete(fixture: &Fixture, escaped: &str) -> u16 {
     );
     let blobs = fixture.blobs();
     let plan = PhysicalDelete::new(&fixture.put_key);
-    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
-    let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::delete_requirements(&blobs, &plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_delete(&mut buf, &mut remaining_headers, &plan, &now)
+        .unwrap();
 
     let mut outgoing = ureq::delete(&format!(
         "{}/{}/{escaped}",
@@ -1608,8 +1640,16 @@ fn list_status(fixture: &Fixture, marker: Option<&str>) -> (u16, Vec<u8>) {
         marker,
         ..PhysicalList::new(&fixture.list_prefix)
     };
-    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
-    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, &plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_list(&mut buf, &mut remaining_headers, &plan, &now)
+        .unwrap();
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
@@ -1699,8 +1739,16 @@ fn raw(
     );
     let blobs = fixture.blobs();
     let plan = PhysicalDelete::new(key);
-    let mut buf = vec![0; layered::delete_requirements(&blobs, &plan, &now).unwrap()];
-    let request = blobs.encode_delete(&mut buf, &plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::delete_requirements(&blobs, &plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_delete(&mut buf, &mut remaining_headers, &plan, &now)
+        .unwrap();
 
     let url = format!("{}{query}", request.url());
     // The head this crate wrote, plus whatever the probe adds to it.
@@ -1810,8 +1858,16 @@ fn raw_list(fixture: &Fixture, query: &str) -> Raw {
     );
     let blobs = fixture.blobs();
     let plan = PhysicalList::new("");
-    let mut buf = vec![0; layered::list_requirements(&blobs, &plan, &now).unwrap()];
-    let request = blobs.encode_list(&mut buf, &plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, &plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_list(&mut buf, &mut remaining_headers, &plan, &now)
+        .unwrap();
 
     let url = format!(
         "{}/{}?restype=container&comp=list{query}",
@@ -1841,8 +1897,16 @@ fn raw_page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Raw {
             .as_secs(),
     );
     let blobs = fixture.blobs();
-    let mut buf = vec![0; layered::list_requirements(&blobs, plan, &now).unwrap()];
-    let request = blobs.encode_list(&mut buf, plan, &now).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, plan, &now)
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
+    let mut remaining_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_list(&mut buf, &mut remaining_headers, plan, &now)
+        .unwrap();
     let mut outgoing = ureq::get(request.url());
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);

@@ -105,6 +105,7 @@ pub(crate) fn entry_view(entry: &proto::ListEntry<'_>) -> ListEntry {
         size: maybe_number(entry.size),
         e_tag: maybe_bytes(entry.e_tag.map(str::as_bytes)),
         last_modified: maybe_bytes(entry.last_modified.map(str::as_bytes)),
+        content_type: maybe_bytes(entry.content_type.map(str::as_bytes)),
         raw: bytes(entry.raw),
     }
 }
@@ -192,6 +193,7 @@ fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
         last_modified: maybe_bytes(meta.last_modified),
         version: maybe_bytes(meta.version),
         content_encoding: maybe_bytes(meta.content_encoding),
+        content_type: maybe_bytes(meta.content_type),
     }
 }
 

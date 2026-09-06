@@ -4,15 +4,16 @@
 //! version if you need different behaviour.
 
 use crate::{
-    Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Result,
-    Timestamps,
+    Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize,
+    Result, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
 
-/// Returns the number of bytes that [`Blobs::encode_get`] needs for this plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_get`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -24,11 +25,12 @@ pub fn get_requirements(
     blobs: &Blobs<'_>,
     get: &PhysicalGet<'_>,
     now: &Timestamps,
-) -> Result<usize> {
-    required(blobs.encode_get(&mut [], get, now).map(drop))
+) -> Result<RequestSize> {
+    required(blobs.encode_get(&mut [], &mut [], get, now).map(drop))
 }
 
-/// Returns the number of bytes that [`Blobs::encode_put`] needs for this plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_put`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode. The answer covers the request
 /// head only, and never the content. Only the length of `content` reaches the
@@ -43,14 +45,18 @@ pub fn put_requirements(
     put: &PhysicalPut<'_>,
     content: Payload<'_>,
     now: &Timestamps,
-) -> Result<usize> {
+) -> Result<RequestSize> {
     // The head states how long the content is, so the requirement depends on
     // the length of `content`. Its bytes are never read.
-    required(blobs.encode_put(&mut [], put, content, now).map(drop))
+    required(
+        blobs
+            .encode_put(&mut [], &mut [], put, content, now)
+            .map(drop),
+    )
 }
 
-/// Returns the number of bytes that [`Blobs::encode_delete`] needs for this
-/// plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_delete`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -62,12 +68,12 @@ pub fn delete_requirements(
     blobs: &Blobs<'_>,
     delete: &PhysicalDelete<'_>,
     now: &Timestamps,
-) -> Result<usize> {
-    required(blobs.encode_delete(&mut [], delete, now).map(drop))
+) -> Result<RequestSize> {
+    required(blobs.encode_delete(&mut [], &mut [], delete, now).map(drop))
 }
 
-/// Returns the number of bytes that [`Blobs::encode_list`] needs for this
-/// plan.
+/// Returns the byte and header-slot capacities that [`Blobs::encode_list`]
+/// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
@@ -79,8 +85,8 @@ pub fn list_requirements(
     blobs: &Blobs<'_>,
     list: &PhysicalList<'_>,
     now: &Timestamps,
-) -> Result<usize> {
-    required(blobs.encode_list(&mut [], list, now).map(drop))
+) -> Result<RequestSize> {
+    required(blobs.encode_list(&mut [], &mut [], list, now).map(drop))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
@@ -103,6 +109,7 @@ pub fn quoted_etag<'a>(listed: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
         into.copy_from_slice(listed);
         return Some(into);
     }
+    // A byte slice is at most isize::MAX bytes, leaving usize room for two quotes.
     let into = into.get_mut(..listed.len() + 2)?;
     into[0] = b'"';
     into[1..listed.len() + 1].copy_from_slice(listed);
@@ -110,10 +117,13 @@ pub fn quoted_etag<'a>(listed: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
     Some(into)
 }
 
-fn required(result: Result<()>) -> Result<usize> {
+fn required(result: Result<()>) -> Result<RequestSize> {
     match result {
-        Ok(()) => Ok(0),
-        Err(Error::Capacity(error)) => Ok(error.required),
+        Ok(()) => Ok(RequestSize::default()),
+        Err(Error::Capacity(error)) => Ok(RequestSize {
+            bytes: error.required,
+            headers: error.required_headers,
+        }),
         Err(error) => Err(error),
     }
 }
@@ -185,6 +195,7 @@ pub fn http_date_ms(value: &[u8]) -> Option<u64> {
 }
 
 fn number(bytes: &[u8]) -> Option<u64> {
+    // http_date_ms passes only two- or four-byte fields, so the sum is <= 9999.
     bytes.iter().try_fold(0, |value, byte| {
         byte.checked_sub(b'0')
             .filter(|digit| *digit <= 9)
@@ -193,6 +204,8 @@ fn number(bytes: &[u8]) -> Option<u64> {
 }
 
 // Howard Hinnant's `days_from_civil`, the inverse of the conversion in `time`.
+// Called only with a four-digit year, month 1..=12 and day 1..=31; all
+// intermediates fit i64, including the adjusted year -1 for January of year 0.
 fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;

@@ -2,8 +2,9 @@
 
 use borink_object_storage_proto::{
     BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass,
-    InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList, PropertySet,
-    PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList,
+    PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
+    layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -19,10 +20,16 @@ fn now() -> Timestamps {
 }
 
 fn url(list: &PhysicalList<'_>) -> String {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
-    let mut buf = vec![0; layered::list_requirements(&blobs, list, &now()).unwrap()];
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, list, &now())
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
     blobs
-        .encode_list(&mut buf, list, &now())
+        .encode_list(&mut buf, &mut request_headers, list, &now())
         .unwrap()
         .url()
         .to_owned()
@@ -60,10 +67,18 @@ fn fill<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Listing<'b> {
 
 #[test]
 fn a_listing_addresses_the_container_and_carries_no_content() {
+    let mut headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("");
-    let mut buf = vec![0; layered::list_requirements(&blobs, &list, &now()).unwrap()];
-    let request = blobs.encode_list(&mut buf, &list, &now()).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, &list, &now())
+            .unwrap()
+            .bytes
+    ];
+    let request = blobs
+        .encode_list(&mut buf, &mut headers, &list, &now())
+        .unwrap();
 
     assert_eq!(request.method(), Method::Get);
     assert_eq!(
@@ -145,6 +160,7 @@ fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
 
 #[test]
 fn a_listing_plan_is_validated_before_any_byte_is_written() {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let long = "k".repeat(1025);
     for (list, expected) in [
@@ -165,12 +181,16 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
         ),
     ] {
         assert_eq!(
-            blobs.encode_list(&mut [0; 512], &list, &now()).map(drop),
+            blobs
+                .encode_list(&mut [0; 512], &mut request_headers, &list, &now())
+                .map(drop),
             Err(Error::InvalidPlan(expected))
         );
         // The plan is refused before the buffer is even looked at.
         assert_eq!(
-            blobs.encode_list(&mut [], &list, &now()).map(drop),
+            blobs
+                .encode_list(&mut [], &mut request_headers, &list, &now())
+                .map(drop),
             Err(Error::InvalidPlan(expected))
         );
     }
@@ -178,24 +198,38 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
     // A prefix of exactly the longest key, and an empty one, both encode.
     let longest = "k".repeat(1024);
     assert!(
-        layered::list_requirements(&blobs, &PhysicalList::new(longest.as_str()), &now()).is_ok()
+        layered::list_requirements(&blobs, &PhysicalList::new(longest.as_str()), &now())
+            .map(|size| size.bytes)
+            .is_ok()
     );
-    assert!(layered::list_requirements(&blobs, &PhysicalList::new(""), &now()).is_ok());
+    assert!(
+        layered::list_requirements(&blobs, &PhysicalList::new(""), &now())
+            .map(|size| size.bytes)
+            .is_ok()
+    );
 }
 
 #[test]
 fn an_undersized_buffer_states_the_exact_requirement() {
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("directory/");
-    let required = layered::list_requirements(&blobs, &list, &now()).unwrap();
+    let required = layered::list_requirements(&blobs, &list, &now())
+        .map(|size| size.bytes)
+        .unwrap();
 
     let error = blobs
-        .encode_list(&mut vec![0; required - 1], &list, &now())
+        .encode_list(
+            &mut vec![0; required - 1],
+            &mut request_headers,
+            &list,
+            &now(),
+        )
         .unwrap_err();
     assert_eq!(error.capacity().unwrap().required, required);
     assert!(
         blobs
-            .encode_list(&mut vec![0; required], &list, &now())
+            .encode_list(&mut vec![0; required], &mut request_headers, &list, &now())
             .is_ok()
     );
 }
@@ -341,10 +375,63 @@ fn a_hierarchical_account_reports_its_directories_as_such() {
 
     assert_eq!(entries[0].kind, EntryKind::Directory);
     assert_eq!(entries[0].key, "directory");
-    assert_eq!((entries[0].size, entries[0].e_tag), (None, None));
+    assert_eq!((entries[0].size, entries[0].e_tag), (None, Some("0x8DF")));
+    assert_eq!(
+        entries[0].property("Etag"),
+        entries[0].e_tag.map(str::as_bytes)
+    );
     // The properties that such an account attaches to a group are skipped.
     assert_eq!(entries[1].kind, EntryKind::Prefix);
     assert_eq!(entries[1].e_tag, None);
+}
+
+#[test]
+fn content_type_is_decoded_and_shared_by_each_listing_access_path() {
+    for (xml, expected) in [
+        ("", None),
+        (
+            "<Content-Type > application/vnd.example+xml; p=&quot;a&amp;b&quot; </Content-Type >",
+            Some("application/vnd.example+xml; p=\"a&b\""),
+        ),
+        ("<Content-Type/>", Some("")),
+        ("<Content-Type />", Some("")),
+        ("<Content-Type\n/>", Some("")),
+        ("<Content-Type></Content-Type>", Some("")),
+    ] {
+        for wanted in [
+            PropertySet::default(),
+            PropertySet::of(&[BlobProperty::ContentType]),
+        ] {
+            let mut body = page(
+                &format!(
+                    "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>{xml}</Properties></Blob>"
+                ),
+                "",
+            );
+            let mut entries = [(ListEntry::default(), None)];
+            blobs()
+                .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+                    (entry, values.get(BlobProperty::ContentType))
+                })
+                .unwrap();
+            let (entry, selected) = entries[0];
+            assert_eq!(entry.content_type, expected, "{xml}");
+            assert_eq!(
+                entry.property("Content-Type").map(<[u8]>::trim_ascii),
+                expected.map(str::as_bytes),
+                "{xml}"
+            );
+            if wanted.contains(BlobProperty::ContentType) {
+                assert_eq!(selected, expected.map(str::as_bytes), "{xml}");
+                assert_eq!(
+                    selected.map(<[u8]>::as_ptr),
+                    entry.content_type.map(str::as_ptr)
+                );
+            } else {
+                assert_eq!(selected, None);
+            }
+        }
+    }
 }
 
 #[test]
@@ -476,7 +563,7 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
         blobs().fill_listing(&mut body, &mut entries),
         Err(Error::Capacity(CapacityError {
             required: 3,
-            available: 2,
+            ..CapacityError::default()
         }))
     );
 }
@@ -496,7 +583,7 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
         blobs().fill_listing(&mut body, &mut none),
         Err(Error::Capacity(CapacityError {
             required: 1,
-            available: 0,
+            ..CapacityError::default()
         }))
     );
 }
@@ -599,6 +686,12 @@ fn a_body_that_is_not_a_page_is_a_fault() {
         page(
             "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>\
              <Content-Length>2</Content-Length></Properties></Blob>",
+            "",
+        ),
+        page(
+            "<Blob><Name>a</Name><Properties><Content-Length>1</Content-Length>\
+             <Content-Type>text/plain</Content-Type><Content-Type/>\
+             </Properties></Blob>",
             "",
         ),
         // A comment or a character-data section may hold the very tags that

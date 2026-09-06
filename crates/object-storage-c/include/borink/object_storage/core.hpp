@@ -35,6 +35,8 @@ using MaybeBytes    = borink_maybe_bytes;
 using MaybeU64      = borink_maybe_u64;
 using MaybeU32      = borink_maybe_u32;
 using Status        = borink_status;
+using AzureNamespace = borink_azure_namespace;
+using AzureRejection = borink_azure_rejection;
 using Session       = borink_session;
 using Range         = borink_range;
 using GetShape      = borink_get_shape;
@@ -66,7 +68,7 @@ using EntryKind     = borink_entry_kind;
 using BlobProperty  = borink_blob_property;
 using PropertySet   = borink_property_set;
 
-inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
+using RequestBuffer = borink_request_buffer;
 
 inline constexpr ErrorCode ErrorCodeNone             = BORINK_ERROR_CODE_NONE;
 inline constexpr ErrorCode ErrorCodeCapacity         = BORINK_ERROR_CODE_CAPACITY;
@@ -75,6 +77,10 @@ inline constexpr ErrorCode ErrorCodeInvalidContainer = BORINK_ERROR_CODE_INVALID
 inline constexpr ErrorCode ErrorCodeInvalidToken     = BORINK_ERROR_CODE_INVALID_TOKEN;
 inline constexpr ErrorCode ErrorCodeInvalidPlan      = BORINK_ERROR_CODE_INVALID_PLAN;
 inline constexpr ErrorCode ErrorCodeResponse         = BORINK_ERROR_CODE_RESPONSE;
+
+inline constexpr AzureNamespace AzureNamespaceUnknown = BORINK_AZURE_NAMESPACE_UNKNOWN;
+inline constexpr AzureNamespace AzureNamespaceFlat = BORINK_AZURE_NAMESPACE_FLAT;
+inline constexpr AzureNamespace AzureNamespaceHierarchical = BORINK_AZURE_NAMESPACE_HIERARCHICAL;
 
 inline constexpr Method MethodGet    = BORINK_METHOD_GET;
 inline constexpr Method MethodHead   = BORINK_METHOD_HEAD;

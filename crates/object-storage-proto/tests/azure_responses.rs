@@ -41,6 +41,7 @@ fn accepts_a_whole_object_read() {
             ("ETag", b"\"etag\""),
             ("Last-Modified", b"Fri, 24 May 2013 00:00:00 GMT"),
             ("Content-Encoding", b"gzip"),
+            ("Content-Type", b"text/plain; charset=utf-8"),
         ],
     );
     let GetHeadOutcome::Body { meta, body, .. } = accept(GetShape::default(), head).unwrap() else {
@@ -56,6 +57,7 @@ fn accepts_a_whole_object_read() {
             // Ranges cover the stored representation, so an encoding is
             // surfaced rather than rejected.
             content_encoding: Some(b"gzip"),
+            content_type: Some(b"text/plain; charset=utf-8"),
         }
     );
     assert_eq!(

@@ -30,6 +30,16 @@ static borink_bytes as_bytes(const char *text) {
 // compares it with what Rust compiled, field by field.
 static void the_two_compilers_agree_on_every_struct(void) {
     const borink_layout measured = {
+        .sizeof_azure_rejection = sizeof(borink_azure_rejection),
+        .alignof_azure_rejection = _Alignof(borink_azure_rejection),
+        .offsetof_azure_rejection_status = offsetof(borink_azure_rejection, status),
+        .offsetof_azure_rejection_code = offsetof(borink_azure_rejection, code),
+        .sizeof_request_buffer = sizeof(borink_request_buffer),
+        .alignof_request_buffer = _Alignof(borink_request_buffer),
+        .offsetof_request_buffer_bytes = offsetof(borink_request_buffer, bytes),
+        .offsetof_request_buffer_headers = offsetof(borink_request_buffer, headers),
+        .offsetof_request_buffer_header_capacity = offsetof(borink_request_buffer, header_capacity),
+        .offsetof_request_head_required_headers = offsetof(borink_request_head, required_headers),
         .sizeof_bytes = sizeof(borink_bytes),
         .alignof_bytes = _Alignof(borink_bytes),
         .offsetof_bytes_len = offsetof(borink_bytes, len),
@@ -74,6 +84,7 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_object_meta_last_modified = offsetof(borink_object_meta, last_modified),
         .offsetof_object_meta_version = offsetof(borink_object_meta, version),
         .offsetof_object_meta_content_encoding = offsetof(borink_object_meta, content_encoding),
+        .offsetof_object_meta_content_type = offsetof(borink_object_meta, content_type),
         .sizeof_body_window = sizeof(borink_body_window),
         .offsetof_body_window_expected_len = offsetof(borink_body_window, expected_len),
         .offsetof_body_window_object_size = offsetof(borink_body_window, object_size),
@@ -98,6 +109,7 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .offsetof_list_entry_size = offsetof(borink_list_entry, size),
         .offsetof_list_entry_e_tag = offsetof(borink_list_entry, e_tag),
         .offsetof_list_entry_last_modified = offsetof(borink_list_entry, last_modified),
+        .offsetof_list_entry_content_type = offsetof(borink_list_entry, content_type),
         .offsetof_list_entry_raw = offsetof(borink_list_entry, raw),
         .sizeof_properties = sizeof(borink_properties),
         .alignof_properties = _Alignof(borink_properties),
@@ -136,10 +148,11 @@ static void one_request_head_is_written_into_a_stack_buffer(void) {
                                     {BORINK_RANGE_FORM_BOUNDED, 2, 6},
                                     BORINK_CONDITION_NONE};
     uint8_t buffer[1024];
+    borink_request_header request_headers[8] = {0};
     const borink_bytes no_bytes = {NULL, 0};
     const borink_request_head head =
         borink_encode_get(&session, &shape, as_bytes("object.bin"), no_bytes,
-                          (borink_bytes_mut){buffer, sizeof buffer}, 1787400000);
+                          (borink_request_buffer){{buffer, sizeof buffer}, request_headers, 8}, 1787400000);
 
     CHECK(head.status.code == 0);
     CHECK(head.method == BORINK_METHOD_GET);
@@ -170,7 +183,7 @@ static void a_buffer_that_is_too_small_reports_the_size_it_needs(void) {
                                     {BORINK_RANGE_FORM_WHOLE, 0, 0},
                                     BORINK_CONDITION_NONE};
     const borink_bytes no_bytes = {NULL, 0};
-    const borink_bytes_mut no_room = {NULL, 0};
+    const borink_request_buffer no_room = {{NULL, 0}, NULL, 0};
     const borink_request_head refused = borink_encode_get(
         &session, &shape, as_bytes("object.bin"), no_bytes, no_room, 1787400000);
 
@@ -218,10 +231,11 @@ static void an_unknown_number_is_refused(void) {
     const borink_session session = opened();
     const borink_get_shape shape = {4095, {BORINK_RANGE_FORM_WHOLE, 0, 0}, BORINK_CONDITION_NONE};
     uint8_t buffer[1024];
+    borink_request_header request_headers[8] = {0};
     const borink_bytes no_bytes = {NULL, 0};
     const borink_request_head refused =
         borink_encode_get(&session, &shape, as_bytes("object.bin"), no_bytes,
-                          (borink_bytes_mut){buffer, sizeof buffer}, 1787400000);
+                          (borink_request_buffer){{buffer, sizeof buffer}, request_headers, 8}, 1787400000);
 
     CHECK(refused.status.code == BORINK_ERROR_CODE_INVALID_PLAN);
     CHECK(refused.required == 0);
@@ -233,10 +247,11 @@ static void one_page_is_read_out_of_a_body(void) {
     const borink_session session = opened();
     const borink_list_shape shape = {true, {true, 2}};
     uint8_t buffer[1024];
+    borink_request_header request_headers[8] = {0};
     const borink_bytes no_bytes = {NULL, 0};
     const borink_request_head head =
         borink_encode_list(&session, &shape, as_bytes("directory/"), no_bytes,
-                           (borink_bytes_mut){buffer, sizeof buffer}, 1787400000);
+                           (borink_request_buffer){{buffer, sizeof buffer}, request_headers, 8}, 1787400000);
     CHECK(head.status.code == 0);
     CHECK(head.method == BORINK_METHOD_GET);
 

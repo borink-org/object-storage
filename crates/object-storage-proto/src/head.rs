@@ -30,6 +30,8 @@ pub struct ResponseHead<'h> {
     /// This crate does not decode the body. It returns this value so that you
     /// know how the bytes are encoded.
     pub content_encoding: Option<&'h [u8]>,
+    /// The value of the `Content-Type` header, without an inferred default.
+    pub content_type: Option<&'h [u8]>,
     /// The value of the `ETag` header.
     pub e_tag: Option<&'h [u8]>,
     /// The value of the `Last-Modified` header.
@@ -71,30 +73,37 @@ impl<'h> ResponseHead<'h> {
     ) -> Self {
         let mut head = Self::new(status);
         for (name, value) in headers {
-            let slot = if name.eq_ignore_ascii_case("content-length") {
-                &mut head.content_length
-            } else if name.eq_ignore_ascii_case("content-range") {
-                &mut head.content_range
-            } else if name.eq_ignore_ascii_case("content-encoding") {
-                &mut head.content_encoding
-            } else if name.eq_ignore_ascii_case("etag") {
-                &mut head.e_tag
-            } else if name.eq_ignore_ascii_case("last-modified") {
-                &mut head.last_modified
-            } else if name.eq_ignore_ascii_case("x-ms-version-id") {
-                &mut head.version
-            } else if name.eq_ignore_ascii_case("x-ms-error-code") {
-                &mut head.error_code
-            } else if name.eq_ignore_ascii_case("x-ms-request-id") {
-                &mut head.request_id
-            } else {
-                continue;
-            };
-            if slot.is_none() {
-                *slot = Some(value);
-            }
+            head.insert(name, value);
         }
         head
+    }
+
+    /// Consumes one parsed header without copying its value. The first value wins.
+    pub fn insert(&mut self, name: &str, value: &'h [u8]) {
+        let slot = if name.eq_ignore_ascii_case("content-length") {
+            &mut self.content_length
+        } else if name.eq_ignore_ascii_case("content-range") {
+            &mut self.content_range
+        } else if name.eq_ignore_ascii_case("content-encoding") {
+            &mut self.content_encoding
+        } else if name.eq_ignore_ascii_case("content-type") {
+            &mut self.content_type
+        } else if name.eq_ignore_ascii_case("etag") {
+            &mut self.e_tag
+        } else if name.eq_ignore_ascii_case("last-modified") {
+            &mut self.last_modified
+        } else if name.eq_ignore_ascii_case("x-ms-version-id") {
+            &mut self.version
+        } else if name.eq_ignore_ascii_case("x-ms-error-code") {
+            &mut self.error_code
+        } else if name.eq_ignore_ascii_case("x-ms-request-id") {
+            &mut self.request_id
+        } else {
+            return;
+        };
+        if slot.is_none() {
+            *slot = Some(value);
+        }
     }
 }
 
@@ -111,6 +120,8 @@ mod tests {
                 ("Content-Range", b"bytes 2-5/10"),
                 ("content-range", b"bytes 0-1/10"),
                 ("ETAG", b"\"etag\""),
+                ("CONTENT-TYPE", b"text/plain; charset=utf-8"),
+                ("content-type", b"application/octet-stream"),
             ],
         );
 
@@ -118,6 +129,10 @@ mod tests {
         assert_eq!(head.content_range, Some(b"bytes 2-5/10".as_slice()));
         assert_eq!(head.e_tag, Some(b"\"etag\"".as_slice()));
         assert_eq!(head.content_length, None);
+        assert_eq!(
+            head.content_type,
+            Some(b"text/plain; charset=utf-8".as_slice())
+        );
     }
 
     #[test]

@@ -440,7 +440,7 @@ void reports_a_missing_object() {
 void refuses_a_request_over_the_limit() {
     Server server("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     borink::host::Client client = borink::host::Client::open(
-        server.endpoint(), "container", "token", borink::host::Limits{64, 64});
+        server.endpoint(), "container", "token", borink::host::Limits{.request_bytes = 64, .error_bytes = 64});
 
     std::string reported;
     try {
@@ -485,7 +485,7 @@ void refuses_a_head_over_the_limit() {
     Server server("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nETag: \"tag\"\r\n"
                   "Connection: close\r\n\r\nbody");
     borink::host::Client client = borink::host::Client::open(
-        server.endpoint(), "container", "token", borink::host::Limits{8192, 8192, 8});
+        server.endpoint(), "container", "token", borink::host::Limits{.head_bytes = 8});
 
     std::string reported;
     try {
@@ -503,7 +503,7 @@ void refuses_an_overflowed_head_on_a_read_with_no_body() {
     Server server("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"tag\"\r\n"
                   "Connection: close\r\n\r\n");
     borink::host::Client client = borink::host::Client::open(
-        server.endpoint(), "container", "token", borink::host::Limits{8192, 8192, 8});
+        server.endpoint(), "container", "token", borink::host::Limits{.head_bytes = 8});
 
     std::string reported;
     try {
