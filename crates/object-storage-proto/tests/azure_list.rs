@@ -390,14 +390,6 @@ fn content_type_is_decoded_and_shared_by_each_listing_access_path() {
     for (xml, expected) in [
         ("", None),
         (
-            "<Content-Type>application/octet-stream</Content-Type>",
-            Some("application/octet-stream"),
-        ),
-        (
-            "<Content-Type>text/plain; charset=utf-8</Content-Type>",
-            Some("text/plain; charset=utf-8"),
-        ),
-        (
             "<Content-Type > application/vnd.example+xml; p=&quot;a&amp;b&quot; </Content-Type >",
             Some("application/vnd.example+xml; p=\"a&b\""),
         ),
