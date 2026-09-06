@@ -1,9 +1,9 @@
 //! Azure write encoding and response interpretation.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, Error, Failure, FailureClass, InvalidPlan, Method, ObjectMeta,
-    Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead, ServiceErrorKind,
-    Timestamps, layered,
+    Blobs, ConditionKind, Container, Error, Failure, FailureClass, HeaderSpan, InvalidPlan, Method,
+    ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -24,7 +24,7 @@ fn conditional(condition: ConditionKind) -> PutShape {
 
 #[test]
 fn a_write_states_the_content_length_and_borrows_the_content() {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut::new("directory/object.txt");
     let content = [7u8; 4096];
@@ -37,7 +37,7 @@ fn a_write_states_the_content_length_and_borrows_the_content() {
     let request = blobs
         .encode_put(
             &mut buf,
-            &mut request_headers_1,
+            &mut request_headers,
             &put,
             Payload::Slice(&content),
             &now(),
@@ -63,7 +63,7 @@ fn a_write_states_the_content_length_and_borrows_the_content() {
 
 #[test]
 fn an_empty_write_states_a_zero_length() {
-    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut::new("empty.bin");
     let mut buf = vec![
@@ -75,7 +75,7 @@ fn an_empty_write_states_a_zero_length() {
     let request = blobs
         .encode_put(
             &mut buf,
-            &mut request_headers_2,
+            &mut request_headers,
             &put,
             Payload::Slice(b""),
             &now(),
@@ -88,8 +88,7 @@ fn an_empty_write_states_a_zero_length() {
 
 #[test]
 fn a_conditional_write_sends_the_condition_header() {
-    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let create = PhysicalPut {
         key: "object.bin",
@@ -105,7 +104,7 @@ fn a_conditional_write_sends_the_condition_header() {
     let request = blobs
         .encode_put(
             &mut buf,
-            &mut request_headers_3,
+            &mut request_headers,
             &create,
             Payload::Slice(b"one"),
             &now(),
@@ -127,7 +126,7 @@ fn a_conditional_write_sends_the_condition_header() {
     let request = blobs
         .encode_put(
             &mut buf,
-            &mut request_headers_4,
+            &mut request_headers,
             &replace,
             Payload::Slice(b"one"),
             &now(),
@@ -138,7 +137,7 @@ fn a_conditional_write_sends_the_condition_header() {
 
 #[test]
 fn the_requirement_grows_with_the_stated_length_but_not_with_the_content() {
-    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut::new("object.bin");
     let short = layered::put_requirements(&blobs, &put, Payload::Slice(&[0; 9]), &now())
@@ -157,7 +156,7 @@ fn the_requirement_grows_with_the_stated_length_but_not_with_the_content() {
         blobs
             .encode_put(
                 &mut buf,
-                &mut request_headers_5,
+                &mut request_headers,
                 &put,
                 Payload::Slice(&[0; 9]),
                 &now()
@@ -172,8 +171,7 @@ fn the_requirement_grows_with_the_stated_length_but_not_with_the_content() {
 
 #[test]
 fn a_write_plan_is_validated_before_any_byte_is_written() {
-    let mut request_headers_7 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_6 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     for (put, expected) in [
         (PhysicalPut::new(""), InvalidPlan::EmptyKey),
@@ -198,7 +196,7 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
             blobs
                 .encode_put(
                     &mut [0; 512],
-                    &mut request_headers_6,
+                    &mut request_headers,
                     &put,
                     Payload::Slice(b"one"),
                     &now()
@@ -215,7 +213,7 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
         blobs
             .encode_put(
                 &mut [0; 4096],
-                &mut request_headers_7,
+                &mut request_headers,
                 &PhysicalPut::new(&long),
                 Payload::Slice(b"one"),
                 &now()
@@ -364,8 +362,8 @@ fn describes_what_happened_to_the_write() {
 
 #[test]
 fn streamed_content_writes_the_same_head_without_the_bytes() {
-    let mut request_headers_9 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_8 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut streamed_headers = [HeaderSpan::default(); 8];
+    let mut borrowed_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut::new("object.bin");
     let content = [7u8; 4096];
@@ -386,14 +384,14 @@ fn streamed_content_writes_the_same_head_without_the_bytes() {
     let borrowed = blobs
         .encode_put(
             &mut held,
-            &mut request_headers_8,
+            &mut borrowed_headers,
             &put,
             Payload::Slice(&content),
             &now(),
         )
         .unwrap();
     let streaming = blobs
-        .encode_put(&mut sent, &mut request_headers_9, &put, streamed, &now())
+        .encode_put(&mut sent, &mut streamed_headers, &put, streamed, &now())
         .unwrap();
 
     // The head is what the service sees, and it does not know the difference.
@@ -411,7 +409,7 @@ fn streamed_content_writes_the_same_head_without_the_bytes() {
 
 #[test]
 fn a_streamed_payload_is_refused_at_the_same_length_as_a_held_one() {
-    let mut request_headers_10 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut::new("object.bin");
     // 5000 MiB is the most Azure writes in one request, so this cannot be a
@@ -421,13 +419,7 @@ fn a_streamed_payload_is_refused_at_the_same_length_as_a_held_one() {
     };
     assert_eq!(
         blobs
-            .encode_put(
-                &mut [0; 512],
-                &mut request_headers_10,
-                &put,
-                too_long,
-                &now()
-            )
+            .encode_put(&mut [0; 512], &mut request_headers, &put, too_long, &now())
             .err(),
         Some(Error::InvalidPlan(InvalidPlan::PayloadTooLarge))
     );

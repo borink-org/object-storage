@@ -2,8 +2,9 @@
 
 use borink_object_storage_proto::{
     BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass,
-    InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList, PropertySet,
-    PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList,
+    PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
+    layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -19,7 +20,7 @@ fn now() -> Timestamps {
 }
 
 fn url(list: &PhysicalList<'_>) -> String {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let mut buf = vec![
         0;
@@ -28,7 +29,7 @@ fn url(list: &PhysicalList<'_>) -> String {
             .unwrap()
     ];
     blobs
-        .encode_list(&mut buf, &mut request_headers_1, list, &now())
+        .encode_list(&mut buf, &mut request_headers, list, &now())
         .unwrap()
         .url()
         .to_owned()
@@ -66,7 +67,7 @@ fn fill<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Listing<'b> {
 
 #[test]
 fn a_listing_addresses_the_container_and_carries_no_content() {
-    let mut headers = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("");
     let mut buf = vec![
@@ -159,8 +160,7 @@ fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
 
 #[test]
 fn a_listing_plan_is_validated_before_any_byte_is_written() {
-    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let long = "k".repeat(1025);
     for (list, expected) in [
@@ -182,14 +182,14 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
     ] {
         assert_eq!(
             blobs
-                .encode_list(&mut [0; 512], &mut request_headers_2, &list, &now())
+                .encode_list(&mut [0; 512], &mut request_headers, &list, &now())
                 .map(drop),
             Err(Error::InvalidPlan(expected))
         );
         // The plan is refused before the buffer is even looked at.
         assert_eq!(
             blobs
-                .encode_list(&mut [], &mut request_headers_3, &list, &now())
+                .encode_list(&mut [], &mut request_headers, &list, &now())
                 .map(drop),
             Err(Error::InvalidPlan(expected))
         );
@@ -211,8 +211,7 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
 
 #[test]
 fn an_undersized_buffer_states_the_exact_requirement() {
-    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("directory/");
     let required = layered::list_requirements(&blobs, &list, &now())
@@ -222,7 +221,7 @@ fn an_undersized_buffer_states_the_exact_requirement() {
     let error = blobs
         .encode_list(
             &mut vec![0; required - 1],
-            &mut request_headers_4,
+            &mut request_headers,
             &list,
             &now(),
         )
@@ -230,12 +229,7 @@ fn an_undersized_buffer_states_the_exact_requirement() {
     assert_eq!(error.capacity().unwrap().required, required);
     assert!(
         blobs
-            .encode_list(
-                &mut vec![0; required],
-                &mut request_headers_5,
-                &list,
-                &now()
-            )
+            .encode_list(&mut vec![0; required], &mut request_headers, &list, &now())
             .is_ok()
     );
 }

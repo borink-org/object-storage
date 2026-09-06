@@ -2,7 +2,7 @@
 
 use borink_object_storage_proto::{
     Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    FailureClass, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
+    FailureClass, HeaderSpan, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
     ServiceErrorKind, Timestamps, layered,
 };
 
@@ -27,7 +27,7 @@ fn conditional(condition: ConditionKind) -> DeleteShape {
 
 #[test]
 fn a_removal_names_the_object_and_carries_no_content() {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let delete = PhysicalDelete::new("directory/object.txt");
     let mut buf = vec![
@@ -37,7 +37,7 @@ fn a_removal_names_the_object_and_carries_no_content() {
             .unwrap()
     ];
     let request = blobs
-        .encode_delete(&mut buf, &mut request_headers_1, &delete, &now())
+        .encode_delete(&mut buf, &mut request_headers, &delete, &now())
         .unwrap();
 
     assert_eq!(request.method(), Method::Delete);
@@ -61,7 +61,7 @@ fn a_removal_names_the_object_and_carries_no_content() {
 
 #[test]
 fn a_conditional_removal_sends_the_condition_header() {
-    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let delete = PhysicalDelete::from_shape(
         conditional(ConditionKind::IfMatch),
@@ -75,15 +75,14 @@ fn a_conditional_removal_sends_the_condition_header() {
             .unwrap()
     ];
     let request = blobs
-        .encode_delete(&mut buf, &mut request_headers_2, &delete, &now())
+        .encode_delete(&mut buf, &mut request_headers, &delete, &now())
         .unwrap();
     assert!(request.headers().any(|h| h == ("if-match", "\"etag\"")));
 }
 
 #[test]
 fn a_removal_plan_is_validated_before_any_byte_is_written() {
-    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     for (delete, expected) in [
         (PhysicalDelete::new(""), InvalidPlan::EmptyKey),
@@ -98,7 +97,7 @@ fn a_removal_plan_is_validated_before_any_byte_is_written() {
     ] {
         assert_eq!(
             blobs
-                .encode_delete(&mut [0; 512], &mut request_headers_3, &delete, &now())
+                .encode_delete(&mut [0; 512], &mut request_headers, &delete, &now())
                 .err(),
             Some(Error::InvalidPlan(expected))
         );
@@ -112,7 +111,7 @@ fn a_removal_plan_is_validated_before_any_byte_is_written() {
     let mut buf = vec![0; required - 1];
     assert_eq!(
         blobs
-            .encode_delete(&mut buf, &mut request_headers_4, &delete, &now())
+            .encode_delete(&mut buf, &mut request_headers, &delete, &now())
             .unwrap_err()
             .capacity()
             .unwrap()
@@ -181,7 +180,7 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
 
 #[test]
 fn a_removal_says_what_it_takes_with_it() {
-    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     for (kind, expected) in [
         (DeleteKind::Object, None),
@@ -199,7 +198,7 @@ fn a_removal_says_what_it_takes_with_it() {
                 .unwrap()
         ];
         let request = blobs
-            .encode_delete(&mut buf, &mut request_headers_5, &delete, &now())
+            .encode_delete(&mut buf, &mut request_headers, &delete, &now())
             .unwrap();
         let sent = request
             .headers()

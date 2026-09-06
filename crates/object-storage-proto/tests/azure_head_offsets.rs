@@ -1,8 +1,8 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteKind, GetKind, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
+    Blobs, ConditionKind, Container, DeleteKind, GetKind, HeaderSpan, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -56,7 +56,7 @@ fn check(head: &Head, buf: &[u8]) {
 
 #[test]
 fn a_read_names_every_part_of_its_head_by_offset() {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     for get in [
         PhysicalGet::new("directory/a key+é"),
@@ -83,7 +83,7 @@ fn a_read_names_every_part_of_its_head_by_offset() {
         ];
         let head = record(
             &blobs
-                .encode_get(&mut buf, &mut request_headers_1, &get, &now())
+                .encode_get(&mut buf, &mut request_headers, &get, &now())
                 .unwrap(),
         );
         check(&head, &buf);
@@ -92,7 +92,7 @@ fn a_read_names_every_part_of_its_head_by_offset() {
 
 #[test]
 fn a_write_names_every_part_of_its_head_by_offset() {
-    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let content = Payload::Slice(b"contents");
     for put in [
@@ -111,7 +111,7 @@ fn a_write_names_every_part_of_its_head_by_offset() {
         ];
         let head = record(
             &blobs
-                .encode_put(&mut buf, &mut request_headers_2, &put, content, &now())
+                .encode_put(&mut buf, &mut request_headers, &put, content, &now())
                 .unwrap(),
         );
         check(&head, &buf);
@@ -120,7 +120,7 @@ fn a_write_names_every_part_of_its_head_by_offset() {
 
 #[test]
 fn a_removal_names_every_part_of_its_head_by_offset() {
-    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     for delete in [
         PhysicalDelete::new("object.bin"),
@@ -139,7 +139,7 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
         ];
         let head = record(
             &blobs
-                .encode_delete(&mut buf, &mut request_headers_3, &delete, &now())
+                .encode_delete(&mut buf, &mut request_headers, &delete, &now())
                 .unwrap(),
         );
         check(&head, &buf);
@@ -150,7 +150,7 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
 // every byte that the request names and no byte more.
 #[test]
 fn the_requirement_is_the_end_of_the_last_part() {
-    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut {
         condition: ConditionKind::IfMatch,
@@ -164,7 +164,7 @@ fn the_requirement_is_the_end_of_the_last_part() {
     let mut buf = vec![0; required];
     let head = record(
         &blobs
-            .encode_put(&mut buf, &mut request_headers_4, &put, content, &now())
+            .encode_put(&mut buf, &mut request_headers, &put, content, &now())
             .unwrap(),
     );
 

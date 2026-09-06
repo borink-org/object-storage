@@ -1,8 +1,9 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage_proto::{
-    Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, InvalidPlan,
-    Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps, VERSION, layered,
+    Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, HeaderSpan,
+    InvalidPlan, Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps,
+    VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -19,13 +20,13 @@ fn now() -> Timestamps {
 
 #[test]
 fn encodes_a_bearer_get_in_caller_memory() {
-    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let mut buf = [0; 256];
     let request = blobs
         .encode_get(
             &mut buf,
-            &mut request_headers_1,
+            &mut request_headers,
             &PhysicalGet::new("directory/a key+é"),
             &now(),
         )
@@ -48,14 +49,14 @@ fn encodes_a_bearer_get_in_caller_memory() {
 
 #[test]
 fn the_head_borrows_nothing_the_caller_passed_in() {
-    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let mut buf = [0; 256];
     // The key, the condition value and the timestamp are all temporaries.
     let request = blobs
         .encode_get(
             &mut buf,
-            &mut request_headers_2,
+            &mut request_headers,
             &PhysicalGet {
                 key: &String::from("object"),
                 condition: ConditionKind::IfMatch,
@@ -80,13 +81,11 @@ fn the_head_borrows_nothing_the_caller_passed_in() {
 
 #[test]
 fn reports_the_exact_required_capacity() {
-    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let get = PhysicalGet::new("object");
     let error = blobs
-        .encode_get(&mut [], &mut request_headers_3, &get, &now())
+        .encode_get(&mut [], &mut request_headers, &get, &now())
         .unwrap_err();
     let Error::Capacity(capacity) = error else {
         panic!("unexpected error: {error}");
@@ -99,7 +98,7 @@ fn reports_the_exact_required_capacity() {
     let mut short = vec![0; capacity.required - 1];
     assert_eq!(
         blobs
-            .encode_get(&mut short, &mut request_headers_4, &get, &now())
+            .encode_get(&mut short, &mut request_headers, &get, &now())
             .unwrap_err()
             .capacity()
             .map(|capacity| capacity.required),
@@ -108,14 +107,13 @@ fn reports_the_exact_required_capacity() {
 
     let mut exact = vec![0; capacity.required];
     blobs
-        .encode_get(&mut exact, &mut request_headers_5, &get, &now())
+        .encode_get(&mut exact, &mut request_headers, &get, &now())
         .unwrap();
 }
 
 #[test]
 fn encodes_ranges_conditions_and_metadata_plans() {
-    let mut request_headers_7 = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    let mut request_headers_6 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let mut buf = [0; 256];
     let get = PhysicalGet {
@@ -126,7 +124,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         condition_value: Some(b"\"etag\""),
     };
     let request = blobs
-        .encode_get(&mut buf, &mut request_headers_6, &get, &now())
+        .encode_get(&mut buf, &mut request_headers, &get, &now())
         .unwrap();
     assert_eq!(request.method(), Method::Get);
     assert!(
@@ -143,7 +141,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
     let metadata = blobs
         .encode_get(
             &mut buf,
-            &mut request_headers_7,
+            &mut request_headers,
             &PhysicalGet {
                 kind: GetKind::Metadata,
                 ..PhysicalGet::new("object")
@@ -211,7 +209,7 @@ fn rejects_values_that_could_change_the_http_request() {
 
 #[test]
 fn refuses_invalid_plans_before_writing_anything() {
-    let mut request_headers_8 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers = [HeaderSpan::default(); 8];
     let condition = |condition, condition_value| PhysicalGet {
         condition,
         condition_value,
@@ -259,7 +257,7 @@ fn refuses_invalid_plans_before_writing_anything() {
     for (get, expected) in cases {
         assert_eq!(
             blobs
-                .encode_get(&mut buf, &mut request_headers_8, &get, &now())
+                .encode_get(&mut buf, &mut request_headers, &get, &now())
                 .err(),
             Some(Error::InvalidPlan(expected)),
             "{get:?}"
