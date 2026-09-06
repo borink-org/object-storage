@@ -6,12 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-/// The most headers that one request head carries.
-///
-/// This is the core crate's own bound, and the array in `borink_request_head`
-/// has exactly this many slots. A compile-time assertion stops the build if
-/// the core crate raises it.
-pub const BORINK_MAX_HEADERS: usize = 6;
+use borink_object_storage_proto as proto;
 
 /// Bytes that your program owns and lends to a call.
 ///
@@ -403,6 +398,49 @@ pub struct RequestHeader {
     pub value: Span,
 }
 
+/// Caller-owned storage for an encoded request.
+/// Both regions must be disjoint from all input strings and records.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RequestBuffer {
+    /// Writable byte storage.
+    pub bytes: BytesMut,
+    /// Initialized descriptor slots, disjoint from the byte storage.
+    pub headers: *mut RequestHeader,
+    /// Number of descriptor slots.
+    pub header_capacity: usize,
+}
+
+impl From<proto::HeaderSpan> for RequestHeader {
+    fn from(header: proto::HeaderSpan) -> Self {
+        Self {
+            name: Span {
+                start: header.name.start,
+                len: header.name.len,
+            },
+            value: Span {
+                start: header.value.start,
+                len: header.value.len,
+            },
+        }
+    }
+}
+
+impl From<RequestHeader> for proto::HeaderSpan {
+    fn from(header: RequestHeader) -> Self {
+        Self {
+            name: proto::Span {
+                start: header.name.start,
+                len: header.name.len,
+            },
+            value: proto::Span {
+                start: header.value.start,
+                len: header.value.len,
+            },
+        }
+    }
+}
+
 /// A request head, as ranges of the buffer that holds it.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -423,7 +461,9 @@ pub struct RequestHead {
     /// How many of `headers` this request uses.
     pub header_count: usize,
     /// The headers, in the order that the core crate wrote them.
-    pub headers: [RequestHeader; BORINK_MAX_HEADERS],
+    pub headers: *const RequestHeader,
+    /// Header slots required, including on capacity failure.
+    pub required_headers: usize,
 }
 
 /// One response header, as the bytes that you already hold.

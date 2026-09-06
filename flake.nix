@@ -17,7 +17,19 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
-      forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      rustVersion = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
+      forEachSystem =
+        f:
+        nixpkgs.lib.genAttrs systems (
+          system:
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+          in
+          assert pkgs.lib.assertMsg (
+            pkgs.rustc.version == rustVersion
+          ) "rust-toolchain.toml must match the Rust version in pinned nixpkgs";
+          f pkgs
+        );
     in
     {
       packages = forEachSystem (pkgs: {

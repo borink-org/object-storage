@@ -58,7 +58,7 @@ type Sink<'s, 'b> = dyn FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) + 's;
 // place. So invalid UTF-8 here is a protocol violation, not a key the caller
 // might hold. The measurement is `a_listing_body_is_always_utf_8` in the live
 // suite.
-fn check_body(body: &[u8]) -> Result<()> {
+pub(super) fn check_body(body: &[u8]) -> Result<()> {
     // The body is valid UTF-8 from here on, but the reader keeps working on
     // bytes rather than turning it into a `str`. Values are decoded in place,
     // and a percent escape writes whatever byte it names, which may not be
@@ -791,6 +791,7 @@ fn decode_value_in_place(chunk: &mut [u8], field: Option<(Span, u8)>) -> Result<
     };
     let (start, end) = trim(chunk, span);
     let len = decode(&mut chunk[start..end], flags, false)?;
+    // trim preserves start <= end <= chunk.len(); decode returns len <= end - start.
     if len < end - start {
         chunk[start + len..end].fill(0);
     }
@@ -859,6 +860,7 @@ fn read_root_children_into<'b>(
                     return Err(Error::Capacity(CapacityError {
                         required: entries.held,
                         available: room,
+                        ..CapacityError::default()
                     }));
                 }
                 return Ok(Listing {

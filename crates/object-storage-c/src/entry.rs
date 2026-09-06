@@ -49,15 +49,20 @@ pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
 /// `session` and `shape` must each be null or point at one readable value.
 /// `key`, `condition_value` and `buf` must each address their stated length,
 /// and `buf` must be reached through nothing else during the call.
+/// Byte storage and initialized descriptor slots must be exclusive and disjoint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_get(
     session: *const Session,
     shape: *const GetShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: both output regions are initialized, exclusive and disjoint.
+    let headers = unsafe { ptr::items_mut(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -74,7 +79,7 @@ pub unsafe extern "C" fn borink_encode_get(
             text(key, InvalidPlan::Key)?,
             optional(condition_value),
         );
-        blobs.encode_get(buf, &get, &Timestamps::from_unix(unix_seconds))
+        blobs.encode_get(buf, headers, &get, &Timestamps::from_unix(unix_seconds))
     }))
 }
 
@@ -85,16 +90,21 @@ pub unsafe extern "C" fn borink_encode_get(
 /// # Safety
 ///
 /// As `borink_encode_get`.
+/// Byte storage and initialized descriptor slots must be exclusive and disjoint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_put(
     session: *const Session,
     shape: *const PutShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     content_len: u64,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: both output regions are initialized, exclusive and disjoint.
+    let headers = unsafe { ptr::items_mut(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -115,7 +125,13 @@ pub unsafe extern "C" fn borink_encode_put(
         // head, so the request borrows no content and you send the bytes
         // yourself.
         let content = Payload::Streamed { len: content_len };
-        blobs.encode_put(buf, &put, content, &Timestamps::from_unix(unix_seconds))
+        blobs.encode_put(
+            buf,
+            headers,
+            &put,
+            content,
+            &Timestamps::from_unix(unix_seconds),
+        )
     }))
 }
 
@@ -124,15 +140,20 @@ pub unsafe extern "C" fn borink_encode_put(
 /// # Safety
 ///
 /// As `borink_encode_get`.
+/// Byte storage and initialized descriptor slots must be exclusive and disjoint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_delete(
     session: *const Session,
     shape: *const DeleteShape,
     key: Bytes,
     condition_value: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: both output regions are initialized, exclusive and disjoint.
+    let headers = unsafe { ptr::items_mut(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, key, condition_value, buf) = unsafe {
         (
@@ -150,7 +171,7 @@ pub unsafe extern "C" fn borink_encode_delete(
                 text(key, InvalidPlan::Key)?,
                 optional(condition_value),
             );
-            blobs.encode_delete(buf, &delete, &Timestamps::from_unix(unix_seconds))
+            blobs.encode_delete(buf, headers, &delete, &Timestamps::from_unix(unix_seconds))
         }),
     )
 }
@@ -351,15 +372,20 @@ pub unsafe extern "C" fn borink_finish_delete_error_body(
 /// `session` and `shape` must each be null or point at one readable value.
 /// `prefix`, `marker` and `buf` must each address their stated length, and
 /// `buf` must be reached through nothing else during the call.
+/// Byte storage and initialized descriptor slots must be exclusive and disjoint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_list(
     session: *const Session,
     shape: *const ListShape,
     prefix: Bytes,
     marker: Bytes,
-    buf: BytesMut,
+    buf: RequestBuffer,
     unix_seconds: u64,
 ) -> RequestHead {
+    // SAFETY: both output regions are initialized, exclusive and disjoint.
+    let headers = unsafe { ptr::items_mut(buf.headers, buf.header_capacity) };
+    let buf = buf.bytes;
+
     // SAFETY: the caller states the contract of this function.
     let (session, shape, prefix, marker, buf) = unsafe {
         (
@@ -379,7 +405,7 @@ pub unsafe extern "C" fn borink_encode_list(
                     .map(|marker| text(marker, InvalidPlan::Marker))
                     .transpose()?,
             );
-            blobs.encode_list(buf, &list, &Timestamps::from_unix(unix_seconds))
+            blobs.encode_list(buf, headers, &list, &Timestamps::from_unix(unix_seconds))
         }),
     )
 }
@@ -526,6 +552,7 @@ pub unsafe extern "C" fn borink_fill_listing_with(
             ptr::session(session),
             ptr::slice_mut(body),
             ptr::items_mut(into, rows),
+            // width == 0 gives zero; otherwise rows <= value_capacity / width.
             ptr::items_mut(values, rows * width),
         )
     };

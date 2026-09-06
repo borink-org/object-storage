@@ -1,8 +1,8 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteKind, GetKind, MAX_HEADERS, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
+    Blobs, ConditionKind, Container, DeleteKind, GetKind, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -25,7 +25,6 @@ struct Head {
 }
 
 fn record(request: &WireRequest<'_>) -> Head {
-    assert!(request.headers().len() <= MAX_HEADERS);
     assert_eq!(request.header_spans().len(), request.headers().len());
     Head {
         url: (request.url_span(), request.url().to_owned()),
@@ -57,6 +56,7 @@ fn check(head: &Head, buf: &[u8]) {
 
 #[test]
 fn a_read_names_every_part_of_its_head_by_offset() {
+    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     for get in [
         PhysicalGet::new("directory/a key+é"),
@@ -75,14 +75,24 @@ fn a_read_names_every_part_of_its_head_by_offset() {
             ..PhysicalGet::new("object.bin")
         },
     ] {
-        let mut buf = vec![0; layered::get_requirements(&blobs, &get, &now()).unwrap()];
-        let head = record(&blobs.encode_get(&mut buf, &get, &now()).unwrap());
+        let mut buf = vec![
+            0;
+            layered::get_requirements(&blobs, &get, &now())
+                .map(|size| size.bytes)
+                .unwrap()
+        ];
+        let head = record(
+            &blobs
+                .encode_get(&mut buf, &mut request_headers_1, &get, &now())
+                .unwrap(),
+        );
         check(&head, &buf);
     }
 }
 
 #[test]
 fn a_write_names_every_part_of_its_head_by_offset() {
+    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     let content = Payload::Slice(b"contents");
     for put in [
@@ -93,14 +103,24 @@ fn a_write_names_every_part_of_its_head_by_offset() {
             ..PhysicalPut::new("object.bin")
         },
     ] {
-        let mut buf = vec![0; layered::put_requirements(&blobs, &put, content, &now()).unwrap()];
-        let head = record(&blobs.encode_put(&mut buf, &put, content, &now()).unwrap());
+        let mut buf = vec![
+            0;
+            layered::put_requirements(&blobs, &put, content, &now())
+                .map(|size| size.bytes)
+                .unwrap()
+        ];
+        let head = record(
+            &blobs
+                .encode_put(&mut buf, &mut request_headers_2, &put, content, &now())
+                .unwrap(),
+        );
         check(&head, &buf);
     }
 }
 
 #[test]
 fn a_removal_names_every_part_of_its_head_by_offset() {
+    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     for delete in [
         PhysicalDelete::new("object.bin"),
@@ -111,8 +131,17 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
             ..PhysicalDelete::new("object.bin")
         },
     ] {
-        let mut buf = vec![0; layered::delete_requirements(&blobs, &delete, &now()).unwrap()];
-        let head = record(&blobs.encode_delete(&mut buf, &delete, &now()).unwrap());
+        let mut buf = vec![
+            0;
+            layered::delete_requirements(&blobs, &delete, &now())
+                .map(|size| size.bytes)
+                .unwrap()
+        ];
+        let head = record(
+            &blobs
+                .encode_delete(&mut buf, &mut request_headers_3, &delete, &now())
+                .unwrap(),
+        );
         check(&head, &buf);
     }
 }
@@ -121,6 +150,7 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
 // every byte that the request names and no byte more.
 #[test]
 fn the_requirement_is_the_end_of_the_last_part() {
+    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     let put = PhysicalPut {
         condition: ConditionKind::IfMatch,
@@ -128,9 +158,15 @@ fn the_requirement_is_the_end_of_the_last_part() {
         ..PhysicalPut::new("object.bin")
     };
     let content = Payload::Streamed { len: 1024 };
-    let required = layered::put_requirements(&blobs, &put, content, &now()).unwrap();
+    let required = layered::put_requirements(&blobs, &put, content, &now())
+        .map(|size| size.bytes)
+        .unwrap();
     let mut buf = vec![0; required];
-    let head = record(&blobs.encode_put(&mut buf, &put, content, &now()).unwrap());
+    let head = record(
+        &blobs
+            .encode_put(&mut buf, &mut request_headers_4, &put, content, &now())
+            .unwrap(),
+    );
 
     let end = head
         .headers

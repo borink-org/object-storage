@@ -482,6 +482,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
 // A number that this crate does not define stops the call, and says so.
 #[test]
 fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let shape = GetShape {
         kind: 4095,
@@ -495,7 +496,7 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
             &shape,
             lent(b"object.bin"),
             lent(b""),
-            writable(&mut buf),
+            request_buffer(&mut buf, &mut request_headers),
             1_787_400_000,
         )
     };
@@ -518,6 +519,7 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
 // never read.
 #[test]
 fn a_null_pointer_is_refused_rather_than_read() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let shape = read_shape();
     let mut buf = vec![0; 512];
@@ -532,7 +534,7 @@ fn a_null_pointer_is_refused_rather_than_read() {
                 &shape,
                 lent(b"object.bin"),
                 lent(b""),
-                writable(&mut buf),
+                request_buffer(&mut buf, &mut request_headers),
                 0,
             )
             .status,
@@ -544,7 +546,7 @@ fn a_null_pointer_is_refused_rather_than_read() {
                 core::ptr::null(),
                 lent(b"object.bin"),
                 lent(b""),
-                writable(&mut buf),
+                request_buffer(&mut buf, &mut request_headers),
                 0,
             )
             .status,
@@ -556,7 +558,7 @@ fn a_null_pointer_is_refused_rather_than_read() {
                 core::ptr::null(),
                 lent(b"object.bin"),
                 lent(b""),
-                writable(&mut buf),
+                request_buffer(&mut buf, &mut request_headers),
                 0,
                 0,
             )
@@ -569,7 +571,7 @@ fn a_null_pointer_is_refused_rather_than_read() {
                 core::ptr::null(),
                 lent(b"object.bin"),
                 lent(b""),
-                writable(&mut buf),
+                request_buffer(&mut buf, &mut request_headers),
                 0,
             )
             .status,
@@ -605,7 +607,7 @@ fn a_null_pointer_is_refused_rather_than_read() {
                 core::ptr::null(),
                 lent(b"prefix/"),
                 lent(b""),
-                writable(&mut buf),
+                request_buffer(&mut buf, &mut request_headers),
                 0,
             )
             .status,
@@ -663,7 +665,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the three that carry no
     // inner value.
-    assert_eq!(checked, 3 + 10 + 4);
+    assert_eq!(checked, 3 + 11 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)
@@ -674,6 +676,7 @@ fn every_error_crosses_as_a_status() {
 // as a code and the `required` field of the request head.
 #[test]
 fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let shape = read_shape();
     // SAFETY: the empty buffer is the case under test; the rest are live.
@@ -683,7 +686,7 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
             &shape,
             lent(b"object.bin"),
             lent(b""),
-            writable(&mut []),
+            request_buffer(&mut [], &mut request_headers),
             1_787_400_000,
         )
     };
@@ -698,7 +701,7 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
             &shape,
             lent(b"object.bin"),
             lent(b""),
-            writable(&mut buf),
+            request_buffer(&mut buf, &mut request_headers),
             1_787_400_000,
         )
     };
@@ -712,7 +715,7 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
         "https://account.blob.core.windows.net/container/object.bin"
     );
     for index in 0..written.header_count {
-        let header = written.headers[index];
+        let header = unsafe { *written.headers.add(index) };
         assert!(header.name.start + header.name.len <= buf.len());
         assert!(header.value.start + header.value.len <= buf.len());
     }
@@ -722,6 +725,7 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
 // the bytes that go with it.
 #[test]
 fn a_stored_shape_carries_the_whole_plan() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let shape = GetShape {
         kind: GetKind::Bytes as u16,
@@ -740,14 +744,14 @@ fn a_stored_shape_carries_the_whole_plan() {
             &shape,
             lent(b"object.bin"),
             lent(b"\"etag\""),
-            writable(&mut buf),
+            request_buffer(&mut buf, &mut request_headers),
             1_787_400_000,
         )
     };
     assert_eq!(head.status.code, 0);
     let named = |name: &str| {
         (0..head.header_count).find_map(|index| {
-            let header = head.headers[index];
+            let header = unsafe { *head.headers.add(index) };
             let read =
                 |span: Span| core::str::from_utf8(&buf[span.start..span.start + span.len]).unwrap();
             (read(header.name) == name).then(|| read(header.value).to_string())
@@ -849,6 +853,7 @@ fn an_invalid_head_carries_the_error_of_the_core_crate() {
 
 #[test]
 fn a_session_that_cannot_be_used_says_which_value_is_wrong() {
+    let mut request_headers = [RequestHeader::default(); 8];
     for (endpoint, container, token, expected) in [
         (
             b"account.example".as_slice(),
@@ -883,7 +888,7 @@ fn a_session_that_cannot_be_used_says_which_value_is_wrong() {
                 &read_shape(),
                 lent(b"key"),
                 lent(b""),
-                writable(&mut []),
+                request_buffer(&mut [], &mut request_headers),
                 0,
             )
         };
@@ -941,6 +946,7 @@ fn the_layout_check_answers_for_the_layout_it_is_given() {
 // A listing asks for one page, and the head says that the page follows.
 #[test]
 fn a_listing_plan_reaches_the_wire_and_its_head_announces_the_page() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let shape = ListShape {
         delimited: true,
@@ -957,7 +963,7 @@ fn a_listing_plan_reaches_the_wire_and_its_head_announces_the_page() {
             &shape,
             lent(b"directory/"),
             lent(b"marker-1"),
-            writable(&mut buf),
+            request_buffer(&mut buf, &mut request_headers),
             1_787_400_000,
         )
     };
@@ -1102,6 +1108,7 @@ fn a_listing_failure_is_finished_by_the_body() {
 // the field that was wrong.
 #[test]
 fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
+    let mut request_headers = [RequestHeader::default(); 8];
     let session = session();
     let mut buf = vec![0; 512];
     let shape = list_shape_of(Some(0));
@@ -1112,7 +1119,7 @@ fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
             &shape,
             lent(b"prefix/"),
             lent(b""),
-            writable(&mut buf),
+            request_buffer(&mut buf, &mut request_headers),
             0,
         )
     };
@@ -1129,10 +1136,7 @@ fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
             &shape,
             lent(b"prefix/"),
             lent(b""),
-            BytesMut {
-                ptr: core::ptr::null_mut(),
-                len: 0,
-            },
+            request_buffer(&mut [], &mut request_headers),
             0,
         )
     };
@@ -1358,4 +1362,12 @@ fn the_values_a_program_asks_for_are_written_into_its_rows() {
     };
     assert_eq!(fill.status.code, ErrorCode::Capacity as u16);
     assert_eq!(fill.required, 2);
+}
+
+fn request_buffer(bytes: &mut [u8], headers: &mut [RequestHeader]) -> RequestBuffer {
+    RequestBuffer {
+        bytes: writable(bytes),
+        headers: headers.as_mut_ptr(),
+        header_capacity: headers.len(),
+    }
 }

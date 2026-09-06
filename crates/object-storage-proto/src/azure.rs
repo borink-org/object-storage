@@ -1,8 +1,8 @@
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
-    BodyWindow, CapacityError, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, InvalidPlan,
-    ListEntry, ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    BodyWindow, Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
+    Failure, FailureClass, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
+    ListHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
     PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
     RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
 };
@@ -94,7 +94,8 @@ impl<'a> Blobs<'a> {
     /// Writes the request head for `get` into `buf`.
     ///
     /// This method allocates nothing. It writes the URL and the header values
-    /// into `buf`, and returns a [`WireRequest`] that borrows them.
+    /// into `buf`, records their spans in `headers`, and returns a
+    /// [`WireRequest`] that borrows both buffers.
     ///
     /// # Errors
     ///
@@ -102,19 +103,20 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small. It states the
+    /// required bytes and header slots. Grow the buffers and call this
     /// method again, or call
     /// [`layered::get_requirements`](crate::layered::get_requirements) first.
-    pub fn encode_get<'r>(
+    pub fn encode_get<'r, H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [H],
         get: &PhysicalGet<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<WireRequest<'r, H>> {
         validate_get(get)?;
         let available = buf.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(get.key), &[], get.range, now);
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
@@ -138,21 +140,22 @@ impl<'a> Blobs<'a> {
     /// validates the plan before it writes any byte, so it never reports an
     /// invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small. It states the
+    /// required bytes and header slots. Grow the buffers and call this
     /// method again, or call
     /// [`layered::put_requirements`](crate::layered::put_requirements) first.
-    pub fn encode_put<'r>(
+    pub fn encode_put<'r, H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [H],
         put: &PhysicalPut<'_>,
         content: Payload<'r>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<WireRequest<'r, H>> {
         validate_put(put, content.len())?;
         let available = buf.len();
         let length = content.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
         head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
@@ -168,9 +171,9 @@ impl<'a> Blobs<'a> {
     // written into the caller's buffer. Each part is one range of that buffer.
     // `key` is `None` for a request that names the container alone, and the
     // query is written in the order it is given.
-    fn build(
+    fn build<H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
         &self,
-        head: &mut HeadWriter<'_>,
+        head: &mut HeadWriter<'_, H>,
         key: Option<&str>,
         query: &[Option<(&str, QueryValue<'_>)>],
         range: RequestedRange,
@@ -308,20 +311,21 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small. It states the
+    /// required bytes and header slots. Grow the buffers and call this
     /// method again, or call
     /// [`layered::delete_requirements`](crate::layered::delete_requirements)
     /// first.
-    pub fn encode_delete<'r>(
+    pub fn encode_delete<'r, H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [H],
         delete: &PhysicalDelete<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<WireRequest<'r, H>> {
         validate_delete(delete)?;
         let available = buf.len();
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
             head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
@@ -470,17 +474,18 @@ impl<'a> Blobs<'a> {
     /// request. This method validates the plan before it writes any byte, so
     /// it never reports an invalid plan as a capacity error.
     ///
-    /// Returns [`Error::Capacity`] if `buf` is too small. The error states the
-    /// exact number of bytes that the head needs. Grow `buf` and call this
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small. It states the
+    /// required bytes and header slots. Grow the buffers and call this
     /// method again, or call
     /// [`layered::list_requirements`](crate::layered::list_requirements)
     /// first.
-    pub fn encode_list<'r>(
+    pub fn encode_list<'r, H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
         &self,
         buf: &'r mut [u8],
+        headers: &'r mut [H],
         list: &PhysicalList<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<WireRequest<'r, H>> {
         validate_list(list)?;
         let available = buf.len();
         // The query is written in this order every time, so a caller can
@@ -498,7 +503,7 @@ impl<'a> Blobs<'a> {
                 .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
         ];
 
-        let mut head = HeadWriter::new(buf);
+        let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, None, &query, RequestedRange::Whole, now);
         encoded(head, available, Method::Get, Payload::Slice(&[]))
     }
@@ -840,7 +845,11 @@ fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> FailureClass {
 }
 
 // The condition is the last header of every request that carries one.
-fn push_condition(head: &mut HeadWriter<'_>, condition: ConditionKind, value: Option<&[u8]>) {
+fn push_condition<H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
+    head: &mut HeadWriter<'_, H>,
+    condition: ConditionKind,
+    value: Option<&[u8]>,
+) {
     if let Some(name) = condition_header(condition) {
         let value = value.expect("the plan was validated");
         head.header(name, |out| out.push(value));
@@ -866,18 +875,58 @@ fn write_range(out: &mut Writer<'_>, range: RequestedRange) {
 }
 
 // The written head, or the exact number of bytes that it needed.
-fn encoded<'r>(
-    head: HeadWriter<'r>,
+fn capacity_error<H>(capacity: crate::CapacityError) -> Error {
+    // A slice's byte size must fit isize, including descriptor arrays on 32-bit.
+    // Divide before comparing counts; zero-sized descriptors need no byte storage.
+    let max_headers = (isize::MAX as usize)
+        .checked_div(core::mem::size_of::<H>())
+        .unwrap_or(usize::MAX);
+    if capacity.required > isize::MAX as usize || capacity.required_headers > max_headers {
+        InvalidPlan::RequestTooLarge.into()
+    } else {
+        Error::Capacity(capacity)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_request_larger_than_a_slice_is_not_a_recoverable_capacity_error() {
+    let capacity = crate::CapacityError {
+        required: isize::MAX as usize + 1,
+        ..crate::CapacityError::default()
+    };
+    assert_eq!(
+        capacity_error::<HeaderSpan>(capacity),
+        InvalidPlan::RequestTooLarge.into()
+    );
+    let max_headers = isize::MAX as usize / core::mem::size_of::<HeaderSpan>();
+    let capacity = crate::CapacityError {
+        required_headers: max_headers,
+        ..crate::CapacityError::default()
+    };
+    assert_eq!(
+        capacity_error::<HeaderSpan>(capacity),
+        Error::Capacity(capacity)
+    );
+    let capacity = crate::CapacityError {
+        required_headers: max_headers + 1,
+        ..capacity
+    };
+    assert_eq!(
+        capacity_error::<HeaderSpan>(capacity),
+        InvalidPlan::RequestTooLarge.into()
+    );
+}
+
+fn encoded<'r, H: Copy + From<HeaderSpan> + Into<HeaderSpan>>(
+    head: HeadWriter<'r, H>,
     available: usize,
     method: Method,
     payload: Payload<'r>,
-) -> Result<WireRequest<'r>> {
-    let required = head.position();
+) -> Result<WireRequest<'r, H>> {
+    let capacity = head.capacity(available);
     head.finish(method, payload)
-        .ok_or(Error::Capacity(CapacityError {
-            required,
-            available,
-        }))
+        .ok_or_else(|| capacity_error::<H>(capacity))
 }
 
 fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {

@@ -71,30 +71,35 @@ impl<'h> ResponseHead<'h> {
     ) -> Self {
         let mut head = Self::new(status);
         for (name, value) in headers {
-            let slot = if name.eq_ignore_ascii_case("content-length") {
-                &mut head.content_length
-            } else if name.eq_ignore_ascii_case("content-range") {
-                &mut head.content_range
-            } else if name.eq_ignore_ascii_case("content-encoding") {
-                &mut head.content_encoding
-            } else if name.eq_ignore_ascii_case("etag") {
-                &mut head.e_tag
-            } else if name.eq_ignore_ascii_case("last-modified") {
-                &mut head.last_modified
-            } else if name.eq_ignore_ascii_case("x-ms-version-id") {
-                &mut head.version
-            } else if name.eq_ignore_ascii_case("x-ms-error-code") {
-                &mut head.error_code
-            } else if name.eq_ignore_ascii_case("x-ms-request-id") {
-                &mut head.request_id
-            } else {
-                continue;
-            };
-            if slot.is_none() {
-                *slot = Some(value);
-            }
+            head.insert(name, value);
         }
         head
+    }
+
+    /// Consumes one parsed header without copying its value. The first value wins.
+    pub fn insert(&mut self, name: &str, value: &'h [u8]) {
+        let slot = if name.eq_ignore_ascii_case("content-length") {
+            &mut self.content_length
+        } else if name.eq_ignore_ascii_case("content-range") {
+            &mut self.content_range
+        } else if name.eq_ignore_ascii_case("content-encoding") {
+            &mut self.content_encoding
+        } else if name.eq_ignore_ascii_case("etag") {
+            &mut self.e_tag
+        } else if name.eq_ignore_ascii_case("last-modified") {
+            &mut self.last_modified
+        } else if name.eq_ignore_ascii_case("x-ms-version-id") {
+            &mut self.version
+        } else if name.eq_ignore_ascii_case("x-ms-error-code") {
+            &mut self.error_code
+        } else if name.eq_ignore_ascii_case("x-ms-request-id") {
+            &mut self.request_id
+        } else {
+            return;
+        };
+        if slot.is_none() {
+            *slot = Some(value);
+        }
     }
 }
 

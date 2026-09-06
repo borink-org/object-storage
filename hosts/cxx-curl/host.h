@@ -59,6 +59,7 @@ struct Limits {
     // The most that one request head may take. A request that needs more is
     // refused rather than served.
     std::size_t request_bytes = 8 * 1024;
+    std::size_t request_headers = 256;
     // The most of an error body to read. An error body is a diagnostic, and
     // the service decides how long it is: one that does not arrive costs the
     // name of the error, not the outcome.
@@ -248,10 +249,12 @@ class Client {
         outcome_ = Outcome{};
         request_head_ = encode();
         if (request_head_.status.code == ErrorCodeCapacity) {
-            if (request_head_.required > limits_.request_bytes) {
+            if (request_head_.required > limits_.request_bytes ||
+                request_head_.required_headers > limits_.request_headers) {
                 throw std::runtime_error("the request head is larger than this client allows");
             }
             request_.resize(request_head_.required);
+            request_headers_.resize(request_head_.required_headers);
             request_head_ = encode();
         }
         if (request_head_.status.code != 0) {
@@ -260,7 +263,9 @@ class Client {
         return request_head_;
     }
 
-    BytesMut request_buffer() { return into(request_); }
+    RequestBuffer request_buffer() {
+        return {into(request_), request_headers_.data(), request_headers_.size()};
+    }
 
     // The page of the last listing, as the buffer that the entries are read
     // out of. Reading decodes the text where it stands, so it is writable.
@@ -292,6 +297,7 @@ class Client {
     std::string token_;
     Limits limits_;
     std::vector<std::uint8_t> request_;
+    std::vector<RequestHeader> request_headers_;
     RequestHead request_head_{};
     std::vector<std::uint8_t> message_;
     CollectedHead head_;

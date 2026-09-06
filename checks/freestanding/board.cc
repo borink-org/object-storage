@@ -40,9 +40,10 @@ extern "C" void board_cxx(void) {
                                  borink::borrow(std::span<const std::uint8_t>(request, 4)).len +
                                  borink::into(writable).len);
 
+    borink::RequestHeader request_headers[8]{};
     const borink::RequestHead head =
         borink_encode_get(&session, &shape, borink::as_bytes("object.bin"),
-                          borink::Bytes{nullptr, 0}, borink::into(writable), 1787400000);
+                          borink::Bytes{nullptr, 0}, {borink::into(writable), request_headers, 8}, 1787400000);
     sink = static_cast<unsigned>(head.required);
 
     const borink::HeaderRef headers[] = {

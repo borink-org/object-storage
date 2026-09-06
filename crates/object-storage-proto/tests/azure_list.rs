@@ -19,10 +19,16 @@ fn now() -> Timestamps {
 }
 
 fn url(list: &PhysicalList<'_>) -> String {
+    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
-    let mut buf = vec![0; layered::list_requirements(&blobs, list, &now()).unwrap()];
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, list, &now())
+            .map(|size| size.bytes)
+            .unwrap()
+    ];
     blobs
-        .encode_list(&mut buf, list, &now())
+        .encode_list(&mut buf, &mut request_headers_1, list, &now())
         .unwrap()
         .url()
         .to_owned()
@@ -60,10 +66,18 @@ fn fill<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Listing<'b> {
 
 #[test]
 fn a_listing_addresses_the_container_and_carries_no_content() {
+    let mut headers = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("");
-    let mut buf = vec![0; layered::list_requirements(&blobs, &list, &now()).unwrap()];
-    let request = blobs.encode_list(&mut buf, &list, &now()).unwrap();
+    let mut buf = vec![
+        0;
+        layered::list_requirements(&blobs, &list, &now())
+            .unwrap()
+            .bytes
+    ];
+    let request = blobs
+        .encode_list(&mut buf, &mut headers, &list, &now())
+        .unwrap();
 
     assert_eq!(request.method(), Method::Get);
     assert_eq!(
@@ -145,6 +159,8 @@ fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
 
 #[test]
 fn a_listing_plan_is_validated_before_any_byte_is_written() {
+    let mut request_headers_3 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers_2 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     let long = "k".repeat(1025);
     for (list, expected) in [
@@ -165,12 +181,16 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
         ),
     ] {
         assert_eq!(
-            blobs.encode_list(&mut [0; 512], &list, &now()).map(drop),
+            blobs
+                .encode_list(&mut [0; 512], &mut request_headers_2, &list, &now())
+                .map(drop),
             Err(Error::InvalidPlan(expected))
         );
         // The plan is refused before the buffer is even looked at.
         assert_eq!(
-            blobs.encode_list(&mut [], &list, &now()).map(drop),
+            blobs
+                .encode_list(&mut [], &mut request_headers_3, &list, &now())
+                .map(drop),
             Err(Error::InvalidPlan(expected))
         );
     }
@@ -178,24 +198,44 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
     // A prefix of exactly the longest key, and an empty one, both encode.
     let longest = "k".repeat(1024);
     assert!(
-        layered::list_requirements(&blobs, &PhysicalList::new(longest.as_str()), &now()).is_ok()
+        layered::list_requirements(&blobs, &PhysicalList::new(longest.as_str()), &now())
+            .map(|size| size.bytes)
+            .is_ok()
     );
-    assert!(layered::list_requirements(&blobs, &PhysicalList::new(""), &now()).is_ok());
+    assert!(
+        layered::list_requirements(&blobs, &PhysicalList::new(""), &now())
+            .map(|size| size.bytes)
+            .is_ok()
+    );
 }
 
 #[test]
 fn an_undersized_buffer_states_the_exact_requirement() {
+    let mut request_headers_5 = [borink_object_storage_proto::HeaderSpan::default(); 8];
+    let mut request_headers_4 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let blobs = blobs();
     let list = PhysicalList::new("directory/");
-    let required = layered::list_requirements(&blobs, &list, &now()).unwrap();
+    let required = layered::list_requirements(&blobs, &list, &now())
+        .map(|size| size.bytes)
+        .unwrap();
 
     let error = blobs
-        .encode_list(&mut vec![0; required - 1], &list, &now())
+        .encode_list(
+            &mut vec![0; required - 1],
+            &mut request_headers_4,
+            &list,
+            &now(),
+        )
         .unwrap_err();
     assert_eq!(error.capacity().unwrap().required, required);
     assert!(
         blobs
-            .encode_list(&mut vec![0; required], &list, &now())
+            .encode_list(
+                &mut vec![0; required],
+                &mut request_headers_5,
+                &list,
+                &now()
+            )
             .is_ok()
     );
 }
@@ -477,6 +517,7 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
         Err(Error::Capacity(CapacityError {
             required: 3,
             available: 2,
+            ..CapacityError::default()
         }))
     );
 }
@@ -497,6 +538,7 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
         Err(Error::Capacity(CapacityError {
             required: 1,
             available: 0,
+            ..CapacityError::default()
         }))
     );
 }

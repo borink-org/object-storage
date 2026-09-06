@@ -18,6 +18,12 @@ use borink_object_storage_proto as proto;
 #[derive(Clone, Copy)]
 #[allow(missing_docs, reason = "each field is named by what it measures")]
 pub struct Layout {
+    pub sizeof_request_buffer: usize,
+    pub alignof_request_buffer: usize,
+    pub offsetof_request_buffer_bytes: usize,
+    pub offsetof_request_buffer_headers: usize,
+    pub offsetof_request_buffer_header_capacity: usize,
+    pub offsetof_request_head_required_headers: usize,
     pub sizeof_bytes: usize,
     pub alignof_bytes: usize,
     pub offsetof_bytes_len: usize,
@@ -107,6 +113,12 @@ pub struct Layout {
 pub(crate) fn layout() -> Layout {
     use core::mem::offset_of;
     Layout {
+        sizeof_request_buffer: size_of::<RequestBuffer>(),
+        alignof_request_buffer: align_of::<RequestBuffer>(),
+        offsetof_request_buffer_bytes: offset_of!(RequestBuffer, bytes),
+        offsetof_request_buffer_headers: offset_of!(RequestBuffer, headers),
+        offsetof_request_buffer_header_capacity: offset_of!(RequestBuffer, header_capacity),
+        offsetof_request_head_required_headers: offset_of!(RequestHead, required_headers),
         sizeof_bytes: size_of::<Bytes>(),
         alignof_bytes: align_of::<Bytes>(),
         offsetof_bytes_len: offset_of!(Bytes, len),
@@ -228,8 +240,6 @@ pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize 
 // Every enum above crosses as a number. These pin the two lists to each other:
 // a value renumbered on either side stops this build.
 const _: () = {
-    assert!(BORINK_MAX_HEADERS == proto::MAX_HEADERS);
-
     assert!(ErrorCode::InvalidEndpoint as u16 == proto::ErrorCode::InvalidEndpoint as u16);
     assert!(ErrorCode::InvalidContainer as u16 == proto::ErrorCode::InvalidContainer as u16);
     assert!(ErrorCode::InvalidToken as u16 == proto::ErrorCode::InvalidToken as u16);

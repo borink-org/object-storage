@@ -66,7 +66,7 @@ using EntryKind     = borink_entry_kind;
 using BlobProperty  = borink_blob_property;
 using PropertySet   = borink_property_set;
 
-inline constexpr std::size_t MaxHeaders = BORINK_MAX_HEADERS;
+using RequestBuffer = borink_request_buffer;
 
 inline constexpr ErrorCode ErrorCodeNone             = BORINK_ERROR_CODE_NONE;
 inline constexpr ErrorCode ErrorCodeCapacity         = BORINK_ERROR_CODE_CAPACITY;

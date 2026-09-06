@@ -12,15 +12,6 @@
 #include <stdint.h>
 
 /**
- * The most headers that one request head carries.
- *
- * This is the core crate's own bound, and the array in `borink_request_head`
- * has exactly this many slots. A compile-time assertion stops the build if
- * the core crate raises it.
- */
-#define BORINK_MAX_HEADERS 6
-
-/**
  * Which kind of failure a `borink_status` carries.
  *
  * These are the numbers that the core crate's error code uses.
@@ -752,7 +743,11 @@ typedef struct borink_request_head {
     /**
      * The headers, in the order that the core crate wrote them.
      */
-    struct borink_request_header headers[BORINK_MAX_HEADERS];
+    const struct borink_request_header *headers;
+    /**
+     * Header slots required, including on capacity failure.
+     */
+    size_t required_headers;
 } borink_request_head;
 
 /**
@@ -811,6 +806,25 @@ typedef struct borink_bytes_mut {
      */
     size_t len;
 } borink_bytes_mut;
+
+/**
+ * Caller-owned storage for an encoded request.
+ * Both regions must be disjoint from all input strings and records.
+ */
+typedef struct borink_request_buffer {
+    /**
+     * Writable byte storage.
+     */
+    struct borink_bytes_mut bytes;
+    /**
+     * Initialized descriptor slots, disjoint from the byte storage.
+     */
+    struct borink_request_header *headers;
+    /**
+     * Number of descriptor slots.
+     */
+    size_t header_capacity;
+} borink_request_buffer;
 
 /**
  * The part of a write plan that holds no borrows.
@@ -1204,6 +1218,12 @@ typedef struct borink_property {
  * gives, and pass it to `borink_layout_disagrees`.
  */
 typedef struct borink_layout {
+    size_t sizeof_request_buffer;
+    size_t alignof_request_buffer;
+    size_t offsetof_request_buffer_bytes;
+    size_t offsetof_request_buffer_headers;
+    size_t offsetof_request_buffer_header_capacity;
+    size_t offsetof_request_head_required_headers;
     size_t sizeof_bytes;
     size_t alignof_bytes;
     size_t offsetof_bytes_len;
@@ -1317,12 +1337,13 @@ struct borink_status borink_validate(const struct borink_session *session);
  * `session` and `shape` must each be null or point at one readable value.
  * `key`, `condition_value` and `buf` must each address their stated length,
  * and `buf` must be reached through nothing else during the call.
+ * Byte storage and initialized descriptor slots must be exclusive and disjoint.
  */
 struct borink_request_head borink_encode_get(const struct borink_session *session,
                                              const struct borink_get_shape *shape,
                                              struct borink_bytes key,
                                              struct borink_bytes condition_value,
-                                             struct borink_bytes_mut buf,
+                                             struct borink_request_buffer buf,
                                              uint64_t unix_seconds);
 
 /**
@@ -1333,12 +1354,13 @@ struct borink_request_head borink_encode_get(const struct borink_session *sessio
  * # Safety
  *
  * As `borink_encode_get`.
+ * Byte storage and initialized descriptor slots must be exclusive and disjoint.
  */
 struct borink_request_head borink_encode_put(const struct borink_session *session,
                                              const struct borink_put_shape *shape,
                                              struct borink_bytes key,
                                              struct borink_bytes condition_value,
-                                             struct borink_bytes_mut buf,
+                                             struct borink_request_buffer buf,
                                              uint64_t content_len,
                                              uint64_t unix_seconds);
 
@@ -1348,12 +1370,13 @@ struct borink_request_head borink_encode_put(const struct borink_session *sessio
  * # Safety
  *
  * As `borink_encode_get`.
+ * Byte storage and initialized descriptor slots must be exclusive and disjoint.
  */
 struct borink_request_head borink_encode_delete(const struct borink_session *session,
                                                 const struct borink_delete_shape *shape,
                                                 struct borink_bytes key,
                                                 struct borink_bytes condition_value,
-                                                struct borink_bytes_mut buf,
+                                                struct borink_request_buffer buf,
                                                 uint64_t unix_seconds);
 
 /**
@@ -1475,12 +1498,13 @@ struct borink_outcome borink_finish_delete_error_body(const struct borink_sessio
  * `session` and `shape` must each be null or point at one readable value.
  * `prefix`, `marker` and `buf` must each address their stated length, and
  * `buf` must be reached through nothing else during the call.
+ * Byte storage and initialized descriptor slots must be exclusive and disjoint.
  */
 struct borink_request_head borink_encode_list(const struct borink_session *session,
                                               const struct borink_list_shape *shape,
                                               struct borink_bytes prefix,
                                               struct borink_bytes marker,
-                                              struct borink_bytes_mut buf,
+                                              struct borink_request_buffer buf,
                                               uint64_t unix_seconds);
 
 /**

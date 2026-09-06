@@ -12,6 +12,7 @@ fn build_request<'a>(
     key: &str,
     object_length: usize,
 ) -> (PutShape, ureq::RequestBuilder<WithBody>) {
+    let mut request_headers_1 = [borink_object_storage_proto::HeaderSpan::default(); 8];
     let mut buf = Vec::with_capacity(4096);
     let plan = PhysicalPut::new(key);
     let now = Timestamps::from_unix(
@@ -23,6 +24,7 @@ fn build_request<'a>(
     let out = blobs
         .encode_put(
             buf.as_mut_slice(),
+            &mut request_headers_1,
             &plan,
             // review: maybe Streamed is not a good name?
             // thinking about it, I think this part of the API is still quite weak

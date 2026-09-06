@@ -49,8 +49,10 @@
 //! let get = PhysicalGet::new("directory/object.txt");
 //!
 //! // 2. Encode the request head into your own buffer, then send it.
-//! let mut buffer = vec![0; layered::get_requirements(&blobs, &get, &now)?];
-//! let request = blobs.encode_get(&mut buffer, &get, &now)?;
+//! let size = layered::get_requirements(&blobs, &get, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+//! let request = blobs.encode_get(&mut buffer, &mut headers, &get, &now)?;
 //! assert_eq!(request.method(), Method::Get);
 //! for (name, value) in request.headers() {
 //!     // your_client.header(name, value);
@@ -72,8 +74,10 @@
 //!     max_results: Some(2),
 //!     ..PhysicalList::new("directory/")
 //! };
-//! let mut buffer = vec![0; layered::list_requirements(&blobs, &list, &now)?];
-//! let request = blobs.encode_list(&mut buffer, &list, &now)?;
+//! let size = layered::list_requirements(&blobs, &list, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+//! let request = blobs.encode_list(&mut buffer, &mut headers, &list, &now)?;
 //! assert_eq!(
 //!     request.url(),
 //!     "https://account.blob.core.windows.net/objects\
@@ -101,8 +105,10 @@
 //! // A write follows the same three steps.
 //! let put = PhysicalPut::new("directory/object.txt");
 //! let content = Payload::Slice(b"contents");
-//! let mut buffer = vec![0; layered::put_requirements(&blobs, &put, content, &now)?];
-//! let request = blobs.encode_put(&mut buffer, &put, content, &now)?;
+//! let size = layered::put_requirements(&blobs, &put, content, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![borink_object_storage_proto::HeaderSpan::default(); size.headers];
+//! let request = blobs.encode_put(&mut buffer, &mut headers, &put, content, &now)?;
 //! assert_eq!(request.method(), Method::Put);
 //! assert_eq!(request.payload().bytes(), Some(b"contents".as_slice()));
 //!
@@ -120,7 +126,7 @@
 //! # Sizing the buffer
 //!
 //! The encoding methods refuse a buffer that is too small and state the exact
-//! number of bytes that they need. You can grow the buffer and call again, or
+//! numbers of bytes and header slots that they need. You can grow the buffer and call again, or
 //! call [`layered::get_requirements`], [`layered::put_requirements`] or
 //! [`layered::list_requirements`] first, as the example does.
 //!
@@ -157,7 +163,7 @@ pub use outcome::{
     BodyWindow, Classification, DeleteHeadOutcome, Failure, FailureClass, GetHeadOutcome,
     ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, ServiceErrorKind,
 };
-pub use request::{MAX_HEADERS, Method, Span, WireRequest};
+pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind, GetShape, ListEntry,

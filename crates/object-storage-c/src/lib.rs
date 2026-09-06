@@ -67,9 +67,8 @@
 //! # Sizing the buffer
 //!
 //! `borink_encode_get` refuses a buffer that is too small. It reports
-//! `Capacity` in `status`, and the number of bytes it needs in `required`.
-//! Call it with an empty buffer to learn that number, then size one buffer per
-//! session and reuse it.
+//! `Capacity` in `status`, with byte and descriptor counts in `required` and
+//! `required_headers`. Both storage regions are caller-owned and reusable.
 //!
 //! # Where each value lives
 //!

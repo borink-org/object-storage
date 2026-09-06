@@ -5,27 +5,31 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// The exact capacity that your buffer needs.
 ///
-/// For an encoding method the two counts are bytes of the request buffer.
+/// Encoding reports both byte capacity and header-slot capacity.
 /// Grow the buffer to `required` bytes and call the same method again. To
 /// learn the requirement before the first call, use
 /// [`layered::get_requirements`](crate::layered::get_requirements).
 ///
 /// For [`Blobs::fill_listing`](crate::Blobs::fill_listing) the two counts are
 /// entries of the array, and `required` is the number that the page holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapacityError {
     /// The smallest buffer that the call accepts, in bytes.
     pub required: usize,
     /// The size of the buffer that you supplied, in bytes.
     pub available: usize,
+    /// Header slots required by an encoder; zero for a body fill.
+    pub required_headers: usize,
+    /// Header slots supplied to an encoder; zero for a body fill.
+    pub available_headers: usize,
 }
 
 impl fmt::Display for CapacityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the buffer needs {} but has {}",
-            self.required, self.available
+            "the buffer needs {} but has {}; headers need {} but have {}",
+            self.required, self.available, self.required_headers, self.available_headers
         )
     }
 }
@@ -62,8 +66,6 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    // 8, 9 and 13 name the part operations, which this crate does not write
-    // yet. Every number here is assigned once, so the holes stay open.
     /// The listing prefix is longer than an object key may be.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
@@ -73,6 +75,8 @@ pub enum InvalidPlan {
     Marker = 11,
     /// The listing asks for zero entries.
     MaxResults = 12,
+    /// The encoded request cannot be addressed on this target.
+    RequestTooLarge = 14,
 }
 
 impl InvalidPlan {
@@ -89,6 +93,7 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
+            Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
             Self::Marker => "invalid listing marker",
             Self::MaxResults => "a listing cannot ask for zero entries",
@@ -110,6 +115,7 @@ impl InvalidPlan {
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,
+            14 => Self::RequestTooLarge,
             _ => return None,
         })
     }
@@ -398,8 +404,8 @@ mod tests {
     // capacity fields set it, so a field added later shows up here.
     #[test]
     fn a_result_stays_small() {
-        assert_eq!(size_of::<Error>(), 3 * size_of::<usize>());
-        assert!(size_of::<Result<(), Error>>() <= 4 * size_of::<usize>());
+        assert_eq!(size_of::<Error>(), 5 * size_of::<usize>());
+        assert!(size_of::<Result<(), Error>>() <= 6 * size_of::<usize>());
     }
 
     // Every error except a capacity error, which carries sizes rather than a
@@ -436,6 +442,7 @@ mod tests {
         let error = Error::Capacity(CapacityError {
             required: 96,
             available: 64,
+            ..CapacityError::default()
         });
         assert_eq!(error.code(), ErrorCode::Capacity);
         assert_eq!(error.detail(), 0);

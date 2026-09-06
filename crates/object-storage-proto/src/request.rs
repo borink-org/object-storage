@@ -2,15 +2,23 @@ use core::str;
 
 use crate::Payload;
 
-/// The most headers that this crate writes into one request head.
-///
-/// `authorization`, `x-ms-date`, `x-ms-version`, `content-length`,
-/// `x-ms-blob-type` and one condition. [`WireRequest::headers`] returns at
-/// most this many.
-///
-/// This is not a limit on your request. Headers that you add yourself, such as
-/// one a proxy needs, go to your HTTP client and are not counted here.
-pub const MAX_HEADERS: usize = 6;
+/// The storage required to encode a request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestSize {
+    /// Bytes for the URL and headers.
+    pub bytes: usize,
+    /// Header descriptor slots.
+    pub headers: usize,
+}
+
+/// One header's name and value in the request buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeaderSpan {
+    /// The header name.
+    pub name: Span,
+    /// The header value.
+    pub value: Span,
+}
 
 /// A range of bytes, as an offset from the start of a buffer.
 ///
@@ -26,6 +34,8 @@ pub struct Span {
 
 impl Span {
     fn of(self, bytes: &str) -> &str {
+        // HeadWriter bounds spans by the finished buffer; custom H conversions
+        // must preserve them, as required by WireRequest's descriptor contract.
         &bytes[self.start..self.start + self.len]
     }
 }
@@ -63,7 +73,7 @@ impl core::fmt::Display for Method {
     }
 }
 
-/// A request that borrows its head from your buffer.
+/// A request borrowing caller-owned byte storage and header descriptors.
 ///
 /// Send this with the HTTP client of your choice. Read the method, the URL,
 /// the headers and the body, and give them to the client.
@@ -71,25 +81,30 @@ impl core::fmt::Display for Method {
 /// The encoding methods copy every byte of the head into your buffer,
 /// including each header name. The head therefore borrows nothing that you
 /// passed to them, and each of those arguments can be a temporary. The content
-/// is the one exception: it stays where you put it, and this request borrows
-/// it or leaves it to you.
+/// stays where you put it, or is streamed separately by the host.
+///
+/// Custom header descriptor types must preserve both spans when converting
+/// from and back into [`HeaderSpan`].
 ///
 /// # Lifetime
 ///
-/// The request borrows the buffer, so the buffer stays locked until you drop
-/// the request. Encode, send, then drop the request to use the buffer again.
-/// The compiler enforces this order.
+/// The request borrows both storage regions until transport consumption ends.
+/// Drop the request before reusing either region.
 #[derive(Debug, Clone, Copy)]
-pub struct WireRequest<'r> {
+pub struct WireRequest<'r, H = HeaderSpan> {
     bytes: &'r str,
     method: Method,
     url: Span,
-    headers: [(Span, Span); MAX_HEADERS],
-    header_count: usize,
+    headers: &'r [H],
     payload: Payload<'r>,
 }
 
-impl<'r> WireRequest<'r> {
+impl<'r, H: Copy + Into<HeaderSpan>> WireRequest<'r, H> {
+    /// Returns the caller-owned descriptor array used by this request.
+    pub fn header_descriptors(&self) -> &'r [H] {
+        self.headers
+    }
+
     /// Returns the HTTP method.
     pub fn method(&self) -> Method {
         self.method
@@ -125,8 +140,10 @@ impl<'r> WireRequest<'r> {
 
     /// Returns each header name and value as a range of that same buffer.
     pub fn header_spans(&self) -> impl ExactSizeIterator<Item = (Span, Span)> {
-        let headers = self.headers;
-        (0..self.header_count).map(move |index| headers[index])
+        self.headers.iter().copied().map(|header| {
+            let HeaderSpan { name, value } = header.into();
+            (name, value)
+        })
     }
 }
 
@@ -143,7 +160,9 @@ impl<'a> Writer<'a> {
     }
 
     pub(crate) fn push(&mut self, value: &[u8]) {
-        let end = self.position + value.len();
+        // Counting continues past capacity; aliased inputs can exceed usize
+        // in aggregate. Saturation preserves monotonicity and cannot fit a slice.
+        let end = self.position.saturating_add(value.len());
         if end <= self.bytes.len() {
             self.bytes[self.position..end].copy_from_slice(value);
         }
@@ -161,19 +180,19 @@ impl<'a> Writer<'a> {
 
 // The head as it is written: every byte of it goes into the caller's buffer,
 // and every part of it is recorded as a range of that buffer.
-pub(crate) struct HeadWriter<'a> {
+pub(crate) struct HeadWriter<'a, H> {
     out: Writer<'a>,
     url: Span,
-    headers: [(Span, Span); MAX_HEADERS],
+    headers: &'a mut [H],
     count: usize,
 }
 
-impl<'a> HeadWriter<'a> {
-    pub(crate) fn new(bytes: &'a mut [u8]) -> Self {
+impl<'a, H: Copy + From<HeaderSpan> + Into<HeaderSpan>> HeadWriter<'a, H> {
+    pub(crate) fn new(bytes: &'a mut [u8], headers: &'a mut [H]) -> Self {
         Self {
             out: Writer::new(bytes),
             url: Span::default(),
-            headers: [(Span::default(), Span::default()); MAX_HEADERS],
+            headers,
             count: 0,
         }
     }
@@ -182,25 +201,47 @@ impl<'a> HeadWriter<'a> {
         self.out.position()
     }
 
+    pub(crate) fn capacity(&self, available: usize) -> crate::CapacityError {
+        crate::CapacityError {
+            required: self.position(),
+            available,
+            required_headers: self.count,
+            available_headers: self.headers.len(),
+        }
+    }
+
     pub(crate) fn url(&mut self, write: impl FnOnce(&mut Writer<'a>)) {
         self.url = self.part(write);
     }
 
     pub(crate) fn header(&mut self, name: &str, write: impl FnOnce(&mut Writer<'a>)) {
-        let name = self.part(|out| out.push(name.as_bytes()));
-        let value = self.part(write);
-        self.headers[self.count] = (name, value);
-        self.count += 1;
+        self.header_parts(|out| out.push(name.as_bytes()), write);
     }
 
-    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
-        let (url, headers, header_count) = (self.url, self.headers, self.count);
+    pub(crate) fn header_parts(
+        &mut self,
+        name: impl FnOnce(&mut Writer<'a>),
+        value: impl FnOnce(&mut Writer<'a>),
+    ) {
+        let name = self.part(name);
+        let value = self.part(value);
+        if let Some(slot) = self.headers.get_mut(self.count) {
+            *slot = HeaderSpan { name, value }.into();
+        }
+        // Headers are counted even after descriptor capacity is exhausted; continue
+        // without wrapping, just as Writer does for bytes.
+        self.count = self.count.saturating_add(1);
+    }
+
+    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a, H>> {
+        if self.count > self.headers.len() {
+            return None;
+        }
         Some(WireRequest {
             bytes: text(self.out.finish()?),
             method,
-            url,
-            headers,
-            header_count,
+            url: self.url,
+            headers: &self.headers[..self.count],
             payload,
         })
     }
@@ -208,6 +249,7 @@ impl<'a> HeadWriter<'a> {
     fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
         let start = self.out.position();
         write(&mut self.out);
+        // push only increases or saturates position, so subtraction cannot underflow.
         Span {
             start,
             len: self.out.position() - start,
@@ -231,6 +273,7 @@ impl U64Decimal {
         let mut bytes = [0; 20];
         let mut start = bytes.len();
         loop {
+            // A u64 has at most 20 decimal digits; each division consumes one.
             start -= 1;
             bytes[start] = b'0' + (value % 10) as u8;
             value /= 10;
@@ -248,7 +291,29 @@ impl U64Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{U64Decimal, Writer};
+    use super::{HeadWriter, HeaderSpan, Method, U64Decimal, Writer};
+
+    #[test]
+    fn header_capacity_is_independent_of_byte_capacity() {
+        for (byte_capacity, header_capacity) in [(0, 1), (9, 0), (9, 1)] {
+            let mut bytes = [0; 9];
+            let mut headers = [HeaderSpan::default(); 1];
+            let mut writer =
+                HeadWriter::new(&mut bytes[..byte_capacity], &mut headers[..header_capacity]);
+            writer.header("name", |out| out.push(b"value"));
+            let capacity = writer.capacity(byte_capacity);
+            assert_eq!(capacity.required, 9);
+            assert_eq!(capacity.required_headers, 1);
+            assert_eq!(capacity.available, byte_capacity);
+            assert_eq!(capacity.available_headers, header_capacity);
+            assert_eq!(
+                writer
+                    .finish(Method::Get, crate::Payload::Slice(b""))
+                    .is_some(),
+                byte_capacity == 9 && header_capacity == 1
+            );
+        }
+    }
 
     #[test]
     fn an_exactly_sized_writer_returns_the_written_bytes() {
@@ -279,6 +344,24 @@ mod tests {
 
         assert_eq!(writer.position(), 8);
         assert!(writer.finish().is_none());
+    }
+
+    #[test]
+    fn an_unrepresentable_requirement_saturates_without_wrapping() {
+        let mut writer = Writer::new(&mut []);
+        writer.position = usize::MAX - 1;
+        writer.push(b"over");
+        assert_eq!(writer.position(), usize::MAX);
+        assert!(writer.finish().is_none());
+
+        let mut head = HeadWriter::new(&mut [], &mut [] as &mut [HeaderSpan]);
+        head.count = usize::MAX;
+        head.header("name", |out| out.push(b"value"));
+        assert_eq!(head.capacity(0).required_headers, usize::MAX);
+        assert!(
+            head.finish(Method::Get, crate::Payload::Slice(b""))
+                .is_none()
+        );
     }
 
     #[test]

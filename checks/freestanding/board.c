@@ -44,10 +44,11 @@ void board_main(void) {
     const borink_get_shape shape = {
         BORINK_GET_KIND_BYTES, {BORINK_RANGE_FORM_BOUNDED, 2, 6}, BORINK_CONDITION_NONE};
     static uint8_t request[1024];
+    borink_request_header request_headers[8] = {0};
     const borink_bytes nothing = {0, 0};
     const borink_request_head head =
         borink_encode_get(&session, &shape, as_bytes("object.bin"), nothing,
-                          (borink_bytes_mut){request, sizeof request}, 1787400000);
+                          (borink_request_buffer){{request, sizeof request}, request_headers, 8}, 1787400000);
     sink = (unsigned)head.required;
 
     const borink_header_ref headers[] = {
@@ -66,7 +67,7 @@ void board_main(void) {
     const borink_list_shape listing = {true, {true, 2}};
     const borink_request_head page_head =
         borink_encode_list(&session, &listing, as_bytes("directory/"), nothing,
-                           (borink_bytes_mut){request, sizeof request}, 1787400000);
+                           (borink_request_buffer){{request, sizeof request}, request_headers, 8}, 1787400000);
     sink = (unsigned)page_head.required;
     sink = borink_accept_list_head(&session, 200, headers,
                                    sizeof headers / sizeof headers[0]).kind;
