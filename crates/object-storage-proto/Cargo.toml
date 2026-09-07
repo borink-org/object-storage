@@ -6,6 +6,9 @@ license = "Apache-2.0"
 description = "Object storage operations with a sans-IO core and externally buffered API"
 repository = "https://github.com/borink-org/object-storage"
 readme = "../../README.md"
+rust-version = "1.97.1"
+keywords = ["azure", "blob-storage", "object-storage", "sans-io", "no-std"]
+categories = ["no-std::no-alloc", "api-bindings", "network-programming"]
 
 [dependencies]
 
