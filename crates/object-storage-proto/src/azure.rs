@@ -437,8 +437,8 @@ impl<'a> Blobs<'a> {
     ///
     /// Use this when the references are produced rather than stored: from an
     /// array in another language, or from an ID derived per index. No second
-    /// array of references is built. The IDs themselves are still copied into
-    /// the body, as any encoding does.
+    /// array of references is built. This method still copies each ID into
+    /// the body.
     ///
     /// `blocks` is traversed twice: once to validate the IDs and size the
     /// body, once to write it. Every traversal must yield the same items in
