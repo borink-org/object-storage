@@ -33,8 +33,9 @@ void start_curl() {
 
 // One easy handle, and the header list that belongs to it.
 //
-// curl_slist_append copies each request header. These allocations are in
-// addition to libcurl's internal state and the host's reusable buffers.
+// `curl_slist_append` copies the line it is given, so this is where a request
+// allocates: once per header, on libcurl's terms. The library allocates none
+// of it, and neither does the arena that holds the response head.
 class Handle {
   public:
     Handle() {
@@ -220,8 +221,9 @@ std::size_t collect_diagnostic(char *data, std::size_t size, std::size_t count, 
     return keep(diagnostic.bytes, diagnostic.cap, data, size * count);
 }
 
-// Listing bodies are kept whole and parsed after transfer. There is currently
-// no byte limit; a partial body would need to be rejected rather than parsed.
+// A body that this host keeps whole, which the page of a listing is: the
+// entries are read out of it after the transfer. A page read in part is not a
+// document, so there is nothing to cap it at short of what was asked for.
 std::size_t collect_page(char *data, std::size_t size, std::size_t count, void *user) {
     std::vector<std::uint8_t> &page = *static_cast<std::vector<std::uint8_t> *>(user);
     const std::size_t length = size * count;
@@ -246,87 +248,6 @@ std::size_t send_content(char *data, std::size_t size, std::size_t count, void *
 } // namespace
 
 const std::string_view client = "libcurl";
-
-void Client::send_upload(const RequestHead &request, std::span<const std::uint8_t> content) {
-    Content sending{content, 0};
-    Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
-    Handle handle;
-    apply(handle, *this, request);
-    handle.set(CURLOPT_UPLOAD, 1L);
-    handle.set(CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(content.size()));
-    handle.set(CURLOPT_READFUNCTION, send_content);
-    handle.set(CURLOPT_READDATA, &sending);
-    handle.set(CURLOPT_HEADERFUNCTION, collect_head);
-    handle.set(CURLOPT_HEADERDATA, &head_);
-    handle.set(CURLOPT_WRITEFUNCTION, collect_diagnostic);
-    handle.set(CURLOPT_WRITEDATA, &diagnostic);
-    handle.send();
-    checked_head();
-}
-
-void Client::stage_block(std::string_view key, std::string_view id, std::span<const std::uint8_t> content) {
-    const Session session = this->session();
-    const StageBlock plan{as_bytes(key), as_bytes(id), {}};
-    const auto now = now_unix();
-    const auto &request = encode([&] {
-        return borink_azure_encode_stage_block(&session, &plan, request_buffer(), content.size(), now);
-    });
-    send_upload(request, content);
-    outcome_ = borink_azure_accept_stage_head(&session, head_.status(), head_.refs(), head_.count()).outcome;
-    if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_azure_finish_stage_error_body(&session, &outcome_.failure, kept_body());
-    }
-    if (outcome_.kind != OutcomeKindStaged) { fail("Azure staged no block"); }
-}
-
-void Client::commit_blocks(std::string_view key, std::span<const BlockRef> blocks, const Write &write) {
-    const Session session = this->session();
-    const CommitBlocks plan{as_bytes(key), write.shape().condition,
-                      {!write.condition_value.empty(), as_bytes(write.condition_value)}, {}};
-    const CommitBlocksShape shape{plan.condition};
-    const auto now = now_unix();
-    const auto &request = encode([&] {
-        return borink_azure_encode_commit_blocks(&session, &plan, blocks.data(), blocks.size(), request_buffer(), now);
-    });
-    send_upload(request, std::span<const std::uint8_t>(request_.data() + request.body.span.start,
-                                                      request.body.span.len));
-    outcome_ = borink_azure_accept_commit_head(&session, &shape, head_.status(), head_.refs(), head_.count()).outcome;
-    if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_azure_finish_commit_error_body(&session, &shape, &outcome_.failure, kept_body());
-    }
-    if (outcome_.kind != OutcomeKindCommitted) { fail("Azure committed no object"); }
-}
-
-std::span<const Block> Client::list_blocks(std::string_view key,
-                                                 std::span<Block> entries, BlockListKind kind) {
-    const Session session = this->session();
-    const ListBlocks plan{as_bytes(key), static_cast<std::uint16_t>(kind), {}, {}, {}};
-    const auto now = now_unix();
-    const auto &request = encode([&] {
-        return borink_azure_encode_list_blocks(&session, &plan, request_buffer(), now);
-    });
-    page_.clear();
-    Handle handle;
-    apply(handle, *this, request);
-    handle.set(CURLOPT_HEADERFUNCTION, collect_head);
-    handle.set(CURLOPT_HEADERDATA, &head_);
-    handle.set(CURLOPT_WRITEFUNCTION, collect_page);
-    handle.set(CURLOPT_WRITEDATA, &page_);
-    handle.send();
-    checked_head();
-    outcome_ = borink_azure_accept_list_blocks_head(&session, head_.status(), head_.refs(), head_.count()).outcome;
-    if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_azure_finish_list_blocks_error_body(&session, &outcome_.failure,
-            borrow(std::span<const std::uint8_t>(page_.data(), std::min(page_.size(), limits_.error_bytes))));
-    }
-    if (outcome_.kind != OutcomeKindBlocks) { fail("Azure listed no blocks"); }
-    const auto fill = borink_azure_fill_blocks(&session, page_buffer(), entries.data(), entries.size());
-    if (fill.status.code != 0) {
-        throw std::runtime_error(std::string(describe_whole(message_, fill.status)));
-    }
-    return entries.first(fill.filled);
-}
-
 
 void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     const std::uint64_t now = now_unix();

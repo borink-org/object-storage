@@ -6,9 +6,12 @@
 // library writes its own `Client` over the same library, and includes
 // `borink/object_storage.hpp` alone.
 //
-// The library allocates nothing. This host reuses client-owned buffers, but
-// those buffers and libcurl can allocate. curl_slist_append copies request
-// headers; libcurl also retains response headers and transport state.
+// The library allocates nothing at all and throws nothing. This host keeps
+// every buffer on the `Client` that the application built, and reuses it for
+// the next request. It still allocates twice per request, and both are
+// libcurl's terms rather than the library's: `curl_slist_append` copies each
+// header line, and a failure builds a message. A host that will not pay for
+// the first chooses a different HTTP library, not a different binding.
 
 #pragma once
 
@@ -51,7 +54,7 @@ using Sink = std::function<void(std::span<const std::uint8_t>)>;
 // call alone.
 using EntrySink = std::function<void(std::span<const ListEntry>)>;
 
-// Limits on selected host buffers, not on total client or libcurl memory.
+// How much memory one client may use.
 struct Limits {
     // The most that one request head may take. A request that needs more is
     // refused rather than served.
@@ -62,20 +65,25 @@ struct Limits {
     // the service decides how long it is: one that does not arrive costs the
     // name of the error, not the outcome.
     std::size_t error_bytes = 8 * 1024;
-    // Bounds the host's response-header arena. libcurl's own header storage
-    // and the host's HeaderRef descriptors are additional memory.
+    // The most that one response head may take. libcurl keeps no header
+    // buffer of its own, so this host copies each header into an arena that it
+    // reserves once at this size. A head that would outgrow it is refused
+    // rather than served, exactly as an oversized request head is.
     std::size_t head_bytes = 8 * 1024;
-    // Listing bodies have no byte limit. max_results limits entry count,
-    // not entry size or malformed responses.
+    // There is no limit on a listing page. libcurl keeps none of the body, so
+    // this client holds the whole page while it reads the entries out of it,
+    // and how large that is follows from `List::max_results`: the service
+    // sends no more entries than you asked for. Ask for fewer to hold less.
 };
 
 // Where this host keeps the response head, and one `HeaderRef` per
 // header.
 //
 // The library takes the head as borrowed bytes and dictates no layout for it.
-// This host copies callback headers into an arena so response fields survive
-// the per-request easy handle. libcurl also retains headers for curl_easy_header;
-// borrowing those instead would require keeping the handle alive.
+// A client whose HTTP library retains its own header buffer points straight
+// into that. libcurl retains none: it hands over one header at a time and
+// keeps nothing, so this host copies each into an arena. That is libcurl's
+// fact, and this class is where it stays.
 //
 // The arena is reserved once and never grows, because every `HeaderRef`
 // points into it and a reallocation would leave them all dangling. A head that
@@ -181,12 +189,6 @@ class Client {
     void put(std::string_view key, std::span<const std::uint8_t> content,
              const Write &write = {});
 
-    void stage_block(std::string_view key, std::string_view id, std::span<const std::uint8_t> content);
-    void commit_blocks(std::string_view key, std::span<const BlockRef> blocks, const Write &write = {});
-    // Entries borrow this client's body buffer until the next blocks/list request.
-    std::span<const Block> list_blocks(std::string_view key, std::span<Block> entries,
-                                             BlockListKind kind = BlockListKindStaged);
-
     // Removes what `removal` names.
     //
     // Reports a missing object rather than treating it as success: only the
@@ -198,8 +200,8 @@ class Client {
     // This client asks for one page after another, and reads each page in as
     // many rounds as `entries` takes. `entries` is your budget for the entries
     // themselves, however many keys the container holds. The page they are
-    // read out of is an unbounded buffer of this client. List::max_results
-    // limits the entry count, not the response's byte length.
+    // read out of is one buffer of this client, and `List::max_results` is
+    // what decides how large it grows.
     //
     // Throws std::runtime_error if Azure listed nothing.
     void list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
@@ -265,7 +267,6 @@ class Client {
     RequestBuffer request_buffer() {
         return {into(request_), request_headers_.data(), request_headers_.size()};
     }
-    void send_upload(const RequestHead &request, std::span<const std::uint8_t> content);
 
     // The page of the last listing, as the buffer that the entries are read
     // out of. Reading decodes the text where it stands, so it is writable.

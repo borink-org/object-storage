@@ -6,54 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// The part of a `borink_commit_blocks` that reading the response needs.
-pub struct CommitBlocksShape {
-    /// A borink_condition.
-    pub condition: u16,
-}
-#[repr(u16)]
-#[derive(Clone, Copy)]
-/// Which blocks a block-list read enumerates.
-pub enum BlockListKind {
-    /// Staged and not yet committed.
-    Staged = 1,
-    /// Blocks of the committed object; empty before the first commit.
-    Committed = 2,
-    /// Both lists; succeeds even when only staged blocks exist.
-    All = 3,
-}
-#[repr(u16)]
-#[derive(Clone, Copy)]
-/// Which list held a listed block.
-pub enum BlockState {
-    /// Staged and not yet committed.
-    Staged = 1,
-    /// Block of the committed object.
-    Committed = 2,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// One listed block, borrowing the response body.
-pub struct Block {
-    /// The block ID as the service writes it; pass it back unchanged.
-    pub id: Bytes,
-    /// The block's length in bytes.
-    pub size: u64,
-    /// A borink_block_state.
-    pub state: u16,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Optional range of the request buffer.
-pub struct MaybeSpan {
-    /// Whether the range exists.
-    pub present: bool,
-    /// Range when present.
-    pub span: Span,
-}
-
 /// Bytes that your program owns and lends to a call.
 ///
 /// A `len` of 0 is an empty value, and `ptr` may then be null.
@@ -332,8 +284,6 @@ pub enum ServiceError {
     Timeout = 8,
     /// The service failed, or it was unavailable.
     Service = 9,
-    /// The service refused the block list, or a block that it names.
-    InvalidUpload = 10,
 }
 
 /// Which outcome a response head became.
@@ -376,16 +326,6 @@ pub enum OutcomeKind {
     /// `borink_fill_listing`. `body.expected_len` is the length of that body,
     /// and the other two values of `body` are absent.
     Page = 13,
-    /// The service holds the block. Put Block answers no entity tag.
-    Staged = 14,
-    /// The object is committed.
-    Committed = 15,
-    /// The blocks follow in the response body.
-    ///
-    /// Read the whole body into one buffer and pass it to
-    /// `borink_azure_fill_blocks`; `borink_azure_max_blocks_in` sizes the
-    /// array from `body.expected_len`.
-    Blocks = 16,
 }
 
 /// One container, and the token that opens it.
@@ -503,8 +443,6 @@ pub struct RequestBuffer {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RequestHead {
-    /// Generated body in the request buffer, valid until the buffer is reused.
-    pub body: MaybeSpan,
     /// Whether the head was written, and what stopped it.
     ///
     /// A `code` of 0 means that the head is in your buffer.
@@ -849,185 +787,4 @@ pub struct Fill {
     /// Absent when the listing is complete. Copy the bytes into your own
     /// storage and pass them as the marker of the next request.
     pub next_marker: MaybeBytes,
-}
-
-#[repr(u16)]
-#[derive(Clone, Copy)]
-/// Azure block-list selector.
-pub enum BlockSource {
-    /// Require staged data.
-    Uncommitted = 1,
-    /// Reuse committed data.
-    Committed = 2,
-    /// Prefer staged data, otherwise reuse committed data.
-    Latest = 3,
-}
-
-#[repr(u16)]
-#[derive(Clone, Copy)]
-/// Supported native option.
-pub enum BlockOptionKind {
-    /// x-ms-lease-id.
-    LeaseId = 1,
-    /// Content-MD5.
-    ContentMd5 = 2,
-    /// x-ms-content-crc64.
-    ContentCrc64 = 3,
-    /// x-ms-encryption-key.
-    EncryptionKey = 4,
-    /// x-ms-encryption-key-sha256.
-    EncryptionKeySha256 = 5,
-    /// x-ms-encryption-algorithm.
-    EncryptionAlgorithm = 6,
-    /// x-ms-encryption-scope.
-    EncryptionScope = 7,
-    /// x-ms-client-request-id.
-    ClientRequestId = 8,
-    /// x-ms-blob-content-type.
-    ContentType = 9,
-    /// x-ms-blob-content-encoding.
-    ContentEncoding = 10,
-    /// x-ms-blob-content-language.
-    ContentLanguage = 11,
-    /// x-ms-blob-cache-control.
-    CacheControl = 12,
-    /// x-ms-blob-content-md5.
-    BlobContentMd5 = 13,
-    /// x-ms-blob-content-disposition.
-    ContentDisposition = 14,
-    /// x-ms-tags.
-    Tags = 15,
-    /// x-ms-access-tier.
-    AccessTier = 16,
-    /// If-Modified-Since.
-    IfModifiedSince = 17,
-    /// If-Unmodified-Since.
-    IfUnmodifiedSince = 18,
-    /// x-ms-if-tags.
-    IfTags = 19,
-    /// x-ms-immutability-policy-until-date.
-    ImmutabilityUntil = 20,
-    /// x-ms-immutability-policy-mode.
-    ImmutabilityMode = 21,
-    /// x-ms-legal-hold.
-    LegalHold = 22,
-    /// x-ms-expiry-option.
-    ExpiryOption = 23,
-    /// x-ms-expiry-time.
-    ExpiryTime = 24,
-    /// x-ms-meta-.
-    Metadata = 25,
-    /// HNS encryption context.
-    EncryptionContext = 26,
-    /// Server-side timeout in seconds.
-    Timeout = 27,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Borrowed, typed native option.
-pub struct BlockOption {
-    /// A borink_block_option_kind.
-    pub kind: u16,
-    /// Metadata key; empty for other kinds.
-    pub name: Bytes,
-    /// Provider wire value.
-    pub value: Bytes,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Borrowed option sequence.
-pub struct BlockOptions {
-    /// Readable option array.
-    pub items: *const BlockOption,
-    /// Number of options.
-    pub count: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Native Put Block plan.
-pub struct StageBlock {
-    /// Object key.
-    pub key: Bytes,
-    /// Base64 block ID: at most 88 characters, at most 64 bytes decoded, the
-    /// same decoded length for every block of one blob.
-    pub id: Bytes,
-    /// Native options.
-    pub options: BlockOptions,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Ordered native block reference.
-pub struct BlockRef {
-    /// Base64 block ID.
-    pub id: Bytes,
-    /// A borink_block_source.
-    pub source: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Native Put Block List plan.
-pub struct CommitBlocks {
-    /// Object key.
-    pub key: Bytes,
-    /// Publication precondition.
-    pub condition: u16,
-    /// ETag or wildcard.
-    pub condition_value: MaybeBytes,
-    /// Native options.
-    pub options: BlockOptions,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Native block-list read.
-pub struct ListBlocks {
-    /// Object key.
-    pub key: Bytes,
-    /// A borink_block_list_kind.
-    pub kind: u16,
-    /// Snapshot, mutually exclusive with version.
-    pub snapshot: MaybeBytes,
-    /// Version target.
-    pub version: MaybeBytes,
-    /// Native options.
-    pub options: BlockOptions,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-/// Native fields accompany the shared response outcome.
-pub struct AzureBlockOutcome {
-    /// Shared response interpretation.
-    pub outcome: Outcome,
-    /// The content-md5 response header.
-    pub content_md5: MaybeBytes,
-    /// The x-ms-content-crc64 response header.
-    pub content_crc64: MaybeBytes,
-    /// The x-ms-request-server-encrypted response header.
-    pub server_encrypted: MaybeBytes,
-    /// The x-ms-encryption-key-sha256 response header.
-    pub encryption_key_sha256: MaybeBytes,
-    /// The x-ms-encryption-scope response header.
-    pub encryption_scope: MaybeBytes,
-    /// The x-ms-client-request-id response header.
-    pub client_request_id: MaybeBytes,
-    /// The date response header.
-    pub date: MaybeBytes,
-    /// The x-ms-blob-content-length response header.
-    pub blob_content_length: MaybeBytes,
-    /// The x-ms-error-code response header.
-    pub error_code: MaybeBytes,
-    /// The x-ms-request-id response header.
-    pub request_id: MaybeBytes,
-    /// The x-ms-version-id response header.
-    pub version: MaybeBytes,
-    /// The etag response header.
-    pub e_tag: MaybeBytes,
-    /// The last-modified response header.
-    pub last_modified: MaybeBytes,
 }

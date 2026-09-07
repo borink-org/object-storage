@@ -7,71 +7,6 @@
 
 use crate::types::*;
 
-pub(crate) fn stage_outcome(outcome: &proto::StageBlockHeadOutcome<'_>) -> Outcome {
-    match *outcome {
-        proto::StageBlockHeadOutcome::Staged => only(OutcomeKind::Staged),
-        proto::StageBlockHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::StageBlockHeadOutcome::NeedErrorBody(failure) => {
-            failed(OutcomeKind::NeedErrorBody, &failure)
-        }
-        proto::StageBlockHeadOutcome::ServiceFailure(failure) => {
-            failed(OutcomeKind::ServiceFailure, &failure)
-        }
-        _ => only(OutcomeKind::Unsupported),
-    }
-}
-
-pub(crate) fn commit_outcome(outcome: &proto::CommitBlocksHeadOutcome<'_>) -> Outcome {
-    match *outcome {
-        proto::CommitBlocksHeadOutcome::Committed { meta } => Outcome {
-            meta: meta_view(&meta),
-            ..only(OutcomeKind::Committed)
-        },
-        proto::CommitBlocksHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
-        proto::CommitBlocksHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::CommitBlocksHeadOutcome::NeedErrorBody(failure) => {
-            failed(OutcomeKind::NeedErrorBody, &failure)
-        }
-        proto::CommitBlocksHeadOutcome::ServiceFailure(failure) => {
-            failed(OutcomeKind::ServiceFailure, &failure)
-        }
-        _ => only(OutcomeKind::Unsupported),
-    }
-}
-
-pub(crate) fn list_blocks_outcome(outcome: &proto::ListBlocksHeadOutcome<'_>) -> Outcome {
-    match *outcome {
-        proto::ListBlocksHeadOutcome::Blocks {
-            meta, expected_len, ..
-        } => Outcome {
-            meta: meta_view(&meta),
-            body: BodyWindow {
-                expected_len: maybe_number(expected_len),
-                ..Default::default()
-            },
-            ..only(OutcomeKind::Blocks)
-        },
-        proto::ListBlocksHeadOutcome::NotFound { kind } => not_found(kind),
-        proto::ListBlocksHeadOutcome::NeedErrorBody(failure) => {
-            failed(OutcomeKind::NeedErrorBody, &failure)
-        }
-        proto::ListBlocksHeadOutcome::ServiceFailure(failure) => {
-            failed(OutcomeKind::ServiceFailure, &failure)
-        }
-        _ => only(OutcomeKind::Unsupported),
-    }
-}
-
-impl From<proto::azure::Block<'_>> for Block {
-    fn from(block: proto::azure::Block<'_>) -> Self {
-        Self {
-            id: bytes(block.id.as_bytes()),
-            size: block.size,
-            state: block.state as u16,
-        }
-    }
-}
-
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
     DeleteHeadOutcome, Error, GetHeadOutcome, ListHeadOutcome, PutHeadOutcome, ServiceErrorKind,
@@ -300,26 +235,4 @@ pub(crate) fn maybe_number(value: Option<u64>) -> MaybeU64 {
         present: true,
         value,
     })
-}
-
-pub(crate) fn block_outcome(
-    outcome: Outcome,
-    head: proto::azure::BlockResponseHead<'_>,
-) -> AzureBlockOutcome {
-    AzureBlockOutcome {
-        outcome,
-        content_md5: maybe_bytes(head.content_md5),
-        content_crc64: maybe_bytes(head.content_crc64),
-        server_encrypted: maybe_bytes(head.server_encrypted),
-        encryption_key_sha256: maybe_bytes(head.encryption_key_sha256),
-        encryption_scope: maybe_bytes(head.encryption_scope),
-        client_request_id: maybe_bytes(head.client_request_id),
-        date: maybe_bytes(head.date),
-        blob_content_length: maybe_bytes(head.blob_content_length),
-        error_code: maybe_bytes(head.common.error_code),
-        request_id: maybe_bytes(head.common.request_id),
-        version: maybe_bytes(head.common.version),
-        e_tag: maybe_bytes(head.common.e_tag),
-        last_modified: maybe_bytes(head.common.last_modified),
-    }
 }
