@@ -31,6 +31,7 @@ For C and C++, [`crates/object-storage-c`](crates/object-storage-c) is an `exter
 - Object listing (GET request on the container, one page at a time)
   - Supports delimiters, prefixes
   - Supports registering properties you want to read into your own entry type in the main parsing pass
+- Object multipart upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 
 ## Development status and roadmap
@@ -40,7 +41,7 @@ The goal is a full-featured object storage library that supports both Azure Blob
 The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) will target Azure only, S3 will come in 0.0.2. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
 
 Roadmap:
-- Azure multipart support (Put Block List) -> 0.0.1 release
+- Azure multipart C/C++ bindings
 - S3 PUT, GET, DELETE (so lands SigV4 support and crypto primitives)
 - S3 LIST
 - S3 multipart -> 0.0.2 release
