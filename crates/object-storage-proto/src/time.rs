@@ -29,6 +29,8 @@ impl Timestamps {
         // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
         // It maps days since 1970-01-01 to a proleptic Gregorian date. March
         // is treated as month zero so leap day is at the end of each year.
+        // The clamp above bounds days to 2,932,896; these i64 intermediates
+        // stay below four million and produce month 1..=12, day 1..=31.
         let shifted_days = days + 719_468;
         let era = shifted_days.div_euclid(146_097);
         let day_of_era = shifted_days.rem_euclid(146_097);

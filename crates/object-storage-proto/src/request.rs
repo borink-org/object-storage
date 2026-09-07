@@ -5,7 +5,7 @@ use crate::Payload;
 /// The storage required to encode a request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RequestSize {
-    /// Bytes for the URL and headers.
+    /// Bytes for the URL, headers and any generated body.
     pub bytes: usize,
     /// Header descriptor slots.
     pub headers: usize,
@@ -82,7 +82,8 @@ impl core::fmt::Display for Method {
 /// The encoding methods copy every byte of the head into your buffer,
 /// including each header name. The head therefore borrows nothing that you
 /// passed to them, and each of those arguments can be a temporary. The content
-/// stays where you put it, or is streamed separately by the host.
+/// stays where you put it for a stage or PUT. A commit writes its body after
+/// the head in the same buffer.
 ///
 /// # Lifetime
 ///
@@ -95,6 +96,7 @@ pub struct WireRequest<'r> {
     url: Span,
     headers: &'r [HeaderSpan],
     payload: Payload<'r>,
+    body: Option<Span>,
 }
 
 impl<'r> WireRequest<'r> {
@@ -129,6 +131,13 @@ impl<'r> WireRequest<'r> {
     /// must send, and carries no bytes.
     pub fn payload(&self) -> Payload<'r> {
         self.payload
+    }
+
+    /// Returns the range of the request buffer that holds the body that this
+    /// crate wrote. A commit writes its block list there. Returns [`None`] for
+    /// a payload that you supplied, as a slice or as streamed content.
+    pub fn body_span(&self) -> Option<Span> {
+        self.body
     }
 
     /// Returns the URL as a range of the buffer that holds the head.
@@ -224,21 +233,42 @@ impl<'a> HeadWriter<'a> {
         if let Some(slot) = self.headers.get_mut(self.count) {
             *slot = HeaderSpan { name, value };
         }
-        // Headers are counted even after descriptor capacity is exhausted; continue
+        // Option iterators are not bounded by descriptor capacity; keep counting
         // without wrapping, just as Writer does for bytes.
         self.count = self.count.saturating_add(1);
     }
 
     pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
+        self.finish_with_body(method, payload, None)
+    }
+
+    pub(crate) fn body(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
+        self.part(write)
+    }
+
+    pub(crate) fn finish_with_body(
+        self,
+        method: Method,
+        payload: Payload<'a>,
+        body: Option<Span>,
+    ) -> Option<WireRequest<'a>> {
         if self.count > self.headers.len() {
             return None;
         }
+        let (url, headers) = (self.url, &self.headers[..self.count]);
+        let bytes = self.out.finish()?;
+        let head_end = body.map_or(bytes.len(), |span| span.start);
+        // body() records writer positions; finish() proved the entire body fits.
+        let payload = body.map_or(payload, |span| {
+            Payload::Slice(&bytes[span.start..span.start + span.len])
+        });
         Some(WireRequest {
-            bytes: text(self.out.finish()?),
+            bytes: text(&bytes[..head_end]),
             method,
-            url: self.url,
-            headers: &self.headers[..self.count],
+            url,
+            headers,
             payload,
+            body,
         })
     }
 

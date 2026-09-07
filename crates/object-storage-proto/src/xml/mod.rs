@@ -19,6 +19,7 @@
 // say how many entries the page holds.
 
 pub(crate) mod azure;
+pub(crate) mod azure_blocks;
 pub(crate) mod decode;
 pub(crate) mod scan;
 
