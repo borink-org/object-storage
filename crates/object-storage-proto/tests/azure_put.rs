@@ -1,9 +1,9 @@
 //! Azure write encoding and response interpretation.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, Error, Failure, FailureClass, HeaderSpan, InvalidPlan, Method,
-    ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+    AzureNamespace, Blobs, ConditionKind, Container, Error, Failure, FailureClass, HeaderSpan,
+    InvalidPlan, Method, ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault,
+    ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -206,11 +206,13 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
         );
     }
 
-    // A key longer than Azure accepts is refused by character count, not by
-    // byte count: these are two-byte characters.
+    // A key longer than a flat account accepts is refused by character count,
+    // not by byte count: these are two-byte characters. Only a client told it
+    // is on a flat account refuses it.
     let long = "\u{e9}".repeat(1025);
     assert_eq!(
         blobs
+            .with_namespace(AzureNamespace::Flat)
             .encode_put(
                 &mut [0; 4096],
                 &mut request_headers,
@@ -221,6 +223,23 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
             .err(),
         Some(Error::InvalidPlan(InvalidPlan::KeyTooLong))
     );
+
+    // A client that does not know its account, and one told it is on a
+    // hierarchical account, both send the key as written: only a flat account
+    // refuses it, and the service says so.
+    let mut buf = [0; 16384];
+    for client in [blobs, blobs.with_namespace(AzureNamespace::Hierarchical)] {
+        let request = client
+            .encode_put(
+                &mut buf,
+                &mut request_headers,
+                &PhysicalPut::new(&long),
+                Payload::Slice(b"one"),
+                &now(),
+            )
+            .unwrap();
+        assert!(request.url().ends_with(&"%C3%A9".repeat(1025)));
+    }
 }
 
 #[test]

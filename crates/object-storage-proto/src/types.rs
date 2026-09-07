@@ -189,8 +189,10 @@ pub struct GetShape {
 pub struct PhysicalGet<'h> {
     /// The object key, before percent-encoding.
     ///
-    /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice, and no control character: Azure refuses those.
+    /// No control character: Azure refuses those. A flat-namespace account
+    /// also refuses more than 1024 UTF-16 code units, where a character outside
+    /// the basic plane counts twice; a client told it is on one refuses such a
+    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -272,8 +274,10 @@ pub struct PutShape {
 pub struct PhysicalPut<'h> {
     /// The object key, within the container.
     ///
-    /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice, and no control character: Azure refuses those.
+    /// No control character: Azure refuses those. A flat-namespace account
+    /// also refuses more than 1024 UTF-16 code units, where a character outside
+    /// the basic plane counts twice; a client told it is on one refuses such a
+    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -420,8 +424,10 @@ pub struct DeleteShape {
 pub struct PhysicalDelete<'h> {
     /// The object key, within the container.
     ///
-    /// At most 1024 UTF-16 code units, so a character outside the basic plane
-    /// counts twice, and no control character: Azure refuses those.
+    /// No control character: Azure refuses those. A flat-namespace account
+    /// also refuses more than 1024 UTF-16 code units, where a character outside
+    /// the basic plane counts twice; a client told it is on one refuses such a
+    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host

@@ -1,10 +1,10 @@
 //! Azure listing encoding, response interpretation and page reading.
 
 use borink_object_storage_proto::{
-    BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure, FailureClass,
-    HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method, PhysicalList,
-    PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
-    layered,
+    AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure,
+    FailureClass, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method,
+    PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind,
+    Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -161,8 +161,20 @@ fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
 #[test]
 fn a_listing_plan_is_validated_before_any_byte_is_written() {
     let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
+    // Only a client told it is on a flat account refuses a long prefix; the
+    // default client sends it, and the service answers for its account.
     let long = "k".repeat(1025);
+    assert!(
+        blobs()
+            .encode_list(
+                &mut [0; 4096],
+                &mut request_headers,
+                &PhysicalList::new(long.as_str()),
+                &now()
+            )
+            .is_ok()
+    );
+    let blobs = blobs().with_namespace(AzureNamespace::Flat);
     for (list, expected) in [
         (PhysicalList::new(long.as_str()), InvalidPlan::Prefix),
         (

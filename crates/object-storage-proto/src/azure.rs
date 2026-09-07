@@ -17,11 +17,18 @@ use crate::{
 /// See the [Azure Storage service version lifecycle](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services).
 pub const VERSION: &str = "2026-04-06";
 
-// Azure limits blob names to 1,024 characters.
+// A flat-namespace account limits blob names to 1,024 characters.
 // Azure counts a blob name in UTF-16 code units, so a character outside the
 // basic plane counts twice. Measured: a name of 1024 two-byte characters is
 // taken and one of 541 four-byte characters, which is 1041 code units, is
 // refused with 400. See the live suite.
+//
+// A hierarchical-namespace account has no such limit. Measured: it stored a
+// key of 32,689 units and read it back, and refused a longer one with 414, a
+// request line too long, at 32,759 bytes of encoded URL. That
+// bound is the URL's, which the service checks. This crate applies the flat
+// limit only when told the account is flat; a client that does not know sends
+// the key, and the service answers for the account it is.
 const MAX_BLOB_NAME_UNITS: usize = 1024;
 
 // The most `/`-delimited segments Azure takes in a name. Its documentation
@@ -71,6 +78,7 @@ impl<'a> Container<'a> {
 pub struct Blobs<'a> {
     container: Container<'a>,
     token: &'a str,
+    namespace: AzureNamespace,
 }
 
 impl core::fmt::Debug for Blobs<'_> {
@@ -78,17 +86,21 @@ impl core::fmt::Debug for Blobs<'_> {
         f.debug_struct("Blobs")
             .field("container", &self.container)
             .field("token", &"<redacted>")
+            .field("namespace", &self.namespace)
             .finish()
     }
 }
 
-/// The account namespace used to interpret a local rejection.
+/// The kind of storage account that a client talks to.
 ///
-/// This does not change request validation or discover account capabilities.
+/// [`Blobs::with_namespace`] sets it and [`InvalidPlan::azure_rejection`]
+/// reads it. This crate never discovers it: no request or response says
+/// which kind of account answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u16)]
 pub enum AzureNamespace {
-    /// The account's namespace is not known.
+    /// The account's namespace is not known. A client refuses only what
+    /// both kinds of account refuse, and sends the rest.
     #[default]
     Unknown = 0,
     /// A flat-namespace account.
@@ -326,7 +338,7 @@ impl<'a> Blobs<'a> {
         plan: &PhysicalListBlocks<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_block_key(plan.key)?;
+        validate_block_key(plan.key, self.namespace)?;
         if (plan.snapshot.is_some() && plan.version.is_some())
             || plan.snapshot.is_some_and(str::is_empty)
             || plan.version.is_some_and(str::is_empty)
@@ -376,7 +388,7 @@ impl<'a> Blobs<'a> {
         content: Payload<'r>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_block_key(plan.key)?;
+        validate_block_key(plan.key, self.namespace)?;
         validate_block_id(plan.id)?;
         if content.len() > MAX_STAGE_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
@@ -459,7 +471,7 @@ impl<'a> Blobs<'a> {
     where
         I: AsRef<str>,
     {
-        validate_block_key(plan.key)?;
+        validate_block_key(plan.key, self.namespace)?;
         validate_condition(plan.condition, plan.condition_value)?;
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
         for (index, (id, source)) in blocks.clone().enumerate() {
@@ -704,7 +716,21 @@ impl<'a> Blobs<'a> {
         if !valid_header(token.as_bytes()) {
             return Err(Error::InvalidToken);
         }
-        Ok(Self { container, token })
+        Ok(Self {
+            container,
+            token,
+            namespace: AzureNamespace::Unknown,
+        })
+    }
+
+    /// Returns this client with the account's namespace set.
+    ///
+    /// A client told it is on a flat account refuses a key of more than 1,024
+    /// UTF-16 code units as [`InvalidPlan::KeyTooLong`]. Any other client
+    /// sends it and reports what the service answers.
+    pub const fn with_namespace(mut self, namespace: AzureNamespace) -> Self {
+        self.namespace = namespace;
+        self
     }
 
     /// Writes the request head for `get` into `buf`.
@@ -729,7 +755,7 @@ impl<'a> Blobs<'a> {
         get: &PhysicalGet<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_get(get)?;
+        validate_get(get, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(get.key), &[], get.range, now);
         push_condition(&mut head, get.condition, get.condition_value);
@@ -765,7 +791,7 @@ impl<'a> Blobs<'a> {
         content: Payload<'r>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_put(put, content.len())?;
+        validate_put(put, content.len(), self.namespace)?;
         let length = content.len();
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
@@ -934,7 +960,7 @@ impl<'a> Blobs<'a> {
         delete: &PhysicalDelete<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_delete(delete)?;
+        validate_delete(delete, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
         if let Some(value) = delete_snapshots(delete.kind) {
@@ -1096,7 +1122,7 @@ impl<'a> Blobs<'a> {
         list: &PhysicalList<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_list(list)?;
+        validate_list(list, self.namespace)?;
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
         let query = [
@@ -1262,8 +1288,8 @@ fn multipart_meta(head: ResponseHead<'_>) -> ObjectMeta<'_> {
     }
 }
 
-fn validate_block_key(key: &str) -> Result<()> {
-    validate_key(key)
+fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
+    validate_key(key, namespace)
 }
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
@@ -1625,11 +1651,11 @@ fn name_units(value: &str) -> usize {
 }
 
 // Reject unsupported names before encoding, without losing the reason.
-fn validate_key(key: &str) -> Result<()> {
+fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     if key.is_empty() {
         return Err(InvalidPlan::EmptyKey.into());
     }
-    if name_units(key) > MAX_BLOB_NAME_UNITS {
+    if namespace == AzureNamespace::Flat && name_units(key) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::KeyTooLong.into());
     }
     // Azure refuses an ASCII control character in a name, with 400. Measured
@@ -1660,8 +1686,8 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
-    validate_key(get.key)?;
+fn validate_get(get: &PhysicalGet<'_>, namespace: AzureNamespace) -> Result<()> {
+    validate_key(get.key, namespace)?;
     match get.range {
         RequestedRange::Bounded { start, end } if start >= end => {
             return Err(InvalidPlan::Range.into());
@@ -1694,22 +1720,22 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 // `u64` because it does not fit a 32-bit `usize`.
 const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
-fn validate_put(put: &PhysicalPut<'_>, len: u64) -> Result<()> {
-    validate_key(put.key)?;
+fn validate_put(put: &PhysicalPut<'_>, len: u64, namespace: AzureNamespace) -> Result<()> {
+    validate_key(put.key, namespace)?;
     if len > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
     validate_condition(put.condition, put.condition_value)
 }
 
-fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
     // A prefix is the start of a key, so it is bounded like one. An empty
     // prefix lists the whole container and is valid.
     // A prefix is the start of a key, so it is bounded like one. The rest of
     // `validate_key` does not apply: a prefix is written into the query, where
     // nothing resolves a `..` and nothing drops a trailing dot, and `dir.` is
     // an honest prefix of `dir.txt`.
-    if name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
+    if namespace == AzureNamespace::Flat && name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::Prefix.into());
     }
     if list.marker.is_some_and(str::is_empty) {
@@ -1721,8 +1747,8 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     Ok(())
 }
 
-fn validate_delete(delete: &PhysicalDelete<'_>) -> Result<()> {
-    validate_key(delete.key)?;
+fn validate_delete(delete: &PhysicalDelete<'_>, namespace: AzureNamespace) -> Result<()> {
+    validate_key(delete.key, namespace)?;
     validate_condition(delete.condition, delete.condition_value)
 }
 
