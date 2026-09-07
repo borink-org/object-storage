@@ -177,10 +177,10 @@ pub struct BlockRef<'a> {
     ///
     /// Choose the bytes yourself and write them with
     /// [`layered::block_id`](crate::layered::block_id), or pass a listed
-    /// [`Block::id`] unchanged. Encoding checks the text locally: not empty,
-    /// at most 88 characters of standard base64 with at most two `=` of
-    /// padding, so at most 64 decoded bytes. The encoder percent-encodes it
-    /// into the query itself. Only the service checks that every block of one
+    /// [`Block::id`] unchanged. The encoder checks the text: it is not empty,
+    /// and it is at most 88 characters of standard base64 with at most two `=`
+    /// of padding. That is at most 64 decoded bytes. The encoder percent-encodes
+    /// it into the query itself. Only the service checks that every block of one
     /// blob decodes to the same length, and that a referenced block exists.
     pub id: &'a str,
     /// The stored version to select.
@@ -435,10 +435,10 @@ impl<'a> Blobs<'a> {
     /// [`Blobs::encode_commit_blocks`] over block references that are not in
     /// one array.
     ///
-    /// Use this when the references are produced rather than stored, such as
-    /// from an array in another language or from an ID derived per index, so
-    /// that no second array of references is built. The IDs themselves are
-    /// still copied into the body, as any encoding does.
+    /// Use this when the references are produced rather than stored: from an
+    /// array in another language, or from an ID derived per index. No second
+    /// array of references is built. The IDs themselves are still copied into
+    /// the body, as any encoding does.
     ///
     /// `blocks` is traversed twice: once to validate the IDs and size the
     /// body, once to write it. Every traversal must yield the same items in
@@ -524,8 +524,17 @@ impl<'a> Blobs<'a> {
         crate::xml::azure_blocks::fill_blocks(body, into)
     }
 
-    /// Reads the response head. A shape is needed only when a condition
-    /// changes the meaning of the response.
+    /// Reads the head that answers a stage.
+    ///
+    /// Every head that Azure sends becomes a [`StageBlockHeadOutcome`],
+    /// including the heads that report a failure. If the head names no error
+    /// code, the outcome is [`StageBlockHeadOutcome::NeedErrorBody`]: read the
+    /// body and pass it to [`Self::accept_stage_block_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status that a stage never returns is [`ResponseFault::Status`].
     pub fn accept_stage_block_head<'h>(
         &self,
         head: ResponseHead<'h>,
@@ -564,8 +573,23 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Reads the response head. A shape is needed only when a condition
-    /// changes the meaning of the response.
+    /// Reads the head that answers a commit.
+    ///
+    /// Pass the `shape` that [`PhysicalCommitBlocks::shape`] gave you before
+    /// the request. A failed condition is reported as
+    /// [`CommitBlocksHeadOutcome::PreconditionFailed`] only if that plan
+    /// carried a condition. Otherwise a 412 is a service failure that names
+    /// its code.
+    ///
+    /// Every head that Azure sends becomes a [`CommitBlocksHeadOutcome`],
+    /// including the heads that report a failure. If the head names no error
+    /// code, the outcome is [`CommitBlocksHeadOutcome::NeedErrorBody`]: read the
+    /// body and pass it to [`Self::accept_commit_blocks_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status that a commit never returns is [`ResponseFault::Status`].
     pub fn accept_commit_blocks_head<'h>(
         &self,
         shape: CommitBlocksShape,
@@ -616,8 +640,18 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Reads the response head. A shape is needed only when a condition
-    /// changes the meaning of the response.
+    /// Reads the head that answers a block listing.
+    ///
+    /// Every head that Azure sends becomes a [`ListBlocksHeadOutcome`],
+    /// including the heads that report a failure. If the head names no error
+    /// code, the outcome is [`ListBlocksHeadOutcome::NeedErrorBody`]: read the
+    /// body and pass it to [`Self::accept_list_blocks_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`], and a
+    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
     pub fn accept_list_blocks_head<'h>(
         &self,
         head: ResponseHead<'h>,
@@ -1303,8 +1337,9 @@ pub fn error_code<'a>(head: &ResponseHead<'a>, body: &'a [u8]) -> Option<&'a [u8
         .or_else(|| crate::xml::error_code(body).map(str::as_bytes))
 }
 
-/// Classifies an Azure error while the caller retains its native code.
-/// Set `truncated` when a read limit stopped the body early.
+/// Classifies the Azure error that `head` names, or that `body` names if the
+/// head carries no error code. Set `truncated` if a read limit stopped the
+/// body early.
 pub fn classify_error(head: &ResponseHead<'_>, body: &[u8], truncated: bool) -> Classification {
     let code = head
         .error_code

@@ -31,11 +31,11 @@
 //! content with a [`Payload`], which names a length whether or not you hold
 //! the bytes, so a write can stream from a file or a socket.
 //!
-//! An object can also be written in blocks: stage each block with
-//! [`azure::PhysicalStageBlock`], then publish an ordered list of them with
+//! An object can also be written in blocks. Stage each block with
+//! [`azure::PhysicalStageBlock`], publish an ordered list of them with
 //! [`azure::PhysicalCommitBlocks`], and read what is staged with
 //! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
-//! [`azure`] module with their options.
+//! [`azure`] module.
 //!
 //! # Example
 //!

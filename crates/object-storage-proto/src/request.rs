@@ -133,8 +133,9 @@ impl<'r> WireRequest<'r> {
         self.payload
     }
 
-    /// The body as a range of the request buffer, when the core wrote it.
-    /// `None` for caller-owned or streamed payloads.
+    /// Returns the range of the request buffer that holds the body that this
+    /// crate wrote. A commit writes its block list there. Returns [`None`] for
+    /// a payload that you supplied, as a slice or as streamed content.
     pub fn body_span(&self) -> Option<Span> {
         self.body
     }

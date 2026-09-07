@@ -164,25 +164,24 @@ pub fn list_blocks_requirements(
 /// Use it to size the array for [`Blobs::fill_blocks`] from the
 /// `expected_len` of
 /// [`ListBlocksHeadOutcome::Blocks`](crate::ListBlocksHeadOutcome::Blocks).
-/// The smallest element the reader accepts is
-/// `<Block><Name>x</Name><Size>0</Size></Block>`, 43 bytes: it requires a
-/// name and a size, and does not check that the name is base64, because the
-/// service decided what it stored.
+/// The smallest element that the reader accepts is
+/// `<Block><Name>x</Name><Size>0</Size></Block>`, 43 bytes. The reader
+/// requires a name and a size, and does not check that the name is base64.
 pub const fn max_blocks_in(len: usize) -> usize {
     len / 43
 }
 
 /// Writes the block ID for `bytes` in the base64 form that Azure stores.
 ///
-/// A block ID is base64 text on the wire, of at most 64 decoded bytes, and
-/// every block of one blob must decode to the same length. Choose the bytes
-/// however you number blocks, keep them the same length within one blob, and
-/// pass what this returns as [`BlockRef::id`] or
-/// [`PhysicalStageBlock::id`].
+/// A block ID is base64 text on the wire, and decodes to at most 64 bytes.
+/// Every block of one blob must decode to the same length. Choose the bytes
+/// however you number blocks, and pass what this returns as [`BlockRef::id`]
+/// or [`PhysicalStageBlock::id`].
 ///
-/// Copies the encoding into `into` and returns it. Returns [`None`] if
-/// `bytes` is empty or longer than 64 bytes, or if `into` is shorter than
-/// the encoding, which is four characters for every three bytes, rounded up.
+/// Copies the encoding into `into` and returns it. The encoding is four
+/// characters for every three bytes, rounded up, so 88 bytes of `into` fit
+/// every ID. Returns [`None`] if `bytes` is empty or longer than 64 bytes,
+/// or if `into` is shorter than the encoding.
 pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
     if bytes.is_empty() || bytes.len() > 64 {
         return None;
