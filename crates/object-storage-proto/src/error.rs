@@ -65,7 +65,8 @@ pub enum InvalidPlan {
     BlockId = 8,
     /// The block list holds more entries than the service accepts.
     Blocks = 9,
-    /// The listing prefix is longer than an object key may be.
+    /// The listing prefix exceeds the 1,024 UTF-16 code units that a
+    /// flat-namespace account accepts, and the client was told it is on one.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
     ///
@@ -83,7 +84,8 @@ pub enum InvalidPlan {
     RequestTooLarge = 14,
     /// The object key is not UTF-8.
     KeyNotUtf8 = 15,
-    /// The object key exceeds the supported 1,024 UTF-16 code units.
+    /// The object key exceeds the 1,024 UTF-16 code units that a
+    /// flat-namespace account accepts, and the client was told it is on one.
     KeyTooLong = 16,
     /// The object key contains an ASCII control character.
     KeyControlCharacter = 17,

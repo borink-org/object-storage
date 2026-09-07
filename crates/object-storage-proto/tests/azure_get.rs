@@ -1,9 +1,9 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage_proto::{
-    Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind, HeaderSpan,
-    InvalidPlan, Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead, Timestamps,
-    VERSION, layered,
+    AzureNamespace, Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind,
+    HeaderSpan, InvalidPlan, Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead,
+    Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -333,7 +333,7 @@ fn refuses_invalid_plans_before_writing_anything() {
 fn a_key_that_would_not_survive_the_journey_is_refused() {
     let refused = |key: &str| {
         borink_object_storage_proto::layered::get_requirements(
-            &blobs(),
+            &blobs().with_namespace(AzureNamespace::Flat),
             &PhysicalGet::new(key),
             &now(),
         )
@@ -341,9 +341,10 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
         .map(drop)
     };
 
-    // Azure counts a name in UTF-16 code units, so a character outside the
-    // basic plane counts twice. 512 of them is the limit, and 1024 of a
-    // character inside it is too.
+    // A flat account counts a name in UTF-16 code units, so a character
+    // outside the basic plane counts twice. 512 of them is the limit, and 1024
+    // of a character inside it is too. Only a client told it is on a flat
+    // account refuses the key itself; the default client sends it.
     assert!(refused(&"a".repeat(1024)).is_ok());
     assert!(refused(&"é".repeat(1024)).is_ok());
     assert!(refused(&"🦀".repeat(512)).is_ok());
@@ -353,6 +354,14 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
             Err(Error::InvalidPlan(InvalidPlan::KeyTooLong)),
             "{} UTF-16 code units",
             over.encode_utf16().count()
+        );
+        assert!(
+            borink_object_storage_proto::layered::get_requirements(
+                &blobs(),
+                &PhysicalGet::new(&over),
+                &now(),
+            )
+            .is_ok()
         );
     }
 
