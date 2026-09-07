@@ -1,8 +1,8 @@
 //! Azure block operations: staging, committing and listing blocks.
 
 use borink_object_storage_proto::azure::{
-    Block, BlockListKind, BlockOption, BlockOptionKind, BlockRef, BlockResponseHead, BlockSource,
-    BlockState, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock,
+    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState,
+    PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
     Blobs, CommitBlocksHeadOutcome, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
@@ -22,10 +22,6 @@ fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
-fn no_options() -> core::iter::Empty<BlockOption<'static>> {
-    core::iter::empty()
-}
-
 fn stage_id(id: &str) -> Result<(), Error> {
     blobs()
         .encode_stage_block(
@@ -33,7 +29,6 @@ fn stage_id(id: &str) -> Result<(), Error> {
             &mut [HeaderSpan::default(); 8],
             &PhysicalStageBlock { key: "object", id },
             Payload::Slice(b"bytes"),
-            no_options(),
             &now(),
         )
         .map(drop)
@@ -52,7 +47,6 @@ fn a_stage_names_the_block_in_the_query_and_states_the_length() {
                 id: "+/8=",
             },
             Payload::Slice(b"bytes"),
-            no_options(),
             &now(),
         )
         .unwrap();
@@ -100,50 +94,9 @@ fn the_block_id_is_checked_locally_before_any_byte_is_written() {
                 id: "?"
             },
             Payload::Slice(b""),
-            no_options(),
             &now(),
         ),
         Err(Error::InvalidPlan(InvalidPlan::BlockId))
-    ));
-}
-
-#[test]
-fn a_stage_option_applies_to_its_operation_only() {
-    let lease = [BlockOption::new(BlockOptionKind::LeaseId, "lease")];
-    let mut buf = [0; 1024];
-    let mut headers = [HeaderSpan::default(); 8];
-    let request = blobs()
-        .encode_stage_block(
-            &mut buf,
-            &mut headers,
-            &PhysicalStageBlock {
-                key: "object",
-                id: "YQ==",
-            },
-            Payload::Slice(b""),
-            lease.iter().copied(),
-            &now(),
-        )
-        .unwrap();
-    assert!(
-        request
-            .headers()
-            .any(|header| header == ("x-ms-lease-id", "lease"))
-    );
-    let tier = [BlockOption::new(BlockOptionKind::AccessTier, "Hot")];
-    assert!(matches!(
-        blobs().encode_stage_block(
-            &mut buf,
-            &mut headers,
-            &PhysicalStageBlock {
-                key: "object",
-                id: "YQ==",
-            },
-            Payload::Slice(b""),
-            tier.iter().copied(),
-            &now(),
-        ),
-        Err(Error::InvalidPlan(InvalidPlan::Option))
     ));
 }
 
@@ -164,12 +117,11 @@ fn a_commit_writes_the_selectors_in_order_after_the_head() {
         },
     ];
     let plan = PhysicalCommitBlocks::new("object");
-    let size = layered::commit_blocks_requirements(&blobs(), &plan, &blocks, no_options(), &now())
-        .unwrap();
+    let size = layered::commit_blocks_requirements(&blobs(), &plan, &blocks, &now()).unwrap();
     let mut buf = vec![0; size.bytes];
     let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs()
-        .encode_commit_blocks(&mut buf, &mut headers, &plan, &blocks, no_options(), &now())
+        .encode_commit_blocks(&mut buf, &mut headers, &plan, &blocks, &now())
         .unwrap();
     let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>\
                 <Committed>YQ==</Committed><Uncommitted>Yg==</Uncommitted><Latest>YQ==</Latest>\
@@ -194,7 +146,6 @@ fn a_commit_writes_the_selectors_in_order_after_the_head() {
         &mut headers,
         &plan,
         &blocks,
-        no_options(),
         &now(),
     );
     match short {
@@ -208,7 +159,6 @@ fn a_commit_writes_the_selectors_in_order_after_the_head() {
             &mut headers[..size.headers - 1],
             &plan,
             &blocks,
-            no_options(),
             &now(),
         ),
         Err(Error::Capacity(_))
@@ -227,14 +177,7 @@ fn a_commit_from_an_iterator_writes_the_same_request_as_a_slice() {
     let mut from_iter = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
     let slice = blobs()
-        .encode_commit_blocks(
-            &mut from_slice,
-            &mut headers,
-            &plan,
-            &blocks,
-            no_options(),
-            &now(),
-        )
+        .encode_commit_blocks(&mut from_slice, &mut headers, &plan, &blocks, &now())
         .unwrap();
     let slice_body = slice.payload().bytes().unwrap().to_vec();
     let iter = blobs()
@@ -243,7 +186,6 @@ fn a_commit_from_an_iterator_writes_the_same_request_as_a_slice() {
             &mut headers,
             &plan,
             ids.iter().map(|id| (id, BlockSource::Uncommitted)),
-            no_options(),
             &now(),
         )
         .unwrap();
@@ -260,7 +202,6 @@ fn an_empty_commit_writes_an_empty_list() {
             &mut headers,
             &PhysicalCommitBlocks::new("object"),
             &[],
-            no_options(),
             &now(),
         )
         .unwrap();
@@ -280,7 +221,6 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
             &mut [],
             &plan,
             core::iter::repeat_n(one, 50_001),
-            no_options(),
             &now(),
         ),
         Err(Error::InvalidPlan(InvalidPlan::Blocks))
@@ -291,7 +231,6 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
             &mut [],
             &plan,
             core::iter::repeat_n(one, 50_000),
-            no_options(),
             &now(),
         ),
         Err(Error::Capacity(_))
@@ -308,7 +247,7 @@ fn a_conditional_commit_sends_the_condition_and_keeps_it_in_the_shape() {
     let mut buf = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
     let request = blobs()
-        .encode_commit_blocks(&mut buf, &mut headers, &plan, &[], no_options(), &now())
+        .encode_commit_blocks(&mut buf, &mut headers, &plan, &[], &now())
         .unwrap();
     assert!(
         request
@@ -384,11 +323,11 @@ fn a_lease_refusal_is_not_a_failed_condition() {
 #[test]
 fn a_block_list_read_sizes_its_body() {
     let plan = PhysicalListBlocks::new("object", BlockListKind::All);
-    let size = layered::list_blocks_requirements(&blobs(), &plan, no_options(), &now()).unwrap();
+    let size = layered::list_blocks_requirements(&blobs(), &plan, &now()).unwrap();
     let mut buf = vec![0; size.bytes];
     let mut headers = vec![HeaderSpan::default(); size.headers];
     let request = blobs()
-        .encode_list_blocks(&mut buf, &mut headers, &plan, no_options(), &now())
+        .encode_list_blocks(&mut buf, &mut headers, &plan, &now())
         .unwrap();
     assert_eq!(request.method(), Method::Get);
     assert_eq!(
@@ -396,13 +335,7 @@ fn a_block_list_read_sizes_its_body() {
         "https://account.blob.core.windows.net/container/object?comp=blocklist&blocklisttype=all"
     );
     assert!(matches!(
-        blobs().encode_list_blocks(
-            &mut buf[..size.bytes - 1],
-            &mut headers,
-            &plan,
-            no_options(),
-            &now()
-        ),
+        blobs().encode_list_blocks(&mut buf[..size.bytes - 1], &mut headers, &plan, &now()),
         Err(Error::Capacity(_))
     ));
     let head = ResponseHead::from_headers(200, [("Content-Length", b"86".as_slice())]);
@@ -471,7 +404,6 @@ fn a_listed_id_is_passed_back_unchanged() {
             &mut headers,
             &PhysicalCommitBlocks::new("object"),
             &[block],
-            no_options(),
             &now(),
         )
         .unwrap();
@@ -488,22 +420,12 @@ fn the_stage_requirement_follows_the_stated_length_not_the_bytes() {
         key: "object",
         id: "YQ==",
     };
-    let held = layered::stage_block_requirements(
-        &blobs(),
-        &plan,
-        Payload::Slice(&[0; 300]),
-        no_options(),
-        &now(),
-    )
-    .unwrap();
-    let streamed = layered::stage_block_requirements(
-        &blobs(),
-        &plan,
-        Payload::Streamed { len: 300 },
-        no_options(),
-        &now(),
-    )
-    .unwrap();
+    let held =
+        layered::stage_block_requirements(&blobs(), &plan, Payload::Slice(&[0; 300]), &now())
+            .unwrap();
+    let streamed =
+        layered::stage_block_requirements(&blobs(), &plan, Payload::Streamed { len: 300 }, &now())
+            .unwrap();
     assert_eq!(held, streamed);
     let mut buf = vec![0; held.bytes];
     let mut headers = vec![HeaderSpan::default(); held.headers];
@@ -514,7 +436,6 @@ fn the_stage_requirement_follows_the_stated_length_not_the_bytes() {
                 &mut headers,
                 &plan,
                 Payload::Streamed { len: 300 },
-                no_options(),
                 &now()
             )
             .is_ok()

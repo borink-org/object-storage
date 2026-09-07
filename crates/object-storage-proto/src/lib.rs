@@ -156,7 +156,6 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
-mod block_options;
 mod error;
 mod head;
 mod http;

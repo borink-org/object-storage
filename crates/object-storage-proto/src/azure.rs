@@ -2,7 +2,6 @@
 //!
 //! Put Block From URL and structured-body framing are not implemented.
 
-pub use crate::block_options::{BlockOption, BlockOptionKind};
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind,
@@ -315,23 +314,18 @@ impl<'a> PhysicalListBlocks<'a> {
 impl<'a> Blobs<'a> {
     /// Writes the request head for an Azure Get Block List into `buf`.
     ///
-    /// `options` is as for [`Blobs::encode_stage_block`].
-    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// if it names both a snapshot and a version, or if an option does not
-    /// apply to Get Block List. Returns [`Error::Capacity`] as
-    /// [`Blobs::encode_get`] does.
-    pub fn encode_list_blocks<'r, 'o>(
+    /// or if it names both a snapshot and a version. Returns
+    /// [`Error::Capacity`] as [`Blobs::encode_get`] does.
+    pub fn encode_list_blocks<'r>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalListBlocks<'_>,
-        options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        crate::block_options::validate(options.clone(), 4)?;
         validate_block_key(plan.key)?;
         if (plan.snapshot.is_some() && plan.version.is_some())
             || plan.snapshot.is_some_and(str::is_empty)
@@ -351,8 +345,6 @@ impl<'a> Blobs<'a> {
             &[
                 Some(("comp", QueryValue::Literal("blocklist"))),
                 Some(("blocklisttype", QueryValue::Literal(kind))),
-                crate::block_options::timeout(options.clone())
-                    .map(|seconds| ("timeout", QueryValue::Number(seconds))),
                 plan.snapshot
                     .map(|value| ("snapshot", QueryValue::Encoded(value.as_bytes()))),
                 plan.version
@@ -361,36 +353,29 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         );
-        crate::block_options::write(&mut head, options);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
     /// Writes the request head for an Azure Put Block into `buf`.
     ///
     /// The head states the length of `content`, which stays where you put it,
-    /// as for [`Blobs::encode_put`]. `options` is any cloneable iterator over
-    /// [`BlockOption`]s, and `core::iter::empty()` when there are none. It is
-    /// read more than once, so every pass must yield the same options in the
-    /// same order.
+    /// as for [`Blobs::encode_put`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// if `content` is longer than one block may be, or if an option does not
-    /// apply to Put Block. Returns [`Error::Capacity`] as [`Blobs::encode_put`]
-    /// does, or call
+    /// or if `content` is longer than one block may be. Returns
+    /// [`Error::Capacity`] as [`Blobs::encode_put`] does, or call
     /// [`layered::stage_block_requirements`](crate::layered::stage_block_requirements)
     /// first.
-    pub fn encode_stage_block<'r, 'o>(
+    pub fn encode_stage_block<'r>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalStageBlock<'_>,
         content: Payload<'r>,
-        options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        crate::block_options::validate(options.clone(), 1)?;
         validate_block_key(plan.key)?;
         validate_block_id(plan.id)?;
         if content.len() > MAX_STAGE_LEN {
@@ -400,8 +385,6 @@ impl<'a> Blobs<'a> {
         let query = [
             Some(("comp", QueryValue::Literal("block"))),
             Some(("blockid", QueryValue::Encoded(plan.id.as_bytes()))),
-            crate::block_options::timeout(options.clone())
-                .map(|seconds| ("timeout", QueryValue::Number(seconds))),
         ];
         self.build(
             &mut head,
@@ -413,7 +396,6 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(content.len()).as_bytes())
         });
-        crate::block_options::write(&mut head, options);
         encoded(head, Method::Put, content)
     }
 
@@ -423,25 +405,22 @@ impl<'a> Blobs<'a> {
     /// `blocks` become the object in this order, each looked up where its
     /// [`BlockSource`] says. The body is written into `buf` after the head,
     /// so [`WireRequest::body_span`] names it and [`WireRequest::payload`]
-    /// borrows it; send both before reusing `buf`. `options` is as for
-    /// [`Blobs::encode_stage_block`].
+    /// borrows it; send both before reusing `buf`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
     /// if `blocks` holds more than 50,000 entries or an ID that fails the
-    /// checks on [`BlockRef::id`], or if an option does not apply to Put Block
-    /// List. Returns [`Error::Capacity`] with the bytes that the head and the
-    /// body need together, or call
+    /// checks on [`BlockRef::id`]. Returns [`Error::Capacity`] with the bytes
+    /// that the head and the body need together, or call
     /// [`layered::commit_blocks_requirements`](crate::layered::commit_blocks_requirements)
     /// first.
-    pub fn encode_commit_blocks<'r, 'o>(
+    pub fn encode_commit_blocks<'r>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCommitBlocks<'_>,
         blocks: &[BlockRef<'_>],
-        options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         self.encode_commit_blocks_from_iter(
@@ -449,7 +428,6 @@ impl<'a> Blobs<'a> {
             headers,
             plan,
             blocks.iter().map(|block| (block.id, block.source)),
-            options,
             now,
         )
     }
@@ -470,19 +448,17 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// As [`Blobs::encode_commit_blocks`].
-    pub fn encode_commit_blocks_from_iter<'r, 'o, I>(
+    pub fn encode_commit_blocks_from_iter<'r, I>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCommitBlocks<'_>,
         blocks: impl Iterator<Item = (I, BlockSource)> + Clone,
-        options: impl Iterator<Item = BlockOption<'o>> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>>
     where
         I: AsRef<str>,
     {
-        crate::block_options::validate(options.clone(), 2)?;
         validate_block_key(plan.key)?;
         validate_condition(plan.condition, plan.condition_value)?;
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
@@ -499,11 +475,7 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(plan.key),
-            &[
-                Some(("comp", QueryValue::Literal("blocklist"))),
-                crate::block_options::timeout(options.clone())
-                    .map(|seconds| ("timeout", QueryValue::Number(seconds))),
-            ],
+            &[Some(("comp", QueryValue::Literal("blocklist")))],
             RequestedRange::Whole,
             now,
         );
@@ -511,7 +483,6 @@ impl<'a> Blobs<'a> {
             out.push(U64Decimal::new(length as u64).as_bytes())
         });
         push_condition(&mut head, plan.condition, plan.condition_value);
-        crate::block_options::write(&mut head, options);
         let body = head.body(|out| {
             out.push(COMMIT_OPEN);
             for (id, source) in blocks {

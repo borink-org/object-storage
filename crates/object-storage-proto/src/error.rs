@@ -76,7 +76,8 @@ pub enum InvalidPlan {
     ///
     /// Azure answers `maxresults=0` with HTTP 400 `OutOfRangeQueryParameterValue`.
     MaxResults = 12,
-    /// A provider option is invalid, repeated, or inapplicable to the operation.
+    /// A provider option is invalid or inapplicable, such as a block listing
+    /// that names both a snapshot and a version.
     Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,

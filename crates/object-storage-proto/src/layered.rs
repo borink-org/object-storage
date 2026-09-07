@@ -3,9 +3,7 @@
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
 
-use crate::azure::{
-    BlockOption, BlockRef, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock,
-};
+use crate::azure::{BlockRef, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock};
 use crate::{
     Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize,
     Result, Timestamps,
@@ -104,16 +102,15 @@ pub fn list_requirements(
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
 /// unchanged from [`Blobs::encode_stage_block`].
-pub fn stage_block_requirements<'o>(
+pub fn stage_block_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalStageBlock<'_>,
     content: Payload<'_>,
-    options: impl Iterator<Item = BlockOption<'o>> + Clone,
     now: &Timestamps,
 ) -> Result<RequestSize> {
     required(
         blobs
-            .encode_stage_block(&mut [], &mut [], plan, content, options, now)
+            .encode_stage_block(&mut [], &mut [], plan, content, now)
             .map(drop),
     )
 }
@@ -128,16 +125,15 @@ pub fn stage_block_requirements<'o>(
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
 /// unchanged from [`Blobs::encode_commit_blocks`].
-pub fn commit_blocks_requirements<'o>(
+pub fn commit_blocks_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalCommitBlocks<'_>,
     blocks: &[BlockRef<'_>],
-    options: impl Iterator<Item = BlockOption<'o>> + Clone,
     now: &Timestamps,
 ) -> Result<RequestSize> {
     required(
         blobs
-            .encode_commit_blocks(&mut [], &mut [], plan, blocks, options, now)
+            .encode_commit_blocks(&mut [], &mut [], plan, blocks, now)
             .map(drop),
     )
 }
@@ -151,15 +147,14 @@ pub fn commit_blocks_requirements<'o>(
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
 /// unchanged from [`Blobs::encode_list_blocks`].
-pub fn list_blocks_requirements<'o>(
+pub fn list_blocks_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalListBlocks<'_>,
-    options: impl Iterator<Item = BlockOption<'o>> + Clone,
     now: &Timestamps,
 ) -> Result<RequestSize> {
     required(
         blobs
-            .encode_list_blocks(&mut [], &mut [], plan, options, now)
+            .encode_list_blocks(&mut [], &mut [], plan, now)
             .map(drop),
     )
 }
