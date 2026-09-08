@@ -52,7 +52,7 @@ fn accepts_a_whole_object_read() {
         ObjectMeta {
             size: Some(8),
             e_tag: Some(b"\"etag\""),
-            last_modified: Some(b"Fri, 24 May 2013 00:00:00 GMT"),
+            last_modified: Some("Fri, 24 May 2013 00:00:00 GMT"),
             version: None,
             // Ranges cover the stored representation, so an encoding is
             // surfaced rather than rejected.
@@ -77,7 +77,7 @@ fn accepts_a_whole_object_read() {
 #[test]
 fn a_metadata_plan_completes_without_a_body() {
     let shape = GetShape {
-        kind: GetKind::Metadata,
+        kind: GetKind::Head,
         ..GetShape::default()
     };
     let head = ResponseHead::from_headers(200, [("Content-Length", b"8".as_slice())]);

@@ -71,7 +71,7 @@ fn a_read_names_every_part_of_its_head_by_offset() {
             ..PhysicalGet::new("object.bin")
         },
         PhysicalGet {
-            kind: GetKind::Metadata,
+            kind: GetKind::Head,
             ..PhysicalGet::new("object.bin")
         },
     ] {

@@ -144,13 +144,45 @@
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
 //!
+//! A `*_requirements` function is a dry run: it encodes the request into an
+//! empty buffer and reads the capacities from the refusal. It allocates
+//! nothing, and it reports a plan error that the encoding method reports
+//! again.
+//!
+//! # Staying within Azure's limits
+//!
+//! The encoding methods refuse a plan that Azure would refuse, with an
+//! [`InvalidPlan`] that names the rule. The rules on a key are documented at
+//! [`PhysicalGet::key`]. The numeric limits are [`azure::MAX_URL_LEN`] for
+//! the whole URL, [`azure::MAX_PUT_LEN`] for one write, and
+//! [`azure::MAX_STAGE_LEN`] for one block.
+//!
 //! # Host requirements
 //!
 //! Your HTTP client must not decompress the response body. See
 //! [`BodyWindow`] for the reason.
 //!
+//! Hand back the response head and the response body as two values. Every
+//! outcome borrows the [`ResponseHead`] that you passed in, and a
+//! `NeedErrorBody` outcome then asks for the body. A value that lends the
+//! head from `&self` and reads the body from `&mut self` cannot do both.
+//!
 //! The [ureq host](https://github.com/borink-org/object-storage/tree/master/hosts/ureq)
-//! is a complete example.
+//! is a complete example. It reads every operation the same way, so copy its
+//! shape for your own.
+//!
+//! # Reading a failure
+//!
+//! A `NeedErrorBody` outcome carries a [`Failure`] whose `request_id`
+//! borrows the head. Copy what you need out of it, read the body, and call
+//! the `accept_*_error_body` method of the same operation. That method
+//! returns the same outcome type again, with the error that the body named.
+//!
+//! Every outcome type is `#[non_exhaustive]`. Treat a variant that your
+//! `match` does not name as a failure of the service, and report the status.
+//!
+//! This crate never retries a request. [`Failure::class`] says whether a
+//! retry can succeed. When to retry, and how often, is your decision.
 
 #![no_std]
 #![forbid(unsafe_code)]

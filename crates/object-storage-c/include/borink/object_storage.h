@@ -134,9 +134,9 @@ enum borink_get_kind
      */
     BORINK_GET_KIND_BYTES = 1,
     /**
-     * The metadata of the object, without its bytes.
+     * The properties and the metadata of the object, without its bytes.
      */
-    BORINK_GET_KIND_METADATA = 2,
+    BORINK_GET_KIND_HEAD = 2,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L

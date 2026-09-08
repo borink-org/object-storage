@@ -161,22 +161,42 @@ fn a_shape_and_the_borrowed_bytes_rebuild_the_plan() {
 #[test]
 fn a_listing_plan_is_validated_before_any_byte_is_written() {
     let mut request_headers = [HeaderSpan::default(); 8];
-    // Only a client told it is on a flat account refuses a long prefix; the
-    // default client sends it, and the service answers for its account.
+    // A prefix is not bounded like a name, on any account: a flat account
+    // answers a prefix far longer than the names it takes. What bounds it is
+    // the URL.
     let long = "k".repeat(1025);
-    assert!(
-        blobs()
-            .encode_list(
-                &mut [0; 4096],
-                &mut request_headers,
-                &PhysicalList::new(long.as_str()),
-                &now()
-            )
-            .is_ok()
+    for blobs in [blobs(), blobs().with_namespace(AzureNamespace::Flat)] {
+        assert!(
+            blobs
+                .encode_list(
+                    &mut [0; 4096],
+                    &mut request_headers,
+                    &PhysicalList::new(long.as_str()),
+                    &now()
+                )
+                .is_ok()
+        );
+    }
+    let fixed =
+        "https://account.blob.core.windows.net/container?restype=container&comp=list&prefix=".len();
+    let fits = "k".repeat(borink_object_storage_proto::azure::MAX_URL_LEN - fixed);
+    let mut buf = vec![0; 65536];
+    let request = blobs()
+        .encode_list(
+            &mut buf,
+            &mut request_headers,
+            &PhysicalList::new(&fits),
+            &now(),
+        )
+        .unwrap();
+    assert_eq!(
+        request.url().len(),
+        borink_object_storage_proto::azure::MAX_URL_LEN
     );
+    let over = format!("{fits}k");
     let blobs = blobs().with_namespace(AzureNamespace::Flat);
     for (list, expected) in [
-        (PhysicalList::new(long.as_str()), InvalidPlan::Prefix),
+        (PhysicalList::new(&over), InvalidPlan::UrlTooLong),
         (
             PhysicalList {
                 marker: Some(""),
@@ -333,10 +353,7 @@ fn a_page_reports_every_object_it_holds() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].key, "b/c.txt");
@@ -638,10 +655,7 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].kind, EntryKind::Directory);
@@ -858,10 +872,7 @@ fn a_page_the_service_actually_sent() {
     assert_eq!(entries[0].size, Some(1));
     assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_788_289_691_000)
     );
     // The last page of the listing, written the way the service writes it.

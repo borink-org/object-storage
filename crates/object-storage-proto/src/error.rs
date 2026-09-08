@@ -45,14 +45,19 @@ pub enum InvalidPlan {
     Range = 2,
     /// The service does not accept this form of range.
     UnsupportedRange = 3,
-    /// A metadata plan carries a byte range, which the service cannot answer.
-    RangedMetadata = 4,
+    /// A [`GetKind::Head`](crate::GetKind::Head) plan carries a byte range,
+    /// which the service cannot answer.
+    RangedHead = 4,
     /// The condition kind and the condition value do not agree.
     ///
     /// A kind without a value, and a value without a kind, are both invalid.
     /// The value must also be usable as one HTTP header value.
     Condition = 5,
     /// The content is longer than the service writes in one request.
+    ///
+    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN) and
+    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN) state the
+    /// limits.
     PayloadTooLarge = 6,
     /// A field of the plan holds a discriminant that this crate does not
     /// define.
@@ -65,8 +70,7 @@ pub enum InvalidPlan {
     BlockId = 8,
     /// The block list holds more entries than the service accepts.
     Blocks = 9,
-    /// The listing prefix exceeds the 1,024 UTF-16 code units that a
-    /// flat-namespace account accepts, and the client was told it is on one.
+    /// The listing prefix is not UTF-8.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
     ///
@@ -93,6 +97,12 @@ pub enum InvalidPlan {
     KeyTooManySegments = 18,
     /// A path segment ends in a dot and would not be addressed unchanged.
     KeyWouldBeNormalized = 19,
+    /// The URL is longer than the service reads.
+    ///
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN) states the limit.
+    /// The endpoint, the container name, the encoded key and the query all
+    /// count towards it.
+    UrlTooLong = 20,
 }
 
 impl InvalidPlan {
@@ -110,7 +120,7 @@ impl InvalidPlan {
             Self::UnsupportedRange => {
                 "the service does not support Range: bytes=-N suffix requests"
             }
-            Self::RangedMetadata => "a metadata plan cannot carry a byte range",
+            Self::RangedHead => "a head plan cannot carry a byte range",
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
@@ -121,6 +131,7 @@ impl InvalidPlan {
             Self::Prefix => "invalid listing prefix",
             Self::Marker => "invalid listing marker",
             Self::MaxResults => "a listing cannot ask for zero entries",
+            Self::UrlTooLong => "the URL is longer than the service reads",
         }
     }
 
@@ -132,7 +143,7 @@ impl InvalidPlan {
             1 => Self::EmptyKey,
             2 => Self::Range,
             3 => Self::UnsupportedRange,
-            4 => Self::RangedMetadata,
+            4 => Self::RangedHead,
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
@@ -148,6 +159,7 @@ impl InvalidPlan {
             17 => Self::KeyControlCharacter,
             18 => Self::KeyTooManySegments,
             19 => Self::KeyWouldBeNormalized,
+            20 => Self::UrlTooLong,
             _ => return None,
         })
     }
@@ -200,8 +212,8 @@ impl fmt::Display for InvalidPlan {
 #[non_exhaustive]
 #[repr(u16)]
 pub enum ResponseFault {
-    /// A value in the head is missing, is not a number, or disagrees with
-    /// another value in the same head.
+    /// A value in the head is missing, is not a number, is not text, or
+    /// disagrees with another value in the same head.
     Head = 1,
     /// The status does not answer the request that was sent.
     Status = 2,
@@ -326,6 +338,10 @@ pub enum Error {
     /// The plan cannot become a request.
     InvalidPlan(InvalidPlan),
     /// Your request buffer or your entry array is too small.
+    ///
+    /// Grow a request buffer and encode again. An entry array cannot be
+    /// refilled from the same body: see
+    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing).
     Capacity(CapacityError),
     /// The response cannot be read.
     Response(ResponseFault),

@@ -144,7 +144,7 @@ fn full_meta() -> CoreObjectMeta<'static> {
     CoreObjectMeta {
         size: Some(10),
         e_tag: Some(e_tag()),
-        last_modified: Some(&VALUES[6..35]),
+        last_modified: Some(core::str::from_utf8(&VALUES[6..35]).unwrap()),
         version: Some(&VALUES[35..44]),
         content_encoding: Some(&VALUES[44..]),
         content_type: Some(b"text/plain; charset=utf-8"),
@@ -387,7 +387,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     // The plan side, which crosses inwards and must refuse.
     for (kind, expected) in [
         (GetKind::Bytes as u16, Some(proto::GetKind::Bytes)),
-        (GetKind::Metadata as u16, Some(proto::GetKind::Metadata)),
+        (GetKind::Head as u16, Some(proto::GetKind::Head)),
         (0, None),
         (4095, None),
     ] {
@@ -680,7 +680,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the three that carry no
     // inner value.
-    assert_eq!(checked, 3 + 19 + 4);
+    assert_eq!(checked, 3 + 20 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

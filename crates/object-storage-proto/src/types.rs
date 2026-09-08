@@ -7,10 +7,6 @@ pub struct CommitBlocksShape {
 }
 
 /// What a plan asks the service to return.
-///
-/// The provider chooses the request that delivers it. Azure Blob Storage sends
-/// a HEAD request for [`GetKind::Metadata`] and a GET request for
-/// [`GetKind::Bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -18,8 +14,10 @@ pub enum GetKind {
     /// The bytes of the object.
     #[default]
     Bytes = 1,
-    /// The metadata of the object, without its bytes.
-    Metadata = 2,
+    /// The properties and the metadata of the object, without its bytes.
+    ///
+    /// Azure answers this with a HEAD request, as S3's `HeadObject` does.
+    Head = 2,
 }
 
 impl GetKind {
@@ -31,7 +29,7 @@ impl GetKind {
     pub const fn from_discriminant(value: u16) -> Option<Self> {
         Some(match value {
             1 => Self::Bytes,
-            2 => Self::Metadata,
+            2 => Self::Head,
             _ => return None,
         })
     }
@@ -221,6 +219,15 @@ impl<'h> PhysicalGet<'h> {
             range: RequestedRange::default(),
             condition: ConditionKind::default(),
             condition_value: None,
+        }
+    }
+
+    /// Creates a plan that reads the properties and the metadata of `key`,
+    /// without its bytes, with no precondition.
+    pub fn head(key: &'h str) -> Self {
+        Self {
+            kind: GetKind::Head,
+            ..Self::new(key)
         }
     }
 
@@ -533,6 +540,8 @@ pub struct PhysicalList<'h> {
     /// The prefix is matched byte for byte and is not a path: this crate adds
     /// no `/` to it. To list one directory of a delimited listing, end the
     /// prefix with the delimiter yourself.
+    ///
+    /// A prefix may be longer than a name.
     pub prefix: &'h str,
     /// Where the previous page ended.
     ///
@@ -590,9 +599,9 @@ impl<'h> PhysicalList<'h> {
 /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
 /// until you reuse that buffer.
 ///
-/// The fields hold the text that the service wrote, which is what
-/// [`ObjectMeta`] holds as bytes. Read `last_modified` with
-/// [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// The fields hold the text that the service wrote. Read `last_modified`
+/// with [`layered::http_date_ms`](crate::layered::http_date_ms), as you
+/// would [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified).
 ///
 /// Azure version and snapshot fields are available through
 /// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and
@@ -746,7 +755,7 @@ mod tests {
             assert_eq!(RangeForm::from_discriminant(form as u16), Some(form));
             assert_eq!(RequestedRange::from_parts(form, 2, 6), range);
         }
-        for kind in [GetKind::Bytes, GetKind::Metadata] {
+        for kind in [GetKind::Bytes, GetKind::Head] {
             assert_eq!(GetKind::from_discriminant(kind as u16), Some(kind));
         }
         for condition in [

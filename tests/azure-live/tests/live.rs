@@ -137,7 +137,7 @@ fn read(
 }
 
 const METADATA: GetShape = GetShape {
-    kind: GetKind::Metadata,
+    kind: GetKind::Head,
     range: RequestedRange::Whole,
     condition: ConditionKind::None,
 };
@@ -328,7 +328,7 @@ fn seed(fixture: &Fixture, content: &[u8]) -> String {
         WriteOutcome::Created
     );
     let shape = GetShape {
-        kind: GetKind::Metadata,
+        kind: GetKind::Head,
         ..GetShape::default()
     };
     read_put_key(fixture, shape).e_tag.unwrap()
@@ -758,10 +758,7 @@ fn page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Result<Page, Box<dyn std:
             key: entry.key.to_owned(),
             size: entry.size,
             e_tag: entry.e_tag.map(str::to_owned),
-            last_modified: entry
-                .last_modified
-                .map(str::as_bytes)
-                .and_then(layered::http_date_ms),
+            last_modified: entry.last_modified.and_then(layered::http_date_ms),
         })
         .collect();
     Ok((entries, page.next_marker.map(str::to_owned)))
@@ -1340,6 +1337,89 @@ fn a_key_holds_the_segments_azure_says_it_may() {
 
 // Measured by the bisection above, and the number `addressable` holds.
 const MAX_SEGMENTS: usize = 255;
+
+/// Measures where Azure stops reading a URL, and that
+/// `azure::MAX_URL_LEN` is that byte.
+///
+/// Measured on 2026-09-08 on both accounts, whose hosts differ in length: a
+/// listing whose whole URL is 32,759 bytes is answered, and one byte more is
+/// refused with 414 and no error code. The bound is the same in the path,
+/// where the hierarchical account's longest key met it. So it is a bound on
+/// the URL as a whole, not on the name, the path or the request line, and it
+/// does not depend on the account.
+#[test]
+#[ignore = "requires Azure credentials"]
+fn the_url_bound_is_where_azure_stops_reading() {
+    use borink_object_storage_proto::azure::MAX_URL_LEN;
+    use borink_object_storage_proto::{Error, InvalidPlan};
+
+    let fixture = Fixture::from_env();
+    let now = Timestamps::from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    let blobs = fixture.blobs();
+    let mut request_headers = [HeaderSpan::default(); 8];
+
+    // The listing URL around a prefix of one byte, read from a request rather
+    // than assumed, since the endpoint and the container are the fixture's.
+    // An empty prefix is not written at all, so it cannot be the one measured.
+    let mut buf = vec![0; 65536];
+    let fixed = blobs
+        .encode_list(
+            &mut buf,
+            &mut request_headers,
+            &PhysicalList::new("k"),
+            &now,
+        )
+        .unwrap()
+        .url()
+        .len()
+        - 1;
+    let prefix = "k".repeat(MAX_URL_LEN - fixed);
+    let plan = PhysicalList::new(&prefix);
+    let request = blobs
+        .encode_list(&mut buf, &mut request_headers, &plan, &now)
+        .unwrap();
+    assert_eq!(request.url().len(), MAX_URL_LEN);
+
+    let headers: Vec<(&str, &str)> = request.headers().collect();
+    let status = |url: &str| {
+        let mut outgoing = ureq::get(url);
+        for (name, value) in &headers {
+            outgoing = outgoing.header(*name, *value);
+        }
+        outgoing
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(
+        status(request.url()),
+        200,
+        "a URL of {MAX_URL_LEN} bytes is answered"
+    );
+    // The prefix is the last query parameter, so one more byte of URL is one
+    // more byte of prefix, which this crate refuses to encode.
+    let over = format!("{}k", request.url());
+    assert_eq!(
+        status(&over),
+        414,
+        "a URL of {} bytes is refused",
+        MAX_URL_LEN + 1
+    );
+    let longer = format!("{prefix}k");
+    assert_eq!(
+        layered::list_requirements(&blobs, &PhysicalList::new(&longer), &now).map(drop),
+        Err(Error::InvalidPlan(InvalidPlan::UrlTooLong))
+    );
+}
 
 // The same limit measured on a hierarchical account. There a name is a path
 // through directories the service keeps, not a name that happens to hold

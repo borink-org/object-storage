@@ -195,10 +195,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .encode_get(
             &mut buf,
             &mut request_headers,
-            &PhysicalGet {
-                kind: GetKind::Metadata,
-                ..PhysicalGet::new("object")
-            },
+            &PhysicalGet::head("object"),
             &now(),
         )
         .unwrap();
@@ -284,11 +281,11 @@ fn refuses_invalid_plans_before_writing_anything() {
         ),
         (
             PhysicalGet {
-                kind: GetKind::Metadata,
+                kind: GetKind::Head,
                 range: RequestedRange::Offset(2),
                 ..PhysicalGet::new("object")
             },
-            InvalidPlan::RangedMetadata,
+            InvalidPlan::RangedHead,
         ),
         // A kind without a value and a value without a kind are both invalid.
         (
@@ -329,6 +326,54 @@ fn refuses_invalid_plans_before_writing_anything() {
 /// Each refusal here is a measurement from the live suite, not a rule read off
 /// a specification: a name is refused where storing it would store it under a
 /// name the caller did not write.
+#[test]
+fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
+    use borink_object_storage_proto::azure::MAX_URL_LEN;
+
+    let blobs = blobs();
+    // The bytes of the URL that are not the key.
+    let fixed = "https://account.blob.core.windows.net/objects/".len();
+    // A space is one UTF-16 unit and three bytes of URL, so the bytes of the
+    // URL and the units of the name are far apart here.
+    let spaces = (MAX_URL_LEN - fixed - 1) / 3;
+    let key = format!("{}k", " ".repeat(spaces));
+    let plan = PhysicalGet::new(&key);
+    let size = layered::get_requirements(&blobs, &plan, &now()).unwrap();
+    let mut buf = vec![0; size.bytes];
+    let mut request_headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs
+        .encode_get(&mut buf, &mut request_headers, &plan, &now())
+        .unwrap();
+    assert_eq!(request.url().len(), MAX_URL_LEN);
+    assert!(key.encode_utf16().count() * 2 < MAX_URL_LEN);
+
+    // One more byte of URL, and the plan is refused before the buffer is
+    // touched, whatever the account.
+    let over = format!(" {key}");
+    let mut untouched = [0xAA; 256];
+    for blobs in [blobs, blobs.with_namespace(AzureNamespace::Hierarchical)] {
+        assert_eq!(
+            blobs
+                .encode_get(
+                    &mut untouched,
+                    &mut request_headers,
+                    &PhysicalGet::new(&over),
+                    &now()
+                )
+                .map(drop),
+            Err(Error::InvalidPlan(InvalidPlan::UrlTooLong))
+        );
+    }
+    assert!(untouched.iter().all(|byte| *byte == 0xAA));
+    assert_eq!(
+        InvalidPlan::UrlTooLong.azure_rejection(AzureNamespace::Unknown),
+        Some(borink_object_storage_proto::AzureRejection {
+            status: 414,
+            code: ""
+        })
+    );
+}
+
 #[test]
 fn a_key_that_would_not_survive_the_journey_is_refused() {
     let refused = |key: &str| {
