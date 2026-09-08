@@ -263,7 +263,7 @@ fn a_stored_object_reports_the_metadata_azure_returned() {
             // A write never reports a size: it is the length you sent.
             size: None,
             e_tag: Some(b"\"etag\""),
-            last_modified: Some(b"Fri, 24 May 2013 00:00:00 GMT"),
+            last_modified: Some("Fri, 24 May 2013 00:00:00 GMT"),
             version: Some(b"version-1"),
             ..ObjectMeta::default()
         }

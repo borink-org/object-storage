@@ -190,7 +190,7 @@ fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
     ObjectMeta {
         size: maybe_number(meta.size),
         e_tag: maybe_bytes(meta.e_tag),
-        last_modified: maybe_bytes(meta.last_modified),
+        last_modified: maybe_bytes(meta.last_modified.map(str::as_bytes)),
         version: maybe_bytes(meta.version),
         content_encoding: maybe_bytes(meta.content_encoding),
         content_type: maybe_bytes(meta.content_type),

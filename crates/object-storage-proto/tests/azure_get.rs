@@ -195,10 +195,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .encode_get(
             &mut buf,
             &mut request_headers,
-            &PhysicalGet {
-                kind: GetKind::Metadata,
-                ..PhysicalGet::new("object")
-            },
+            &PhysicalGet::metadata("object"),
             &now(),
         )
         .unwrap();

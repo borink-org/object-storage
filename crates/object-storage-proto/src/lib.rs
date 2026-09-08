@@ -149,8 +149,27 @@
 //! Your HTTP client must not decompress the response body. See
 //! [`BodyWindow`] for the reason.
 //!
+//! Hand back the response head and the response body as two values. Every
+//! outcome borrows the [`ResponseHead`] that you passed in, and a
+//! `NeedErrorBody` outcome then asks for the body. A value that lends the
+//! head from `&self` and reads the body from `&mut self` cannot do both.
+//!
 //! The [ureq host](https://github.com/borink-org/object-storage/tree/master/hosts/ureq)
-//! is a complete example.
+//! is a complete example. It reads every operation the same way, so copy its
+//! shape for your own.
+//!
+//! # Reading a failure
+//!
+//! A `NeedErrorBody` outcome carries a [`Failure`] whose `request_id`
+//! borrows the head. Copy what you need out of it, read the body, and call
+//! the `accept_*_error_body` method of the same operation. That method
+//! returns the same outcome type again, with the error that the body named.
+//!
+//! Every outcome type is `#[non_exhaustive]`. Treat a variant that your
+//! `match` does not name as a failure of the service, and report the status.
+//!
+//! This crate never retries a request. [`Failure::class`] says whether a
+//! retry can succeed. When to retry, and how often, is your decision.
 
 #![no_std]
 #![forbid(unsafe_code)]

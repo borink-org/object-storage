@@ -144,7 +144,7 @@ fn full_meta() -> CoreObjectMeta<'static> {
     CoreObjectMeta {
         size: Some(10),
         e_tag: Some(e_tag()),
-        last_modified: Some(&VALUES[6..35]),
+        last_modified: Some(core::str::from_utf8(&VALUES[6..35]).unwrap()),
         version: Some(&VALUES[35..44]),
         content_encoding: Some(&VALUES[44..]),
         content_type: Some(b"text/plain; charset=utf-8"),

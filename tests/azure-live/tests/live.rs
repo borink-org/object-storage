@@ -758,10 +758,7 @@ fn page(fixture: &Fixture, plan: &PhysicalList<'_>) -> Result<Page, Box<dyn std:
             key: entry.key.to_owned(),
             size: entry.size,
             e_tag: entry.e_tag.map(str::to_owned),
-            last_modified: entry
-                .last_modified
-                .map(str::as_bytes)
-                .and_then(layered::http_date_ms),
+            last_modified: entry.last_modified.and_then(layered::http_date_ms),
         })
         .collect();
     Ok((entries, page.next_marker.map(str::to_owned)))

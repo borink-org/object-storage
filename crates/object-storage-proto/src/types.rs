@@ -224,6 +224,15 @@ impl<'h> PhysicalGet<'h> {
         }
     }
 
+    /// Creates a plan that reads the metadata of `key`, without its bytes,
+    /// with no precondition.
+    pub fn metadata(key: &'h str) -> Self {
+        Self {
+            kind: GetKind::Metadata,
+            ..Self::new(key)
+        }
+    }
+
     /// Rebuilds a plan from a stored [`GetShape`] and the bytes it needs.
     pub fn from_shape(shape: GetShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
         Self {
@@ -590,9 +599,9 @@ impl<'h> PhysicalList<'h> {
 /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
 /// until you reuse that buffer.
 ///
-/// The fields hold the text that the service wrote, which is what
-/// [`ObjectMeta`] holds as bytes. Read `last_modified` with
-/// [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// The fields hold the text that the service wrote. Read `last_modified`
+/// with [`layered::http_date_ms`](crate::layered::http_date_ms), as you
+/// would [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified).
 ///
 /// Azure version and snapshot fields are available through
 /// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and

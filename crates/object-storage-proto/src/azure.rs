@@ -69,8 +69,14 @@ impl<'a> Container<'a> {
 
 /// The Azure Blob operations that one bearer token authorizes.
 ///
-/// This is a small borrowed value. Create it again whenever the token
-/// changes.
+/// This is a small borrowed value, and it is [`Copy`]. Create it once per
+/// token and keep it while the token is valid. It borrows the endpoint, the
+/// container name and the token, so it cannot live in the value that owns
+/// those strings. Keep the strings in one value and this in a second value
+/// that borrows the first.
+///
+/// You can also create it again for every request. Each creation checks the
+/// token as a header value, which is a scan of its bytes.
 ///
 /// Every method that encodes a request takes the current time in `now`,
 /// because this crate never reads the clock.
@@ -609,7 +615,7 @@ impl<'a> Blobs<'a> {
     ) -> Result<CommitBlocksHeadOutcome<'h>> {
         match head.status {
             201 => Ok(CommitBlocksHeadOutcome::Committed {
-                meta: multipart_meta(head),
+                meta: multipart_meta(head)?,
             }),
             412 if shape.condition != ConditionKind::None
                 && named(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -670,7 +676,7 @@ impl<'a> Blobs<'a> {
     ) -> Result<ListBlocksHeadOutcome<'h>> {
         match head.status {
             200 => Ok(ListBlocksHeadOutcome::Blocks {
-                meta: multipart_meta(head),
+                meta: multipart_meta(head)?,
                 expected_len: decimal_header(head.content_length)?,
             }),
 
@@ -1054,7 +1060,7 @@ impl<'a> Blobs<'a> {
                 meta: ObjectMeta {
                     size: None,
                     e_tag: head.e_tag,
-                    last_modified: head.last_modified,
+                    last_modified: text_header(head.last_modified)?,
                     version: head.version,
                     content_encoding: head.content_encoding,
                     content_type: head.content_type,
@@ -1272,20 +1278,24 @@ impl<'a> Blobs<'a> {
 // what a plan turns on rather than a byte that it carries.
 const DELIMITER: &[u8] = b"/";
 
-const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
+/// The most bytes that Azure stages in one `Put Block` request.
+///
+/// [`Blobs::encode_stage_block`] refuses a longer payload with
+/// [`InvalidPlan::PayloadTooLarge`].
+pub const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
 const MAX_BLOCKS: usize = 50_000;
 const COMMIT_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
 const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
-fn multipart_meta(head: ResponseHead<'_>) -> ObjectMeta<'_> {
-    ObjectMeta {
+fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
+    Ok(ObjectMeta {
         size: None,
         e_tag: head.e_tag,
-        last_modified: head.last_modified,
+        last_modified: text_header(head.last_modified)?,
         version: head.version,
         content_encoding: head.content_encoding,
         content_type: head.content_type,
-    }
+    })
 }
 
 fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
@@ -1380,10 +1390,11 @@ pub fn classify_error(head: &ResponseHead<'_>, body: &[u8], truncated: bool) -> 
 
 fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>> {
     let content_length = decimal_header(head.content_length)?;
+    let last_modified = text_header(head.last_modified)?;
     let meta = |size| ObjectMeta {
         size,
         e_tag: head.e_tag,
-        last_modified: head.last_modified,
+        last_modified,
         version: head.version,
         content_encoding: head.content_encoding,
         content_type: head.content_type,
@@ -1481,6 +1492,14 @@ fn parse_content_range(value: &[u8]) -> Option<ContentRange> {
         return None;
     }
     Some(ContentRange::Satisfied { start, end, total })
+}
+
+// Reads a header value that carries text. Azure writes `Last-Modified` in
+// ASCII, so a value that is not UTF-8 is a fault in the head.
+fn text_header(value: Option<&[u8]>) -> Result<Option<&str>> {
+    value
+        .map(|value| core::str::from_utf8(value).map_err(|_| Error::Response(ResponseFault::Head)))
+        .transpose()
 }
 
 fn decimal_header(value: Option<&[u8]>) -> Result<Option<u64>> {
@@ -1716,9 +1735,12 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
     }
 }
 
-// Azure writes at most 5000 MiB of content in one Put Blob request. This is a
-// `u64` because it does not fit a 32-bit `usize`.
-const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
+/// The most bytes that Azure writes in one `Put Blob` request.
+///
+/// [`Blobs::encode_put`] refuses a longer payload with
+/// [`InvalidPlan::PayloadTooLarge`]. Write a longer object in blocks. This
+/// is a `u64` because it does not fit a 32-bit `usize`.
+pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
 fn validate_put(put: &PhysicalPut<'_>, len: u64, namespace: AzureNamespace) -> Result<()> {
     validate_key(put.key, namespace)?;

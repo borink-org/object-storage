@@ -105,8 +105,9 @@ impl fmt::Display for ListBlocksHeadOutcome<'_> {
 
 /// Object metadata borrowed from a response head.
 ///
-/// Each field holds the bytes that the service sent. To read `last_modified`
-/// as an instant, use [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// Each field holds the bytes that the service sent. `last_modified` holds
+/// them as text. To read it as an instant, use
+/// [`layered::http_date_ms`](crate::layered::http_date_ms).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectMeta<'h> {
     /// The size of the whole object, if the head states it.
@@ -117,7 +118,7 @@ pub struct ObjectMeta<'h> {
     /// The entity tag, if the service returned one.
     pub e_tag: Option<&'h [u8]>,
     /// The value of the `Last-Modified` header, if the service returned one.
-    pub last_modified: Option<&'h [u8]>,
+    pub last_modified: Option<&'h str>,
     /// The version identifier, if the service returned one.
     pub version: Option<&'h [u8]>,
     /// The value of the `Content-Encoding` header, if the service returned
@@ -152,8 +153,9 @@ pub struct BodyWindow {
 
 /// The category of a service failure.
 ///
-/// Use this to decide whether to retry a request, and how. For the specific
-/// error that the service named, read [`ServiceErrorKind`].
+/// Use this to decide whether to retry a request, and how. This crate never
+/// retries a request itself. For the specific error that the service named,
+/// read [`ServiceErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]

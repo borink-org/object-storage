@@ -53,6 +53,10 @@ pub enum InvalidPlan {
     /// The value must also be usable as one HTTP header value.
     Condition = 5,
     /// The content is longer than the service writes in one request.
+    ///
+    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN) and
+    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN) state the
+    /// limits.
     PayloadTooLarge = 6,
     /// A field of the plan holds a discriminant that this crate does not
     /// define.
@@ -200,8 +204,8 @@ impl fmt::Display for InvalidPlan {
 #[non_exhaustive]
 #[repr(u16)]
 pub enum ResponseFault {
-    /// A value in the head is missing, is not a number, or disagrees with
-    /// another value in the same head.
+    /// A value in the head is missing, is not a number, is not text, or
+    /// disagrees with another value in the same head.
     Head = 1,
     /// The status does not answer the request that was sent.
     Status = 2,
@@ -326,6 +330,10 @@ pub enum Error {
     /// The plan cannot become a request.
     InvalidPlan(InvalidPlan),
     /// Your request buffer or your entry array is too small.
+    ///
+    /// Grow a request buffer and encode again. An entry array cannot be
+    /// refilled from the same body: see
+    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing).
     Capacity(CapacityError),
     /// The response cannot be read.
     Response(ResponseFault),

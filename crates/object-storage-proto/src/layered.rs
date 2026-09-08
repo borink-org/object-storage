@@ -20,10 +20,13 @@ const MONTHS: [&[u8; 3]; 12] = [
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_get`].
+/// unchanged from [`Blobs::encode_get`], which reports it again.
 pub fn get_requirements(
     blobs: &Blobs<'_>,
     get: &PhysicalGet<'_>,
@@ -39,10 +42,13 @@ pub fn get_requirements(
 /// head only, and never the content. Only the length of `content` reaches the
 /// head, so a [`Payload::Streamed`] sizes a buffer without the bytes.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if `put` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_put`].
+/// unchanged from [`Blobs::encode_put`], which reports it again.
 pub fn put_requirements(
     blobs: &Blobs<'_>,
     put: &PhysicalPut<'_>,
@@ -63,10 +69,13 @@ pub fn put_requirements(
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_delete`].
+/// unchanged from [`Blobs::encode_delete`], which reports it again.
 pub fn delete_requirements(
     blobs: &Blobs<'_>,
     delete: &PhysicalDelete<'_>,
@@ -80,10 +89,13 @@ pub fn delete_requirements(
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_list`].
+/// unchanged from [`Blobs::encode_list`], which reports it again.
 pub fn list_requirements(
     blobs: &Blobs<'_>,
     list: &PhysicalList<'_>,
@@ -98,10 +110,13 @@ pub fn list_requirements(
 /// As [`put_requirements`]: the answer covers the head, and only the length
 /// of `content` reaches it.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
-/// unchanged from [`Blobs::encode_stage_block`].
+/// unchanged from [`Blobs::encode_stage_block`], which reports it again.
 pub fn stage_block_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalStageBlock<'_>,
@@ -121,10 +136,13 @@ pub fn stage_block_requirements(
 /// Call this to size a buffer before you encode; the answer is exact, and
 /// the bytes include the XML body that the request carries.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
-/// unchanged from [`Blobs::encode_commit_blocks`].
+/// unchanged from [`Blobs::encode_commit_blocks`], which reports it again.
 pub fn commit_blocks_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalCommitBlocks<'_>,
@@ -143,10 +161,13 @@ pub fn commit_blocks_requirements(
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
+/// This encodes the request into an empty buffer and reads the capacities
+/// from the refusal. It allocates nothing.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
-/// unchanged from [`Blobs::encode_list_blocks`].
+/// unchanged from [`Blobs::encode_list_blocks`], which reports it again.
 pub fn list_blocks_requirements(
     blobs: &Blobs<'_>,
     plan: &PhysicalListBlocks<'_>,
@@ -272,13 +293,16 @@ pub fn decode_into<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
 
 /// Reads an HTTP date as milliseconds since the Unix epoch.
 ///
-/// Use this on [`ObjectMeta::last_modified`], which holds the bytes that Azure
-/// sent. Returns [`None`] if `value` is not an RFC 1123 date.
+/// Use this on [`ObjectMeta::last_modified`] and on
+/// [`ListEntry::last_modified`]. Returns [`None`] if `value` is not an
+/// RFC 1123 date.
 ///
 /// [`ObjectMeta::last_modified`]: crate::ObjectMeta::last_modified
-pub fn http_date_ms(value: &[u8]) -> Option<u64> {
+/// [`ListEntry::last_modified`]: crate::ListEntry::last_modified
+pub fn http_date_ms(value: &str) -> Option<u64> {
     // RFC 1123 `Www, DD Mon YYYY HH:MM:SS GMT`, the only form these services
     // send and the only one this crate writes.
+    let value = value.as_bytes();
     if value.len() != 29
         || value[3] != b','
         || value[4] != b' '
@@ -351,11 +375,11 @@ mod tests {
     #[test]
     fn reads_an_azure_last_modified_header() {
         assert_eq!(
-            http_date_ms(b"Fri, 24 May 2013 00:00:00 GMT"),
+            http_date_ms("Fri, 24 May 2013 00:00:00 GMT"),
             Some(1_369_353_600_000)
         );
-        assert_eq!(http_date_ms(b"not an HTTP date"), None);
-        assert_eq!(http_date_ms(b"Fri, 24 Xxx 2013 00:00:00 GMT"), None);
+        assert_eq!(http_date_ms("not an HTTP date"), None);
+        assert_eq!(http_date_ms("Fri, 24 Xxx 2013 00:00:00 GMT"), None);
     }
 
     #[test]

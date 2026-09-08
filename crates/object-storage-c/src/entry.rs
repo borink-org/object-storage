@@ -796,7 +796,11 @@ pub unsafe extern "C" fn borink_quoted_etag(listed: Bytes, into: BytesMut) -> Ma
 pub unsafe extern "C" fn borink_http_date_ms(value: Bytes) -> MaybeU64 {
     // SAFETY: the caller states the contract of this function.
     let value = unsafe { ptr::slice(value) };
-    maybe_number(layered::http_date_ms(value))
+    maybe_number(
+        core::str::from_utf8(value)
+            .ok()
+            .and_then(layered::http_date_ms),
+    )
 }
 
 /// Writes one sentence naming what `outcome` says.

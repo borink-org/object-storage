@@ -333,10 +333,7 @@ fn a_page_reports_every_object_it_holds() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].key, "b/c.txt");
@@ -638,10 +635,7 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].kind, EntryKind::Directory);
@@ -858,10 +852,7 @@ fn a_page_the_service_actually_sent() {
     assert_eq!(entries[0].size, Some(1));
     assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
     assert_eq!(
-        entries[0]
-            .last_modified
-            .map(str::as_bytes)
-            .and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(layered::http_date_ms),
         Some(1_788_289_691_000)
     );
     // The last page of the listing, written the way the service writes it.

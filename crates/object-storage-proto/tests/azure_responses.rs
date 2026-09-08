@@ -52,7 +52,7 @@ fn accepts_a_whole_object_read() {
         ObjectMeta {
             size: Some(8),
             e_tag: Some(b"\"etag\""),
-            last_modified: Some(b"Fri, 24 May 2013 00:00:00 GMT"),
+            last_modified: Some("Fri, 24 May 2013 00:00:00 GMT"),
             version: None,
             // Ranges cover the stored representation, so an encoding is
             // surfaced rather than rejected.
