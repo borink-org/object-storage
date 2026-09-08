@@ -257,7 +257,7 @@ pub enum GetHeadOutcome<'h> {
     },
     /// No body follows and the request is complete.
     ///
-    /// A metadata plan ends here.
+    /// A [`GetKind::Head`](crate::GetKind::Head) plan ends here.
     Complete {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,

@@ -88,7 +88,7 @@ inline constexpr Method MethodPut    = BORINK_METHOD_PUT;
 inline constexpr Method MethodDelete = BORINK_METHOD_DELETE;
 
 inline constexpr GetKind GetKindBytes    = BORINK_GET_KIND_BYTES;
-inline constexpr GetKind GetKindMetadata = BORINK_GET_KIND_METADATA;
+inline constexpr GetKind GetKindHead     = BORINK_GET_KIND_HEAD;
 
 inline constexpr RangeForm RangeFormWhole   = BORINK_RANGE_FORM_WHOLE;
 inline constexpr RangeForm RangeFormBounded = BORINK_RANGE_FORM_BOUNDED;

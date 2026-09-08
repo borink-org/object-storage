@@ -45,8 +45,9 @@ pub enum InvalidPlan {
     Range = 2,
     /// The service does not accept this form of range.
     UnsupportedRange = 3,
-    /// A metadata plan carries a byte range, which the service cannot answer.
-    RangedMetadata = 4,
+    /// A [`GetKind::Head`](crate::GetKind::Head) plan carries a byte range,
+    /// which the service cannot answer.
+    RangedHead = 4,
     /// The condition kind and the condition value do not agree.
     ///
     /// A kind without a value, and a value without a kind, are both invalid.
@@ -119,7 +120,7 @@ impl InvalidPlan {
             Self::UnsupportedRange => {
                 "the service does not support Range: bytes=-N suffix requests"
             }
-            Self::RangedMetadata => "a metadata plan cannot carry a byte range",
+            Self::RangedHead => "a head plan cannot carry a byte range",
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
@@ -142,7 +143,7 @@ impl InvalidPlan {
             1 => Self::EmptyKey,
             2 => Self::Range,
             3 => Self::UnsupportedRange,
-            4 => Self::RangedMetadata,
+            4 => Self::RangedHead,
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,

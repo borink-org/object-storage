@@ -387,7 +387,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     // The plan side, which crosses inwards and must refuse.
     for (kind, expected) in [
         (GetKind::Bytes as u16, Some(proto::GetKind::Bytes)),
-        (GetKind::Metadata as u16, Some(proto::GetKind::Metadata)),
+        (GetKind::Head as u16, Some(proto::GetKind::Head)),
         (0, None),
         (4095, None),
     ] {

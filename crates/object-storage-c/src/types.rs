@@ -177,8 +177,8 @@ pub enum Method {
 pub enum GetKind {
     /// The bytes of the object.
     Bytes = 1,
-    /// The metadata of the object, without its bytes.
-    Metadata = 2,
+    /// The properties and the metadata of the object, without its bytes.
+    Head = 2,
 }
 
 /// Which form of byte range a read requests.

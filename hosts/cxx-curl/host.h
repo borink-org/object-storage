@@ -177,8 +177,8 @@ class Client {
     // Reads the object that `read` describes, passing its stored bytes to
     // `sink` as they arrive.
     //
-    // A metadata read returns no bytes and calls `sink` not at all. Read the
-    // metadata from `outcome()` and `head()` afterwards.
+    // A head read returns no bytes and calls `sink` not at all. Read the
+    // properties from `outcome()` and `head()` afterwards.
     //
     // Throws std::runtime_error if Azure returned no object. The message is
     // the sentence that the core crate wrote for the outcome.

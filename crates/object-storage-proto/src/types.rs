@@ -7,10 +7,6 @@ pub struct CommitBlocksShape {
 }
 
 /// What a plan asks the service to return.
-///
-/// The provider chooses the request that delivers it. Azure Blob Storage sends
-/// a HEAD request for [`GetKind::Metadata`] and a GET request for
-/// [`GetKind::Bytes`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -18,8 +14,10 @@ pub enum GetKind {
     /// The bytes of the object.
     #[default]
     Bytes = 1,
-    /// The metadata of the object, without its bytes.
-    Metadata = 2,
+    /// The properties and the metadata of the object, without its bytes.
+    ///
+    /// Azure answers this with a HEAD request, as S3's `HeadObject` does.
+    Head = 2,
 }
 
 impl GetKind {
@@ -31,7 +29,7 @@ impl GetKind {
     pub const fn from_discriminant(value: u16) -> Option<Self> {
         Some(match value {
             1 => Self::Bytes,
-            2 => Self::Metadata,
+            2 => Self::Head,
             _ => return None,
         })
     }
@@ -193,8 +191,6 @@ pub struct PhysicalGet<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    /// The URL that names the object is bounded on every account: see
-    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -226,11 +222,11 @@ impl<'h> PhysicalGet<'h> {
         }
     }
 
-    /// Creates a plan that reads the metadata of `key`, without its bytes,
-    /// with no precondition.
-    pub fn metadata(key: &'h str) -> Self {
+    /// Creates a plan that reads the properties and the metadata of `key`,
+    /// without its bytes, with no precondition.
+    pub fn head(key: &'h str) -> Self {
         Self {
-            kind: GetKind::Metadata,
+            kind: GetKind::Head,
             ..Self::new(key)
         }
     }
@@ -289,8 +285,6 @@ pub struct PhysicalPut<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    /// The URL that names the object is bounded on every account: see
-    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -441,8 +435,6 @@ pub struct PhysicalDelete<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    /// The URL that names the object is bounded on every account: see
-    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -549,8 +541,7 @@ pub struct PhysicalList<'h> {
     /// no `/` to it. To list one directory of a delimited listing, end the
     /// prefix with the delimiter yourself.
     ///
-    /// A prefix may be longer than a name. What bounds it is the URL: see
-    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
+    /// A prefix may be longer than a name.
     pub prefix: &'h str,
     /// Where the previous page ended.
     ///
@@ -764,7 +755,7 @@ mod tests {
             assert_eq!(RangeForm::from_discriminant(form as u16), Some(form));
             assert_eq!(RequestedRange::from_parts(form, 2, 6), range);
         }
-        for kind in [GetKind::Bytes, GetKind::Metadata] {
+        for kind in [GetKind::Bytes, GetKind::Head] {
             assert_eq!(GetKind::from_discriminant(kind as u16), Some(kind));
         }
         for condition in [

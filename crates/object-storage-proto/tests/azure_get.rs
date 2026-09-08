@@ -195,7 +195,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         .encode_get(
             &mut buf,
             &mut request_headers,
-            &PhysicalGet::metadata("object"),
+            &PhysicalGet::head("object"),
             &now(),
         )
         .unwrap();
@@ -281,11 +281,11 @@ fn refuses_invalid_plans_before_writing_anything() {
         ),
         (
             PhysicalGet {
-                kind: GetKind::Metadata,
+                kind: GetKind::Head,
                 range: RequestedRange::Offset(2),
                 ..PhysicalGet::new("object")
             },
-            InvalidPlan::RangedMetadata,
+            InvalidPlan::RangedHead,
         ),
         // A kind without a value and a value without a kind are both invalid.
         (

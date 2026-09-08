@@ -144,6 +144,19 @@
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
 //!
+//! A `*_requirements` function is a dry run: it encodes the request into an
+//! empty buffer and reads the capacities from the refusal. It allocates
+//! nothing, and it reports a plan error that the encoding method reports
+//! again.
+//!
+//! # Staying within Azure's limits
+//!
+//! The encoding methods refuse a plan that Azure would refuse, with an
+//! [`InvalidPlan`] that names the rule. The rules on a key are documented at
+//! [`PhysicalGet::key`]. The numeric limits are [`azure::MAX_URL_LEN`] for
+//! the whole URL, [`azure::MAX_PUT_LEN`] for one write, and
+//! [`azure::MAX_STAGE_LEN`] for one block.
+//!
 //! # Host requirements
 //!
 //! Your HTTP client must not decompress the response body. See

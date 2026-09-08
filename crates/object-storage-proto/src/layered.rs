@@ -2,6 +2,9 @@
 //!
 //! Each function here uses only the public types, so you can write your own
 //! version if you need different behaviour.
+//!
+//! The `*_requirements` functions encode the request into an empty buffer
+//! and read the capacities from the refusal. They allocate nothing.
 
 use crate::azure::{BlockRef, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock};
 use crate::{
@@ -19,9 +22,6 @@ const MONTHS: [&[u8; 3]; 12] = [
 /// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
-///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
 ///
 /// # Errors
 ///
@@ -41,9 +41,6 @@ pub fn get_requirements(
 /// Call this to size a buffer before you encode. The answer covers the request
 /// head only, and never the content. Only the length of `content` reaches the
 /// head, so a [`Payload::Streamed`] sizes a buffer without the bytes.
-///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
 ///
 /// # Errors
 ///
@@ -69,9 +66,6 @@ pub fn put_requirements(
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
 ///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
-///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure request,
@@ -88,9 +82,6 @@ pub fn delete_requirements(
 /// needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
-///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
 ///
 /// # Errors
 ///
@@ -109,9 +100,6 @@ pub fn list_requirements(
 ///
 /// As [`put_requirements`]: the answer covers the head, and only the length
 /// of `content` reaches it.
-///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
 ///
 /// # Errors
 ///
@@ -136,9 +124,6 @@ pub fn stage_block_requirements(
 /// Call this to size a buffer before you encode; the answer is exact, and
 /// the bytes include the XML body that the request carries.
 ///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
-///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
@@ -160,9 +145,6 @@ pub fn commit_blocks_requirements(
 /// [`Blobs::encode_list_blocks`] needs for this plan.
 ///
 /// Call this to size a buffer before you encode; the answer is exact.
-///
-/// This encodes the request into an empty buffer and reads the capacities
-/// from the refusal. It allocates nothing.
 ///
 /// # Errors
 ///

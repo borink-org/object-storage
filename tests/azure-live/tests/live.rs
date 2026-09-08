@@ -137,7 +137,7 @@ fn read(
 }
 
 const METADATA: GetShape = GetShape {
-    kind: GetKind::Metadata,
+    kind: GetKind::Head,
     range: RequestedRange::Whole,
     condition: ConditionKind::None,
 };
@@ -328,7 +328,7 @@ fn seed(fixture: &Fixture, content: &[u8]) -> String {
         WriteOutcome::Created
     );
     let shape = GetShape {
-        kind: GetKind::Metadata,
+        kind: GetKind::Head,
         ..GetShape::default()
     };
     read_put_key(fixture, shape).e_tag.unwrap()

@@ -280,7 +280,7 @@ const _: () = {
     assert!(Method::Delete as u16 == proto::Method::Delete as u16);
 
     assert!(GetKind::Bytes as u16 == proto::GetKind::Bytes as u16);
-    assert!(GetKind::Metadata as u16 == proto::GetKind::Metadata as u16);
+    assert!(GetKind::Head as u16 == proto::GetKind::Head as u16);
 
     assert!(RangeForm::Whole as u16 == proto::RangeForm::Whole as u16);
     assert!(RangeForm::Bounded as u16 == proto::RangeForm::Bounded as u16);

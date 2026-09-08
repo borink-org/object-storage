@@ -228,7 +228,7 @@ void reads_the_metadata_of_an_object() {
     borink::host::Client client = open(server);
     client.get(
         "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-        borink::Read{borink::GetKindMetadata, borink::whole(), borink::ConditionNone, {}});
+        borink::Read{borink::GetKindHead, borink::whole(), borink::ConditionNone, {}});
 
     CHECK(server.head().starts_with("HEAD /container/a%20key HTTP/1.1\r\n"));
     CHECK(client.outcome().kind == borink::OutcomeKindComplete);
@@ -509,7 +509,7 @@ void refuses_an_overflowed_head_on_a_read_with_no_body() {
     try {
         client.get(
             "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-            borink::Read{borink::GetKindMetadata, borink::whole(), borink::ConditionNone, {}});
+            borink::Read{borink::GetKindHead, borink::whole(), borink::ConditionNone, {}});
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();

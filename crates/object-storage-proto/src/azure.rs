@@ -80,13 +80,8 @@ impl<'a> Container<'a> {
 /// The Azure Blob operations that one bearer token authorizes.
 ///
 /// This is a small borrowed value, and it is [`Copy`]. Create it once per
-/// token and keep it while the token is valid. It borrows the endpoint, the
-/// container name and the token, so it cannot live in the value that owns
-/// those strings. Keep the strings in one value and this in a second value
-/// that borrows the first.
-///
-/// You can also create it again for every request. Each creation checks the
-/// token as a header value, which is a scan of its bytes.
+/// token. Creating it for every request also works: each creation checks
+/// the token as a header value, and nothing else.
 ///
 /// Every method that encodes a request takes the current time in `now`,
 /// because this crate never reads the clock.
@@ -780,7 +775,7 @@ impl<'a> Blobs<'a> {
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
-            GetKind::Metadata => Method::Head,
+            GetKind::Head => Method::Head,
         };
         encoded(head, method, Payload::Slice(&[]))
     }
@@ -1434,7 +1429,7 @@ fn accept_success<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHead
         // An unranged plan reads from byte zero, and Azure states the whole
         // object length, so `Content-Length` is both the window and the size.
         return Ok(match shape.kind {
-            GetKind::Metadata => GetHeadOutcome::Complete {
+            GetKind::Head => GetHeadOutcome::Complete {
                 meta: meta(content_length),
             },
             GetKind::Bytes => GetHeadOutcome::Body {
@@ -1744,8 +1739,8 @@ fn validate_get(get: &PhysicalGet<'_>, namespace: AzureNamespace) -> Result<()> 
         }
         RequestedRange::Suffix(_) => return Err(InvalidPlan::UnsupportedRange.into()),
         RequestedRange::Whole => {}
-        _ if get.kind == GetKind::Metadata => {
-            return Err(InvalidPlan::RangedMetadata.into());
+        _ if get.kind == GetKind::Head => {
+            return Err(InvalidPlan::RangedHead.into());
         }
         _ => {}
     }

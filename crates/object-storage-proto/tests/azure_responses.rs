@@ -77,7 +77,7 @@ fn accepts_a_whole_object_read() {
 #[test]
 fn a_metadata_plan_completes_without_a_body() {
     let shape = GetShape {
-        kind: GetKind::Metadata,
+        kind: GetKind::Head,
         ..GetShape::default()
     };
     let head = ResponseHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
