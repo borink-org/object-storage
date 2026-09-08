@@ -69,8 +69,7 @@ pub enum InvalidPlan {
     BlockId = 8,
     /// The block list holds more entries than the service accepts.
     Blocks = 9,
-    /// The listing prefix exceeds the 1,024 UTF-16 code units that a
-    /// flat-namespace account accepts, and the client was told it is on one.
+    /// The listing prefix is not UTF-8.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
     ///
@@ -97,6 +96,12 @@ pub enum InvalidPlan {
     KeyTooManySegments = 18,
     /// A path segment ends in a dot and would not be addressed unchanged.
     KeyWouldBeNormalized = 19,
+    /// The URL is longer than the service reads.
+    ///
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN) states the limit.
+    /// The endpoint, the container name, the encoded key and the query all
+    /// count towards it.
+    UrlTooLong = 20,
 }
 
 impl InvalidPlan {
@@ -125,6 +130,7 @@ impl InvalidPlan {
             Self::Prefix => "invalid listing prefix",
             Self::Marker => "invalid listing marker",
             Self::MaxResults => "a listing cannot ask for zero entries",
+            Self::UrlTooLong => "the URL is longer than the service reads",
         }
     }
 
@@ -152,6 +158,7 @@ impl InvalidPlan {
             17 => Self::KeyControlCharacter,
             18 => Self::KeyTooManySegments,
             19 => Self::KeyWouldBeNormalized,
+            20 => Self::UrlTooLong,
             _ => return None,
         })
     }

@@ -193,6 +193,8 @@ pub struct PhysicalGet<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
+    /// The URL that names the object is bounded on every account: see
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -287,6 +289,8 @@ pub struct PhysicalPut<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
+    /// The URL that names the object is bounded on every account: see
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -437,6 +441,8 @@ pub struct PhysicalDelete<'h> {
     /// also refuses more than 1024 UTF-16 code units, where a character outside
     /// the basic plane counts twice; a client told it is on one refuses such a
     /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
+    /// The URL that names the object is bounded on every account: see
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     ///
     /// A segment that ends in `.` is refused as well, because Azure stores the
     /// name without that dot, and so is a `.` or `..` segment, because a host
@@ -542,6 +548,9 @@ pub struct PhysicalList<'h> {
     /// The prefix is matched byte for byte and is not a path: this crate adds
     /// no `/` to it. To list one directory of a delimited listing, end the
     /// prefix with the delimiter yourself.
+    ///
+    /// A prefix may be longer than a name. What bounds it is the URL: see
+    /// [`azure::MAX_URL_LEN`](crate::azure::MAX_URL_LEN).
     pub prefix: &'h str,
     /// Where the previous page ended.
     ///

@@ -17,6 +17,16 @@ use crate::{
 /// See the [Azure Storage service version lifecycle](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services).
 pub const VERSION: &str = "2026-04-06";
 
+/// The most bytes of URL that Azure reads: the scheme, the host, the path
+/// and the query together.
+///
+/// Every encoding method refuses a longer URL with
+/// [`InvalidPlan::UrlTooLong`]. Azure answers one with HTTP 414 and no
+/// error code. Measured on a flat and on a hierarchical account, whose hosts
+/// differ in length: 32,759 bytes is answered and 32,760 is refused, in the
+/// path and in the query alike.
+pub const MAX_URL_LEN: usize = 32_759;
+
 // A flat-namespace account limits blob names to 1,024 characters.
 // Azure counts a blob name in UTF-16 code units, so a character outside the
 // basic plane counts twice. Measured: a name of 1024 two-byte characters is
@@ -25,10 +35,10 @@ pub const VERSION: &str = "2026-04-06";
 //
 // A hierarchical-namespace account has no such limit. Measured: it stored a
 // key of 32,689 units and read it back, and refused a longer one with 414, a
-// request line too long, at 32,759 bytes of encoded URL. That
-// bound is the URL's, which the service checks. This crate applies the flat
-// limit only when told the account is flat; a client that does not know sends
-// the key, and the service answers for the account it is.
+// request line too long, at 32,759 bytes of encoded URL. That bound is the
+// URL's, and `MAX_URL_LEN` holds it. This crate applies the flat limit only
+// when told the account is flat; a client that does not know sends the key,
+// and the service answers for the account it is.
 const MAX_BLOB_NAME_UNITS: usize = 1024;
 
 // The most `/`-delimited segments Azure takes in a name. Its documentation
@@ -124,6 +134,8 @@ pub struct AzureRejection {
     /// The corresponding HTTP status.
     pub status: u16,
     /// The service error code, stored in static memory.
+    ///
+    /// Empty for a 414, which Azure sends without a code.
     pub code: &'static str,
 }
 
@@ -143,12 +155,13 @@ impl InvalidPlan {
     /// assert_eq!(reason.azure_rejection(AzureNamespace::Hierarchical), None);
     /// ```
     pub const fn azure_rejection(self, namespace: AzureNamespace) -> Option<AzureRejection> {
-        let code = match (self, namespace) {
-            (Self::MaxResults, _) => "OutOfRangeQueryParameterValue",
-            (Self::KeyTooLong, AzureNamespace::Flat) => "OutOfRangeInput",
+        let (status, code) = match (self, namespace) {
+            (Self::MaxResults, _) => (400, "OutOfRangeQueryParameterValue"),
+            (Self::KeyTooLong, AzureNamespace::Flat) => (400, "OutOfRangeInput"),
+            (Self::UrlTooLong, _) => (414, ""),
             _ => return None,
         };
-        Some(AzureRejection { status: 400, code })
+        Some(AzureRejection { status, code })
     }
 }
 
@@ -370,7 +383,7 @@ impl<'a> Blobs<'a> {
             ],
             RequestedRange::Whole,
             now,
-        );
+        )?;
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -410,7 +423,7 @@ impl<'a> Blobs<'a> {
             &query,
             RequestedRange::Whole,
             now,
-        );
+        )?;
         head.header("content-length", |out| {
             out.push(U64Decimal::new(content.len()).as_bytes())
         });
@@ -496,7 +509,7 @@ impl<'a> Blobs<'a> {
             &[Some(("comp", QueryValue::Literal("blocklist")))],
             RequestedRange::Whole,
             now,
-        );
+        )?;
         head.header("content-length", |out| {
             out.push(U64Decimal::new(length as u64).as_bytes())
         });
@@ -763,7 +776,7 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_get(get, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(get.key), &[], get.range, now);
+        self.build(&mut head, Some(get.key), &[], get.range, now)?;
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
@@ -800,7 +813,7 @@ impl<'a> Blobs<'a> {
         validate_put(put, content.len(), self.namespace)?;
         let length = content.len();
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now);
+        self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now)?;
         head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
@@ -815,6 +828,11 @@ impl<'a> Blobs<'a> {
     // written into the caller's buffer. Each part is one range of that buffer.
     // `key` is `None` for a request that names the container alone, and the
     // query is written in the order it is given.
+    //
+    // The URL is the one part whose length depends on the endpoint and the
+    // container as well as on the plan, so it is the one rule that cannot be
+    // checked on the plan alone. It is counted into nothing first, so that
+    // a refusal is reported before any byte reaches the caller's buffer.
     fn build(
         &self,
         head: &mut HeadWriter<'_>,
@@ -822,24 +840,13 @@ impl<'a> Blobs<'a> {
         query: &[Option<(&str, QueryValue<'_>)>],
         range: RequestedRange,
         now: &Timestamps,
-    ) {
-        head.url(|out| {
-            out.push(self.container.endpoint.as_bytes());
-            out.push(b"/");
-            out.push(self.container.name.as_bytes());
-            if let Some(key) = key {
-                out.push(b"/");
-                for part in crate::path::encode_object_key(key) {
-                    out.push(part);
-                }
-            }
-            for (index, (name, value)) in query.iter().flatten().enumerate() {
-                out.push(if index == 0 { b"?" } else { b"&" });
-                out.push(name.as_bytes());
-                out.push(b"=");
-                value.write(out);
-            }
-        });
+    ) -> Result<()> {
+        let mut counted = Writer::new(&mut []);
+        self.write_url(&mut counted, key, query);
+        if counted.position() > MAX_URL_LEN {
+            return Err(InvalidPlan::UrlTooLong.into());
+        }
+        head.url(|out| self.write_url(out, key, query));
         head.header("authorization", |out| {
             out.push(b"Bearer ");
             out.push(self.token.as_bytes());
@@ -848,6 +855,30 @@ impl<'a> Blobs<'a> {
         head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
         if range != RequestedRange::Whole {
             head.header("range", |out| write_range(out, range));
+        }
+        Ok(())
+    }
+
+    fn write_url(
+        &self,
+        out: &mut Writer<'_>,
+        key: Option<&str>,
+        query: &[Option<(&str, QueryValue<'_>)>],
+    ) {
+        out.push(self.container.endpoint.as_bytes());
+        out.push(b"/");
+        out.push(self.container.name.as_bytes());
+        if let Some(key) = key {
+            out.push(b"/");
+            for part in crate::path::encode_object_key(key) {
+                out.push(part);
+            }
+        }
+        for (index, (name, value)) in query.iter().flatten().enumerate() {
+            out.push(if index == 0 { b"?" } else { b"&" });
+            out.push(name.as_bytes());
+            out.push(b"=");
+            value.write(out);
         }
     }
 
@@ -968,7 +999,7 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now);
+        self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now)?;
         if let Some(value) = delete_snapshots(delete.kind) {
             head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
         }
@@ -1145,7 +1176,7 @@ impl<'a> Blobs<'a> {
         ];
 
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, None, &query, RequestedRange::Whole, now);
+        self.build(&mut head, None, &query, RequestedRange::Whole, now)?;
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -1750,16 +1781,13 @@ fn validate_put(put: &PhysicalPut<'_>, len: u64, namespace: AzureNamespace) -> R
     validate_condition(put.condition, put.condition_value)
 }
 
-fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
-    // A prefix is the start of a key, so it is bounded like one. An empty
-    // prefix lists the whole container and is valid.
-    // A prefix is the start of a key, so it is bounded like one. The rest of
-    // `validate_key` does not apply: a prefix is written into the query, where
-    // nothing resolves a `..` and nothing drops a trailing dot, and `dir.` is
-    // an honest prefix of `dir.txt`.
-    if namespace == AzureNamespace::Flat && name_units(list.prefix) > MAX_BLOB_NAME_UNITS {
-        return Err(InvalidPlan::Prefix.into());
-    }
+fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<()> {
+    // No rule of `validate_key` applies to a prefix. It is written into the
+    // query, where nothing resolves a `..` and nothing drops a trailing dot,
+    // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
+    // name: a flat account answered a prefix of 32,657 units, far past the
+    // 1,024 it allows a name. What bounds a prefix is the URL, which `build`
+    // checks. Measured; see the live suite.
     if list.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
     }
