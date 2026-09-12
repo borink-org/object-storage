@@ -743,6 +743,8 @@ pub enum BlobProperty {
     VersionId,
     /// The sequence number of a page blob.
     BlobSequenceNumber,
+    /// The metadata pairs, as the bytes of the element that holds them.
+    Metadata,
 }
 
 /// The properties that one `borink_fill_listing_with` call is asked for.

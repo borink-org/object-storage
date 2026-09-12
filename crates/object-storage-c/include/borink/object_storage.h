@@ -639,6 +639,10 @@ enum borink_blob_property
      * The sequence number of a page blob.
      */
     BORINK_BLOB_PROPERTY_BLOB_SEQUENCE_NUMBER,
+    /**
+     * The metadata pairs, as the bytes of the element that holds them.
+     */
+    BORINK_BLOB_PROPERTY_METADATA,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
