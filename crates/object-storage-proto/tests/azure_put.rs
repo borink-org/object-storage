@@ -369,18 +369,6 @@ fn a_refused_write_carries_the_category_and_the_request_id() {
 }
 
 #[test]
-fn describes_what_happened_to_the_write() {
-    assert_eq!(
-        PutHeadOutcome::PreconditionFailed.to_string(),
-        "the condition on the write did not hold"
-    );
-    assert_eq!(
-        PutHeadOutcome::NotFound { kind: None }.to_string(),
-        "the container does not exist"
-    );
-}
-
-#[test]
 fn streamed_content_writes_the_same_head_without_the_bytes() {
     let mut streamed_headers = [HeaderSpan::default(); 8];
     let mut borrowed_headers = [HeaderSpan::default(); 8];

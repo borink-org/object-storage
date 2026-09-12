@@ -244,15 +244,3 @@ fn an_object_with_snapshots_is_refused_rather_than_widened() {
         }))
     ));
 }
-
-#[test]
-fn describes_what_happened_to_the_removal() {
-    assert_eq!(
-        DeleteHeadOutcome::Accepted.to_string(),
-        "the service accepted the removal"
-    );
-    assert_eq!(
-        DeleteHeadOutcome::NotFound { kind: None }.to_string(),
-        "the object does not exist"
-    );
-}

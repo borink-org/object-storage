@@ -91,6 +91,11 @@ mod tests {
     fn civil_conversion_matches_a_simple_calendar_for_every_day() {
         // Deliberately use a slow day-by-day calendar, not the formula under
         // test, as the reference implementation.
+        //
+        // The calendar repeats every 400 years, so every day up to the end of
+        // 2400 covers each leap rule once and crosses the era boundary at
+        // 2000 that the formula computes around. Sweeping to 9999 instead
+        // took most of the crate's test time and found nothing more.
         let (mut year, mut month, mut day) = (1970u32, 1usize, 1u32);
         let (mut weekday, mut unix) = (4usize, 0u64);
 
@@ -103,7 +108,7 @@ mod tests {
             assert_eq!(decimal(&text[12..16]), year, "{year}-{month}-{day}");
             assert_eq!(&text[17..], b"00:00:00 GMT", "{year}-{month}-{day}");
 
-            if (year, month, day) == (9999, 12, 31) {
+            if (year, month, day) == (2400, 12, 31) {
                 break;
             }
             unix += 86_400;
@@ -129,6 +134,14 @@ mod tests {
         assert_eq!(
             Timestamps::from_unix(86_399).rfc1123(),
             "Thu, 01 Jan 1970 23:59:59 GMT"
+        );
+    }
+
+    #[test]
+    fn the_last_representable_day_formats_as_itself() {
+        assert_eq!(
+            Timestamps::from_unix(MAX_UNIX_SECONDS).rfc1123(),
+            "Fri, 31 Dec 9999 23:59:59 GMT"
         );
     }
 

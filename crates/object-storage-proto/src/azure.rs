@@ -33,7 +33,7 @@ pub const MAX_URL_LEN: usize = 32_759;
 // Azure counts a blob name in UTF-16 code units, so a character outside the
 // basic plane counts twice. Measured: a name of 1024 two-byte characters is
 // taken and one of 541 four-byte characters, which is 1041 code units, is
-// refused with 400. See the live suite.
+// refused with 400. Measured against the live service.
 //
 // A hierarchical-namespace account has no such limit. Measured: it stored a
 // key of 32,689 units and read it back, and refused a longer one with 414, a
@@ -1793,8 +1793,8 @@ fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
         return Err(InvalidPlan::KeyControlCharacter.into());
     }
     // Azure takes a name of 255 `/`-delimited segments and refuses 256,
-    // whatever the 254 in its documentation says. Measured by bisection; see
-    // the live suite.
+    // whatever the 254 in its documentation says. Measured by bisection
+    // against the live service.
     // At most one segment per byte plus one; str lengths fit isize.
     if key.matches('/').count() + 1 > MAX_BLOB_NAME_SEGMENTS {
         return Err(InvalidPlan::KeyTooManySegments.into());
@@ -2021,7 +2021,7 @@ fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<
     // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
     // name: a flat account answered a prefix of 32,657 units, far past the
     // 1,024 it allows a name. What bounds a prefix is the URL, which `build`
-    // checks. Measured; see the live suite.
+    // checks. Measured against the live service.
     if list.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
     }
