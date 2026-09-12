@@ -42,16 +42,18 @@ The goal is a full-featured object storage library that supports both Azure Blob
 The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) targets Azure only, S3 will come in 0.0.2. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
 
 Roadmap:
-- Azure multipart C/C++ bindings
+- New testing setup -> 0.0.2 release
 - S3 PUT, GET, DELETE (so lands SigV4 support and crypto primitives)
-- S3 LIST
-- S3 multipart -> 0.0.2 release
-- S3 directory buckets, S3 Express One Zone, Azure HNS compatibility -> 0.0.3 release
+- S3 LIST -> 0.0.3
+- - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
+- S3 multipart -> 0.0.5 release
+- C/C++ bindings up to par with provider APIs
 - Refine API, performance improvements
 - 0.1 release (with promise to try and keep API stable from now on, no guarantee)
 - ... support for various AWS and Azure authorization schemes -> 0.2 release
-- Convenience layer and API -> 0.3 release
-- 1.0 release (API stability)
+- Generic API (so layer over the providers) -> 0.3 release
+- Convenience API that allocates -> 0.4 release
+- API stability promise -> 1.0
 - ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings)
 - ... various improvements to the convenience layer and API and CLI that implements various non-core features that are coupled to the transport
 
