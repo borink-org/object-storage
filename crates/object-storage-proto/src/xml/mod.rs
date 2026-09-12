@@ -138,6 +138,48 @@ pub(crate) fn next_property<'b>(
     }
 }
 
+// Reads the next pair of a metadata element and returns its name and its
+// text.
+//
+// `rest` starts inside the element, at the first pair. Each call advances it
+// past what it read. Unlike `next_property`, this walk steps into no
+// element: every element it finds is a pair, whatever its name.
+//
+// A byte that is not the start of an element ends the walk, as it does in
+// `next_property`.
+pub(crate) fn next_pair<'b>(rest: &mut &'b [u8]) -> Option<(&'b [u8], &'b [u8])> {
+    let space = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    let Some(after) = rest[space..].strip_prefix(b"<") else {
+        *rest = &[];
+        return None;
+    };
+    // A close tag here ends the element that holds the pairs.
+    if after.starts_with(b"/") {
+        *rest = &[];
+        return None;
+    }
+    let tag = opening_tag_end(after)?;
+    // The name is everything up to the first space, where an attribute would
+    // begin, or the `/` of an empty element.
+    let name_end = after[..tag]
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || *byte == b'/')
+        .unwrap_or(tag);
+    let name = &after[..name_end];
+    let body = &after[tag + 1..];
+    // An empty element has no value and no close tag.
+    if after[..tag].ends_with(b"/") {
+        *rest = body;
+        return Some((name, &[]));
+    }
+    let (value, after_close) = split_at_close_tag(body, name)?;
+    *rest = after_close;
+    Some((name, value))
+}
+
 // The elements whose text reading the page decodes in place.
 const DECODED: [&[u8]; 4] = [b"Name", b"Etag", b"Last-Modified", b"Content-Type"];
 
@@ -178,23 +220,44 @@ fn split_at_decoded_value<'b>(body: &'b [u8], name: &[u8]) -> Option<(&'b [u8], 
 // close tag is found by name, so an element that holds other elements is
 // returned whole.
 fn split_at_close_tag<'b>(body: &'b [u8], name: &[u8]) -> Option<(&'b [u8], &'b [u8])> {
+    // An element can hold an element of its own name: a metadata pair named
+    // `Metadata` sits inside the `Metadata` element. Each such opening tag
+    // is matched by one close tag before the close tag that ends `body`.
+    let mut depth = 0usize;
     let mut at = 0;
     loop {
         let found = find_byte(body, at, b'<');
         if found == body.len() {
             return None;
         }
-        let after = body.get(found + 2..)?;
-        if body[found + 1] == b'/' && after.starts_with(name) {
+        let after = &body[found + 1..];
+        if let Some(tail) = after
+            .strip_prefix(b"/")
+            .and_then(|closing| closing.strip_prefix(name))
+        {
             // XML allows whitespace before the `>` of a close tag. Azure
             // never writes it; this is for consistency with the page reader.
-            let tail = &after[name.len()..];
             let close = tail
                 .iter()
                 .position(|byte| !byte.is_ascii_whitespace())
                 .unwrap_or(tail.len());
             if tail.get(close) == Some(&b'>') {
-                return Some((&body[..found], &tail[close + 1..]));
+                if depth == 0 {
+                    return Some((&body[..found], &tail[close + 1..]));
+                }
+                depth -= 1;
+            }
+        } else if let Some(tail) = after.strip_prefix(name) {
+            // The same name opened again, as `<Name>` or `<Name attr>`. The
+            // empty `<Name />` has no close tag and does not count.
+            let end = find_byte(tail, 0, b'>');
+            if tail
+                .first()
+                .is_some_and(|byte| *byte == b'>' || byte.is_ascii_whitespace())
+                && end < tail.len()
+                && !tail[..end].ends_with(b"/")
+            {
+                depth += 1;
             }
         }
         at = found + 1;

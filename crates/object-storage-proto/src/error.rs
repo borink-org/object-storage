@@ -81,8 +81,10 @@ pub enum InvalidPlan {
     ///
     /// Azure answers `maxresults=0` with HTTP 400 `OutOfRangeQueryParameterValue`.
     MaxResults = 12,
-    /// A provider option is invalid or inapplicable, such as a block listing
-    /// that names both a snapshot and a version.
+    /// A provider option is invalid or inapplicable.
+    ///
+    /// A block listing that names both a snapshot and a version is one. A
+    /// declared MD5 on a write that is not a commit is another.
     Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,
@@ -103,6 +105,27 @@ pub enum InvalidPlan {
     /// The endpoint, the container name, the encoded key and the query all
     /// count towards it.
     UrlTooLong = 20,
+    /// A metadata name is empty, or it holds a character that Azure does not
+    /// accept in one.
+    ///
+    /// See [`MetadataPair::name`](crate::MetadataPair::name) for the
+    /// characters a name may hold.
+    MetadataName = 21,
+    /// A metadata value cannot be sent as an HTTP header value.
+    ///
+    /// It holds a control character or a byte outside ASCII, or it starts or
+    /// ends with a space. See [`MetadataPair::value`](crate::MetadataPair::value).
+    MetadataValue = 22,
+    /// Two metadata pairs have the same name.
+    ///
+    /// Azure matches a metadata name without case, so two names that differ
+    /// only in case are the same name.
+    MetadataDuplicate = 23,
+    /// A checksum is not the base64 of the bytes it names: sixteen for an
+    /// MD5, eight for a CRC64.
+    ///
+    /// See [`TransactionalChecksum`](crate::TransactionalChecksum).
+    Checksum = 24,
 }
 
 impl InvalidPlan {
@@ -132,6 +155,10 @@ impl InvalidPlan {
             Self::Marker => "invalid listing marker",
             Self::MaxResults => "a listing cannot ask for zero entries",
             Self::UrlTooLong => "the URL is longer than the service reads",
+            Self::MetadataName => "invalid metadata name",
+            Self::MetadataValue => "invalid metadata value",
+            Self::MetadataDuplicate => "two metadata pairs have the same name",
+            Self::Checksum => "the checksum is not the base64 of the bytes it names",
         }
     }
 
@@ -160,6 +187,10 @@ impl InvalidPlan {
             18 => Self::KeyTooManySegments,
             19 => Self::KeyWouldBeNormalized,
             20 => Self::UrlTooLong,
+            21 => Self::MetadataName,
+            22 => Self::MetadataValue,
+            23 => Self::MetadataDuplicate,
+            24 => Self::Checksum,
             _ => return None,
         })
     }

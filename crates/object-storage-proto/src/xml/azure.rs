@@ -415,7 +415,14 @@ fn read_other_element(
     }
     match BlobProperty::identify(scan.text(tag.name)) {
         Some(property) if wanted.contains(property) => {
-            let (span, _) = scan.value(tag)?;
+            // An element that holds other elements has no text to read, so
+            // it is read to its close tag instead. The name is the
+            // property's own, which `identify` matched the tag against.
+            let span = if property.holds_elements() && !tag.empty {
+                scan.nested(property.name().as_bytes())?
+            } else {
+                scan.value(tag)?.0
+            };
             // A slot is always in range: it is the property's rank in the set,
             // and there is one slot per member. Written through `get_mut` so
             // that no bounds check or panic path is compiled in.
@@ -440,6 +447,27 @@ fn known(
     captured: &mut [Option<Span>],
 ) -> Result<bool> {
     let (span, _) = scan.value_of(property.name().as_bytes())?;
+    if wanted.contains(property) {
+        // A slot is always in range: it is the property's rank in the set,
+        // and there is one slot per member. Written through `get_mut` so
+        // that no bounds check or panic path is compiled in.
+        if let Some(slot) = captured.get_mut(wanted.slot(property)) {
+            *slot = Some(span);
+        }
+    }
+    Ok(true)
+}
+
+// The same for an element that holds other elements, which is read to its
+// close tag. Its value is everything between its tags.
+#[inline(always)]
+fn known_nested(
+    scan: &mut Scan<'_>,
+    property: BlobProperty,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<bool> {
+    let span = scan.nested(property.name().as_bytes())?;
     if wanted.contains(property) {
         // A slot is always in range: it is the property's rank in the set,
         // and there is one slot per member. Written through `get_mut` so
@@ -665,6 +693,15 @@ fn read_known_element(
         b'V' => {
             if scan.lit(b"<VersionId>") {
                 return known(scan, VersionId, wanted, captured);
+            }
+            Ok(false)
+        }
+        b'M' => {
+            if scan.lit(b"<Metadata />") {
+                return Ok(known_empty(Metadata, wanted, captured));
+            }
+            if scan.lit(b"<Metadata>") {
+                return known_nested(scan, Metadata, wanted, captured);
             }
             Ok(false)
         }
@@ -898,8 +935,10 @@ mod tests {
 
     use super::{BlobProperty, PropertySet, Scan, read_known_element};
 
-    // The properties whose empty spelling the match tries.
-    const WRITTEN_EMPTY: [BlobProperty; 7] = [
+    // The properties that `read_known_element` matches in the empty
+    // spelling, `<Name />`.
+    const WRITTEN_EMPTY: [BlobProperty; 8] = [
+        BlobProperty::Metadata,
         BlobProperty::ContentType,
         BlobProperty::ContentEncoding,
         BlobProperty::ContentLanguage,
@@ -946,10 +985,7 @@ mod tests {
             assert_eq!(matched(&document, property), (true, Some((0, 0))));
         }
         // Any other tag is left for the general path.
-        assert_eq!(
-            matched("<Metadata>", BlobProperty::AccessTier),
-            (false, None)
-        );
+        assert_eq!(matched("<Name>", BlobProperty::AccessTier), (false, None));
         assert_eq!(
             matched("<AccessTier >", BlobProperty::AccessTier),
             (false, None)

@@ -1,5 +1,6 @@
 //! Azure bearer GET integration tests.
 
+use borink_object_storage_proto::azure::metadata_name;
 use borink_object_storage_proto::{
     AzureNamespace, Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead,
@@ -466,5 +467,46 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
         "a.b/c",
     ] {
         assert!(refused(key).is_ok(), "{key:?}");
+    }
+}
+
+#[test]
+fn a_metadata_read_reports_its_pairs_through_the_response_header_names() {
+    let blobs = blobs();
+    let get = PhysicalGet::head("object.bin");
+    let mut buf = [0; 256];
+    let mut request_headers = [HeaderSpan::default(); 8];
+    let request = blobs
+        .encode_get(&mut buf, &mut request_headers, &get, &now())
+        .unwrap();
+    assert_eq!(request.method(), Method::Head);
+
+    // The pairs are one header each, so the head this crate reads carries
+    // none of them. Collect them from the response headers yourself.
+    let response = [
+        ("Content-Length", b"8".as_slice()),
+        ("ETag", b"\"0x8DF0046E8E555AF\""),
+        ("x-ms-meta-source_mtime", b"1787400000"),
+        ("X-MS-META-Label", b"a b"),
+        ("x-ms-meta-", b"nameless"),
+    ];
+    let pairs: Vec<_> = response
+        .iter()
+        .filter_map(|(name, value)| Some((metadata_name(name)?, *value)))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("source_mtime", b"1787400000".as_slice()),
+            ("Label", b"a b"),
+        ]
+    );
+
+    match blobs
+        .accept_get_head(get.shape(), ResponseHead::from_headers(200, response))
+        .unwrap()
+    {
+        GetHeadOutcome::Complete { meta } => assert_eq!(meta.size, Some(8)),
+        other => panic!("unexpected outcome {other:?}"),
     }
 }

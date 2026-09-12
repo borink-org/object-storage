@@ -181,6 +181,7 @@ inline constexpr BlobProperty BlobPropertySnapshot = BORINK_BLOB_PROPERTY_SNAPSH
 inline constexpr BlobProperty BlobPropertyTagCount = BORINK_BLOB_PROPERTY_TAG_COUNT;
 inline constexpr BlobProperty BlobPropertyVersionId = BORINK_BLOB_PROPERTY_VERSION_ID;
 inline constexpr BlobProperty BlobPropertyBlobSequenceNumber = BORINK_BLOB_PROPERTY_BLOB_SEQUENCE_NUMBER;
+inline constexpr BlobProperty BlobPropertyMetadata = BORINK_BLOB_PROPERTY_METADATA;
 
 // Returns a range over every byte of the object.
 inline Range whole() { return Range{RangeFormWhole, 0, 0}; }

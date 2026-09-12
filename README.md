@@ -25,6 +25,7 @@ For C and C++, [`crates/object-storage-c`](https://github.com/borink-org/object-
   - Conditional (If-None-Match: * writes only if the object is absent)
   - Content is borrowed or streamed: the head states its length, so a write can come
     from a file or a socket without holding the object in memory
+  - Metadata, checksums
 - Object delete (DELETE request)
   - Conditional (If-Match, If-None-Match)
   - Takes the object alone, the object and its snapshots, or the snapshots alone

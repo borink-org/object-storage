@@ -1,0 +1,14 @@
+{
+  // rust-analyzer loads the Cargo workspace before it reads a workspace-level
+  // rust-analyzer.toml, so the features it checks with can only come from the
+  // editor. Every feature on, as CI checks them.
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "features": "all"
+        }
+      }
+    }
+  }
+}

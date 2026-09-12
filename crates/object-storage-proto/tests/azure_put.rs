@@ -2,8 +2,9 @@
 
 use borink_object_storage_proto::{
     AzureNamespace, Blobs, ConditionKind, Container, Error, Failure, FailureClass, HeaderSpan,
-    InvalidPlan, Method, ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape, ResponseFault,
-    ResponseHead, ServiceErrorKind, Timestamps, layered,
+    InvalidPlan, MetadataPair, Method, ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape,
+    ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, TransactionalChecksum, WriteOptions,
+    layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -91,9 +92,9 @@ fn a_conditional_write_sends_the_condition_header() {
     let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
     let create = PhysicalPut {
-        key: "object.bin",
         condition: ConditionKind::IfNoneMatch,
         condition_value: Some(b"*"),
+        ..PhysicalPut::new("object.bin")
     };
     let mut buf = vec![
         0;
@@ -177,17 +178,17 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
         (PhysicalPut::new(""), InvalidPlan::EmptyKey),
         (
             PhysicalPut {
-                key: "object.bin",
                 condition: ConditionKind::IfMatch,
                 condition_value: None,
+                ..PhysicalPut::new("object.bin")
             },
             InvalidPlan::Condition,
         ),
         (
             PhysicalPut {
-                key: "object.bin",
                 condition: ConditionKind::None,
                 condition_value: Some(b"\"etag\""),
+                ..PhysicalPut::new("object.bin")
             },
             InvalidPlan::Condition,
         ),
@@ -450,5 +451,272 @@ fn a_streamed_payload_is_refused_at_the_same_length_as_a_held_one() {
         layered::put_requirements(&blobs, &put, longest, &now())
             .map(|size| size.bytes)
             .is_ok()
+    );
+}
+
+#[test]
+fn a_write_sends_one_header_per_metadata_pair_and_the_content_md5() {
+    let blobs = blobs();
+    let metadata = [
+        MetadataPair {
+            name: "source_mtime",
+            value: "1787400000",
+        },
+        MetadataPair {
+            name: "Source_Size",
+            value: "4096",
+        },
+    ];
+    let put = PhysicalPut {
+        metadata: &metadata,
+        options: WriteOptions {
+            checksum: Some(TransactionalChecksum::Md5("rL0Y20zC+Fzt72VPzMSk2A==")),
+            ..Default::default()
+        },
+        ..PhysicalPut::new("directory/object.txt")
+    };
+    let content = Payload::Slice(b"contents");
+    let size = layered::put_requirements(&blobs, &put, content, &now()).unwrap();
+    let mut buf = vec![0; size.bytes];
+    let mut request_headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs
+        .encode_put(&mut buf, &mut request_headers, &put, content, &now())
+        .unwrap();
+
+    let headers: Vec<_> = request.headers().collect();
+    assert!(headers.contains(&("x-ms-meta-source_mtime", "1787400000")));
+    // The name is written as the plan spelled it.
+    assert!(headers.contains(&("x-ms-meta-Source_Size", "4096")));
+    assert!(headers.contains(&("content-md5", "rL0Y20zC+Fzt72VPzMSk2A==")));
+    // The five a plain write carries, one per pair, and the checksum.
+    assert_eq!(headers.len(), 8);
+}
+
+#[test]
+fn a_write_without_metadata_sends_the_same_head_as_before() {
+    let blobs = blobs();
+    let put = PhysicalPut::new("directory/object.txt");
+    let content = Payload::Slice(b"contents");
+    let size = layered::put_requirements(&blobs, &put, content, &now()).unwrap();
+    let mut buf = vec![0; size.bytes];
+    let mut request_headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs
+        .encode_put(&mut buf, &mut request_headers, &put, content, &now())
+        .unwrap();
+
+    let names: Vec<_> = request.headers().map(|(name, _)| name).collect();
+    assert_eq!(
+        names,
+        [
+            "authorization",
+            "x-ms-date",
+            "x-ms-version",
+            "x-ms-blob-type",
+            "content-length"
+        ]
+    );
+}
+
+#[test]
+fn metadata_a_request_cannot_carry_is_refused_before_it_is_written() {
+    let blobs = blobs();
+    let duplicate = [
+        MetadataPair {
+            name: "mtime",
+            value: "1",
+        },
+        MetadataPair {
+            name: "MTime",
+            value: "2",
+        },
+    ];
+    for (metadata, expected) in [
+        (
+            [MetadataPair {
+                name: "",
+                value: "1",
+            }]
+            .as_slice(),
+            InvalidPlan::MetadataName,
+        ),
+        (
+            &[MetadataPair {
+                name: "1st",
+                value: "1",
+            }],
+            InvalidPlan::MetadataName,
+        ),
+        (
+            &[MetadataPair {
+                name: "source-mtime",
+                value: "1",
+            }],
+            InvalidPlan::MetadataName,
+        ),
+        (
+            &[MetadataPair {
+                name: "mtime",
+                value: "one\ntwo",
+            }],
+            InvalidPlan::MetadataValue,
+        ),
+        (
+            &[MetadataPair {
+                name: "mtime",
+                value: "één",
+            }],
+            InvalidPlan::MetadataValue,
+        ),
+        // HTTP drops the spaces at either end of a header value, so the pair
+        // would not come back as it was written.
+        (
+            &[MetadataPair {
+                name: "mtime",
+                value: " 1",
+            }],
+            InvalidPlan::MetadataValue,
+        ),
+        (
+            &[MetadataPair {
+                name: "mtime",
+                value: "1 ",
+            }],
+            InvalidPlan::MetadataValue,
+        ),
+        (&duplicate, InvalidPlan::MetadataDuplicate),
+    ] {
+        let put = PhysicalPut {
+            metadata,
+            ..PhysicalPut::new("object.bin")
+        };
+        assert_eq!(
+            blobs
+                .encode_put(
+                    &mut [0; 1024],
+                    &mut [HeaderSpan::default(); 8],
+                    &put,
+                    Payload::Slice(b""),
+                    &now()
+                )
+                .unwrap_err(),
+            Error::InvalidPlan(expected),
+            "{:?}",
+            metadata[0].name
+        );
+    }
+}
+
+#[test]
+fn a_crc64_is_sent_as_its_own_header() {
+    let blobs = blobs();
+    let put = PhysicalPut {
+        options: WriteOptions {
+            checksum: Some(TransactionalChecksum::Crc64("HZz9TO6x+RU=")),
+            ..Default::default()
+        },
+        ..PhysicalPut::new("object.bin")
+    };
+    let content = Payload::Slice(b"0123456789");
+    let size = layered::put_requirements(&blobs, &put, content, &now()).unwrap();
+    let mut buf = vec![0; size.bytes];
+    let mut request_headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs
+        .encode_put(&mut buf, &mut request_headers, &put, content, &now())
+        .unwrap();
+    let headers: Vec<_> = request.headers().collect();
+    assert!(headers.contains(&("x-ms-content-crc64", "HZz9TO6x+RU=")));
+    assert!(!headers.iter().any(|(name, _)| *name == "content-md5"));
+}
+
+#[test]
+fn a_computed_checksum_needs_a_provider_of_that_kind() {
+    // This client has none, so both kinds are refused. `borink-crypto`'s
+    // `encoder` tests cover a client that has one.
+    for kind in [
+        borink_object_storage_proto::ChecksumKind::Md5,
+        borink_object_storage_proto::ChecksumKind::Crc64,
+    ] {
+        let options = WriteOptions {
+            checksum: Some(TransactionalChecksum::Compute(kind)),
+            ..Default::default()
+        };
+        assert_eq!(
+            blobs()
+                .encode_put(
+                    &mut [0; 1024],
+                    &mut [HeaderSpan::default(); 8],
+                    &PhysicalPut {
+                        options,
+                        ..PhysicalPut::new("object.bin")
+                    },
+                    Payload::Slice(b"0123456789"),
+                    &now()
+                )
+                .map(drop),
+            Err(Error::InvalidPlan(InvalidPlan::Option)),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_checksum_that_is_not_the_base64_of_its_bytes_is_refused() {
+    let blobs = blobs();
+    let refused = |options: WriteOptions<'_>| {
+        blobs
+            .encode_put(
+                &mut [0; 1024],
+                &mut [HeaderSpan::default(); 8],
+                &PhysicalPut {
+                    options,
+                    ..PhysicalPut::new("object.bin")
+                },
+                Payload::Slice(b""),
+                &now(),
+            )
+            .map(drop)
+            .unwrap_err()
+    };
+    for value in [
+        "rL0Y20zC+Fzt72VPzMSk2A=",
+        "rL0Y20zC+Fzt72VPzMSk2A===",
+        "rL0Y20zC+Fzt72VPzMSk2A",
+        "rL0Y20zC+Fzt72VPzMSk2!==",
+        "HZz9TO6x+RU=",
+        "",
+    ] {
+        assert_eq!(
+            refused(WriteOptions {
+                checksum: Some(TransactionalChecksum::Md5(value)),
+                ..Default::default()
+            }),
+            Error::InvalidPlan(InvalidPlan::Checksum),
+            "{value:?}"
+        );
+    }
+    for value in [
+        "HZz9TO6x+RU",
+        "HZz9TO6x+RU==",
+        "HZz9TO6x+R!=",
+        "rL0Y20zC+Fzt72VPzMSk2A==",
+        "",
+    ] {
+        assert_eq!(
+            refused(WriteOptions {
+                checksum: Some(TransactionalChecksum::Crc64(value)),
+                ..Default::default()
+            }),
+            Error::InvalidPlan(InvalidPlan::Checksum),
+            "{value:?}"
+        );
+    }
+    // A whole-object write stores the MD5 it checks, so it takes no declared
+    // one.
+    assert_eq!(
+        refused(WriteOptions {
+            declared_md5: Some("rL0Y20zC+Fzt72VPzMSk2A=="),
+            ..Default::default()
+        }),
+        Error::InvalidPlan(InvalidPlan::Option)
     );
 }

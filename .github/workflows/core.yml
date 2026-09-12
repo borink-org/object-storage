@@ -40,6 +40,41 @@ jobs:
       - name: Link without a global allocator
         run: cargo build --locked --profile no-allocator --no-default-features --features link-check --manifest-path checks/no-allocator/Cargo.toml
 
+  # The two crates that write `unsafe`, under Miri. `borink-crypto` keeps a
+  # host's checksum in the byte slot the encoder passes it, and the C ABI
+  # crate reads and writes caller-owned pointers on every call. Neither kind
+  # of mistake is a compile error or a failing assertion, so the tests are run
+  # a second time under an interpreter that checks each access.
+  #
+  # Miri ships with nightly alone, so this job installs one beside the pinned
+  # toolchain. That nightly is pinned like everything else here, so that a
+  # change in Miri, or in the standard library it builds, cannot fail this
+  # job on its own. Move the pin on purpose, after running both crates under
+  # the new nightly.
+  #
+  # Interpreting is slow, so a test that sweeps every `u16` sweeps the range
+  # the discriminants live in under `cfg!(miri)` instead; see `sweep` in
+  # `crates/object-storage-c/src/tests.rs`. Both crates interpret in about
+  # five seconds with that in place.
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      # Both crates were run under this one before it was pinned here:
+      # rustc 1.100.0-nightly (0fc141305 2026-09-11).
+      MIRI_TOOLCHAIN: nightly-2026-09-12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the nightly with Miri
+        run: rustup toolchain install $MIRI_TOOLCHAIN --profile minimal --component miri
+      # Builds the standard library Miri runs against, so that a failure in
+      # the steps below is a failure of this repository's code.
+      - name: Prepare Miri
+        run: cargo +$MIRI_TOOLCHAIN miri setup
+      - name: Check the checksum providers
+        run: cargo +$MIRI_TOOLCHAIN miri test --locked -p borink-crypto --all-features
+      - name: Check the C ABI
+        run: cargo +$MIRI_TOOLCHAIN miri test --locked -p borink-object-storage-c --all-features
+
   # The C++ host of the C ABI crate, which is the only thing here that needs
   # libcurl. What it links is checked by the `c-abi` job below.
   cxx-host:

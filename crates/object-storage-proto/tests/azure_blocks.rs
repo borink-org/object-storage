@@ -6,8 +6,8 @@ use borink_object_storage_proto::azure::{
 };
 use borink_object_storage_proto::{
     Blobs, CommitBlocksHeadOutcome, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
-    ListBlocksHeadOutcome, Method, Payload, ResponseHead, StageBlockHeadOutcome, Timestamps,
-    layered,
+    ListBlocksHeadOutcome, MetadataPair, Method, Payload, ResponseHead, StageBlockHeadOutcome,
+    Timestamps, WriteOptions, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -27,7 +27,7 @@ fn stage_id(id: &str) -> Result<(), Error> {
         .encode_stage_block(
             &mut [0; 1024],
             &mut [HeaderSpan::default(); 8],
-            &PhysicalStageBlock { key: "object", id },
+            &PhysicalStageBlock::new("object", id),
             Payload::Slice(b"bytes"),
             &now(),
         )
@@ -42,10 +42,7 @@ fn a_stage_names_the_block_in_the_query_and_states_the_length() {
         .encode_stage_block(
             &mut buf,
             &mut headers,
-            &PhysicalStageBlock {
-                key: "object",
-                id: "+/8=",
-            },
+            &PhysicalStageBlock::new("object", "+/8="),
             Payload::Slice(b"bytes"),
             &now(),
         )
@@ -89,10 +86,7 @@ fn the_block_id_is_checked_locally_before_any_byte_is_written() {
         blobs().encode_stage_block(
             &mut [],
             &mut [],
-            &PhysicalStageBlock {
-                key: "object",
-                id: "?"
-            },
+            &PhysicalStageBlock::new("object", "?"),
             Payload::Slice(b""),
             &now(),
         ),
@@ -240,9 +234,9 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
 #[test]
 fn a_conditional_commit_sends_the_condition_and_keeps_it_in_the_shape() {
     let plan = PhysicalCommitBlocks {
-        key: "object",
         condition: ConditionKind::IfNoneMatch,
         condition_value: Some(b"*"),
+        ..PhysicalCommitBlocks::new("object")
     };
     let mut buf = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
@@ -290,9 +284,9 @@ fn a_lease_refusal_is_not_a_failed_condition() {
         other => panic!("{other:?}"),
     }
     let conditional = PhysicalCommitBlocks {
-        key: "object",
         condition: ConditionKind::IfMatch,
         condition_value: Some(b"\"tag\""),
+        ..PhysicalCommitBlocks::new("object")
     }
     .shape();
     match blobs()
@@ -416,10 +410,7 @@ fn a_listed_id_is_passed_back_unchanged() {
 
 #[test]
 fn the_stage_requirement_follows_the_stated_length_not_the_bytes() {
-    let plan = PhysicalStageBlock {
-        key: "object",
-        id: "YQ==",
-    };
+    let plan = PhysicalStageBlock::new("object", "YQ==");
     let held =
         layered::stage_block_requirements(&blobs(), &plan, Payload::Slice(&[0; 300]), &now())
             .unwrap();
@@ -439,5 +430,62 @@ fn the_stage_requirement_follows_the_stated_length_not_the_bytes() {
                 &now()
             )
             .is_ok()
+    );
+}
+
+#[test]
+fn a_commit_carries_the_metadata_and_states_the_object_md5_as_a_property() {
+    let metadata = [MetadataPair {
+        name: "source_mtime",
+        value: "1787400000",
+    }];
+    let plan = PhysicalCommitBlocks {
+        metadata: &metadata,
+        options: WriteOptions {
+            declared_md5: Some("rL0Y20zC+Fzt72VPzMSk2A=="),
+            ..Default::default()
+        },
+        ..PhysicalCommitBlocks::new("object")
+    };
+    let blocks = [BlockRef {
+        id: "AAAAAA==",
+        source: BlockSource::Latest,
+    }];
+    let size = layered::commit_blocks_requirements(&blobs(), &plan, &blocks, &now()).unwrap();
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = blobs()
+        .encode_commit_blocks(&mut buf, &mut headers, &plan, &blocks, &now())
+        .unwrap();
+
+    let headers: Vec<_> = request.headers().collect();
+    assert!(headers.contains(&("x-ms-meta-source_mtime", "1787400000")));
+    // The request's own content is the block list, so the object's checksum
+    // is stated as a property of the blob.
+    assert!(headers.contains(&("x-ms-blob-content-md5", "rL0Y20zC+Fzt72VPzMSk2A==")));
+    assert!(!headers.iter().any(|(name, _)| *name == "content-md5"));
+}
+
+#[test]
+fn a_commit_refuses_metadata_that_a_request_cannot_carry() {
+    let metadata = [MetadataPair {
+        name: "source mtime",
+        value: "1",
+    }];
+    let plan = PhysicalCommitBlocks {
+        metadata: &metadata,
+        ..PhysicalCommitBlocks::new("object")
+    };
+    assert_eq!(
+        blobs()
+            .encode_commit_blocks(
+                &mut [0; 1024],
+                &mut [HeaderSpan::default(); 8],
+                &plan,
+                &[],
+                &now()
+            )
+            .unwrap_err(),
+        Error::InvalidPlan(InvalidPlan::MetadataName)
     );
 }

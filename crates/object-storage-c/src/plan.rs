@@ -43,6 +43,8 @@ pub(crate) fn list_shape(shape: &ListShape) -> proto::Result<proto::ListShape> {
     Ok(proto::ListShape {
         delimited: shape.delimited,
         max_results: number(shape.max_results),
+        // This boundary does not ask for anything beside the objects yet.
+        include: proto::ListInclude::default(),
     })
 }
 

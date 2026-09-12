@@ -3,8 +3,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use borink_object_storage_proto::{
-    BlobProperty, Blobs, Container, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome,
-    PhysicalGet, PhysicalList, PropertySet, ResponseHead, Timestamps, layered,
+    BlobProperty, Blobs, ChecksumKind, Container, GetHeadOutcome, HeaderSpan, ListEntry,
+    ListHeadOutcome, Payload, PhysicalGet, PhysicalList, PhysicalPut, PropertySet, ResponseHead,
+    Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -26,6 +27,9 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     let Ok(blobs) = Blobs::new(container, "token") else {
         return 2;
     };
+    let blobs = blobs
+        .with_checksum(borink_crypto::CRC64)
+        .with_checksum(borink_crypto::MD5);
     let mut buf = [0; 256];
     let now = Timestamps::from_unix(1_787_400_000);
     let get = PhysicalGet::new("object");
@@ -38,7 +42,40 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     else {
         return 4;
     };
-    request.url().len() + body.expected_len.unwrap_or_default() as usize + listing(&blobs, &now)
+    request.url().len()
+        + body.expected_len.unwrap_or_default() as usize
+        + listing(&blobs, &now)
+        + computed_checksums(&blobs, &now)
+}
+
+// A computed checksum runs a provider over the content while the head is
+// written. The state is a slot on this stack frame, so neither the encoder
+// nor either implementation asks for memory.
+fn computed_checksums(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
+    let mut written = 0;
+    for kind in [ChecksumKind::Crc64, ChecksumKind::Md5] {
+        let mut request_headers = [HeaderSpan::default(); 8];
+        let mut buf = [0; 256];
+        let options = WriteOptions {
+            checksum: Some(TransactionalChecksum::Compute(kind)),
+            ..WriteOptions::default()
+        };
+        let put = PhysicalPut {
+            options,
+            ..PhysicalPut::new("object")
+        };
+        let Ok(request) = blobs.encode_put(
+            &mut buf,
+            &mut request_headers,
+            &put,
+            Payload::Slice(b"0123456789"),
+            now,
+        ) else {
+            return 9;
+        };
+        written += request.url().len();
+    }
+    written
 }
 
 // A listing reads a document out of a buffer and decodes the text in it where

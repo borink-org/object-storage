@@ -2,14 +2,16 @@
 //!
 //! Put Block From URL and structured-body framing are not implemented.
 
+use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind,
     DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure, FailureClass, GetHeadOutcome,
     GetKind, GetShape, HeaderSpan, InvalidPlan, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome,
-    Listing, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    PropertySet, PropertyValues, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, StageBlockHeadOutcome, Timestamps, WireRequest,
+    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, StageBlockHeadOutcome,
+    Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -44,6 +46,16 @@ const MAX_BLOB_NAME_UNITS: usize = 1024;
 // The most `/`-delimited segments Azure takes in a name. Its documentation
 // gives 254; measurement gives this.
 const MAX_BLOB_NAME_SEGMENTS: usize = 255;
+
+/// The prefix of the header that carries one metadata pair.
+pub const METADATA_PREFIX: &str = "x-ms-meta-";
+
+/// Returns the metadata name that a response header carries, or [`None`]
+/// for a header that carries no pair.
+pub fn metadata_name(header: &str) -> Option<&str> {
+    let (prefix, name) = header.split_at_checked(METADATA_PREFIX.len())?;
+    (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
+}
 
 /// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +102,7 @@ pub struct Blobs<'a> {
     container: Container<'a>,
     token: &'a str,
     namespace: AzureNamespace,
+    checksums: [Option<ChecksumProvider>; KINDS],
 }
 
 impl core::fmt::Debug for Blobs<'_> {
@@ -98,6 +111,7 @@ impl core::fmt::Debug for Blobs<'_> {
             .field("container", &self.container)
             .field("token", &"<redacted>")
             .field("namespace", &self.namespace)
+            .field("checksums", &self.checksums)
             .finish()
     }
 }
@@ -280,6 +294,20 @@ pub struct PhysicalStageBlock<'a> {
     pub key: &'a str,
     /// The block ID, as base64 text. See [`BlockRef::id`] for the rules.
     pub id: &'a str,
+    /// The options of the stage, such as a checksum of the block. A stage
+    /// refuses [`WriteOptions::declared_md5`].
+    pub options: WriteOptions<'a>,
+}
+
+impl<'a> PhysicalStageBlock<'a> {
+    /// Creates a plan that stages `id` for `key` with no options.
+    pub const fn new(key: &'a str, id: &'a str) -> Self {
+        Self {
+            key,
+            id,
+            options: WriteOptions::new(),
+        }
+    }
 }
 
 /// A native Put Block List plan: publish an ordered list of blocks as the
@@ -292,15 +320,28 @@ pub struct PhysicalCommitBlocks<'a> {
     pub condition: ConditionKind,
     /// ETag or wildcard for the precondition.
     pub condition_value: Option<&'a [u8]>,
+    /// The metadata pairs to store with the object.
+    ///
+    /// A commit replaces the whole set, as
+    /// [`PhysicalPut::metadata`](crate::PhysicalPut::metadata) does.
+    pub metadata: &'a [MetadataPair<'a>],
+    /// The options of the commit.
+    ///
+    /// An object written in blocks stores no checksum unless the commit
+    /// declares one in [`WriteOptions::declared_md5`].
+    pub options: WriteOptions<'a>,
 }
 
 impl<'a> PhysicalCommitBlocks<'a> {
-    /// An unconditional block-list write.
+    /// Creates a plan that commits blocks to `key` with no condition, no
+    /// metadata and no options.
     pub const fn new(key: &'a str) -> Self {
         Self {
             key,
             condition: ConditionKind::None,
             condition_value: None,
+            metadata: &[],
+            options: WriteOptions::new(),
         }
     }
 
@@ -407,6 +448,12 @@ impl<'a> Blobs<'a> {
         if content.len() > MAX_STAGE_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
+        validate_options(
+            &plan.options,
+            Write::Stage,
+            content.bytes().is_some(),
+            &self.checksums,
+        )?;
         let mut head = HeadWriter::new(buf, headers);
         let query = [
             Some(("comp", QueryValue::Literal("block"))),
@@ -421,6 +468,9 @@ impl<'a> Blobs<'a> {
         )?;
         head.header("content-length", |out| {
             out.push(U64Decimal::new(content.len()).as_bytes())
+        });
+        push_checksum(&mut head, &plan.options, &self.checksums, |sum| {
+            sum.update(content.bytes().unwrap_or(&[]));
         });
         encoded(head, Method::Put, content)
     }
@@ -487,6 +537,8 @@ impl<'a> Blobs<'a> {
     {
         validate_block_key(plan.key, self.namespace)?;
         validate_condition(plan.condition, plan.condition_value)?;
+        validate_metadata(plan.metadata)?;
+        validate_options(&plan.options, Write::Commit, true, &self.checksums)?;
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
         for (index, (id, source)) in blocks.clone().enumerate() {
             if index >= MAX_BLOCKS {
@@ -508,20 +560,18 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(length as u64).as_bytes())
         });
-        push_condition(&mut head, plan.condition, plan.condition_value);
-        let body = head.body(|out| {
-            out.push(COMMIT_OPEN);
-            for (id, source) in blocks {
-                out.push(b"<");
-                out.push(source.tag().as_bytes());
-                out.push(b">");
-                out.push(id.as_ref().as_bytes());
-                out.push(b"</");
-                out.push(source.tag().as_bytes());
-                out.push(b">");
-            }
-            out.push(COMMIT_CLOSE);
+        // The content of a commit is the block list, so a checksum of the
+        // content is a checksum of that text. The object's own MD5 is a
+        // property of the blob, `x-ms-blob-content-md5`.
+        push_checksum(&mut head, &plan.options, &self.checksums, |sum| {
+            write_block_list(&mut |piece| sum.update(piece), blocks.clone());
         });
+        if let Some(md5) = plan.options.declared_md5 {
+            head.header("x-ms-blob-content-md5", |out| out.push(md5.as_bytes()));
+        }
+        push_metadata(&mut head, plan.metadata);
+        push_condition(&mut head, plan.condition, plan.condition_value);
+        let body = head.body(|out| write_block_list(&mut |piece| out.push(piece), blocks));
         let capacity = head.capacity();
         head.finish_with_body(Method::Put, Payload::Slice(&[]), Some(body))
             .ok_or_else(|| capacity_error(capacity))
@@ -734,6 +784,7 @@ impl<'a> Blobs<'a> {
             container,
             token,
             namespace: AzureNamespace::Unknown,
+            checksums: [None; KINDS],
         })
     }
 
@@ -744,6 +795,22 @@ impl<'a> Blobs<'a> {
     /// sends it and reports what the service answers.
     pub const fn with_namespace(mut self, namespace: AzureNamespace) -> Self {
         self.namespace = namespace;
+        self
+    }
+
+    /// Returns this client with `provider` registered for the kind that it
+    /// computes.
+    ///
+    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
+    /// then has the encoder compute the checksum. Register a provider for
+    /// each kind you compute: the encoder refuses `Compute` of a kind with no
+    /// provider as [`InvalidPlan::Option`]. Registering a kind twice keeps
+    /// the later provider. A checksum that you pass as text needs no
+    /// provider.
+    ///
+    /// The `borink-crypto` crate has providers for both kinds.
+    pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
+        self.checksums[provider.kind().slot()] = Some(provider);
         self
     }
 
@@ -805,7 +872,7 @@ impl<'a> Blobs<'a> {
         content: Payload<'r>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_put(put, content.len(), self.namespace)?;
+        validate_put(put, content, self)?;
         let length = content.len();
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now)?;
@@ -815,6 +882,10 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(length).as_bytes());
         });
+        push_checksum(&mut head, &put.options, &self.checksums, |sum| {
+            sum.update(content.bytes().unwrap_or(&[]));
+        });
+        push_metadata(&mut head, put.metadata);
         push_condition(&mut head, put.condition, put.condition_value);
         encoded(head, Method::Put, content)
     }
@@ -1168,6 +1239,7 @@ impl<'a> Blobs<'a> {
                 .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
             list.max_results
                 .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
+            (!list.include.is_empty()).then_some(("include", QueryValue::Include(list.include))),
         ];
 
         let mut head = HeadWriter::new(buf, headers);
@@ -1357,6 +1429,8 @@ enum QueryValue<'q> {
     // Bytes of the caller's or the service's, which are not.
     Encoded(&'q [u8]),
     Number(u32),
+    // The words of a listing's include set, comma separated.
+    Include(ListInclude),
 }
 
 impl QueryValue<'_> {
@@ -1369,6 +1443,14 @@ impl QueryValue<'_> {
                 }
             }
             Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),
+            Self::Include(include) => {
+                for (index, word) in include.words().enumerate() {
+                    if index > 0 {
+                        out.push(b",");
+                    }
+                    out.push(word.as_bytes());
+                }
+            }
         }
     }
 }
@@ -1768,12 +1850,169 @@ fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<
 /// is a `u64` because it does not fit a 32-bit `usize`.
 pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
-fn validate_put(put: &PhysicalPut<'_>, len: u64, namespace: AzureNamespace) -> Result<()> {
-    validate_key(put.key, namespace)?;
-    if len > MAX_PUT_LEN {
+fn validate_put(put: &PhysicalPut<'_>, content: Payload<'_>, client: &Blobs<'_>) -> Result<()> {
+    validate_key(put.key, client.namespace)?;
+    if content.len() > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
+    validate_metadata(put.metadata)?;
+    validate_options(
+        &put.options,
+        Write::Whole,
+        content.bytes().is_some(),
+        &client.checksums,
+    )?;
     validate_condition(put.condition, put.condition_value)
+}
+
+// One header per pair, named with the prefix and the pair's own name. The
+// plan was validated, so each name and each value is usable in a header.
+fn push_metadata(head: &mut HeadWriter<'_>, metadata: &[MetadataPair<'_>]) {
+    for pair in metadata {
+        head.header_parts(
+            |out| {
+                out.push(METADATA_PREFIX.as_bytes());
+                out.push(pair.name.as_bytes());
+            },
+            |out| out.push(pair.value.as_bytes()),
+        );
+    }
+}
+
+// Azure names a metadata pair with a C# identifier: ASCII letters, digits
+// and underscores, and no leading digit. It refuses anything else with 400
+// `InvalidMetadata`. The total size of the pairs is the service's to check;
+// this crate is not told which limit applies to the account.
+fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
+    for (index, pair) in metadata.iter().enumerate() {
+        if pair.name.is_empty()
+            || pair.name.starts_with(|first: char| first.is_ascii_digit())
+            || !pair
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(InvalidPlan::MetadataName.into());
+        }
+        // A value is sent as one header value. HTTP drops the spaces at
+        // either end of one, so a value with those would not be stored as it
+        // was given. An empty value is a pair with no text, which Azure
+        // stores.
+        if !pair.value.is_ascii()
+            || pair.value.bytes().any(|byte| byte.is_ascii_control())
+            || pair.value.starts_with(' ')
+            || pair.value.ends_with(' ')
+        {
+            return Err(InvalidPlan::MetadataValue.into());
+        }
+        // Azure matches a name without case, so two pairs that differ only in
+        // case name the same pair and the request would say what it stores
+        // twice. A plan carries a handful of pairs, so each is compared
+        // against the ones before it.
+        if metadata[..index]
+            .iter()
+            .any(|earlier| earlier.name.eq_ignore_ascii_case(pair.name))
+        {
+            return Err(InvalidPlan::MetadataDuplicate.into());
+        }
+    }
+    Ok(())
+}
+
+// The three writes that take options. `validate_options` refuses an option
+// on a write that does not take it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Write {
+    Whole,
+    Stage,
+    Commit,
+}
+
+// `has_bytes` says whether the encoder holds the content, which it does not
+// for a streamed payload. `checksums` are the client's providers.
+fn validate_options(
+    options: &WriteOptions<'_>,
+    write: Write,
+    has_bytes: bool,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+) -> Result<()> {
+    match options.checksum {
+        Some(TransactionalChecksum::Md5(text)) => ChecksumKind::Md5.check_base64(text)?,
+        Some(TransactionalChecksum::Crc64(text)) => ChecksumKind::Crc64.check_base64(text)?,
+        // A computed checksum needs the content and a provider of its kind.
+        Some(TransactionalChecksum::Compute(kind))
+            if !has_bytes || checksums[kind.slot()].is_none() =>
+        {
+            return Err(InvalidPlan::Option.into());
+        }
+        Some(TransactionalChecksum::Compute(_)) | None => {}
+    }
+    if let Some(text) = options.declared_md5 {
+        // A whole-object write stores the MD5 that Azure checked, and a block
+        // is not an object. Only a commit declares one.
+        if write != Write::Commit {
+            return Err(InvalidPlan::Option.into());
+        }
+        ChecksumKind::Md5.check_base64(text)?;
+    }
+    Ok(())
+}
+
+// Writes the checksum header of a write, if the plan carries a checksum.
+// Text that the plan gave is written as it is; `validate_options` checked
+// it. A computed checksum is summed here by the provider of its kind, which
+// `validate_options` checked is registered. `content` feeds the content to
+// the sum one piece at a time: a put or a stage has one piece, and a commit
+// writes its block list piece by piece.
+fn push_checksum(
+    head: &mut HeadWriter<'_>,
+    options: &WriteOptions<'_>,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+    content: impl FnOnce(&mut Sum),
+) {
+    match options.checksum {
+        Some(TransactionalChecksum::Md5(text)) => {
+            head.header(ChecksumKind::Md5.header(), |out| out.push(text.as_bytes()));
+        }
+        Some(TransactionalChecksum::Crc64(text)) => {
+            head.header(ChecksumKind::Crc64.header(), |out| {
+                out.push(text.as_bytes())
+            });
+        }
+        Some(TransactionalChecksum::Compute(kind)) => {
+            // Validation refused the plan if this is `None`.
+            if let Some(provider) = &checksums[kind.slot()] {
+                let mut sum = provider.start();
+                content(&mut sum);
+                let mut into = [0; crate::checksum::BASE64_LEN];
+                let text = sum.finish().base64(&mut into);
+                head.header(kind.header(), |out| out.push(text.as_bytes()));
+            }
+        }
+        None => {}
+    }
+}
+
+// Writes the block list of a commit into `out`, one piece at a time. The
+// block list is the content of a commit, so a commit that computes a
+// checksum writes it twice: first into the checksum, then into the buffer
+// as the body. Both writes go through this function, so they write the same
+// bytes.
+fn write_block_list<I: AsRef<str>>(
+    out: &mut dyn FnMut(&[u8]),
+    blocks: impl Iterator<Item = (I, BlockSource)>,
+) {
+    out(COMMIT_OPEN);
+    for (id, source) in blocks {
+        out(b"<");
+        out(source.tag().as_bytes());
+        out(b">");
+        out(id.as_ref().as_bytes());
+        out(b"</");
+        out(source.tag().as_bytes());
+        out(b">");
+    }
+    out(COMMIT_CLOSE);
 }
 
 fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<()> {

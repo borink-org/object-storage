@@ -256,6 +256,139 @@ impl<'h> PhysicalGet<'h> {
     }
 }
 
+/// One metadata pair of an object.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataPair<'h> {
+    /// The name, without the `x-ms-meta-` prefix.
+    ///
+    /// ASCII letters, digits and underscores, not starting with a digit.
+    /// Azure matches a name without case.
+    pub name: &'h str,
+    /// The text stored under that name.
+    ///
+    /// The text is sent as one HTTP header value, so it must be ASCII with
+    /// no control character and no space at either end. Encode any other
+    /// text yourself, as base64 or with percent escapes.
+    pub value: &'h str,
+}
+
+/// A checksum of the content, which Azure compares against the bytes it
+/// receives.
+///
+/// Azure refuses a write whose content does not match, with 400
+/// `Md5Mismatch` or `Crc64Mismatch`. The text is base64: of sixteen bytes
+/// for an MD5, of eight for a CRC64.
+///
+/// # What Azure stores
+///
+/// A whole-object write stores an MD5 whether or not you sent one, and
+/// stores a CRC64 only if you sent one. A listing reports both, as
+/// [`BlobProperty::ContentMd5`] and [`BlobProperty::ContentCrc64`]. A head
+/// read reports the MD5 alone. An object written in blocks stores neither
+/// unless the commit declares one: see [`WriteOptions::declared_md5`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransactionalChecksum<'h> {
+    /// The base64 of the MD5 of the content, sent as `Content-MD5`.
+    Md5(&'h str),
+    /// The base64 of the CRC64 of the content, sent as `x-ms-content-crc64`.
+    Crc64(&'h str),
+    /// A checksum of this kind that the encoder computes and sends.
+    ///
+    /// The encoder computes it with the provider of that kind that
+    /// [`Blobs::with_checksum`](crate::Blobs::with_checksum) registered. It
+    /// can only sum content that it holds: a [`Payload::Slice`], or the block
+    /// list of a commit. It refuses the plan with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option) if no provider of
+    /// that kind is registered, or if the payload is [`Payload::Streamed`].
+    /// For a streamed payload, compute the checksum yourself before you
+    /// encode and pass the text.
+    Compute(crate::checksum::ChecksumKind),
+}
+
+/// The options of a write.
+///
+/// [`PhysicalPut::options`],
+/// [`azure::PhysicalCommitBlocks::options`](crate::azure::PhysicalCommitBlocks::options)
+/// and
+/// [`azure::PhysicalStageBlock::options`](crate::azure::PhysicalStageBlock::options)
+/// each hold one. Build it with `..Default::default()` or [`Self::new`], so
+/// that a field added later does not break your code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteOptions<'h> {
+    /// A checksum of the content, which Azure compares against the bytes it
+    /// receives.
+    ///
+    /// The content of a commit is its block list, so on a commit this is a
+    /// checksum of that text.
+    pub checksum: Option<TransactionalChecksum<'h>>,
+    /// The base64 of an MD5 to store as the object's `Content-MD5`.
+    ///
+    /// Azure stores this value without comparing it to the content. Only a
+    /// commit takes it, because an object written in blocks stores no
+    /// checksum unless the commit declares one. A whole-object write or a
+    /// stage that sets it is refused with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub declared_md5: Option<&'h str>,
+}
+
+impl<'h> WriteOptions<'h> {
+    /// Creates options that add nothing to the request.
+    ///
+    /// This is the same value as [`Default::default`], from a `const fn`.
+    pub const fn new() -> Self {
+        Self {
+            checksum: None,
+            declared_md5: None,
+        }
+    }
+}
+
+/// The extra elements that a listing asks Azure to write for each object.
+///
+/// Combine the constants with `|` and put the set in
+/// [`PhysicalList::include`]. An empty set asks for nothing beyond the
+/// object's own properties.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ListInclude(u32);
+
+impl ListInclude {
+    /// The metadata pairs of each object, as a `Metadata` element.
+    ///
+    /// Read them with [`ListEntry::metadata`], or in the same pass as the
+    /// rest of the page with [`BlobProperty::Metadata`].
+    pub const METADATA: Self = Self(1 << 0);
+
+    // The word of each flag, in the order they are written into the query.
+    const WORDS: [(Self, &'static str); 1] = [(Self::METADATA, "metadata")];
+
+    /// Returns `true` if this set holds every flag of `other`.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Returns `true` if this set holds no flag.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    // The words of the set, in one fixed order whatever order it was built
+    // in, so a caller can compare the URL byte for byte.
+    pub(crate) fn words(self) -> impl Iterator<Item = &'static str> {
+        Self::WORDS
+            .into_iter()
+            .filter_map(move |(flag, word)| self.contains(flag).then_some(word))
+    }
+}
+
+impl core::ops::BitOr for ListInclude {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 /// The part of a write plan that holds no borrows.
 ///
 /// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
@@ -295,24 +428,40 @@ pub struct PhysicalPut<'h> {
     pub condition: ConditionKind,
     /// The entity tag that `condition` compares against, or `*`.
     pub condition_value: Option<&'h [u8]>,
+    /// The metadata pairs to store with the object.
+    ///
+    /// The object then holds these pairs and no others: a write replaces the
+    /// whole set.
+    pub metadata: &'h [MetadataPair<'h>],
+    /// The options of the write, such as a checksum of the content.
+    ///
+    /// [`WriteOptions::new`] adds nothing to the request.
+    pub options: WriteOptions<'h>,
 }
 
 impl<'h> PhysicalPut<'h> {
-    /// Creates a plan that writes this object with no condition.
+    /// Creates a plan that writes this object with no condition, no metadata
+    /// and no options.
     pub fn new(key: &'h str) -> Self {
         Self {
             key,
             condition: ConditionKind::None,
             condition_value: None,
+            metadata: &[],
+            options: WriteOptions::new(),
         }
     }
 
     /// Creates a plan from a stored shape and the bytes that it needs.
+    ///
+    /// The plan has no metadata and no options, because a shape holds no
+    /// borrows and both of those borrow. Set those two fields after this
+    /// call if the write needs them.
     pub fn from_shape(shape: PutShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
         Self {
-            key,
             condition: shape.condition,
             condition_value,
+            ..Self::new(key)
         }
     }
 
@@ -524,6 +673,8 @@ pub struct ListShape {
     pub delimited: bool,
     /// The most entries that one page reports.
     pub max_results: Option<u32>,
+    /// The extra elements that each page reports beside each object.
+    pub include: ListInclude,
 }
 
 /// One page of a listing.
@@ -561,6 +712,9 @@ pub struct PhysicalList<'h> {
     /// any larger number. The service may report fewer entries than this and
     /// still name a next page.
     pub max_results: Option<u32>,
+    /// The extra elements that each page reports beside each object. See
+    /// [`ListInclude`].
+    pub include: ListInclude,
 }
 
 impl<'h> PhysicalList<'h> {
@@ -571,6 +725,7 @@ impl<'h> PhysicalList<'h> {
             marker: None,
             delimited: false,
             max_results: None,
+            include: ListInclude::default(),
         }
     }
 
@@ -581,6 +736,7 @@ impl<'h> PhysicalList<'h> {
             marker,
             delimited: shape.delimited,
             max_results: shape.max_results,
+            include: shape.include,
         }
     }
 
@@ -589,6 +745,7 @@ impl<'h> PhysicalList<'h> {
         ListShape {
             delimited: self.delimited,
             max_results: self.max_results,
+            include: self.include,
         }
     }
 }
@@ -674,6 +831,49 @@ impl<'b> ListEntry<'b> {
     /// reports those bytes as its value.
     pub fn properties(&self) -> Properties<'b> {
         Properties::new(self.raw)
+    }
+
+    /// Returns the metadata pairs that this entry carries.
+    ///
+    /// Returns [`None`] if the entry has no metadata element, which Azure
+    /// writes only when the plan asked for [`ListInclude::METADATA`]. This
+    /// method reads the entry again. To read the pairs in the same pass as
+    /// the rest of the page, select [`BlobProperty::Metadata`].
+    pub fn metadata(&self) -> Option<Metadata<'b>> {
+        self.property("Metadata").map(Metadata::new)
+    }
+}
+
+/// The metadata pairs of one listed object.
+///
+/// Each item is a name and a value, as the bytes between the pair's tags.
+/// The value is not decoded: pass it to
+/// [`layered::decode_into`](crate::layered::decode_into) to resolve `&amp;`
+/// and the other references.
+#[derive(Debug, Clone, Copy)]
+pub struct Metadata<'b> {
+    rest: &'b [u8],
+}
+
+impl<'b> Metadata<'b> {
+    /// Creates an iterator over the pairs in `bytes`, which are the bytes
+    /// between the tags of one metadata element, as
+    /// [`BlobProperty::Metadata`] reports them.
+    pub const fn new(bytes: &'b [u8]) -> Self {
+        Self { rest: bytes }
+    }
+
+    /// Returns the bytes that this iterator has not read yet.
+    pub const fn remaining(self) -> &'b [u8] {
+        self.rest
+    }
+}
+
+impl<'b> Iterator for Metadata<'b> {
+    type Item = (&'b [u8], &'b [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        crate::xml::next_pair(&mut self.rest)
     }
 }
 
@@ -888,6 +1088,11 @@ pub enum BlobProperty {
     VersionId,
     /// The sequence number of a page blob.
     BlobSequenceNumber,
+    /// The metadata pairs of the object, as the bytes between the tags of
+    /// the `Metadata` element. Pass the value to [`Metadata::new`] to read
+    /// the pairs. Azure writes the element only when the plan asked for
+    /// [`ListInclude::METADATA`].
+    Metadata,
 }
 
 impl BlobProperty {
@@ -935,6 +1140,7 @@ impl BlobProperty {
         Self::TagCount,
         Self::VersionId,
         Self::BlobSequenceNumber,
+        Self::Metadata,
     ];
 
     /// The element name, as the service writes it.
@@ -982,7 +1188,15 @@ impl BlobProperty {
             Self::TagCount => "TagCount",
             Self::VersionId => "VersionId",
             Self::BlobSequenceNumber => "x-ms-blob-sequence-number",
+            Self::Metadata => "Metadata",
         }
+    }
+
+    // Whether the element holds other elements rather than one text. The
+    // page reader reads such an element to its close tag and reports
+    // everything between the tags.
+    pub(crate) const fn holds_elements(self) -> bool {
+        matches!(self, Self::Metadata)
     }
 }
 

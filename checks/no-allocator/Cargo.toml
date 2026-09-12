@@ -16,6 +16,9 @@ doctest = false
 
 [dependencies]
 borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
+# Both providers, so the check covers the `md-5` adapter as well as this
+# workspace's own CRC64.
+borink-crypto = { path = "../../crates/crypto", features = ["crc64", "md5"] }
 
 [lints.rust]
 missing_docs = "deny"

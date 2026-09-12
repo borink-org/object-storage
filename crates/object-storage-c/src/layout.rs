@@ -300,7 +300,7 @@ const _: () = {
     assert!(EntryKind::Directory as u16 == proto::EntryKind::Directory as u16);
 
     // The properties, and that neither list has one the other lacks.
-    assert!(proto::BlobProperty::COUNT == BlobProperty::BlobSequenceNumber as usize + 1);
+    assert!(proto::BlobProperty::COUNT == BlobProperty::Metadata as usize + 1);
     assert!(BlobProperty::AccessTier as u16 == proto::BlobProperty::AccessTier as u16);
     assert!(
         BlobProperty::AccessTierInferred as u16 == proto::BlobProperty::AccessTierInferred as u16
@@ -368,6 +368,7 @@ const _: () = {
     assert!(
         BlobProperty::BlobSequenceNumber as u16 == proto::BlobProperty::BlobSequenceNumber as u16
     );
+    assert!(BlobProperty::Metadata as u16 == proto::BlobProperty::Metadata as u16);
 
     assert!(FailureClass::Auth as u16 == proto::FailureClass::Auth as u16);
     assert!(FailureClass::Throttled as u16 == proto::FailureClass::Throttled as u16);

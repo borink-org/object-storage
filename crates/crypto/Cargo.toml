@@ -1,0 +1,28 @@
+[package]
+name = "borink-crypto"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "Checksum implementations for borink-object-storage: a software CRC-64/NVME, an adapter for RustCrypto's MD5, and the trait that turns either into a provider"
+repository = "https://github.com/borink-org/object-storage"
+readme = "../../README.md"
+rust-version = "1.97.1"
+keywords = ["crc64", "checksum", "md5", "no-std", "object-storage"]
+categories = ["no-std::no-alloc", "algorithms"]
+
+[dependencies]
+borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0.1" }
+# Only the `md5` feature links this. Its default features are off, because
+# this crate needs the hasher alone: not `std`, `alloc` or the OID tables.
+md-5 = { version = "0.11", optional = true, default-features = false }
+
+[features]
+# Nothing by default: a host that registers no checksum links no algorithm.
+default = []
+# The software CRC-64/NVME of `crc64`.
+crc64 = []
+# The `Md5` adapter over RustCrypto's `md-5`.
+md5 = ["dep:md-5"]
+
+[lints.rust]
+missing_docs = "deny"

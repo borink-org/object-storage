@@ -361,23 +361,43 @@ fn every_outcome_kind_says_something_of_its_own() {
     assert_eq!(text(&later), settled_sentence(None));
 }
 
+// Every number a sweep below visits, which is every `u16` under `cargo
+// test`. Miri interprets each iteration, and a sweep proves something about
+// numbers rather than about memory, so under Miri it visits the range the
+// discriminants live in and the largest `u16` for the edge. The highest
+// discriminant any of these enums defines is 24.
+fn sweep() -> impl Iterator<Item = u16> {
+    let last = if cfg!(miri) { 64 } else { u16::MAX };
+    (1..=last).chain((last != u16::MAX).then_some(u16::MAX))
+}
+
 // Every enum crosses as its number, and comes back the same value. A number
 // that names nothing is refused, never read as another value.
 #[test]
 fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
-    for repr in 1..=u16::MAX {
+    let (mut kinds, mut classes, mut outcomes) = (0, 0, 0);
+    for repr in sweep() {
         if let Some(kind) = kind_of(repr) {
             assert_eq!(kind_of(kind_view(Some(kind))), Some(kind), "{kind:?}");
             assert_eq!(kind_view(Some(kind)), repr);
+            kinds += 1;
         }
         if let Some(class) = class_of(repr) {
             assert_eq!(class_of(class as u16), Some(class), "{class:?}");
+            classes += 1;
         }
         assert_eq!(
             outcome_kind_of(repr).map(|kind| kind as u16),
             outcome_kind_of(repr).map(|_| repr)
         );
+        outcomes += usize::from(outcome_kind_of(repr).is_some());
     }
+    // How many numbers the sweep found. A variant added to one of these
+    // enums, but left out of the call that reads a number into it, is a
+    // variant no number reaches and the loop above never sees. These three
+    // fail until someone states the new count. They also check `sweep`
+    // itself: a discriminant above its Miri bound would be missing here.
+    assert_eq!((kinds, classes, outcomes), (10, 5, 13));
     assert_eq!(kind_of(kind_view(None)), None);
     assert_eq!(kind_of(4095), None);
     assert_eq!(class_of(4095), None);
@@ -478,6 +498,37 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
             entry.content_type.unwrap().as_ptr()
         );
     }
+    // How many numbers the readers above accept. The tables say what each
+    // number means, and these say that nothing else is read at all: a
+    // number no variant defines is refused, whatever it is. The counts fail
+    // when a variant is added to one of these enums, which is a variant the
+    // tables have never crossed.
+    let (mut gets, mut forms, mut deletes, mut conditions, mut entries) = (0, 0, 0, 0, 0);
+    for repr in core::iter::once(0).chain(sweep()) {
+        let read = GetShape {
+            kind: repr,
+            ..read_shape()
+        };
+        gets += usize::from(get_shape(&read).is_ok());
+        let ranged = GetShape {
+            range: Range {
+                form: repr,
+                start: 2,
+                end: 6,
+            },
+            ..read_shape()
+        };
+        forms += usize::from(get_shape(&ranged).is_ok());
+        let removal = DeleteShape {
+            kind: repr,
+            condition: Condition::None as u16,
+        };
+        deletes += usize::from(delete_shape(&removal).is_ok());
+        conditions += usize::from(condition_kind(repr).is_ok());
+        entries += usize::from(proto::EntryKind::from_discriminant(repr).is_some());
+    }
+    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 3, 3));
+
     // A listing plan carries no enum, and an absent count is not a zero one.
     for max_results in [None, Some(1000)] {
         let shape = ListShape {
@@ -656,11 +707,11 @@ fn a_null_pointer_is_refused_rather_than_read() {
 #[test]
 fn every_error_crosses_as_a_status() {
     let mut checked = 0;
-    for code in 1..=u16::MAX {
+    for code in sweep() {
         let Some(code) = proto::ErrorCode::from_discriminant(code) else {
             continue;
         };
-        for detail in 0..=u16::MAX {
+        for detail in core::iter::once(0).chain(sweep()) {
             let Some(error) = Error::from_parts(code, detail) else {
                 continue;
             };
@@ -680,7 +731,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the three that carry no
     // inner value.
-    assert_eq!(checked, 3 + 20 + 4);
+    assert_eq!(checked, 3 + 24 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)
