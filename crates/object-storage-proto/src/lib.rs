@@ -132,6 +132,22 @@
 //! # }
 //! ```
 //!
+//! # Metadata and checksums
+//!
+//! To store metadata pairs with an object, put them in
+//! [`PhysicalPut::metadata`] or [`azure::PhysicalCommitBlocks::metadata`].
+//! To read them back from a listing, put [`ListInclude::METADATA`] in the
+//! plan and call [`ListEntry::metadata`] on each entry. To read them back
+//! from a head read, pass each response header name to
+//! [`azure::metadata_name`].
+//!
+//! To have Azure check the content of a write, put an MD5 or a CRC64 of it
+//! in [`WriteOptions::checksum`]. Pass the text, or register a
+//! [`checksum::ChecksumProvider`] with [`Blobs::with_checksum`] and ask for
+//! [`TransactionalChecksum::Compute`], which has the encoder compute it. This
+//! crate implements neither checksum. The [`checksum`] module says where to
+//! get one.
+//!
 //! # Sizing the buffer
 //!
 //! The encoding methods refuse a buffer that is too small and state the exact
@@ -188,6 +204,7 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
+pub mod checksum;
 mod error;
 mod head;
 mod http;
@@ -200,6 +217,7 @@ mod types;
 mod xml;
 
 pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, classify_error};
+pub use checksum::{ChecksumKind, ChecksumProvider, ChecksumState, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
@@ -211,6 +229,7 @@ pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, CommitBlocksShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
-    GetShape, ListEntry, ListShape, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
-    PhysicalPut, Properties, PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange,
+    GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, Properties, PropertySet, PropertyValues, PutShape,
+    RangeForm, RequestedRange, TransactionalChecksum, WriteOptions,
 };

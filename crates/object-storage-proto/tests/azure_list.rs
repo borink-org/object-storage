@@ -2,9 +2,9 @@
 
 use borink_object_storage_proto::{
     AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure,
-    FailureClass, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListShape, Listing, Method,
-    PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind,
-    Timestamps, layered,
+    FailureClass, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListShape,
+    Listing, Metadata, Method, PhysicalList, PropertySet, PropertyValues, ResponseFault,
+    ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -136,6 +136,7 @@ fn every_query_parameter_is_written_in_one_order() {
             ListShape {
                 delimited: true,
                 max_results: Some(2),
+                ..ListShape::default()
             },
             "directory/",
             Some("next"),
@@ -1224,4 +1225,182 @@ fn a_value_read_with_the_page_is_what_the_walk_reports() {
     let (entry, blob_type) = entries[0];
     assert_eq!(blob_type, entry.property("BlobType"));
     assert_eq!(blob_type, Some(b"BlockBlob".as_slice()));
+}
+
+#[test]
+fn an_include_set_is_written_as_one_query_parameter() {
+    let base = "https://account.blob.core.windows.net/container?restype=container&comp=list";
+
+    assert_eq!(
+        url(&PhysicalList {
+            include: ListInclude::METADATA,
+            ..PhysicalList::new("")
+        }),
+        format!("{base}&include=metadata")
+    );
+    // The set comes after the page size, and an empty set writes nothing.
+    assert_eq!(
+        url(&PhysicalList {
+            max_results: Some(2),
+            include: ListInclude::METADATA | ListInclude::default(),
+            ..PhysicalList::new("")
+        }),
+        format!("{base}&maxresults=2&include=metadata")
+    );
+    assert_eq!(url(&PhysicalList::new("")), base);
+    assert!(ListInclude::default().is_empty());
+    assert!(!ListInclude::METADATA.is_empty());
+    assert!(ListInclude::METADATA.contains(ListInclude::default()));
+}
+
+// One object with the metadata element that `include=metadata` adds. Azure
+// writes it after the properties element.
+fn object_with_metadata(name: &str, metadata: &str) -> String {
+    format!(
+        "<Blob><Name>{name}</Name><Properties>\
+         <Last-Modified>Sat, 22 Aug 2026 12:00:00 GMT</Last-Modified>\
+         <Etag>0x8DF0046E8E555AF</Etag><Content-Length>8</Content-Length>\
+         <Content-MD5>rL0Y20zC+Fzt72VPzMSk2A==</Content-MD5>\
+         <BlobType>BlockBlob</BlobType></Properties>\
+         <Metadata>{metadata}</Metadata><OrMetadata /></Blob>"
+    )
+}
+
+#[test]
+fn an_entry_reports_the_metadata_pairs_the_service_wrote() {
+    let mut body = page(
+        &object_with_metadata(
+            "object.bin",
+            "<source_mtime>1787400000</source_mtime>\
+             <label>a &amp; b</label><empty />",
+        ),
+        "",
+    );
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+
+    let pairs: Vec<_> = entries[0].metadata().unwrap().collect();
+    assert_eq!(
+        pairs,
+        [
+            (b"source_mtime".as_slice(), b"1787400000".as_slice()),
+            (b"label", b"a &amp; b"),
+            (b"empty", b""),
+        ]
+    );
+    // The value is the text the service wrote. Its references are resolved
+    // where the caller wants them resolved.
+    let mut into = [0; 16];
+    assert_eq!(
+        layered::decode_into(pairs[1].1, &mut into),
+        Some(b"a & b".as_slice())
+    );
+    // The entry's own fields are unchanged by the metadata beside them.
+    assert_eq!(entries[0].key, "object.bin");
+    assert_eq!(entries[0].size, Some(8));
+}
+
+#[test]
+fn a_pair_named_metadata_does_not_end_the_walk_early() {
+    // `Metadata` is a legal pair name, so the element then holds an element
+    // of its own name. The close tag of the pair is not the close tag of the
+    // element, in either order.
+    let x = (b"Metadata".as_slice(), b"x".as_slice());
+    let label = (b"label".as_slice(), b"b".as_slice());
+    for (pairs, expected) in [
+        ("<label>b</label><Metadata>x</Metadata>", vec![label, x]),
+        ("<Metadata>x</Metadata><label>b</label>", vec![x, label]),
+        (
+            "<Metadata />",
+            vec![(b"Metadata".as_slice(), b"".as_slice())],
+        ),
+    ] {
+        let mut body = page(&object_with_metadata("object.bin", pairs), "");
+        let mut entries = [ListEntry::default(); 1];
+        fill(&mut body, &mut entries);
+        let walked: Vec<_> = entries[0].metadata().unwrap().collect();
+        assert_eq!(walked, expected, "{pairs}");
+        // The walk of the entry goes on past the element.
+        assert_eq!(
+            entries[0].property("OrMetadata"),
+            Some(b"".as_slice()),
+            "{pairs}"
+        );
+    }
+}
+
+#[test]
+fn an_entry_without_a_metadata_element_reports_no_metadata() {
+    let mut body = page(&object("object.bin", 8), "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+    assert!(entries[0].metadata().is_none());
+
+    // An object that carries no pair is written as an empty element, which
+    // is a walk over no pairs rather than no element.
+    let mut body = page(&object_with_metadata("object.bin", ""), "");
+    let mut entries = [ListEntry::default(); 1];
+    fill(&mut body, &mut entries);
+    assert_eq!(entries[0].metadata().unwrap().count(), 0);
+}
+
+#[test]
+fn a_selected_metadata_property_is_read_in_the_same_pass_as_the_page() {
+    let wanted = PropertySet::of(&[BlobProperty::Metadata, BlobProperty::ContentMd5]);
+    let mut body = page(
+        &object_with_metadata("object.bin", "<source_mtime>1787400000</source_mtime>"),
+        "",
+    );
+    let mut entries = [(ListEntry::default(), None, None); 1];
+    blobs()
+        .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+            (
+                entry,
+                values.get(BlobProperty::Metadata),
+                values.get(BlobProperty::ContentMd5),
+            )
+        })
+        .unwrap();
+
+    let (entry, metadata, md5) = entries[0];
+    assert_eq!(entry.key, "object.bin");
+    assert_eq!(md5, Some(b"rL0Y20zC+Fzt72VPzMSk2A==".as_slice()));
+    let pairs: Vec<_> = Metadata::new(metadata.unwrap()).collect();
+    assert_eq!(
+        pairs,
+        [(b"source_mtime".as_slice(), b"1787400000".as_slice())]
+    );
+}
+
+#[test]
+fn an_empty_metadata_element_is_read_as_a_property_with_no_pairs() {
+    let wanted = PropertySet::of(&[BlobProperty::Metadata]);
+    for written in ["<Metadata />", "<Metadata/>", "<Metadata></Metadata>"] {
+        let entry = format!(
+            "<Blob><Name>object.bin</Name>\
+             <Properties><Content-Length>8</Content-Length></Properties>\
+             {written}</Blob>"
+        );
+        let mut body = page(&entry, "");
+        let mut entries = [(ListEntry::default(), None); 1];
+        blobs()
+            .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+                (entry, values.get(BlobProperty::Metadata))
+            })
+            .unwrap();
+        assert_eq!(entries[0].1, Some(b"".as_slice()), "{written}");
+    }
+}
+
+#[test]
+fn a_metadata_element_the_page_reader_cannot_close_is_a_fault() {
+    let entry = "<Blob><Name>object.bin</Name>\
+                 <Properties><Content-Length>8</Content-Length></Properties>\
+                 <Metadata><pair>value</Metadata></Blob>";
+    let mut body = page(entry, "");
+    let mut entries = [ListEntry::default(); 1];
+    assert_eq!(
+        blobs().fill_listing(&mut body, &mut entries).unwrap_err(),
+        Error::Response(ResponseFault::Body)
+    );
 }

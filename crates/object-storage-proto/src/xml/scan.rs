@@ -544,6 +544,51 @@ impl<'b> Scan<'b> {
         }
     }
 
+    // Reads an element that holds other elements, whose start tag was
+    // consumed. Returns the span of everything between its tags and consumes
+    // through its close tag. `name` is the element's own name, which the
+    // caller holds; the names inside it are read from the body.
+    //
+    // The nesting is checked the way `skip` checks it, and the same depth
+    // bounds it.
+    pub(crate) fn nested(&mut self, name: &[u8]) -> Result<Span> {
+        let start = self.cursor;
+        let mut open = [(0usize, 0usize); MAX_DEPTH];
+        let mut depth = 0;
+        loop {
+            let Some((tag_at, _)) = find_lt(self.bytes, self.cursor) else {
+                return fault();
+            };
+            self.cursor = tag_at;
+            match self.peek(1) {
+                b'/' if depth == 0 => {
+                    self.cursor = close_tag(self.bytes, tag_at, name)?;
+                    return Ok((start, tag_at));
+                }
+                b'/' => {
+                    // `depth` is above zero in this arm.
+                    depth -= 1;
+                    self.cursor = close_tag(self.bytes, tag_at, self.text(open[depth]))?;
+                }
+                b'!' | b'?' => {
+                    self.skip_misc()?;
+                }
+                _ => {
+                    let child = self.open()?;
+                    if !child.empty {
+                        // The fixed array checks the nesting without a heap.
+                        // A document deeper than it is not a listing.
+                        if depth == MAX_DEPTH {
+                            return fault();
+                        }
+                        open[depth] = child.name;
+                        depth += 1;
+                    }
+                }
+            }
+        }
+    }
+
     // Skips an element whose start tag was consumed. Consumes everything
     // through the matching close tag and checks that the tags in between
     // nest.

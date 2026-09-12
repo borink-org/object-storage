@@ -190,6 +190,12 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
         return None;
     }
     let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
+    Some(base64_into(bytes, into))
+}
+
+// Writes the standard base64 of `bytes` into `into`, which holds exactly the
+// four characters per three bytes that it takes, and returns it as text.
+pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
     for (group, out) in bytes.chunks(3).zip(into.chunks_mut(4)) {
         // A group is 1 to 3 bytes; the missing ones read as zero and are
         // written as padding below. Each sextet index is at most 63.
@@ -204,7 +210,8 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
             };
         }
     }
-    core::str::from_utf8(into).ok()
+    // Every byte written is from the alphabet or padding, so this is ASCII.
+    crate::request::text(into)
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
