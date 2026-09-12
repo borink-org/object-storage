@@ -324,7 +324,7 @@ fn refuses_invalid_plans_before_writing_anything() {
 /// The keys a plan may name, and the ones it may not because they would name
 /// something else by the time the request arrives.
 ///
-/// Each refusal here is a measurement from the live suite, not a rule read off
+/// Each refusal here was measured against the live service, not read off
 /// a specification: a name is refused where storing it would store it under a
 /// name the caller did not write.
 #[test]
