@@ -205,6 +205,7 @@
 
 pub mod azure;
 pub mod checksum;
+mod common;
 mod error;
 mod head;
 mod http;

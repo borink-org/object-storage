@@ -780,7 +780,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let size = match fields.size {
         Some(span) => {
             let (start, end) = trim(chunk, span);
-            match crate::azure::decimal(&chunk[start..end]) {
+            match crate::common::decimal(&chunk[start..end]) {
                 Some(size) => Some(size),
                 None => return fault(),
             }
