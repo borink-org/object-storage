@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # Move this on purpose: a new revision can bring new cases, or a new protocol.
-revision=5c2ef728bd498aa453719466f8713319788642db
+revision=7b2158343612d5d626b4db6253ff75b9ae1d400f
 suites=(core operations s3-express vectors)
 
 mode=--expected-unsupported
