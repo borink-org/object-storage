@@ -294,7 +294,7 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     // Azure names the error in the head when it can. When it did not, the
     // diagnostic body names it, and the library finishes the outcome from it.
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_get_error_body(&session, &outcome_.failure, kept_body());
+        outcome_ = borink_finish_get_error_body(&session, &shape, &outcome_.failure, kept_body());
     }
     switch (outcome_.kind) {
     case OutcomeKindBody:
@@ -334,7 +334,7 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     outcome_ = borink_accept_put_head(&session, &shape, head_.status(), head_.refs(),
                                       head_.count());
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_put_error_body(&session, &outcome_.failure, kept_body());
+        outcome_ = borink_finish_put_error_body(&session, &shape, &outcome_.failure, kept_body());
     }
     if (outcome_.kind != OutcomeKindDone) {
         fail("Azure stored no object");
@@ -422,7 +422,8 @@ void Client::remove(std::string_view key, const Removal &removal) {
     outcome_ = borink_accept_delete_head(&session, &shape, head_.status(), head_.refs(),
                                          head_.count());
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_delete_error_body(&session, &outcome_.failure, kept_body());
+        outcome_ = borink_finish_delete_error_body(&session, &shape, &outcome_.failure,
+                                                   kept_body());
     }
     if (outcome_.kind != OutcomeKindAccepted) {
         fail("Azure removed no object");

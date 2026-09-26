@@ -1521,14 +1521,14 @@ struct borink_outcome borink_accept_delete_head(const struct borink_session *ses
 /**
  * Finishes a read whose head asked for the error body.
  *
- * Pass the `failure` of that outcome and the body that you read. Pass an
- * empty body if you read none: the outcome is then final with the error
- * unnamed.
+ * Pass the `shape` that the head was read against, the `failure` of that
+ * outcome and the body that you read. Pass an empty body if you read none: the
+ * outcome is then final with the error unnamed.
  *
  * # Safety
  *
- * `session` and `failure` must each be null or point at one readable value.
- * `body` must address its stated length.
+ * `session`, `shape` and `failure` must each be null or point at one
+ * readable value. `body` must address its stated length.
  *
  * # Lifetime
  *
@@ -1536,6 +1536,7 @@ struct borink_outcome borink_accept_delete_head(const struct borink_session *ses
  * valid for as long as you use the returned outcome. So must `body`.
  */
 struct borink_outcome borink_finish_get_error_body(const struct borink_session *session,
+                                                   const struct borink_get_shape *shape,
                                                    const struct borink_failure *failure,
                                                    struct borink_bytes body);
 
@@ -1551,6 +1552,7 @@ struct borink_outcome borink_finish_get_error_body(const struct borink_session *
  * As `borink_finish_get_error_body`.
  */
 struct borink_outcome borink_finish_put_error_body(const struct borink_session *session,
+                                                   const struct borink_put_shape *shape,
                                                    const struct borink_failure *failure,
                                                    struct borink_bytes body);
 
@@ -1566,6 +1568,7 @@ struct borink_outcome borink_finish_put_error_body(const struct borink_session *
  * As `borink_finish_get_error_body`.
  */
 struct borink_outcome borink_finish_delete_error_body(const struct borink_session *session,
+                                                      const struct borink_delete_shape *shape,
                                                       const struct borink_failure *failure,
                                                       struct borink_bytes body);
 

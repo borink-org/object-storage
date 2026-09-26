@@ -272,18 +272,52 @@ fn a_stored_object_reports_the_metadata_azure_returned() {
 }
 
 #[test]
-fn a_failed_condition_needs_the_condition_that_explains_it() {
+fn a_412_is_a_failed_condition_only_when_azure_names_one() {
     let blobs = blobs();
+    let failed =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"ConditionNotMet".as_slice())]);
+    let lease =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"LeaseIdMissing".as_slice())]);
     assert_eq!(
-        blobs.accept_put_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
+        blobs.accept_put_head(conditional(ConditionKind::IfMatch), failed),
         Ok(PutHeadOutcome::PreconditionFailed)
     );
 
-    // Nothing in an unconditional write explains a 412.
+    // Azure refuses a write to a leased blob without its lease ID with 412
+    // too, whether or not the write carries a condition.
+    for shape in [PutShape::default(), conditional(ConditionKind::IfMatch)] {
+        match blobs.accept_put_head(shape, lease) {
+            Ok(PutHeadOutcome::ServiceFailure(failure)) => assert_eq!(failure.status, 412),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // A code that Azure names only in the body decides the same way.
+    let unnamed = blobs
+        .accept_put_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412))
+        .unwrap();
+    let PutHeadOutcome::NeedErrorBody(failure) = unnamed else {
+        panic!("unexpected outcome: {unnamed:?}");
+    };
+    let body = b"<Error><Code>ConditionNotMet</Code></Error>";
     assert_eq!(
-        blobs.accept_put_head(PutShape::default(), ResponseHead::new(412)),
-        Err(Error::Response(ResponseFault::Status))
+        blobs.accept_put_error_body(
+            conditional(ConditionKind::IfMatch),
+            failure.status,
+            failure.request_id,
+            body
+        ),
+        PutHeadOutcome::PreconditionFailed
     );
+    assert!(matches!(
+        blobs.accept_put_error_body(
+            PutShape::default(),
+            failure.status,
+            failure.request_id,
+            body
+        ),
+        PutHeadOutcome::ServiceFailure(_)
+    ));
 
     // A write answers 201, never another success status.
     assert_eq!(
@@ -330,6 +364,7 @@ fn a_write_to_a_missing_container_reports_the_container() {
     assert_eq!(failure.kind, None);
     assert_eq!(
         blobs.accept_put_error_body(
+            PutShape::default(),
             failure.status,
             failure.request_id,
             b"<Error><Code>ContainerNotFound</Code></Error>"
@@ -339,7 +374,7 @@ fn a_write_to_a_missing_container_reports_the_container() {
         }
     );
     assert_eq!(
-        blobs.accept_put_error_body(failure.status, failure.request_id, b""),
+        blobs.accept_put_error_body(PutShape::default(), failure.status, failure.request_id, b""),
         PutHeadOutcome::NotFound { kind: None }
     );
 }
@@ -355,6 +390,7 @@ fn a_refused_write_carries_the_category_and_the_request_id() {
     };
     assert_eq!(
         blobs.accept_put_error_body(
+            PutShape::default(),
             failure.status,
             failure.request_id,
             b"<Error><Code>ServerBusy</Code></Error>"
