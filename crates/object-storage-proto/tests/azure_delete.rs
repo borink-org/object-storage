@@ -135,15 +135,41 @@ fn an_accepted_removal_reports_no_metadata() {
 }
 
 #[test]
-fn a_failed_condition_needs_the_condition_that_explains_it() {
+fn a_412_is_a_failed_condition_only_when_azure_names_one() {
     let blobs = blobs();
+    let failed =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"ConditionNotMet".as_slice())]);
+    let lease =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"LeaseIdMissing".as_slice())]);
     assert_eq!(
-        blobs.accept_delete_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
+        blobs.accept_delete_head(conditional(ConditionKind::IfMatch), failed),
         Ok(DeleteHeadOutcome::PreconditionFailed)
     );
+
+    // Azure refuses a removal of a leased blob without its lease ID with 412
+    // too, whether or not the removal carries a condition.
+    for shape in [DeleteShape::default(), conditional(ConditionKind::IfMatch)] {
+        match blobs.accept_delete_head(shape, lease) {
+            Ok(DeleteHeadOutcome::ServiceFailure(failure)) => assert_eq!(failure.status, 412),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // A code that Azure names only in the body decides the same way.
+    let unnamed = blobs
+        .accept_delete_head(conditional(ConditionKind::IfMatch), ResponseHead::new(412))
+        .unwrap();
+    let DeleteHeadOutcome::NeedErrorBody(failure) = unnamed else {
+        panic!("unexpected outcome: {unnamed:?}");
+    };
     assert_eq!(
-        blobs.accept_delete_head(DeleteShape::default(), ResponseHead::new(412)),
-        Err(Error::Response(ResponseFault::Status))
+        blobs.accept_delete_error_body(
+            conditional(ConditionKind::IfMatch),
+            failure.status,
+            failure.request_id,
+            b"<Error><Code>ConditionNotMet</Code></Error>"
+        ),
+        DeleteHeadOutcome::PreconditionFailed
     );
 }
 
@@ -168,6 +194,7 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
     };
     assert_eq!(
         blobs.accept_delete_error_body(
+            DeleteShape::default(),
             failure.status,
             failure.request_id,
             b"<Error><Code>ContainerNotFound</Code></Error>"

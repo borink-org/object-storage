@@ -49,6 +49,19 @@ pub(crate) fn finishing<'a>(
     Ok((blobs, status, request_id))
 }
 
+// A finishing call whose outcome also depends on the plan: the shape was
+// passed too, and it is one that the core crate can read.
+pub(crate) fn finishing_with<'a, V, S>(
+    session: Option<[&'a [u8]; 3]>,
+    shape: Option<&V>,
+    convert: impl FnOnce(&V) -> proto::Result<S>,
+    failure: Option<(u16, Option<&'a [u8]>)>,
+) -> proto::Result<(Blobs<'a>, S, u16, Option<&'a [u8]>)> {
+    let (blobs, shape) = ready(session, shape, convert)?;
+    let (status, request_id) = failure.ok_or(UNKNOWN)?;
+    Ok((blobs, shape, status, request_id))
+}
+
 // The bytes as text, or `error` if they are not.
 pub(crate) fn text(bytes: &[u8], error: impl Into<Error>) -> proto::Result<&str> {
     core::str::from_utf8(bytes).map_err(|_| error.into())

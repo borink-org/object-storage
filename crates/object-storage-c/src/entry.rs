@@ -14,7 +14,7 @@ use crate::plan::{delete_shape, get_shape, list_shape, put_shape};
 use crate::ptr;
 use crate::sentence::{describe, describe_status};
 use crate::step::{
-    filling, filling_with, finishing, head_of, open, optional, ready, text, written,
+    filling, filling_with, finishing, finishing_with, head_of, open, optional, ready, text, written,
 };
 use crate::types::*;
 
@@ -302,14 +302,14 @@ pub unsafe extern "C" fn borink_accept_delete_head(
 
 /// Finishes a read whose head asked for the error body.
 ///
-/// Pass the `failure` of that outcome and the body that you read. Pass an
-/// empty body if you read none: the outcome is then final with the error
-/// unnamed.
+/// Pass the `shape` that the head was read against, the `failure` of that
+/// outcome and the body that you read. Pass an empty body if you read none: the
+/// outcome is then final with the error unnamed.
 ///
 /// # Safety
 ///
-/// `session` and `failure` must each be null or point at one readable value.
-/// `body` must address its stated length.
+/// `session`, `shape` and `failure` must each be null or point at one
+/// readable value. `body` must address its stated length.
 ///
 /// # Lifetime
 ///
@@ -318,19 +318,21 @@ pub unsafe extern "C" fn borink_accept_delete_head(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_finish_get_error_body(
     session: *const Session,
+    shape: *const GetShape,
     failure: *const Failure,
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, failure, body) = unsafe {
+    let (session, shape, failure, body) = unsafe {
         (
             ptr::session(session),
+            shape.as_ref(),
             ptr::failure(failure),
             ptr::slice(body),
         )
     };
-    finishing(session, failure)
-        .map(|(blobs, status, id)| blobs.accept_error_body(status, id, body))
+    finishing_with(session, shape, get_shape, failure)
+        .map(|(blobs, shape, status, id)| blobs.accept_error_body(shape, status, id, body))
         .map_or_else(invalid, |outcome| get_outcome(&outcome))
 }
 
@@ -346,19 +348,21 @@ pub unsafe extern "C" fn borink_finish_get_error_body(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_finish_put_error_body(
     session: *const Session,
+    shape: *const PutShape,
     failure: *const Failure,
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, failure, body) = unsafe {
+    let (session, shape, failure, body) = unsafe {
         (
             ptr::session(session),
+            shape.as_ref(),
             ptr::failure(failure),
             ptr::slice(body),
         )
     };
-    finishing(session, failure)
-        .map(|(blobs, status, id)| blobs.accept_put_error_body(status, id, body))
+    finishing_with(session, shape, put_shape, failure)
+        .map(|(blobs, shape, status, id)| blobs.accept_put_error_body(shape, status, id, body))
         .map_or_else(invalid, |outcome| put_outcome(&outcome))
 }
 
@@ -374,19 +378,21 @@ pub unsafe extern "C" fn borink_finish_put_error_body(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_finish_delete_error_body(
     session: *const Session,
+    shape: *const DeleteShape,
     failure: *const Failure,
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, failure, body) = unsafe {
+    let (session, shape, failure, body) = unsafe {
         (
             ptr::session(session),
+            shape.as_ref(),
             ptr::failure(failure),
             ptr::slice(body),
         )
     };
-    finishing(session, failure)
-        .map(|(blobs, status, id)| blobs.accept_delete_error_body(status, id, body))
+    finishing_with(session, shape, delete_shape, failure)
+        .map(|(blobs, shape, status, id)| blobs.accept_delete_error_body(shape, status, id, body))
         .map_or_else(invalid, |outcome| delete_outcome(&outcome))
 }
 

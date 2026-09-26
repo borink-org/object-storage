@@ -83,6 +83,13 @@ fn write_shape() -> PutShape {
     }
 }
 
+fn removal_shape() -> DeleteShape {
+    DeleteShape {
+        kind: DeleteKind::Object as u16,
+        condition: Condition::None as u16,
+    }
+}
+
 fn list_shape_of(max_results: Option<u32>) -> ListShape {
     ListShape {
         delimited: false,
@@ -656,15 +663,23 @@ fn a_null_pointer_is_refused_rather_than_read() {
             unknown()
         );
         assert_eq!(
-            borink_finish_get_error_body(&session, core::ptr::null(), lent(b"")).error,
+            borink_finish_get_error_body(&session, &read_shape(), core::ptr::null(), lent(b""))
+                .error,
             unknown()
         );
         assert_eq!(
-            borink_finish_put_error_body(&session, core::ptr::null(), lent(b"")).error,
+            borink_finish_put_error_body(&session, &write_shape(), core::ptr::null(), lent(b""))
+                .error,
             unknown()
         );
         assert_eq!(
-            borink_finish_delete_error_body(&session, core::ptr::null(), lent(b"")).error,
+            borink_finish_delete_error_body(
+                &session,
+                &removal_shape(),
+                core::ptr::null(),
+                lent(b"")
+            )
+            .error,
             unknown()
         );
         assert_eq!(
@@ -894,6 +909,7 @@ fn the_error_body_finishes_what_the_head_left_open() {
     let finished = unsafe {
         borink_finish_put_error_body(
             &session,
+            &write_shape(),
             &outcome.failure,
             lent(b"<Error><Code>BlobAlreadyExists</Code></Error>"),
         )
@@ -908,18 +924,51 @@ fn the_error_body_finishes_what_the_head_left_open() {
 
     // A body that never arrived leaves the outcome final and unnamed.
     // SAFETY: as above.
-    let unnamed = unsafe { borink_finish_put_error_body(&session, &outcome.failure, lent(b"")) };
+    let unnamed = unsafe {
+        borink_finish_put_error_body(&session, &write_shape(), &outcome.failure, lent(b""))
+    };
     assert_eq!(unnamed.kind, OutcomeKind::ServiceFailure as u16);
     assert_eq!(kind_of(unnamed.failure.kind), None);
+}
+
+// A 412 is the plan's failed condition only if the plan carried one and
+// Azure names it, whether in the head or only in the body.
+#[test]
+fn a_412_is_a_failed_condition_only_when_azure_names_one() {
+    let session = session();
+    let conditional = PutShape {
+        condition: Condition::IfMatch as u16,
+    };
+    let lease = [header("x-ms-error-code", b"LeaseIdMissing")];
+    // SAFETY: every pointer addresses a live value of this test.
+    let refused =
+        unsafe { borink_accept_put_head(&session, &conditional, 412, lease.as_ptr(), lease.len()) };
+    assert_eq!(refused.kind, OutcomeKind::ServiceFailure as u16);
+
+    // SAFETY: as above.
+    let unnamed =
+        unsafe { borink_accept_put_head(&session, &conditional, 412, core::ptr::null(), 0) };
+    assert_eq!(unnamed.kind, OutcomeKind::NeedErrorBody as u16);
+    // SAFETY: as above, and the body outlives the outcome it names.
+    let failed = unsafe {
+        borink_finish_put_error_body(
+            &session,
+            &conditional,
+            &unnamed.failure,
+            lent(b"<Error><Code>ConditionNotMet</Code></Error>"),
+        )
+    };
+    assert_eq!(failed.kind, OutcomeKind::PreconditionFailed as u16);
 }
 
 // A head that does not answer the plan is a status, not a sentence.
 #[test]
 fn an_invalid_head_carries_the_error_of_the_core_crate() {
     let session = session();
-    // SAFETY: every pointer addresses a live value of this test.
+    // SAFETY: every pointer addresses a live value of this test. A write
+    // answers 201, never 200.
     let outcome =
-        unsafe { borink_accept_put_head(&session, &write_shape(), 412, core::ptr::null(), 0) };
+        unsafe { borink_accept_put_head(&session, &write_shape(), 200, core::ptr::null(), 0) };
     assert_eq!(outcome.kind, OutcomeKind::Invalid as u16);
     assert_eq!(outcome.error.code, ErrorCode::Response as u16);
     assert_eq!(outcome.error.detail, ResponseFault::Status as u16);
