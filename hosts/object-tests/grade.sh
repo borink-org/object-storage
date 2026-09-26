@@ -9,7 +9,9 @@
 #
 # An entry with a `*` names a whole category, such as `operations/s3/*` or
 # `operations/azure*/lease-*`, and every case it covers must be unsupported.
-# Write those by hand; `--record` keeps them and lists only the cases they miss.
+# An entry `field:/value/NAME` covers every case unsupported only because the
+# adapter declares that field unsupported. Write patterns and field entries by
+# hand; `--record` keeps them and lists only the cases they miss.
 #
 #     hosts/object-tests/grade.sh
 #
@@ -22,7 +24,7 @@
 set -euo pipefail
 
 # Move this on purpose: a new revision can bring new cases, or a new protocol.
-revision=8a40d7e87453c82b6b7e9f55c43b99056a76b53e
+revision=327d1cb30c61c50b6209d9fa05c56b89c5967fbd
 suites=(core operations s3-express vectors)
 
 mode=--expected-unsupported
