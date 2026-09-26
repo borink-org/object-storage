@@ -26,10 +26,10 @@
 //!
 //! This crate computes no checksum. A provider is three function pointers,
 //! `start`, `update` and `finish`, which keep their state in a
-//! [`ChecksumState`]. The `borink-crypto` crate has a CRC-64/NVME, an adapter
-//! for RustCrypto's `md-5`, and a trait that turns any implementation into a
-//! provider. Register one of those, or build your own with
-//! [`ChecksumProvider::new`].
+//! [`ChecksumState`]. The `borink-object-storage-crypto` crate has a
+//! CRC-64/NVME, an adapter for RustCrypto's `md-5`, and a trait that turns
+//! any implementation into a provider. Register one of those, or build your
+//! own with [`ChecksumProvider::new`].
 //!
 //! Neither checksum is cryptography. Both detect corruption in transit and
 //! nothing else.
@@ -198,8 +198,9 @@ impl ChecksumState {
     /// The number of bytes in the slot.
     ///
     /// A provider's state must fit in it. An MD5 as RustCrypto keeps it takes
-    /// 88 bytes, and a CRC-64 takes eight. `borink-crypto` refuses at compile
-    /// time to build a provider whose state is larger than this.
+    /// 88 bytes, and a CRC-64 takes eight. `borink-object-storage-crypto`
+    /// refuses at compile time to build a provider whose state is larger than
+    /// this.
     pub const LEN: usize = 128;
 
     /// Creates a slot whose bytes are not written yet.
@@ -238,7 +239,7 @@ impl core::fmt::Debug for ChecksumState {
 /// between requests.
 ///
 /// A provider holds no borrows, so it can be a `const`. The providers of
-/// `borink-crypto` are.
+/// `borink-object-storage-crypto` are.
 #[derive(Clone, Copy)]
 pub struct ChecksumProvider {
     kind: ChecksumKind,

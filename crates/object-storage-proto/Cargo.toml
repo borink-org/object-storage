@@ -1,6 +1,6 @@
 [package]
 name = "borink-object-storage-proto"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Object storage operations with a sans-IO core and externally buffered API, with support for Azure Blob Storage"

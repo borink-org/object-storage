@@ -654,8 +654,8 @@ fn a_crc64_is_sent_as_its_own_header() {
 
 #[test]
 fn a_computed_checksum_needs_a_provider_of_that_kind() {
-    // This client has none, so both kinds are refused. `borink-crypto`'s
-    // `encoder` tests cover a client that has one.
+    // This client has none, so both kinds are refused. The `encoder` tests of
+    // `borink-object-storage-crypto` cover a client that has one.
     for kind in [
         borink_object_storage_proto::ChecksumKind::Md5,
         borink_object_storage_proto::ChecksumKind::Crc64,
