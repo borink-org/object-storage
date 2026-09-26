@@ -1,0 +1,29 @@
+[package]
+name = "borink-object-tests-adapter"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The adapter that borink-org/object-tests grades, and `grade.sh` runs. The
+# library is what object-tests builds its example adapter from, pinned to a
+# commit of this repository. It is here so that a change to the crates' API
+# changes the adapter in the same commit.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "object-tests-adapter"
+path = "src/main.rs"
+
+[dependencies]
+borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
+borink-crypto = { path = "../../crates/crypto", features = ["md5", "crc64"] }
+# `default-features = false` drops gzip and brotli decoding, which the crate
+# forbids: it reads byte counts from the head that a decoded body contradicts.
+ureq = { version = "3.1", default-features = false }
+serde_json = "1"
+base64 = "0.22"
+
+[features]
+# HTTPS, which only the live probes need. Offline grading uses plain HTTP on loopback.
+live = ["ureq/rustls"]
