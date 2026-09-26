@@ -1,0 +1,21 @@
+name: object-tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The recorded Azure and S3 cases of borink-org/object-tests, graded through
+  # the adapter in `hosts/object-tests`. Its `grade.sh` pins the revision, and
+  # fails on any case whose verdict differs from `expected-unsupported.json`.
+  grade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - run: hosts/object-tests/grade.sh
