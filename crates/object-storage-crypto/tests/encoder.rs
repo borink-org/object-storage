@@ -16,8 +16,8 @@ fn blobs() -> Blobs<'static> {
         "token",
     )
     .unwrap()
-    .with_checksum(borink_crypto::CRC64)
-    .with_checksum(borink_crypto::MD5)
+    .with_checksum(borink_object_storage_crypto::CRC64)
+    .with_checksum(borink_object_storage_crypto::MD5)
 }
 
 fn now() -> Timestamps {
@@ -94,7 +94,7 @@ fn a_client_registers_the_kinds_it_computes() {
         "token",
     )
     .unwrap()
-    .with_checksum(borink_crypto::CRC64);
+    .with_checksum(borink_object_storage_crypto::CRC64);
     // A client is the value that carries the providers, so registering one
     // kind leaves the other refused.
     assert_eq!(put(&one, ChecksumKind::Crc64).unwrap(), "HZz9TO6x+RU=");

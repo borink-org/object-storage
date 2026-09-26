@@ -13,7 +13,8 @@
 //! use borink_object_storage_proto::{Blobs, Container};
 //!
 //! let container = Container::new("https://account.blob.core.windows.net", "objects")?;
-//! let blobs = Blobs::new(container, "access-token")?.with_checksum(borink_crypto::CRC64);
+//! let blobs = Blobs::new(container, "access-token")?
+//!     .with_checksum(borink_object_storage_crypto::CRC64);
 //! # }
 //! # Ok::<(), borink_object_storage_proto::Error>(())
 //! ```
@@ -95,7 +96,7 @@ pub trait Checksum: Default {
 /// sixteen, fails to compile:
 ///
 /// ```compile_fail
-/// use borink_crypto::{Checksum, provider};
+/// use borink_object_storage_crypto::{Checksum, provider};
 /// use borink_object_storage_proto::checksum::{ChecksumKind, Digest};
 ///
 /// #[derive(Default)]

@@ -32,14 +32,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "borink-crypto"
-version = "0.0.1"
-dependencies = [
- "borink-object-storage-proto",
- "md-5",
-]
-
-[[package]]
 name = "borink-object-storage-c"
 version = "0.0.0"
 dependencies = [
@@ -47,23 +39,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "borink-object-storage-crypto"
+version = "0.0.2"
+dependencies = [
+ "borink-object-storage-proto",
+ "md-5",
+]
+
+[[package]]
 name = "borink-object-storage-no-allocator"
 version = "0.0.0"
 dependencies = [
- "borink-crypto",
+ "borink-object-storage-crypto",
  "borink-object-storage-proto",
 ]
 
 [[package]]
 name = "borink-object-storage-proto"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "borink-object-tests-adapter"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
- "borink-crypto",
+ "borink-object-storage-crypto",
  "borink-object-storage-proto",
  "serde_json",
  "ureq",

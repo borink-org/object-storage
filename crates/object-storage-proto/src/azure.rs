@@ -808,7 +808,7 @@ impl<'a> Blobs<'a> {
     /// the later provider. A checksum that you pass as text needs no
     /// provider.
     ///
-    /// The `borink-crypto` crate has providers for both kinds.
+    /// The `borink-object-storage-crypto` crate has providers for both kinds.
     pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
         self.checksums[provider.kind().slot()] = Some(provider);
         self

@@ -28,8 +28,8 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
         return 2;
     };
     let blobs = blobs
-        .with_checksum(borink_crypto::CRC64)
-        .with_checksum(borink_crypto::MD5);
+        .with_checksum(borink_object_storage_crypto::CRC64)
+        .with_checksum(borink_object_storage_crypto::MD5);
     let mut buf = [0; 256];
     let now = Timestamps::from_unix(1_787_400_000);
     let get = PhysicalGet::new("object");

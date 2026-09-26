@@ -9,7 +9,7 @@
 //! placeholder token, and live cases need `endpoint.auth = "bearer"`.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_crypto::{Checksum, Crc64, Md5};
+use borink_object_storage_crypto::{Checksum, Crc64, Md5};
 use borink_object_storage_proto::azure::{
     self, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalCommitBlocks,
     PhysicalListBlocks, PhysicalStageBlock,

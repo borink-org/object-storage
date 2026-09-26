@@ -3,7 +3,7 @@
 
 #![cfg(all(feature = "crc64", feature = "md5"))]
 
-use borink_crypto::{Checksum, Crc64, Md5};
+use borink_object_storage_crypto::{Checksum, Crc64, Md5};
 use borink_object_storage_proto::checksum::BASE64_LEN;
 
 fn base64<C: Checksum>(pieces: &[&[u8]]) -> String {

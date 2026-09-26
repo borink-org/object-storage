@@ -40,11 +40,12 @@ jobs:
       - name: Link without a global allocator
         run: cargo build --locked --profile no-allocator --no-default-features --features link-check --manifest-path checks/no-allocator/Cargo.toml
 
-  # The two crates that write `unsafe`, under Miri. `borink-crypto` keeps a
-  # host's checksum in the byte slot the encoder passes it, and the C ABI
-  # crate reads and writes caller-owned pointers on every call. Neither kind
-  # of mistake is a compile error or a failing assertion, so the tests are run
-  # a second time under an interpreter that checks each access.
+  # The two crates that write `unsafe`, under Miri.
+  # `borink-object-storage-crypto` keeps a host's checksum in the byte slot
+  # the encoder passes it, and the C ABI crate reads and writes caller-owned
+  # pointers on every call. Neither kind of mistake is a compile error or a
+  # failing assertion, so the tests are run a second time under an
+  # interpreter that checks each access.
   #
   # Miri ships with nightly alone, so this job installs one beside the pinned
   # toolchain. That nightly is pinned like everything else here, so that a
@@ -71,7 +72,7 @@ jobs:
       - name: Prepare Miri
         run: cargo +$MIRI_TOOLCHAIN miri setup
       - name: Check the checksum providers
-        run: cargo +$MIRI_TOOLCHAIN miri test --locked -p borink-crypto --all-features
+        run: cargo +$MIRI_TOOLCHAIN miri test --locked -p borink-object-storage-crypto --all-features
       - name: Check the C ABI
         run: cargo +$MIRI_TOOLCHAIN miri test --locked -p borink-object-storage-c --all-features
 

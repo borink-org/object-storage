@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
-borink-crypto = { path = "../../crates/crypto", features = ["md5", "crc64"] }
+borink-object-storage-crypto = { path = "../../crates/object-storage-crypto", features = ["md5", "crc64"] }
 # `default-features = false` drops gzip and brotli decoding, which the crate
 # forbids: it reads byte counts from the head that a decoded body contradicts.
 ureq = { version = "3.1", default-features = false }
