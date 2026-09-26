@@ -7,6 +7,12 @@
 # adapter reports unsupported and why. A listed case that starts to pass fails
 # the run as well as a case that regresses, so the list stays exact.
 #
+# An entry with a `*` names a whole category, such as `operations/s3/*` or
+# `operations/azure*/lease-*`, and every case it covers must be unsupported.
+# An entry `field:/value/NAME` covers every case unsupported only because the
+# adapter declares that field unsupported. Write patterns and field entries by
+# hand; `--record` keeps them and lists only the cases they miss.
+#
 #     hosts/object-tests/grade.sh
 #
 # The revision fixes both the cases and the protocol the adapter speaks. After
@@ -18,7 +24,7 @@
 set -euo pipefail
 
 # Move this on purpose: a new revision can bring new cases, or a new protocol.
-revision=813ee34433f496f3d77f0ec71faabd5a36694be4
+revision=bb4523e85b49c9a3d54cb1a9b545fbc5f40cf0c4
 suites=(core operations s3-express vectors)
 
 mode=--expected-unsupported

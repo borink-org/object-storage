@@ -369,18 +369,29 @@ fn read_object(
 
     Ok(match outcome {
         GetHeadOutcome::Body { meta, .. } | GetHeadOutcome::Complete { meta } => {
-            // The crate does not read Content-MD5 from a response head.
-            let unsupported_fields = json!([{
-                "at": "/value/content_md5_base64",
-                "scope": "sdk",
-                "reason": "ResponseHead and ObjectMeta carry no Content-MD5",
-            }]);
+            // The crate reads these response headers from no head.
+            let unsupported_fields = json!(
+                [
+                    ("content_md5_base64", "Content-MD5"),
+                    ("content_language", "Content-Language"),
+                    ("content_disposition", "Content-Disposition"),
+                    ("cache_control", "Cache-Control"),
+                ]
+                .map(|(field, header)| json!({
+                    "at": format!("/value/{field}"),
+                    "scope": "sdk",
+                    "reason": format!("ResponseHead and ObjectMeta carry no {header}"),
+                }))
+            );
             let mut value = json!({
                 "etag": text_of(meta.e_tag).unwrap_or_default(),
                 "metadata": metadata_from_headers(&exchange),
             });
             if let Some(content_type) = text_of(meta.content_type) {
                 value["content_type"] = json!(content_type);
+            }
+            if let Some(content_encoding) = text_of(meta.content_encoding) {
+                value["content_encoding"] = json!(content_encoding);
             }
             if let Some(version) = text_of(meta.version) {
                 value["version"] = json!(version);
@@ -412,9 +423,6 @@ fn write_object(
     blobs: &Blobs<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    if call.get("content_type").is_some() {
-        return Ok(unsupported_by_crate("PhysicalPut sets no content type"));
-    }
     // A plan holds one transactional checksum, so the crate cannot send a write
     // that names two. Azure refuses such a write too.
     if call.get("checksums").is_some() {
@@ -1023,6 +1031,84 @@ fn account_namespace(endpoint: &Value) -> AzureNamespace {
     }
 }
 
+// The call fields this adapter maps, by operation. A call with any other field is unsupported,
+// so that the adapter never sends a request without something the case asked for.
+fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "get" => &[
+            "key",
+            "range",
+            "if_match",
+            "if_none_match",
+            "version",
+            "snapshot",
+        ],
+        "head" => &["key", "if_match", "if_none_match", "version", "snapshot"],
+        "put" => &[
+            "key",
+            "body_base64",
+            "if_match",
+            "if_none_match",
+            "metadata",
+            "checksum",
+            "checksums",
+        ],
+        "delete" => &[
+            "key",
+            "if_match",
+            "if_none_match",
+            "snapshots",
+            "snapshot",
+            "version",
+        ],
+        "list" => &["prefix", "page_size"],
+        "list_page" => &[
+            "prefix",
+            "continuation_token",
+            "delimiter",
+            "page_size",
+            "include",
+        ],
+        "azure.stage_block" => &["key", "block_id_base64", "body_base64"],
+        "azure.commit_blocks" => &[
+            "key",
+            "blocks",
+            "content_md5_base64",
+            "if_match",
+            "if_none_match",
+        ],
+        "azure.list_blocks" => &["key", "kind"],
+        _ => &[],
+    }
+}
+
+/// Returns the reason the crate cannot express a call field, for the fields it lacks.
+fn crate_limitation(field: &str) -> Option<&'static str> {
+    match field {
+        "if_modified_since" | "if_unmodified_since" => Some("ConditionKind has no date conditions"),
+        "content_type"
+        | "content_encoding"
+        | "content_language"
+        | "content_disposition"
+        | "cache_control" => Some("PhysicalPut sets no content properties"),
+        "tier" | "tags" => Some("PhysicalPut sets no access tier or tags"),
+        "lease_id" => Some("the crate's plans carry no lease ID"),
+        _ => None,
+    }
+}
+
+fn unmapped_call_field(operation: &str, call: &Value) -> Option<Value> {
+    let mapped_fields = mapped_call_fields(operation);
+    let unmapped_field = call.as_object()?.keys().find(|field| {
+        !matches!(field.as_str(), "op" | "credential_mode")
+            && !mapped_fields.contains(&field.as_str())
+    })?;
+    Some(match crate_limitation(unmapped_field) {
+        Some(reason) => unsupported_by_crate(reason),
+        None => unsupported_by_adapter(&format!("call field {unmapped_field} is not mapped")),
+    })
+}
+
 fn execute_operation(message: &Value) -> Result<Value, AdapterError> {
     let version = message.get("version").and_then(Value::as_u64);
     if version != Some(PROTOCOL_VERSION) {
@@ -1048,6 +1134,14 @@ fn execute_operation(message: &Value) -> Result<Value, AdapterError> {
         }
         "azure.snapshot" => return Ok(unsupported_by_crate("the crate has no snapshot operation")),
         _ => {}
+    }
+    if mapped_call_fields(operation).is_empty() {
+        return Ok(unsupported_by_crate(&format!(
+            "the crate has no {operation} operation"
+        )));
+    }
+    if let Some(unsupported) = unmapped_call_field(operation, call) {
+        return Ok(unsupported);
     }
 
     let endpoint = message.get("endpoint").ok_or("missing endpoint")?;
