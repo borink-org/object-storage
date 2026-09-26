@@ -101,19 +101,42 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
             e_tag: Some(b"\"etag\"")
         })
     );
+    let failed =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"ConditionNotMet".as_slice())]);
     assert_eq!(
-        accept(conditional(ConditionKind::IfMatch), ResponseHead::new(412)),
+        accept(conditional(ConditionKind::IfMatch), failed),
         Ok(GetHeadOutcome::PreconditionFailed)
     );
 
-    // Nothing in an unconditional plan explains either status.
+    // Nothing in an unconditional plan explains a 304.
     assert_eq!(
         accept(GetShape::default(), not_modified),
         Err(Error::Response(ResponseFault::Status))
     );
+
+    // A 412 that names no failed condition is the service failure it names.
+    let lease =
+        ResponseHead::from_headers(412, [("x-ms-error-code", b"LeaseIdMissing".as_slice())]);
+    for shape in [GetShape::default(), conditional(ConditionKind::IfMatch)] {
+        match accept(shape, lease) {
+            Ok(GetHeadOutcome::ServiceFailure(failure)) => assert_eq!(failure.status, 412),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // A failed condition that Azure names only in the body is one too.
+    let unnamed = accept(conditional(ConditionKind::IfMatch), ResponseHead::new(412)).unwrap();
+    let GetHeadOutcome::NeedErrorBody(failure) = unnamed else {
+        panic!("unexpected outcome: {unnamed:?}");
+    };
     assert_eq!(
-        accept(GetShape::default(), ResponseHead::new(412)),
-        Err(Error::Response(ResponseFault::Status))
+        blobs().accept_error_body(
+            conditional(ConditionKind::IfMatch),
+            failure.status,
+            failure.request_id,
+            b"<Error><Code>ConditionNotMet</Code></Error>"
+        ),
+        GetHeadOutcome::PreconditionFailed
     );
 }
 
@@ -359,6 +382,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     let missing = need_error_body(&blobs, 404);
     assert_eq!(
         blobs.accept_error_body(
+            GetShape::default(),
             missing.status,
             missing.request_id,
             b"<Error><Code>ContainerNotFound</Code></Error>"
@@ -373,6 +397,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     let refused = need_error_body(&blobs, 400);
     assert!(matches!(
         blobs.accept_error_body(
+            GetShape::default(),
             refused.status,
             refused.request_id,
             b"<Error><Code>ServerBusy</Code></Error>"
@@ -387,7 +412,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     // A host that could read no body still gets a final outcome, with the
     // error unnamed.
     assert_eq!(
-        blobs.accept_error_body(missing.status, missing.request_id, b""),
+        blobs.accept_error_body(GetShape::default(), missing.status, missing.request_id, b""),
         GetHeadOutcome::NotFound { kind: None }
     );
 

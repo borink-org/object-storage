@@ -967,6 +967,10 @@ impl<'a> Blobs<'a> {
     /// A `Content-Range` whose end is before its start is
     /// [`ResponseFault::Head`]. A ranged plan that Azure answers with status
     /// 200 is [`ResponseFault::Range`].
+    ///
+    /// A 412 is [`GetHeadOutcome::PreconditionFailed`] only if the plan
+    /// carried `If-Match` and Azure names a failed condition. Any other 412 is
+    /// a service failure that names its code.
     pub fn accept_get_head<'h>(
         &self,
         shape: GetShape,
@@ -983,8 +987,14 @@ impl<'a> Blobs<'a> {
                 Err(ResponseFault::Status.into())
             }
             304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            412 if shape.condition != ConditionKind::IfMatch => Err(ResponseFault::Status.into()),
-            412 => Ok(GetHeadOutcome::PreconditionFailed),
+            // A 412 is the plan's failed condition only if the plan carried
+            // one and Azure names it. Azure also answers 412 for other
+            // reasons, which reach the caller as the service failure they are.
+            412 if shape.condition == ConditionKind::IfMatch
+                && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            {
+                Ok(GetHeadOutcome::PreconditionFailed)
+            }
             // Azure repeats the header's code in the body, so only a
             // missing header is worth a body read. A header naming a code
             // this crate does not know is already decisive.
@@ -1018,8 +1028,9 @@ impl<'a> Blobs<'a> {
 
     /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// Pass the `status` and the `request_id` of that
-    /// [`Failure`], and the body that you read. The body names
+    /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
+    /// `status` and the `request_id` of that [`Failure`], and the body that
+    /// you read. The body names
     /// the error, exactly as the `x-ms-error-code` header would have. Pass an
     /// empty body if you could not read one: the outcome is then final with
     /// the error unnamed.
@@ -1028,12 +1039,18 @@ impl<'a> Blobs<'a> {
     /// error this crate does not recognize, call [`classify_error`] instead.
     pub fn accept_error_body<'h>(
         &self,
+        shape: GetShape,
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
+            412 if shape.condition == ConditionKind::IfMatch
+                && kind == Some(ServiceErrorKind::Precondition) =>
+            {
+                GetHeadOutcome::PreconditionFailed
+            }
             404 => GetHeadOutcome::NotFound { kind },
             // The body's code refines the category too, exactly as the
             // header's would have.
@@ -1085,8 +1102,13 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Response`] if the head cannot be read against `shape`.
-    /// A success status that a removal never returns, and a failed condition
-    /// on a removal that carried none, are both [`ResponseFault::Status`].
+    /// A success status that a removal never returns is
+    /// [`ResponseFault::Status`].
+    ///
+    /// A 412 is [`DeleteHeadOutcome::PreconditionFailed`] only if the plan
+    /// carried a condition and Azure names a failed condition. Azure answers
+    /// 412 for other reasons too, such as `LeaseIdMissing` on a leased blob,
+    /// and those are service failures that name their code.
     pub fn accept_delete_head<'h>(
         &self,
         shape: DeleteShape,
@@ -1094,8 +1116,11 @@ impl<'a> Blobs<'a> {
     ) -> Result<DeleteHeadOutcome<'h>> {
         match head.status {
             202 => Ok(DeleteHeadOutcome::Accepted),
-            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
-            412 => Ok(DeleteHeadOutcome::PreconditionFailed),
+            412 if shape.condition != ConditionKind::None
+                && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            {
+                Ok(DeleteHeadOutcome::PreconditionFailed)
+            }
             404 if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
@@ -1122,12 +1147,18 @@ impl<'a> Blobs<'a> {
     /// the same way.
     pub fn accept_delete_error_body<'h>(
         &self,
+        shape: DeleteShape,
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
+            412 if shape.condition != ConditionKind::None
+                && kind == Some(ServiceErrorKind::Precondition) =>
+            {
+                DeleteHeadOutcome::PreconditionFailed
+            }
             404 => DeleteHeadOutcome::NotFound { kind },
             status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
@@ -1145,8 +1176,13 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Response`] if the head cannot be read against `shape`.
-    /// A success status that a write never returns, and a failed condition on
-    /// a write that carried none, are both [`ResponseFault::Status`].
+    /// A success status that a write never returns is
+    /// [`ResponseFault::Status`].
+    ///
+    /// A 412 is [`PutHeadOutcome::PreconditionFailed`] only if the plan carried
+    /// a condition and Azure names a failed condition. Azure answers 412 for
+    /// other reasons too, such as `LeaseIdMissing` on a leased blob, and those
+    /// are service failures that name their code.
     pub fn accept_put_head<'h>(
         &self,
         shape: PutShape,
@@ -1163,9 +1199,11 @@ impl<'a> Blobs<'a> {
                     content_type: head.content_type,
                 },
             }),
-            // Nothing in an unconditional write explains a failed condition.
-            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
-            412 => Ok(PutHeadOutcome::PreconditionFailed),
+            412 if shape.condition != ConditionKind::None
+                && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            {
+                Ok(PutHeadOutcome::PreconditionFailed)
+            }
             404 if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
@@ -1192,12 +1230,18 @@ impl<'a> Blobs<'a> {
     /// same way.
     pub fn accept_put_error_body<'h>(
         &self,
+        shape: PutShape,
         status: u16,
         request_id: Option<&'h [u8]>,
         body: &[u8],
     ) -> PutHeadOutcome<'h> {
         let kind = body_kind(body);
         match status {
+            412 if shape.condition != ConditionKind::None
+                && kind == Some(ServiceErrorKind::Precondition) =>
+            {
+                PutHeadOutcome::PreconditionFailed
+            }
             404 => PutHeadOutcome::NotFound { kind },
             status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
