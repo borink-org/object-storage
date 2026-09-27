@@ -193,6 +193,7 @@ use crate::common::{
     parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
+use crate::query::{self, Parameter, QueryValue};
 use crate::request::{HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::{
@@ -525,8 +526,9 @@ struct Signed<'p> {
     method: Method,
     // The object, or `None` for the bucket itself.
     key: Option<&'p str>,
-    // The query, in the order of its names.
-    query: &'p [Option<QueryParameter<'p>>],
+    // The query, in the order of its names, with every value one that reads
+    // the same encoded again. See `query.rs`.
+    query: &'p [Parameter<'p>],
     range: RequestedRange,
     condition: ConditionKind,
     condition_value: Option<&'p [u8]>,
@@ -535,10 +537,6 @@ struct Signed<'p> {
     metadata: &'p [MetadataPair<'p>],
     content_sha256: &'p [u8],
 }
-
-// One parameter of a query: its name, which is usable in a URL as it is, and
-// its value, which is percent-encoded as it is written.
-type QueryParameter<'p> = (&'p str, &'p [u8]);
 
 // Where the value of a signed header comes from.
 #[derive(Clone, Copy)]
@@ -812,10 +810,7 @@ impl<'a> Objects<'a> {
             self.bucket.write_host(&mut |piece| out.push(piece));
             self.bucket
                 .write_path(&mut |piece| out.push(piece), signed.key);
-            if signed.query.iter().any(Option::is_some) {
-                out.push(b"?");
-                write_query(&mut |piece| out.push(piece), signed.query);
-            }
+            query::write_in_url(&mut |piece| out.push(piece), signed.query);
         });
         let token = self.token();
         head.header("authorization", |out| {
@@ -897,9 +892,10 @@ impl<'a> Objects<'a> {
         out(b"\n");
         self.bucket.write_path(out, signed.key);
         out(b"\n");
-        // The URL carries the query in its canonical form, so this is the
-        // same text.
-        write_query(out, signed.query);
+        // The URL carries the query in its canonical form: every byte but the
+        // unreserved ones percent-encoded, in upper case, and the parameters
+        // in the order of their names. So this is the same text.
+        query::write(out, signed.query);
         out(b"\n");
         let token = self.token();
         for header in ordered_headers(signed, token) {
@@ -1144,23 +1140,26 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list)?;
-        let max_keys = list.max_results.map(|max| U64Decimal::new(max.into()));
-        // In the order of the names, which SigV4 signs. The keys come back
-        // URL-encoded, so a key that XML cannot carry still arrives.
+        // In the order of the names, which SigV4 signs. Each literal is
+        // unreserved text, so it reads the same encoded again. The keys come
+        // back URL-encoded, so a key that XML cannot carry still arrives.
         let query = [
             list.marker
-                .map(|marker| ("continuation-token", marker.as_bytes())),
-            list.delimited.then_some(("delimiter", DELIMITER)),
-            Some(("encoding-type", b"url".as_slice())),
+                .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
+            list.delimited
+                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            Some(("encoding-type", QueryValue::Literal("url"))),
             list.include
                 .contains(ListInclude::OWNER)
-                .then_some(("fetch-owner", b"true".as_slice())),
-            Some(("list-type", b"2".as_slice())),
-            max_keys.as_ref().map(|max| ("max-keys", max.as_bytes())),
-            (!list.prefix.is_empty()).then_some(("prefix", list.prefix.as_bytes())),
+                .then_some(("fetch-owner", QueryValue::Literal("true"))),
+            Some(("list-type", QueryValue::Literal("2"))),
+            list.max_results
+                .map(|max| ("max-keys", QueryValue::Number(max))),
+            (!list.prefix.is_empty())
+                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
             list.start_after
                 .filter(|key| !key.is_empty())
-                .map(|key| ("start-after", key.as_bytes())),
+                .map(|key| ("start-after", QueryValue::Encoded(key.as_bytes()))),
         ];
         let signed = Signed {
             method: Method::Get,
@@ -1301,23 +1300,6 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
         b"InternalError" | b"ServiceUnavailable" => ServiceErrorKind::Service,
         _ => return None,
     })
-}
-
-// Writes a query in the canonical form of SigV4, which the URL carries as
-// well: each name and value with every byte but the unreserved ones
-// percent-encoded, in upper case, and the parameters in the order of their
-// names. The caller lists them in that order.
-fn write_query(out: &mut dyn FnMut(&[u8]), query: &[Option<QueryParameter<'_>>]) {
-    for (index, (name, value)) in query.iter().flatten().enumerate() {
-        if index != 0 {
-            out(b"&");
-        }
-        out(name.as_bytes());
-        out(b"=");
-        for part in crate::path::encode_query_value(value) {
-            out(part);
-        }
-    }
 }
 
 // Every signed header in the order of its name: the fixed set sorted, merged

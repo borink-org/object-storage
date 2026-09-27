@@ -385,10 +385,6 @@ impl ListInclude {
     /// that holds elements.
     pub const OWNER: Self = Self(1 << 1);
 
-    // The Azure word of each flag, in the order they are written into the
-    // query.
-    const WORDS: [(Self, &'static str); 1] = [(Self::METADATA, "metadata")];
-
     /// Returns `true` if this set holds every flag of `other`.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -397,14 +393,6 @@ impl ListInclude {
     /// Returns `true` if this set holds no flag.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
-    }
-
-    // The words of the set, in one fixed order whatever order it was built
-    // in, so a caller can compare the URL byte for byte.
-    pub(crate) fn words(self) -> impl Iterator<Item = &'static str> {
-        Self::WORDS
-            .into_iter()
-            .filter_map(move |(flag, word)| self.contains(flag).then_some(word))
     }
 }
 

@@ -8,6 +8,7 @@ use crate::common::{
     parse_content_range, push_condition, text_header, trim_ascii, valid_header, validate_condition,
     write_range,
 };
+use crate::query::{self, Parameter, QueryValue};
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::{
     Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind, DeleteHeadOutcome,
@@ -908,16 +909,16 @@ impl<'a> Blobs<'a> {
         &self,
         head: &mut HeadWriter<'_>,
         key: Option<&str>,
-        query: &[Option<(&str, QueryValue<'_>)>],
+        query: &[Parameter<'_>],
         range: RequestedRange,
         now: &Timestamps,
     ) -> Result<()> {
         let mut counted = Writer::new(&mut []);
-        self.write_url(&mut counted, key, query);
+        self.write_url(&mut |piece| counted.push(piece), key, query);
         if counted.position() > MAX_URL_LEN {
             return Err(InvalidPlan::UrlTooLong.into());
         }
-        head.url(|out| self.write_url(out, key, query));
+        head.url(|out| self.write_url(&mut |piece| out.push(piece), key, query));
         head.header("authorization", |out| {
             out.push(b"Bearer ");
             out.push(self.token.as_bytes());
@@ -932,27 +933,17 @@ impl<'a> Blobs<'a> {
         Ok(())
     }
 
-    fn write_url(
-        &self,
-        out: &mut Writer<'_>,
-        key: Option<&str>,
-        query: &[Option<(&str, QueryValue<'_>)>],
-    ) {
-        out.push(self.container.endpoint.as_bytes());
-        out.push(b"/");
-        out.push(self.container.name.as_bytes());
+    fn write_url(&self, out: &mut dyn FnMut(&[u8]), key: Option<&str>, query: &[Parameter<'_>]) {
+        out(self.container.endpoint.as_bytes());
+        out(b"/");
+        out(self.container.name.as_bytes());
         if let Some(key) = key {
-            out.push(b"/");
+            out(b"/");
             for part in crate::path::encode_object_key(key) {
-                out.push(part);
+                out(part);
             }
         }
-        for (index, (name, value)) in query.iter().flatten().enumerate() {
-            out.push(if index == 0 { b"?" } else { b"&" });
-            out.push(name.as_bytes());
-            out.push(b"=");
-            value.write(out);
-        }
+        query::write_in_url(out, query);
     }
 
     /// Reads a response head and reports what to do next.
@@ -1285,6 +1276,14 @@ impl<'a> Blobs<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list, self.namespace)?;
+        let mut words = [""; INCLUDE_WORDS.len()];
+        let mut word_count = 0;
+        for (flag, word) in INCLUDE_WORDS {
+            if list.include.contains(flag) {
+                words[word_count] = word;
+                word_count += 1;
+            }
+        }
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
         let query = [
@@ -1298,7 +1297,7 @@ impl<'a> Blobs<'a> {
                 .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
             list.max_results
                 .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
-            (!list.include.is_empty()).then_some(("include", QueryValue::Include(list.include))),
+            (word_count != 0).then(|| ("include", QueryValue::Words(&words[..word_count]))),
         ];
 
         let mut head = HeadWriter::new(buf, headers);
@@ -1480,39 +1479,10 @@ fn validate_block_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-// One query value, in the form that the URL writer needs it.
-#[derive(Clone, Copy)]
-enum QueryValue<'q> {
-    // Text of this crate's own, which is already usable in a URL.
-    Literal(&'q str),
-    // Bytes of the caller's or the service's, which are not.
-    Encoded(&'q [u8]),
-    Number(u32),
-    // The words of a listing's include set, comma separated.
-    Include(ListInclude),
-}
-
-impl QueryValue<'_> {
-    fn write(self, out: &mut Writer<'_>) {
-        match self {
-            Self::Literal(value) => out.push(value.as_bytes()),
-            Self::Encoded(value) => {
-                for part in crate::path::encode_query_value(value) {
-                    out.push(part);
-                }
-            }
-            Self::Number(value) => out.push(U64Decimal::new(value as u64).as_bytes()),
-            Self::Include(include) => {
-                for (index, word) in include.words().enumerate() {
-                    if index > 0 {
-                        out.push(b",");
-                    }
-                    out.push(word.as_bytes());
-                }
-            }
-        }
-    }
-}
+// The word that asks Azure for each flag of a listing's include set, in the
+// one order that the query writes them, whatever order the set was built in,
+// so a caller can compare the URL byte for byte.
+const INCLUDE_WORDS: [(ListInclude, &str); 1] = [(ListInclude::METADATA, "metadata")];
 
 fn named<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
     kind_for_code(trim_ascii(head.error_code.unwrap_or_default()))

@@ -224,6 +224,7 @@ mod http;
 pub mod layered;
 mod outcome;
 mod path;
+mod query;
 mod request;
 pub mod s3;
 pub mod sigv4;
