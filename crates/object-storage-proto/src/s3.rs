@@ -496,6 +496,190 @@ pub enum PayloadHash {
     Unsigned,
 }
 
+/// An element that an S3 listing writes for an object, other than the four
+/// that every [`ListEntry`] carries.
+///
+/// Name the ones you want in a [`PropertySet`] and read a page with
+/// [`Objects::fill_listing_with`], which hands you their values as it goes.
+/// Read anything that is not listed here with [`ListEntry::property`].
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ObjectProperty {
+    /// The storage class, such as `STANDARD` or `GLACIER`.
+    StorageClass,
+    /// The algorithm of the checksum that S3 keeps for the object, such as
+    /// `CRC64NVME`. An object written with more than one reports the first.
+    ChecksumAlgorithm,
+    /// Whether that checksum covers the whole object, `FULL_OBJECT`, or is
+    /// made of the checksums of its parts, `COMPOSITE`.
+    ChecksumType,
+    /// The owner, as the bytes between the tags of the `Owner` element,
+    /// which holds an `ID`. S3 writes it only when the plan asked for
+    /// [`ListInclude::OWNER`]. Pass the value to
+    /// [`Metadata::new`](crate::Metadata::new) to read the `ID`.
+    Owner,
+    /// The state of a restore out of an archive class, as the bytes between
+    /// the tags of the `RestoreStatus` element. Pass the value to
+    /// [`Metadata::new`](crate::Metadata::new) to read what it holds.
+    RestoreStatus,
+}
+
+impl ObjectProperty {
+    /// Every property, in the order of their numbers.
+    pub const ALL: &[Self] = &[
+        Self::StorageClass,
+        Self::ChecksumAlgorithm,
+        Self::ChecksumType,
+        Self::Owner,
+        Self::RestoreStatus,
+    ];
+
+    /// How many properties there are, which is the most a set can hold.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// The element name, as S3 writes it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StorageClass => "StorageClass",
+            Self::ChecksumAlgorithm => "ChecksumAlgorithm",
+            Self::ChecksumType => "ChecksumType",
+            Self::Owner => "Owner",
+            Self::RestoreStatus => "RestoreStatus",
+        }
+    }
+
+    /// Returns the property with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::StorageClass,
+            1 => Self::ChecksumAlgorithm,
+            2 => Self::ChecksumType,
+            3 => Self::Owner,
+            4 => Self::RestoreStatus,
+            _ => return None,
+        })
+    }
+
+    // Whether the element holds other elements rather than one text. The
+    // page reader reads such an element to its close tag and reports
+    // everything between the tags.
+    pub(crate) const fn holds_elements(self) -> bool {
+        matches!(self, Self::Owner | Self::RestoreStatus)
+    }
+
+    // The property that an element name stands for, if it is one of these.
+    pub(crate) fn identify(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|property| property.name().as_bytes() == name)
+    }
+
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+// A set is a byte, one bit per property.
+const _: () = assert!(ObjectProperty::COUNT <= 8);
+
+/// The properties that one read of an S3 page is asked for.
+///
+/// Build one with [`Self::of`] and pass it to [`Objects::fill_listing_with`].
+/// The values come back in the order that [`ObjectProperty`] lists them,
+/// whatever order the set was built in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PropertySet(u8);
+
+impl PropertySet {
+    /// A set of these properties. Naming one twice is the same as once.
+    pub const fn of(properties: &[ObjectProperty]) -> Self {
+        let mut mask = 0;
+        let mut i = 0;
+        while i < properties.len() {
+            mask |= properties[i].bit();
+            i += 1;
+        }
+        Self(mask)
+    }
+
+    /// A set from its bits, one per property in the order [`ObjectProperty`]
+    /// numbers them. A bit that names no property is dropped.
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits & ((1 << ObjectProperty::COUNT) - 1))
+    }
+
+    /// The set's bits, as [`Self::from_bits`] reads them.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether the set holds this property.
+    pub const fn contains(self, property: ObjectProperty) -> bool {
+        self.0 & property.bit() != 0
+    }
+
+    /// How many properties the set holds, which is how many values a read
+    /// reports for each entry.
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Whether the set holds nothing.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Where a property's value stands among the values of an entry: its
+    /// rank among the set's members, in the order [`ObjectProperty`] lists
+    /// them. Meaningful only for a property the set holds.
+    pub const fn slot(self, property: ObjectProperty) -> usize {
+        (self.0 & (property.bit() - 1)).count_ones() as usize
+    }
+}
+
+/// The values that one entry gave for the properties of a set.
+///
+/// [`Objects::fill_listing_with`] hands one to the closure that builds each
+/// entry. Each value is the bytes between the element's tags, as S3 wrote
+/// them, under the rules that [`ListEntry::property`] states. A group of
+/// keys gives no values.
+#[derive(Clone, Copy, Debug)]
+pub struct PropertyValues<'x, 'b> {
+    set: PropertySet,
+    values: &'x [Option<&'b [u8]>],
+}
+
+impl<'x, 'b> PropertyValues<'x, 'b> {
+    pub(crate) fn new(set: PropertySet, values: &'x [Option<&'b [u8]>]) -> Self {
+        Self { set, values }
+    }
+
+    /// The set that the page was read with.
+    pub const fn set(&self) -> PropertySet {
+        self.set
+    }
+
+    /// The value the entry gave for one property.
+    ///
+    /// [`None`] if the property is not in the set or the entry wrote no such
+    /// element; an empty slice if it wrote the element empty.
+    pub fn get(&self, property: ObjectProperty) -> Option<&'b [u8]> {
+        if !self.set.contains(property) {
+            return None;
+        }
+        self.values[self.set.slot(property)]
+    }
+
+    /// Every value, one per member of the set, in the order
+    /// [`ObjectProperty`] lists them.
+    pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
+        self.values
+    }
+}
+
 /// The S3 operations that one set of credentials authorizes on one bucket.
 ///
 /// This is a small value, and it is [`Copy`]. This crate never reads the
@@ -1235,7 +1419,8 @@ impl<'a> Objects<'a> {
     /// its quotes, and its date is ISO 8601: read it with
     /// [`layered::iso8601_ms`](crate::layered::iso8601_ms). Read
     /// `StorageClass` and the other elements of an object with
-    /// [`ListEntry::property`].
+    /// [`ListEntry::property`], or in the same pass as the rest of the page
+    /// with [`Self::fill_listing_with`].
     ///
     /// # Errors
     ///
@@ -1253,7 +1438,41 @@ impl<'a> Objects<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::s3::fill_listing(body, into, E::from)
+        crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+    }
+
+    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
+    /// values of the properties in `wanted` as it goes.
+    ///
+    /// This is [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with)
+    /// for S3. `build` is called once per entry, with the entry and its
+    /// values, and what it returns is written into your array. The values
+    /// point into `body`, like the entry. A group of keys gives no values.
+    ///
+    /// ```
+    /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};
+    /// # use borink_object_storage_proto::{ListEntry, Result};
+    /// # fn read(objects: &Objects<'_>, body: &mut [u8]) -> Result<()> {
+    /// let wanted = PropertySet::of(&[ObjectProperty::StorageClass]);
+    /// let mut entries = [(ListEntry::default(), None); 1000];
+    /// objects.fill_listing_with(body, &mut entries, wanted, |entry, values| {
+    ///     (entry, values.get(ObjectProperty::StorageClass))
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fill_listing`].
+    pub fn fill_listing_with<'b, E>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [E],
+        wanted: PropertySet,
+        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+    ) -> Result<Listing<'b>> {
+        crate::xml::s3::fill_listing(body, into, wanted, build)
     }
 }
 

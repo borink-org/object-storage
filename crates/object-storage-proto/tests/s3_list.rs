@@ -149,3 +149,45 @@ fn a_page_that_contradicts_its_token_is_refused() {
     assert_eq!(page(yes, ""), fault);
     assert_eq!(page(no, token), fault);
 }
+
+#[test]
+fn wanted_properties_are_read_in_the_same_pass() {
+    use borink_object_storage_proto::s3::{ObjectProperty, PropertySet};
+    let wanted = PropertySet::of(&[
+        ObjectProperty::Owner,
+        ObjectProperty::StorageClass,
+        ObjectProperty::ChecksumAlgorithm,
+    ]);
+    let body = Vec::leak(
+        "<ListBucketResult><EncodingType>url</EncodingType>\
+         <Contents><Key>a%3C%2FKey%3E</Key><Size>1</Size>\
+         <ChecksumAlgorithm>CRC32</ChecksumAlgorithm>\
+         <ChecksumAlgorithm>SHA256</ChecksumAlgorithm>\
+         <Owner><ID>owner-id</ID></Owner><StorageClass>GLACIER</StorageClass></Contents>\
+         <CommonPrefixes><Prefix>b/</Prefix></CommonPrefixes></ListBucketResult>"
+            .as_bytes()
+            .to_vec(),
+    );
+    let mut entries = [("", None, None, None); 2];
+    let page = objects(Addressing::Path)
+        .fill_listing_with(body, &mut entries, wanted, |entry, values| {
+            (
+                entry.key,
+                values.get(ObjectProperty::StorageClass),
+                values.get(ObjectProperty::ChecksumAlgorithm),
+                values.get(ObjectProperty::Owner),
+            )
+        })
+        .unwrap();
+    assert_eq!(page.filled, 2);
+    assert_eq!(
+        entries[0],
+        (
+            "a</Key>",
+            Some(b"GLACIER".as_slice()),
+            Some(b"CRC32".as_slice()),
+            Some(b"<ID>owner-id</ID>".as_slice()),
+        )
+    );
+    assert_eq!(entries[1], ("b/", None, None, None));
+}

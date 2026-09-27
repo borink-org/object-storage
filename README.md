@@ -30,6 +30,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
   - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
 - Object listing (GET request on the container or bucket, one page at a time)
   - Supports delimiters, prefixes
+  - Supports registering properties you want to read into your own entry type in the main parsing pass
   - S3: asks for URL-encoded keys, so keys that XML cannot carry are listed too
   - S3: start after a key, and list each object's owner
 - Metadata (arbitrary key-value pairs attached to objects) reading and writing
@@ -41,7 +42,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 
 ### Azure Blob Storage-only
 
-- Object listing: registering properties you want to read into your own entry type in the main parsing pass, and listing metadata
+- Object listing: listing metadata (S3 does not list it)
 - Object multipart upload
 
 ### S3-only

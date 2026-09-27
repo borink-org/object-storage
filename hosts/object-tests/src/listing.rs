@@ -16,20 +16,32 @@ pub(crate) struct ListedPage {
     next_marker: Option<String>,
 }
 
+/// An entry that a fill wrote: a [`ListEntry`], or one with the values of
+/// properties read in the same pass.
+pub(crate) trait Listed {
+    fn entry(&self) -> &ListEntry<'_>;
+}
+
+impl Listed for ListEntry<'_> {
+    fn entry(&self) -> &ListEntry<'_> {
+        self
+    }
+}
+
 impl ListedPage {
     /// Splits the entries that a fill wrote into objects and groups of keys,
     /// writing each object with `object_value`.
-    pub(crate) fn read(
-        slots: &[ListEntry<'_>],
+    pub(crate) fn read<T: Listed>(
+        slots: &[T],
         listing: Listing<'_>,
-        object_value: impl Fn(&ListEntry<'_>) -> Value,
+        object_value: impl Fn(&T) -> Value,
     ) -> Self {
         let mut entries = Vec::new();
         let mut prefixes = Vec::new();
-        for entry in &slots[..listing.filled] {
-            match entry.kind {
-                EntryKind::Prefix => prefixes.push(entry.key.to_owned()),
-                _ => entries.push(object_value(entry)),
+        for slot in &slots[..listing.filled] {
+            match slot.entry().kind {
+                EntryKind::Prefix => prefixes.push(slot.entry().key.to_owned()),
+                _ => entries.push(object_value(slot)),
             }
         }
         Self {
@@ -57,11 +69,11 @@ pub(crate) type PageRead = Result<Result<ListedPage, Value>, AdapterError>;
 
 /// An array of `max_results` entries always holds a whole page, and one of
 /// the service's maximum does when the plan names none.
-pub(crate) fn entry_slots<'b>(plan: &PhysicalList<'_>, maximum: usize) -> Vec<ListEntry<'b>> {
+pub(crate) fn entry_slots<T: Clone + Default>(plan: &PhysicalList<'_>, maximum: usize) -> Vec<T> {
     let count = plan
         .max_results
         .map_or(maximum, |max_results| max_results as usize);
-    vec![ListEntry::default(); count]
+    vec![T::default(); count]
 }
 
 fn requested_page_size(call: &Value) -> Option<u32> {

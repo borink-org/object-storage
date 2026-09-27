@@ -27,6 +27,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New function `layered::iso8601_ms`, which reads the date of an S3 listing entry.
   - New field `PhysicalList::start_after`, which starts an S3 listing after a key. An Azure client refuses it.
   - New constant `ListInclude::OWNER`, which asks S3 for each object's owner. An Azure client refuses it.
+  - New method `Objects::fill_listing_with`, with new types `s3::ObjectProperty`, `s3::PropertySet` and `s3::PropertyValues`. They read the properties you name in the same pass as the page, as `Blobs::fill_listing_with` does for Azure.
 - AWS Signature Version 4:
   - New module `sigv4`.
   - New struct `sigv4::Credentials`, which holds an access key and an optional session token. `Credentials::new` also takes the function that wipes a client's copy of the secret access key.

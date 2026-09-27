@@ -387,7 +387,7 @@ fn read_page(
         return Ok(Err(error_result(&exchange, status)));
     }
 
-    let mut slots = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+    let mut slots: Vec<ListEntry<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
     let listing = page_step!(blobs.fill_listing(&mut exchange.body, &mut slots));
     let metadata_requested = list_plan.include.contains(ListInclude::METADATA);
     Ok(Ok(ListedPage::read(&slots, listing, |entry| {

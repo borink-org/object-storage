@@ -22,6 +22,7 @@
 use super::decode::{decode, decode_url};
 use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
 use super::scan::{Child, Scan, Span, fault, trim};
+use crate::s3::{ObjectProperty, PropertySet, PropertyValues};
 use crate::{CapacityError, EntryKind, Error, ListEntry, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";
@@ -31,7 +32,8 @@ const GROUP: &[u8] = b"CommonPrefixes";
 pub(crate) fn fill_listing<'b, E>(
     body: &'b mut [u8],
     into: &mut [E],
-    mut build: impl FnMut(ListEntry<'b>) -> E,
+    wanted: PropertySet,
+    mut build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
 ) -> Result<Listing<'b>> {
     check_body(body)?;
     let mut scan = Scan::new(body);
@@ -40,15 +42,15 @@ pub(crate) fn fill_listing<'b, E>(
     // type, and hands each entry to this closure.
     let room = into.len();
     let mut built = 0;
-    let mut sink = |entry: ListEntry<'b>| {
+    let mut sink = |entry: ListEntry<'b>, values: PropertyValues<'_, 'b>| {
         // In range: the read calls this only while `built` is below `room`.
-        into[built] = build(entry);
+        into[built] = build(entry, values);
         built += 1;
     };
-    read_root_children_into(scan, room, &mut sink)
+    read_root_children_into(scan, room, wanted, &mut sink)
 }
 
-type Sink<'s, 'b> = dyn FnMut(ListEntry<'b>) + 's;
+type Sink<'s, 'b> = dyn FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) + 's;
 
 // What the page said about itself, collected as its root's children are read.
 #[derive(Default)]
@@ -67,9 +69,16 @@ struct Page<'b> {
 fn read_root_children_into<'b>(
     mut scan: Scan<'b>,
     room: usize,
+    wanted: PropertySet,
     sink: &mut Sink<'_, 'b>,
 ) -> Result<Listing<'b>> {
     let mut page = Page::default();
+    // The spans of the wanted properties of one entry, and their values once
+    // it is built. Only the first `wanted.len()` slots are used, so a set
+    // that names nothing costs nothing here.
+    let mut spans = [None; ObjectProperty::COUNT];
+    let mut values: [Option<&'b [u8]>; ObjectProperty::COUNT] = [None; ObjectProperty::COUNT];
+    let slots = wanted.len();
     let mut seen_encoding = false;
     let mut seen_token = false;
     loop {
@@ -82,16 +91,18 @@ fn read_root_children_into<'b>(
         if scan.cur() == b'<' && scan.skip_misc()? {
             continue;
         }
+        let captured = &mut spans[..slots];
+        captured.fill(None);
         // Nearly every child of a page is an object, which is one compare.
         let fields = if scan.lit(b"<Contents>") {
-            Some(read_object(&mut scan)?)
+            Some(read_object(&mut scan, wanted, captured)?)
         } else {
             match scan.child(ROOT)? {
                 Child::Close => break,
                 Child::Open(tag) => match scan.text(tag.name) {
                     // An entry with nothing in it has no key.
                     OBJECT | GROUP if tag.empty => return fault(),
-                    OBJECT => Some(read_object(&mut scan)?),
+                    OBJECT => Some(read_object(&mut scan, wanted, captured)?),
                     GROUP => Some(read_group(&mut scan)?),
                     b"EncodingType" => {
                         // A second one is refused, as a second key is.
@@ -152,7 +163,11 @@ fn read_root_children_into<'b>(
         if page.built < room {
             let (entry, decoded) = build_entry(chunk, fields)?;
             page.decoded |= decoded;
-            sink(entry);
+            for (value, span) in values[..slots].iter_mut().zip(&spans[..slots]) {
+                // The spans were recorded on the chunk, which `raw` is.
+                *value = span.map(|(start, end)| &entry.raw[start..end]);
+            }
+            sink(entry, PropertyValues::new(wanted, &values[..slots]));
             page.built += 1;
         }
     }
@@ -208,12 +223,19 @@ impl Fields {
     }
 }
 
-// Reads an object. `<Contents>` has been consumed. Each field is matched
-// whole, as AWS spells its start tag, and again by name on the general path,
-// which any legal spelling reaches. A field added to one list must be added
-// to the other. Everything else, such as `StorageClass` and `Owner`, stays
-// in the entry's bytes for `ListEntry::property`.
-fn read_object(scan: &mut Scan<'_>) -> Result<Fields> {
+// Reads an object. `<Contents>` has been consumed. Each field and each
+// property is matched whole, as AWS spells its start tag, and again by name
+// on the general path, which any legal spelling reaches. One added to one
+// list must be added to the other. Everything else stays in the entry's
+// bytes for `ListEntry::property`.
+//
+// `captured` has one slot per member of `wanted`, and receives the span of
+// each wanted property's value that this object writes.
+fn read_object(
+    scan: &mut Scan<'_>,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<Fields> {
     let mut fields = Fields::new(false);
     loop {
         scan.skip_space();
@@ -225,6 +247,19 @@ fn read_object(scan: &mut Scan<'_>) -> Result<Fields> {
             }
             b'E' if scan.lit(b"<ETag>") => set_once(&mut fields.e_tag, scan.value_of(b"ETag")?)?,
             b'S' if scan.lit(b"<Size>") => set_once(&mut fields.size, scan.value_of(b"Size")?.0)?,
+            b'S' if scan.lit(b"<StorageClass>") => {
+                known(scan, ObjectProperty::StorageClass, wanted, captured)?;
+            }
+            b'C' if scan.lit(b"<ChecksumAlgorithm>") => {
+                known(scan, ObjectProperty::ChecksumAlgorithm, wanted, captured)?;
+            }
+            b'C' if scan.lit(b"<ChecksumType>") => {
+                known(scan, ObjectProperty::ChecksumType, wanted, captured)?;
+            }
+            b'O' if scan.lit(b"<Owner>") => known(scan, ObjectProperty::Owner, wanted, captured)?,
+            b'R' if scan.lit(b"<RestoreStatus>") => {
+                known(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
+            }
             b'/' if scan.lit(b"</Contents>") => break,
             _ => match scan.child(OBJECT)? {
                 Child::Close => break,
@@ -233,7 +268,19 @@ fn read_object(scan: &mut Scan<'_>) -> Result<Fields> {
                     b"LastModified" => set_once(&mut fields.last_modified, scan.value(tag)?)?,
                     b"ETag" => set_once(&mut fields.e_tag, scan.value(tag)?)?,
                     b"Size" => set_once(&mut fields.size, scan.value(tag)?.0)?,
-                    _ => scan.skip(tag)?,
+                    name => match ObjectProperty::identify(name) {
+                        Some(property) if wanted.contains(property) => {
+                            // An element that holds other elements has no
+                            // text to read, so it is read to its close tag.
+                            let span = if property.holds_elements() && !tag.empty {
+                                scan.nested(property.name().as_bytes())?
+                            } else {
+                                scan.value(tag)?.0
+                            };
+                            capture(property, span, wanted, captured);
+                        }
+                        _ => scan.skip(tag)?,
+                    },
                 },
             },
         }
@@ -243,6 +290,46 @@ fn read_object(scan: &mut Scan<'_>) -> Result<Fields> {
         return fault();
     }
     Ok(fields)
+}
+
+// Reads past a property whose start tag was matched whole, and keeps its
+// value if the caller asked for it.
+#[inline(always)]
+fn known(
+    scan: &mut Scan<'_>,
+    property: ObjectProperty,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) -> Result<()> {
+    let name = property.name().as_bytes();
+    let span = if property.holds_elements() {
+        scan.nested(name)?
+    } else {
+        scan.value_of(name)?.0
+    };
+    capture(property, span, wanted, captured);
+    Ok(())
+}
+
+// Keeps the span of a property's value if the caller asked for it. An object
+// that writes a property twice, as it may `ChecksumAlgorithm`, reports the
+// first.
+#[inline(always)]
+fn capture(
+    property: ObjectProperty,
+    span: Span,
+    wanted: PropertySet,
+    captured: &mut [Option<Span>],
+) {
+    // A slot is always in range: it is the property's rank in the set, and
+    // there is one slot per member. Written through `get_mut` so that no
+    // bounds check or panic path is compiled in.
+    if wanted.contains(property)
+        && let Some(slot) = captured.get_mut(wanted.slot(property))
+        && slot.is_none()
+    {
+        *slot = Some(span);
+    }
 }
 
 // Reads a group of keys. `<CommonPrefixes>` has been consumed. S3 writes one

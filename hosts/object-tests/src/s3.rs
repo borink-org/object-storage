@@ -6,7 +6,7 @@
 //! `AWS_SECRET_ACCESS_KEY` and, if set, `AWS_SESSION_TOKEN`.
 
 use crate::listing::{
-    ListedPage, PageRead, decoded_listing_text, entry_slots, list_all_keys, list_page,
+    Listed, ListedPage, PageRead, decoded_listing_text, entry_slots, list_all_keys, list_page,
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
@@ -16,7 +16,9 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
-use borink_object_storage_proto::s3::{self, Addressing, Bucket, Objects, PayloadHash, Service};
+use borink_object_storage_proto::s3::{
+    self, Addressing, Bucket, ObjectProperty, Objects, PayloadHash, PropertySet, Service,
+};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, Metadata,
@@ -304,12 +306,38 @@ fn read_page(
         return Ok(Err(error_result(&exchange, status)));
     }
 
-    let mut slots = entry_slots(list_plan, MAX_PAGE_ENTRIES);
-    let listing = page_step!(objects.fill_listing(&mut exchange.body, &mut slots));
+    let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+    // The storage class and the owner are read in the same pass as the page.
+    let wanted = PropertySet::of(&[ObjectProperty::StorageClass, ObjectProperty::Owner]);
+    let listing = page_step!(objects.fill_listing_with(
+        &mut exchange.body,
+        &mut slots,
+        wanted,
+        |entry, values| ObjectWithProperties {
+            entry,
+            storage_class: values.get(ObjectProperty::StorageClass),
+            owner: values.get(ObjectProperty::Owner),
+        }
+    ));
     Ok(Ok(ListedPage::read(&slots, listing, listed_entry_value)))
 }
 
-fn listed_entry_value(entry: &ListEntry<'_>) -> Value {
+/// A listed object, with the properties that the page was read for.
+#[derive(Clone, Copy, Default)]
+struct ObjectWithProperties<'b> {
+    entry: ListEntry<'b>,
+    storage_class: Option<&'b [u8]>,
+    owner: Option<&'b [u8]>,
+}
+
+impl Listed for ObjectWithProperties<'_> {
+    fn entry(&self) -> &ListEntry<'_> {
+        &self.entry
+    }
+}
+
+fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
+    let entry = &listed.entry;
     let mut value = json!({
         "key": entry.key,
         "size": entry.size.unwrap_or(0),
@@ -318,12 +346,12 @@ fn listed_entry_value(entry: &ListEntry<'_>) -> Value {
     if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
         value["last_modified"] = json!(rfc3339(millis / 1000));
     }
-    if let Some(storage_class) = entry.property("StorageClass") {
+    if let Some(storage_class) = listed.storage_class {
         value["storage_class"] = json!(decoded_listing_text(storage_class));
     }
     // The owner holds its ID as an element of its own.
-    if let Some((_, id)) = entry
-        .property("Owner")
+    if let Some((_, id)) = listed
+        .owner
         .and_then(|owner| Metadata::new(owner).find(|(name, _)| *name == b"ID"))
     {
         value["owner_id"] = json!(decoded_listing_text(id));
