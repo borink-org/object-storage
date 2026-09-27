@@ -1,10 +1,12 @@
-//! Loopback integration test for the listing of the synchronous `ureq` host.
+//! Loopback integration test for the Azure listing of the synchronous `ureq`
+//! host.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
 use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
+use borink_object_storage_ureq::azure;
 
 const PAGE: &str = "<EnumerationResults><Blobs>\
                     <Blob><Name>directory/a.txt</Name><Properties>\
@@ -49,7 +51,7 @@ fn reads_the_page_that_the_generated_request_asked_for() {
     };
     let mut body = Vec::new();
     let mut entries = [ListEntry::default(); 4];
-    let page = borink_azure_get_ureq::list(&blobs, &plan, &mut body, &mut entries).unwrap();
+    let page = azure::list(&blobs, &plan, &mut body, &mut entries).unwrap();
     assert_eq!(page.filled, 2);
     assert_eq!(entries[0].key, "directory/a.txt");
     assert_eq!(entries[0].size, Some(4));

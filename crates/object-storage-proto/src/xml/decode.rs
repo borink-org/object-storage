@@ -9,6 +9,7 @@
 
 use super::scan::{AMP, PCT, fault, find_byte};
 use crate::Result;
+use crate::encoding::hex_digit;
 
 /// Undoes both encodings, in the order a document applies them.
 pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
@@ -153,8 +154,8 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
         // `%` that does not is a fault. Measured: a listed name reads
         // `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
         let (Some(high), Some(low)) = (
-            b.get(r + 1).copied().and_then(hex),
-            b.get(r + 2).copied().and_then(hex),
+            b.get(r + 1).copied().and_then(hex_digit),
+            b.get(r + 2).copied().and_then(hex_digit),
         ) else {
             return fault();
         };
@@ -163,15 +164,6 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
         w += 1;
     }
     Ok(w)
-}
-
-fn hex(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

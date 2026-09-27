@@ -101,7 +101,7 @@ pub(crate) fn read<'b>(
                 };
                 let chunk = scan.take();
                 let (start, end) = trim(chunk, size);
-                let Some(size) = crate::azure::decimal(&chunk[start..end]) else {
+                let Some(size) = crate::common::decimal(&chunk[start..end]) else {
                     return fault();
                 };
                 let len = decode(&mut chunk[id.0..id.1], flags, false)?;

@@ -1,6 +1,6 @@
 //! What a client does with a registered provider.
 
-#![cfg(all(feature = "crc64", feature = "md5"))]
+#![cfg(all(feature = "crc64", feature = "md5-rustcrypto"))]
 
 use borink_object_storage_proto::azure::{
     BlockRef, BlockSource, PhysicalCommitBlocks, PhysicalStageBlock,
@@ -17,7 +17,7 @@ fn blobs() -> Blobs<'static> {
     )
     .unwrap()
     .with_checksum(borink_object_storage_crypto::CRC64)
-    .with_checksum(borink_object_storage_crypto::MD5)
+    .with_checksum(borink_object_storage_crypto::MD5_RUSTCRYPTO)
 }
 
 fn now() -> Timestamps {

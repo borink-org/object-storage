@@ -1,11 +1,13 @@
 [package]
-name = "borink-azure-get-ureq"
+name = "borink-object-storage-ureq"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
 [dependencies]
 borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
+# The SHA-256 that the S3 example and test sign with.
+borink-object-storage-crypto = { path = "../../crates/object-storage-crypto", features = ["sha256-rustcrypto"] }
 # `default-features = false` drops ureq's `gzip` and `brotli` features. They
 # decode the response body and remove the headers that record it, which would
 # contradict the byte offsets and lengths that this crate reads from the head.

@@ -11,30 +11,40 @@ This library uses a style of programming inspired by Zig, but still provides Rus
 
 Currently we only provide the sans-I/O core as a library; you must provide the HTTP client yourself. [`hosts/ureq`](https://github.com/borink-org/object-storage/tree/master/hosts/ureq) contains an example host.
 
-For C and C++, [`crates/object-storage-c`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-c) is an `extern "C"` static archive and [`hosts/cxx-curl`](https://github.com/borink-org/object-storage/tree/master/hosts/cxx-curl) is a libcurl host built on it. It allocates nothing at all, returns no `Result` and throws nothing, so an application built without exceptions can use it. A C++ program includes the header-only `borink/object_storage.hpp` for `std::span` and `std::string_view` ergonomics; a C program includes the generated `borink/object_storage.h` alone. Neither needs a C++ runtime library, so the same archive links on a hosted operating system and on a bare-metal board (`--no-default-features`, no allocator, no panic handler of ours to replace). Your application keeps its HTTP client, its buffers and its memory budget. Every operation below crosses that boundary, listing included: a page is read out of the response body you held, into an array of entries you own.
+We also provide C/C++ bindings, but these only implement a subset of the features the Rust crate do, and only Azure for now. They will be brought up to par before the 1.0 release.
 
 ## Supported features
 
-### Azure Blob Storage only
+### Azure Blob Storage, S3 and S3-compatible services
 
 - Object get (GET request)
   - Conditional (If-Match, If-None-Match)
-  - Byte ranges: offset and bounded; suffix ranges are refused, Azure does not accept them
-- Object metadata (HEAD request)
+  - Byte ranges: offset, bounded, suffix (S3 only, Azure refuses suffix ranges)
+- Object metadata and information (HEAD request)
 - Object put (PUT request, whole object)
-  - Conditional (If-None-Match: * writes only if the object is absent)
-  - Content is borrowed or streamed: the head states its length, so a write can come
-    from a file or a socket without holding the object in memory
-- Object delete (DELETE request)
   - Conditional (If-Match, If-None-Match)
-  - Takes the object alone, the object and its snapshots, or the snapshots alone
+  - Content is borrowed or streamed: the head states its length, so a write can come from a file or a socket without holding the object in memory
+  - S3: signs the SHA-256 of the content, or leave it unsigned or provide the hash yourself
+- Object delete (DELETE request)
+  - Conditional (If-Match; If-None-Match on Azure only)
+  - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
+- Metadata (arbitrary key-value pairs attached to objects) reading and writing
+  - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
+- Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
+  - CRC64 on Azure only, MD5 on both
+- Response classification: object metadata, byte-range windows, request IDs, and complete error handling
+- Support for less strict verification to better support S3-compatible services
+
+### Azure Blob Storage-only
+
 - Object listing (GET request on the container, one page at a time)
   - Supports delimiters, prefixes
   - Supports registering properties you want to read into your own entry type in the main parsing pass
 - Object multipart upload
-- Metadata reading and writing
-- Checksums (crypto implementations through [`crates/object-storage-c`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
-- Response classification: object metadata, byte-range windows, request IDs, and complete error handling
+
+### S3-only
+
+- SigV4 handling for every request (crypto implementations again through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto) or user-provided)
 
 ## What makes `borink-object-storage` unique?
 
@@ -47,20 +57,19 @@ For C and C++, [`crates/object-storage-c`](https://github.com/borink-org/object-
 
 The goal is a full-featured object storage library that supports both Azure Blob Storage and S3 (including S3-compatible services). The goal is to also include a lot of useful functionality around the basic operations, in particular authentication/authorization features (as usually the SDK's and existing libraries can be quite heavy). This includes things like AssumeRoleWithWebIdentity and OIDC token exchange (e.g. exchanging your GitHub Actions identity token for a short-lived Azure one).
 
-The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) targets Azure only, S3 will come in 0.0.3. Until 0.1, do expect some significant churn, particular in the C/C++ bindings. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
+The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. The initial release (0.0.1) targets Azure only, S3 will come in 0.0.3. Until 0.1, do expect some significant churn. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
 
 Roadmap:
-- S3 PUT, GET, DELETE (so lands SigV4 support and crypto primitives)
 - S3 LIST -> 0.0.3
-- - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
+- S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
 - S3 multipart -> 0.0.5 release
-- C/C++ bindings up to par with provider APIs
 - Refine API, performance improvements
-- 0.1 release (with promise to try and keep API stable from now on, no guarantee)
+- 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - ... support for various AWS and Azure authorization schemes -> 0.2 release
 - Generic API (so layer over the providers) -> 0.3 release
 - Convenience API that allocates -> 0.4 release
-- API stability promise -> 1.0
+- C/C++ bindings for the provider-specific, generic and convenience APIs, will remain unstable and versioned separately
+- Rust API stability promise -> 1.0
 - ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings)
 - ... various improvements to the convenience layer and API and CLI that implements various non-core features that are coupled to the transport
 
@@ -68,21 +77,14 @@ Roadmap:
 
 ### Compressed objects
 
-Azure stores a blob as opaque bytes and never compresses it for you. If you
-uploaded compressed bytes and set `Content-Encoding`, then those bytes are what
-Azure stores and serves, and every byte range, length and offset counts them.
+Azure and S3 store an object as opaque bytes and never compress it for you. If you upload compressed bytes and set `Content-Encoding`, the service stores and serves those bytes, and every byte range, length and offset counts them.
 
-This crate passes such objects through: it reports the encoding in
-`ObjectMeta::content_encoding` and leaves the bytes alone, so you can decompress
-them yourself. Your HTTP client must do the same. Turn off its automatic
-decompression, such as the `gzip` feature of `reqwest` or of `ureq`: those
-decode the body and remove the headers that record it, so the offsets and
-lengths this crate reports would no longer describe the bytes you receive.
+This crate passes such objects through. It reports the encoding in `ObjectMeta::content_encoding` and leaves the bytes alone, so you can decompress them yourself. Your HTTP client must do the same. Turn off its automatic decompression, such as the `gzip` feature of `reqwest` or of `ureq`. Those features decode the body and remove the headers that record it. The offsets and lengths that this crate reports would then no longer describe the bytes you receive.
 
 ## Limitations
 
 - Currently only ASCII endpoints are supported. Object keys may contain Unicode and are percent-encoded for the request. If you have a use case for internationalized endpoints, please let us know and we'll enable them as an optional feature.
-- The only authorization currently supported is a Microsoft Entra ID OAuth 2.0 bearer token. In the future we will also include code for creating these tokens based on other secrets or even a managed identity.
+- On Azure, the only authorization currently supported is a Microsoft Entra ID OAuth 2.0 bearer token. In the future we will also include code for creating these tokens based on other secrets or even a managed identity. On S3, requests are signed with an access key and optional session token that you pass.
 
 ## LLM disclaimer
 

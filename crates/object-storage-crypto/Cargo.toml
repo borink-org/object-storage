@@ -7,22 +7,42 @@ description = "Implements the checksums and cryptographic primitives that borink
 repository = "https://github.com/borink-org/object-storage"
 readme = "../../README.md"
 rust-version = "1.97.1"
-keywords = ["crc64", "checksum", "md5", "no-std", "object-storage"]
+keywords = ["crc64", "checksum", "sha256", "no-std", "object-storage"]
 categories = ["no-std::no-alloc", "algorithms"]
 
 [dependencies]
 borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0.2" }
-# Only the `md5` feature links this. Its default features are off, because
-# this crate needs the hasher alone: not `std`, `alloc` or the OID tables.
+# Only the `md5-rustcrypto` feature links this. Its default features are off,
+# because this crate needs the hasher alone: not `std`, `alloc` or the OID
+# tables.
 md-5 = { version = "0.11", optional = true, default-features = false }
+# The SHA-256 and HMAC-SHA256 that SigV4 signs with, one provider per
+# feature. Each links only its own crates.
+#
+# RustCrypto's, which uses the CPU's SHA extensions where it finds them and
+# needs no `std`.
+sha2 = { version = "0.11", optional = true, default-features = false }
+hmac = { version = "0.13", optional = true, default-features = false }
+# One crate with no dependencies, in portable code.
+hmac-sha256 = { version = "1.1.14", optional = true, default-features = false }
+# Only the `zeroize` feature links this, for `wipe`.
+zeroize = { version = "1", optional = true, default-features = false }
 
 [features]
 # Nothing by default: a host that registers no checksum links no algorithm.
 default = []
 # The software CRC-64/NVME of `crc64`.
 crc64 = []
-# The `Md5` adapter over RustCrypto's `md-5`.
-md5 = ["dep:md-5"]
+# The `Md5RustCrypto` adapter over RustCrypto's `md-5`.
+md5-rustcrypto = ["dep:md-5"]
+# `Sha256RustCrypto`, over RustCrypto's `sha2` and `hmac`.
+sha256-rustcrypto = ["dep:sha2", "dep:hmac"]
+# `Sha256Minimal`, over `hmac-sha256`.
+sha256-minimal = ["dep:hmac-sha256"]
+# `wipe` through the `zeroize` crate, in place of this crate's volatile
+# writes. With `sha256-rustcrypto`, RustCrypto's SHA-256 and HMAC state is
+# also wiped when it is dropped, which holds the key of each HMAC.
+zeroize = ["dep:zeroize", "sha2?/zeroize", "hmac?/zeroize"]
 
 [lints.rust]
 missing_docs = "deny"

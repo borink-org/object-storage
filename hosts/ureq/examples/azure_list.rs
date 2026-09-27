@@ -3,6 +3,7 @@
 use std::env;
 
 use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
+use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = env::var("AZURE_STORAGE_ENDPOINT")?;
@@ -23,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_results: Some(1000),
             ..PhysicalList::new(&prefix)
         };
-        let page = borink_azure_get_ureq::list(&blobs, &plan, &mut body, &mut entries)?;
+        let page = azure::list(&blobs, &plan, &mut body, &mut entries)?;
         for entry in &entries[..page.filled] {
             println!("{}", entry.key);
         }

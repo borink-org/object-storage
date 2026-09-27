@@ -175,7 +175,7 @@ impl Digest {
     /// [`TransactionalChecksum::Crc64`](crate::TransactionalChecksum::Crc64).
     pub fn base64<'a>(&self, into: &'a mut [u8; BASE64_LEN]) -> &'a str {
         let (chars, padding) = self.kind.base64_shape();
-        crate::layered::base64_into(self.as_bytes(), &mut into[..chars + padding])
+        crate::encoding::base64_into(self.as_bytes(), &mut into[..chars + padding])
     }
 }
 

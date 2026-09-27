@@ -12,8 +12,6 @@ use crate::{
     Result, Timestamps,
 };
 
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
@@ -190,28 +188,7 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
         return None;
     }
     let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
-    Some(base64_into(bytes, into))
-}
-
-// Writes the standard base64 of `bytes` into `into`, which holds exactly the
-// four characters per three bytes that it takes, and returns it as text.
-pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
-    for (group, out) in bytes.chunks(3).zip(into.chunks_mut(4)) {
-        // A group is 1 to 3 bytes; the missing ones read as zero and are
-        // written as padding below. Each sextet index is at most 63.
-        let bits = (u32::from(group[0]) << 16)
-            | (u32::from(*group.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*group.get(2).unwrap_or(&0));
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = if i <= group.len() {
-                BASE64[((bits >> (18 - 6 * i)) & 63) as usize]
-            } else {
-                b'='
-            };
-        }
-    }
-    // Every byte written is from the alphabet or padding, so this is ASCII.
-    crate::request::text(into)
+    Some(crate::encoding::base64_into(bytes, into))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
@@ -342,6 +319,82 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
     let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+/// The `*_requirements` functions of an S3 client.
+pub mod s3 {
+    use super::required;
+    use crate::s3::{Objects, PayloadHash};
+    use crate::{
+        Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestSize, Result, Timestamps,
+    };
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_get`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `get`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_get`],
+    /// which reports it again.
+    pub fn get_requirements(
+        objects: &Objects<'_>,
+        get: &PhysicalGet<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(objects.encode_get(&mut [], &mut [], get, now).map(drop))
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_put`] needs for this plan.
+    ///
+    /// The answer covers the request head only, and never the content. This
+    /// function reads no byte of `content` and computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `put`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_put`],
+    /// which reports it again.
+    pub fn put_requirements(
+        objects: &Objects<'_>,
+        put: &PhysicalPut<'_>,
+        content: Payload<'_>,
+        hash: PayloadHash,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_put(&mut [], &mut [], put, content, hash, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_delete`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `delete`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_delete`], which reports it again.
+    pub fn delete_requirements(
+        objects: &Objects<'_>,
+        delete: &PhysicalDelete<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_delete(&mut [], &mut [], delete, now)
+                .map(drop),
+        )
+    }
 }
 
 #[cfg(test)]
