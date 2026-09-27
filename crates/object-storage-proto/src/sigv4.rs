@@ -162,10 +162,18 @@ pub struct Credentials<'a> {
     key_id: &'a str,
     secret: &'a str,
     session_token: Option<&'a str>,
+    wipe: fn(&mut [u8]),
 }
 
 impl<'a> Credentials<'a> {
-    /// Creates credentials from an access key ID and its secret access key.
+    /// Creates credentials from an access key ID, its secret access key, and
+    /// the function that wipes a copy of the secret.
+    ///
+    /// A client copies the secret onto its stack to derive a signing key,
+    /// and calls `wipe` on that copy. `wipe` must set every byte to zero in
+    /// writes that the compiler keeps. This crate forbids `unsafe` code, so
+    /// it cannot guarantee that itself. Pass `borink_object_storage_crypto::wipe`,
+    /// or [`wipe_best_effort`] to accept writes that the compiler may remove.
     ///
     /// # Errors
     ///
@@ -174,7 +182,7 @@ impl<'a> Credentials<'a> {
     /// are the control characters, a space, `/`, `,` and every byte outside
     /// ASCII. Returns it also if `secret` is empty or longer than
     /// [`MAX_SECRET_LEN`] bytes.
-    pub fn new(key_id: &'a str, secret: &'a str) -> Result<Self> {
+    pub fn new(key_id: &'a str, secret: &'a str, wipe: fn(&mut [u8])) -> Result<Self> {
         let key_id_is_valid = !key_id.is_empty()
             && key_id
                 .bytes()
@@ -186,6 +194,7 @@ impl<'a> Credentials<'a> {
             key_id,
             secret,
             session_token: None,
+            wipe,
         })
     }
 
@@ -219,6 +228,18 @@ impl<'a> Credentials<'a> {
     pub(crate) fn token_header(&self) -> &'static str {
         "x-amz-security-token"
     }
+}
+
+/// Sets every byte of `bytes` to zero, on a best-effort basis.
+///
+/// [`core::hint::black_box`] keeps the compiler from removing the writes in
+/// practice, but Rust does not guarantee it. Pass this to
+/// [`Credentials::new`] only if you accept that. The
+/// `borink-object-storage-crypto` crate's `wipe` writes with volatile
+/// writes, which the compiler keeps.
+pub fn wipe_best_effort(bytes: &mut [u8]) {
+    bytes.fill(0);
+    core::hint::black_box(bytes);
 }
 
 impl fmt::Debug for Credentials<'_> {
@@ -260,9 +281,9 @@ impl SigningKey {
         seed[..4].copy_from_slice(b"AWS4");
         seed[4..4 + secret.len()].copy_from_slice(secret);
         let mut key = provider.hmac(&seed[..4 + secret.len()], date.as_bytes());
-        // Best effort: the secret should not outlive this call on the stack.
-        seed.fill(0);
-        core::hint::black_box(&seed);
+        // The caller's `&str` and the provider's HMAC state still hold the
+        // secret. This crate wipes only the copy it made.
+        (credentials.wipe)(&mut seed);
         key = provider.hmac(&key, region.as_bytes());
         key = provider.hmac(&key, service.as_bytes());
         key = provider.hmac(&key, b"aws4_request");
@@ -301,21 +322,11 @@ impl SigningKey {
             b"/",
             service.as_bytes(),
             b"/aws4_request\n",
-            &hex(canonical),
+            &crate::encoding::hex(canonical),
         ] {
             text[at..at + piece.len()].copy_from_slice(piece);
             at += piece.len();
         }
-        hex(&provider.hmac(&self.key, &text[..at]))
+        crate::encoding::hex(&provider.hmac(&self.key, &text[..at]))
     }
-}
-
-pub(crate) fn hex(bytes: &[u8; 32]) -> [u8; 64] {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0; 64];
-    for (index, byte) in bytes.iter().enumerate() {
-        out[2 * index] = DIGITS[usize::from(byte >> 4)];
-        out[2 * index + 1] = DIGITS[usize::from(byte & 0xF)];
-    }
-    out
 }

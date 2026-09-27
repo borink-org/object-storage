@@ -49,7 +49,7 @@ fn clients<'a>(
 }
 
 fn credentials() -> Credentials<'static> {
-    Credentials::new(KEY_ID, SECRET).unwrap()
+    Credentials::new(KEY_ID, SECRET, borink_object_storage_crypto::wipe).unwrap()
 }
 
 fn headers<'r>(request: &WireRequest<'r>) -> Vec<(&'r str, &'r str)> {

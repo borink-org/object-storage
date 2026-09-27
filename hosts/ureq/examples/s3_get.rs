@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Service::Aws,
     };
     let bucket = Bucket::new(&endpoint, &bucket, &region, service)?;
-    let mut credentials = Credentials::new(&key_id, &secret)?;
+    let mut credentials = Credentials::new(&key_id, &secret, borink_object_storage_crypto::wipe)?;
     if let Some(token) = &session_token {
         credentials = credentials.with_session_token(token)?;
     }

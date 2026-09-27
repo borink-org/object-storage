@@ -2,7 +2,9 @@
 
 use borink_object_storage_proto::checksum::{ChecksumProvider, ChecksumState, Digest};
 use borink_object_storage_proto::s3::{Bucket, MAX_PUT_LEN, Objects, PayloadHash, Service};
-use borink_object_storage_proto::sigv4::{Credentials, Sha256Provider, Sha256State};
+use borink_object_storage_proto::sigv4::{
+    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
+};
 use borink_object_storage_proto::{
     ChecksumKind, ConditionKind, Error, FailureClass, InvalidPlan, MetadataPair, Payload,
     PhysicalPut, PutHeadOutcome, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
@@ -27,7 +29,7 @@ fn bucket() -> Bucket<'static> {
 }
 
 fn credentials() -> Credentials<'static> {
-    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET)
+    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort)
         .unwrap()
         .with_session_token(TOKEN)
         .unwrap()

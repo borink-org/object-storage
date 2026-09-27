@@ -22,7 +22,7 @@
 //!
 //! ```
 //! use borink_object_storage_proto::s3::{Bucket, Service, Objects, PayloadHash};
-//! use borink_object_storage_proto::sigv4::Credentials;
+//! use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 //! use borink_object_storage_proto::{
 //!     GetHeadOutcome, HeaderSpan, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome,
 //!     ResponseHead, Timestamps, layered,
@@ -35,7 +35,8 @@
 //! let bucket = Bucket::new(
 //!     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
 //! )?;
-//! let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret")?;
+//! // Pass `borink_object_storage_crypto::wipe` in place of `wipe_best_effort`.
+//! let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! let now = Timestamps::from_unix(1_787_400_000);
 //! // SHA256 is a provider, such as `borink_object_storage_crypto::SHA256_RUSTCRYPTO`.
 //! let objects = Objects::new(bucket, credentials, SHA256).with_signing_key(&now);
@@ -115,6 +116,7 @@ use crate::common::{
     ContentRange, accept_success, condition_header, encoded, failure, parse_content_range,
     text_header, validate_condition, write_range,
 };
+use crate::encoding::{self, rfc2047};
 use crate::request::{HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::{
@@ -165,104 +167,13 @@ pub fn metadata_name(header: &str) -> Option<&str> {
 /// `value`.
 pub fn metadata_value<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
     let into = into.get_mut(..value.len())?;
-    match decode_encoded_words(value, into) {
+    match rfc2047::decode(value, into) {
         Some(len) => Some(&into[..len]),
         None => {
             into.copy_from_slice(value);
             Some(into)
         }
     }
-}
-
-// Writes the text of `value`, a run of encoded words separated by spaces,
-// into `into`, and returns its length. Returns `None` for any other value.
-fn decode_encoded_words(value: &[u8], into: &mut [u8]) -> Option<usize> {
-    let mut len = 0;
-    let mut words = value
-        .split(|byte| matches!(byte, b' ' | b'\t'))
-        .filter(|word| !word.is_empty())
-        .peekable();
-    words.peek()?;
-    for word in words {
-        len += decode_encoded_word(word, &mut into[len..])?;
-    }
-    core::str::from_utf8(&into[..len]).ok()?;
-    Some(len)
-}
-
-// Decodes one `=?UTF-8?B?...?=` or `=?UTF-8?Q?...?=` into `into`, which
-// holds at least as many bytes as `word`.
-fn decode_encoded_word(word: &[u8], into: &mut [u8]) -> Option<usize> {
-    let inner = word.strip_prefix(b"=?")?.strip_suffix(b"?=")?;
-    let mut parts = inner.split(|&byte| byte == b'?');
-    let (charset, encoding, text) = (parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() || !charset.eq_ignore_ascii_case(b"UTF-8") {
-        return None;
-    }
-    match encoding {
-        b"B" | b"b" => decode_base64(text, into),
-        b"Q" | b"q" => decode_q(text, into),
-        _ => None,
-    }
-}
-
-fn decode_base64(text: &[u8], into: &mut [u8]) -> Option<usize> {
-    if !text.len().is_multiple_of(4) {
-        return None;
-    }
-    let sextet = |byte: u8| -> Option<u32> {
-        Some(u32::from(match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        }))
-    };
-    let mut len = 0;
-    let groups = text.len() / 4;
-    for (index, group) in text.chunks(4).enumerate() {
-        // Only the last group may end in padding.
-        let padding = group.iter().rev().take_while(|&&byte| byte == b'=').count();
-        if padding > 2 || (padding > 0 && index + 1 != groups) {
-            return None;
-        }
-        let mut bits = 0;
-        for &byte in &group[..4 - padding] {
-            bits = (bits << 6) | sextet(byte)?;
-        }
-        bits <<= 6 * padding as u32;
-        let bytes = bits.to_be_bytes();
-        let count = 3 - padding;
-        into.get_mut(len..len + count)?
-            .copy_from_slice(&bytes[1..1 + count]);
-        len += count;
-    }
-    Some(len)
-}
-
-fn decode_q(text: &[u8], into: &mut [u8]) -> Option<usize> {
-    let hex = |byte: u8| (byte as char).to_digit(16);
-    let mut len = 0;
-    let mut at = 0;
-    while at < text.len() {
-        let byte = match text[at] {
-            b'_' => b' ',
-            b'=' => {
-                let high = hex(*text.get(at + 1)?)?;
-                let low = hex(*text.get(at + 2)?)?;
-                at += 2;
-                (high * 16 + low) as u8
-            }
-            byte if byte.is_ascii_graphic() => byte,
-            _ => return None,
-        };
-        *into.get_mut(len)? = byte;
-        len += 1;
-        at += 1;
-    }
-    Some(len)
 }
 
 /// Where the bucket name goes in the URL of a request.
@@ -692,7 +603,7 @@ impl<'a> Objects<'a> {
         let content_sha256 = match hash {
             PayloadHash::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
             PayloadHash::Sha256(digest) => {
-                hex = sigv4::hex(&digest);
+                hex = encoding::hex(&digest);
                 hex.as_slice()
             }
             PayloadHash::Compute => {
@@ -701,7 +612,7 @@ impl<'a> Objects<'a> {
                 hex = if dry {
                     [b'0'; 64]
                 } else {
-                    sigv4::hex(&self.sha256.hash(content.bytes().unwrap_or_default()))
+                    encoding::hex(&self.sha256.hash(content.bytes().unwrap_or_default()))
                 };
                 hex.as_slice()
             }
@@ -1229,45 +1140,6 @@ fn write_signed_names(
     }
 }
 
-// Returns whether a write sends `value` as an encoded word. A header value
-// holds neither text outside ASCII nor a control character but a tab. S3
-// returns such a value as an encoded word, which `metadata_value` decodes.
-// A tab is encoded too, because SigV4 signs it as it signs no other
-// character; S3 returns it as it is.
-fn encodes(value: &str) -> bool {
-    !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control())
-}
-
-// Writes a metadata value as the header carries it: as an RFC 2047 encoded
-// word of its UTF-8, or as it is. The encoded word holds no space, so its
-// canonical form for SigV4 is the same.
-fn write_metadata_value(out: &mut dyn FnMut(&[u8]), value: &str) {
-    if !encodes(value) {
-        out(value.as_bytes());
-        return;
-    }
-    out(b"=?UTF-8?B?");
-    for group in value.as_bytes().chunks(3) {
-        let mut text = [0; 4];
-        out(crate::layered::base64_into(group, &mut text).as_bytes());
-    }
-    out(b"?=");
-}
-
-// Returns whether `value` holds `=?` with a `?=` after it, as every
-// encoded word does. S3 may decode such text.
-fn reads_as_encoded_word(value: &str) -> bool {
-    value
-        .find("=?")
-        .is_some_and(|at| value[at + 2..].contains("?="))
-}
-
-// The bytes that RFC 9110 allows in a token, which S3 takes in a metadata
-// name.
-fn token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-}
-
 // SigV4 signs a header value without the spaces at either end, and with each
 // run of spaces inside it as one space. A validated value holds no other
 // whitespace.
@@ -1415,8 +1287,8 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
 }
 
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
-// header name and the value a header value. S3 takes a value outside ASCII as
-// UTF-8, and matches a name without case.
+// token. `write_metadata_value` writes the value, and S3 matches a name
+// without case.
 fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
         if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
@@ -1432,7 +1304,7 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         if pair.value.contains(['\r', '\n'])
             || edge(bytes.first())
             || edge(bytes.last())
-            || reads_as_encoded_word(pair.value)
+            || rfc2047::looks_encoded(pair.value)
         {
             return Err(InvalidPlan::MetadataValue.into());
         }
@@ -1451,6 +1323,31 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         return Err(InvalidPlan::MetadataTooLarge.into());
     }
     Ok(())
+}
+
+// Returns whether a write sends `value` as an encoded word. A header value
+// holds neither text outside ASCII nor a control character but a tab. S3
+// returns such a value as an encoded word, which `metadata_value` decodes.
+// A tab is encoded too, because SigV4 signs it as it signs no other
+// character; S3 returns it as it is.
+fn encodes(value: &str) -> bool {
+    !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+// Writes a metadata value as the header carries it, encoded or as it is. An
+// encoded word holds no space, so its canonical form for SigV4 is the same.
+fn write_metadata_value(out: &mut dyn FnMut(&[u8]), value: &str) {
+    if encodes(value) {
+        rfc2047::write(out, value);
+    } else {
+        out(value.as_bytes());
+    }
+}
+
+// The bytes that RFC 9110 allows in a token, which S3 takes in a metadata
+// name.
+fn token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 #[cfg(test)]

@@ -12,8 +12,6 @@ use crate::{
     Result, Timestamps,
 };
 
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
@@ -190,28 +188,7 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
         return None;
     }
     let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
-    Some(base64_into(bytes, into))
-}
-
-// Writes the standard base64 of `bytes` into `into`, which holds exactly the
-// four characters per three bytes that it takes, and returns it as text.
-pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
-    for (group, out) in bytes.chunks(3).zip(into.chunks_mut(4)) {
-        // A group is 1 to 3 bytes; the missing ones read as zero and are
-        // written as padding below. Each sextet index is at most 63.
-        let bits = (u32::from(group[0]) << 16)
-            | (u32::from(*group.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*group.get(2).unwrap_or(&0));
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = if i <= group.len() {
-                BASE64[((bits >> (18 - 6 * i)) & 63) as usize]
-            } else {
-                b'='
-            };
-        }
-    }
-    // Every byte written is from the alphabet or padding, so this is ASCII.
-    crate::request::text(into)
+    Some(crate::encoding::base64_into(bytes, into))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.

@@ -2,7 +2,9 @@
 //! heads it reads.
 
 use borink_object_storage_proto::s3::{Addressing, Bucket, MAX_KEY_LEN, Objects, Service};
-use borink_object_storage_proto::sigv4::{Credentials, Sha256Provider, Sha256State};
+use borink_object_storage_proto::sigv4::{
+    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
+};
 use borink_object_storage_proto::{
     BodyWindow, ConditionKind, Error, FailureClass, GetHeadOutcome, GetKind, HeaderSpan,
     InvalidPlan, PhysicalGet, RequestedRange, ResponseFault, ResponseHead, ServiceErrorKind,
@@ -20,7 +22,7 @@ fn bucket() -> Bucket<'static> {
 }
 
 fn credentials() -> Credentials<'static> {
-    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET)
+    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort)
         .unwrap()
         .with_session_token(TOKEN)
         .unwrap()

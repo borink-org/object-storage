@@ -22,7 +22,8 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New module `layered::s3`, with `get_requirements`, `put_requirements` and `delete_requirements` for an `Objects` client.
 - AWS Signature Version 4:
   - New module `sigv4`.
-  - New struct `sigv4::Credentials`, which holds an access key and an optional session token.
+  - New struct `sigv4::Credentials`, which holds an access key and an optional session token. `Credentials::new` also takes the function that wipes a client's copy of the secret access key.
+  - New function `sigv4::wipe_best_effort`, which sets a buffer to zero on a best-effort basis. Pass it to `Credentials::new` only if you accept writes that the compiler may remove.
   - New struct `sigv4::Sha256Provider`, which holds the SHA-256 and HMAC-SHA256 that a client signs with.
   - New struct `sigv4::Sha256State`, in which a provider keeps a SHA-256 while it computes it.
   - New constants `sigv4::MAX_SECRET_LEN` and `sigv4::MAX_REGION_LEN`.
@@ -34,6 +35,8 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New trait `Sha256` and function `sha256_provider`, which turn your own SHA-256 into a `Sha256Provider`.
   - New struct `Sha256RustCrypto` and constant `SHA256_RUSTCRYPTO`, over RustCrypto's `sha2` and `hmac`, under the `sha256-rustcrypto` feature.
   - New struct `Sha256Minimal` and constant `SHA256_MINIMAL`, over `hmac-sha256`, under the `sha256-minimal` feature.
+  - New function `wipe`, which sets a buffer to zero with volatile writes. Pass it to `Credentials::new`.
+  - New feature `zeroize`, under which `wipe` calls the `zeroize` crate. It also has RustCrypto wipe its SHA-256 and HMAC state.
 
 ### Changed
 

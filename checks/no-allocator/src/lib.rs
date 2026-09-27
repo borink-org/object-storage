@@ -58,7 +58,11 @@ fn signed_requests(now: &Timestamps) -> usize {
     let Ok(bucket) = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws) else {
         return 10;
     };
-    let Ok(credentials) = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret") else {
+    let Ok(credentials) = Credentials::new(
+        "AKIAIOSFODNN7EXAMPLE",
+        "secret",
+        borink_object_storage_crypto::wipe,
+    ) else {
         return 11;
     };
     let mut written = 0;

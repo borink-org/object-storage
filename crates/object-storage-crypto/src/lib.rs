@@ -48,7 +48,9 @@
 //! let bucket = Bucket::new(
 //!     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
 //! )?;
-//! let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret")?;
+//! let credentials = Credentials::new(
+//!     "AKIAIOSFODNN7EXAMPLE", "secret", borink_object_storage_crypto::wipe,
+//! )?;
 //! let objects = Objects::new(
 //!     bucket, credentials, borink_object_storage_crypto::SHA256_RUSTCRYPTO,
 //! );
@@ -66,6 +68,12 @@
 //!
 //! To register an implementation of your own, implement [`Sha256`] for it
 //! and pass the type to [`sha256_provider`].
+//!
+//! Pass [`wipe`] to `Credentials::new`, as above. A client calls it on the
+//! copy of the secret access key that it makes to derive its signing key.
+//! The `zeroize` feature routes it through the `zeroize` crate. That
+//! feature also has RustCrypto wipe its SHA-256 and HMAC state, which holds
+//! the key of each HMAC. `hmac-sha256` leaves its state on the stack.
 //!
 //! [`borink-object-storage-proto`]: borink_object_storage_proto
 
@@ -233,6 +241,29 @@ pub trait Sha256: Default {
 
     /// Returns the HMAC-SHA256 of `message` under `key`.
     fn hmac(key: &[u8], message: &[u8]) -> [u8; 32];
+}
+
+/// Sets every byte of `bytes` to zero, in writes that the compiler keeps.
+///
+/// Pass it to
+/// [`Credentials::new`](borink_object_storage_proto::sigv4::Credentials::new),
+/// which calls it on its copy of the secret access key.
+///
+/// With the `zeroize` feature, this calls the `zeroize` crate. Without it,
+/// it writes each byte with [`core::ptr::write_volatile`] and then fences,
+/// as `zeroize` does.
+pub fn wipe(bytes: &mut [u8]) {
+    #[cfg(feature = "zeroize")]
+    zeroize::Zeroize::zeroize(bytes);
+    #[cfg(not(feature = "zeroize"))]
+    {
+        for byte in bytes.iter_mut() {
+            // SAFETY: `byte` is a unique borrow of one initialized byte.
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        // Keeps later accesses from moving before the writes.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Returns a provider that computes SHA-256 and HMAC-SHA256 with `S`.

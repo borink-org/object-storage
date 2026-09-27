@@ -12,7 +12,7 @@ use crate::{
     unsupported_by_crate, unsupported_response_fields,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO};
+use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{self, Addressing, Bucket, Objects, PayloadHash, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
@@ -365,7 +365,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
 
     let bucket = crate_step!(Bucket::new(&endpoint, bucket_name, region, Service::Aws))
         .with_addressing(Addressing::VirtualHosted);
-    let mut credentials = crate_step!(Credentials::new(key_id, secret));
+    let mut credentials = crate_step!(Credentials::new(key_id, secret, wipe));
     if let Some(token) = session_token {
         credentials = crate_step!(credentials.with_session_token(token));
     }
@@ -529,7 +529,7 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let bucket_name = optional_text(endpoint, "bucket").ok_or("missing endpoint bucket")?;
     let region = optional_text(endpoint, "region").unwrap_or("us-east-1");
     let bucket = crate_step!(Bucket::new(endpoint_url, bucket_name, region, Service::Aws));
-    let mut credentials = crate_step!(Credentials::new(&key_id, &secret));
+    let mut credentials = crate_step!(Credentials::new(&key_id, &secret, wipe));
     if let Some(token) = &session_token {
         credentials = crate_step!(credentials.with_session_token(token));
     }

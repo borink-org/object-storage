@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_crypto::SHA256_RUSTCRYPTO;
+use borink_object_storage_crypto::{SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{Bucket, Objects, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_ureq::s3;
@@ -84,7 +84,7 @@ fn executes_the_generated_requests() {
     });
 
     let bucket = Bucket::new(&endpoint, "bucket", "us-east-1", Service::Aws).unwrap();
-    let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret").unwrap();
+    let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe).unwrap();
     let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO);
     assert_eq!(s3::get(&objects, "a key").unwrap(), b"body");
     s3::put(&objects, "a key", b"content").unwrap();

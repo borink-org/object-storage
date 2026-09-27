@@ -1,7 +1,9 @@
 //! S3 DELETE: the plans the client refuses, and the response heads it reads.
 
 use borink_object_storage_proto::s3::{Bucket, Objects, Service};
-use borink_object_storage_proto::sigv4::{Credentials, Sha256Provider, Sha256State};
+use borink_object_storage_proto::sigv4::{
+    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
+};
 use borink_object_storage_proto::{
     ConditionKind, DeleteHeadOutcome, DeleteKind, Error, InvalidPlan, PhysicalDelete,
     ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, layered,
@@ -18,7 +20,7 @@ fn bucket() -> Bucket<'static> {
 }
 
 fn credentials() -> Credentials<'static> {
-    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET)
+    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort)
         .unwrap()
         .with_session_token(TOKEN)
         .unwrap()

@@ -6,7 +6,9 @@
 //! if it is asked to.
 
 use borink_object_storage_proto::s3::{Bucket, MAX_METADATA_LEN, Objects, PayloadHash, Service};
-use borink_object_storage_proto::sigv4::{Credentials, Sha256Provider, Sha256State};
+use borink_object_storage_proto::sigv4::{
+    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
+};
 use borink_object_storage_proto::{
     BodyWindow, CapacityError, ConditionKind, DeleteHeadOutcome, Error, GetHeadOutcome, HeaderSpan,
     InvalidPlan, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestedRange,
@@ -32,7 +34,7 @@ fn bucket() -> Bucket<'static> {
 }
 
 fn credentials() -> Credentials<'static> {
-    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET)
+    Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort)
         .unwrap()
         .with_session_token(TOKEN)
         .unwrap()
@@ -106,13 +108,13 @@ fn credentials_refuse_what_the_authorization_header_cannot_carry() {
         ("AKIAIOSFODNN7EXAMPLE", &long),
     ] {
         assert_eq!(
-            Credentials::new(key_id, secret).map(drop),
+            Credentials::new(key_id, secret, wipe_best_effort).map(drop),
             Err(Error::InvalidCredentials),
             "{key_id} {secret}"
         );
     }
-    assert!(Credentials::new("AKIAIOSFODNN7EXAMPLE", &long[1..]).is_ok());
-    let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET).unwrap();
+    assert!(Credentials::new("AKIAIOSFODNN7EXAMPLE", &long[1..], wipe_best_effort).is_ok());
+    let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort).unwrap();
     for token in ["", "a\nb", "é"] {
         assert_eq!(
             credentials.with_session_token(token).map(drop),

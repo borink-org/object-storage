@@ -21,6 +21,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -39,6 +40,7 @@ dependencies = [
  "hmac-sha256",
  "md-5",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -137,6 +139,7 @@ dependencies = [
  "block-buffer",
  "crypto-common",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
