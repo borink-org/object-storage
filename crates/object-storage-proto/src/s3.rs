@@ -198,9 +198,9 @@ use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provid
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
-    PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result,
-    ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest,
+    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
+    ResponseHead, Result, ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
@@ -1112,7 +1112,9 @@ impl<'a> Objects<'a> {
     /// Writes the signed request head for one page of `list` into `buf`.
     ///
     /// The request is a ListObjectsV2. [`PhysicalList::marker`] carries the
-    /// continuation token of the previous page. The response carries the
+    /// continuation token of the previous page, and
+    /// [`PhysicalList::start_after`] the key to start after.
+    /// [`ListInclude::OWNER`] asks for each object's owner. The response carries the
     /// page as a document in its body: read it whole and pass it to
     /// [`Self::fill_listing`].
     ///
@@ -1125,8 +1127,8 @@ impl<'a> Objects<'a> {
     ///
     /// - [`InvalidPlan::Marker`] for an empty marker. The first page carries
     ///   none.
-    /// - [`InvalidPlan::Option`] for a non-empty [`PhysicalList::include`].
-    ///   S3 lists no metadata.
+    /// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`] in
+    ///   [`PhysicalList::include`]. S3 lists no metadata.
     ///
     /// This method validates the plan before it writes any byte.
     ///
@@ -1150,9 +1152,15 @@ impl<'a> Objects<'a> {
                 .map(|marker| ("continuation-token", marker.as_bytes())),
             list.delimited.then_some(("delimiter", DELIMITER)),
             Some(("encoding-type", b"url".as_slice())),
+            list.include
+                .contains(ListInclude::OWNER)
+                .then_some(("fetch-owner", b"true".as_slice())),
             Some(("list-type", b"2".as_slice())),
             max_keys.as_ref().map(|max| ("max-keys", max.as_bytes())),
             (!list.prefix.is_empty()).then_some(("prefix", list.prefix.as_bytes())),
+            list.start_after
+                .filter(|key| !key.is_empty())
+                .map(|key| ("start-after", key.as_bytes())),
         ];
         let signed = Signed {
             method: Method::Get,
@@ -1555,7 +1563,7 @@ fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     if list.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
     }
-    if !list.include.is_empty() {
+    if list.include.contains(ListInclude::METADATA) {
         return Err(InvalidPlan::Option.into());
     }
     Ok(())

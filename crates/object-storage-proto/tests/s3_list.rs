@@ -5,8 +5,8 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    EntryKind, Error, HeaderSpan, ListEntry, Listing, PhysicalList, ResponseFault, Timestamps,
-    layered,
+    EntryKind, Error, HeaderSpan, ListEntry, ListInclude, Listing, PhysicalList, ResponseFault,
+    Timestamps, layered,
 };
 
 const ZEROS: Sha256Provider =
@@ -46,16 +46,18 @@ fn read(body: &str) -> Result<(Listing<'static>, Vec<ListEntry<'static>>), Error
 fn the_query_is_written_in_its_canonical_form() {
     let list = PhysicalList {
         marker: Some("1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM="),
+        start_after: Some("a b/c"),
         delimited: true,
         max_results: Some(2),
+        include: ListInclude::OWNER,
         ..PhysicalList::new("a b/é+")
     };
     assert_eq!(
         url(&objects(Addressing::Path), &list),
         "https://s3.example.com/bucket\
          ?continuation-token=1ueGcxLPRx1Tr%2FXYExHnhbYLgveDs2J%2Fwm36Hy4vbOwM%3D\
-         &delimiter=%2F&encoding-type=url&list-type=2&max-keys=2\
-         &prefix=a%20b%2F%C3%A9%2B"
+         &delimiter=%2F&encoding-type=url&fetch-owner=true&list-type=2&max-keys=2\
+         &prefix=a%20b%2F%C3%A9%2B&start-after=a%20b%2Fc"
     );
     assert_eq!(
         url(&objects(Addressing::VirtualHosted), &PhysicalList::new("")),

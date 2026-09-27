@@ -5,7 +5,9 @@
 //! receive placeholder keys, and live cases read `AWS_ACCESS_KEY_ID`,
 //! `AWS_SECRET_ACCESS_KEY` and, if set, `AWS_SESSION_TOKEN`.
 
-use crate::listing::{ListedPage, PageRead, entry_slots, list_all_keys, list_page};
+use crate::listing::{
+    ListedPage, PageRead, decoded_listing_text, entry_slots, list_all_keys, list_page,
+};
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, request_buffers, requested_condition, requested_range,
@@ -17,9 +19,9 @@ use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{self, Addressing, Bucket, Objects, PayloadHash, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListHeadOutcome, MetadataPair, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, RequestedRange,
-    Timestamps, TransactionalChecksum, WriteOptions, layered,
+    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, Metadata,
+    MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome,
+    RequestedRange, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -304,13 +306,45 @@ fn read_page(
 
     let mut slots = entry_slots(list_plan, MAX_PAGE_ENTRIES);
     let listing = page_step!(objects.fill_listing(&mut exchange.body, &mut slots));
-    Ok(Ok(ListedPage::read(&slots, listing, |entry| {
-        json!({
-            "key": entry.key,
-            "size": entry.size.unwrap_or(0),
-            "etag": entry.e_tag.unwrap_or_default(),
-        })
-    })))
+    Ok(Ok(ListedPage::read(&slots, listing, listed_entry_value)))
+}
+
+fn listed_entry_value(entry: &ListEntry<'_>) -> Value {
+    let mut value = json!({
+        "key": entry.key,
+        "size": entry.size.unwrap_or(0),
+        "etag": entry.e_tag.unwrap_or_default(),
+    });
+    if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
+        value["last_modified"] = json!(rfc3339(millis / 1000));
+    }
+    if let Some(storage_class) = entry.property("StorageClass") {
+        value["storage_class"] = json!(decoded_listing_text(storage_class));
+    }
+    // The owner holds its ID as an element of its own.
+    if let Some((_, id)) = entry
+        .property("Owner")
+        .and_then(|owner| Metadata::new(owner).find(|(name, _)| *name == b"ID"))
+    {
+        value["owner_id"] = json!(decoded_listing_text(id));
+    }
+    value
+}
+
+/// Writes a time as `2024-01-02T03:04:05Z`, from the basic form that
+/// `Timestamps::iso8601` writes.
+fn rfc3339(unix_seconds: u64) -> String {
+    let time = Timestamps::from_unix(unix_seconds);
+    let basic = time.iso8601();
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &basic[..4],
+        &basic[4..6],
+        &basic[6..8],
+        &basic[9..11],
+        &basic[11..13],
+        &basic[13..15],
+    )
 }
 
 /// Reads `2013-05-24T00:00:00Z` or `20130524T000000Z`.
@@ -503,7 +537,14 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         ],
         "delete" => &["key", "if_match", "if_none_match"],
         "list" => &["prefix", "page_size"],
-        "list_page" => &["prefix", "continuation_token", "delimiter", "page_size"],
+        "list_page" => &[
+            "prefix",
+            "continuation_token",
+            "start_after",
+            "delimiter",
+            "page_size",
+            "fetch_owner",
+        ],
         _ => &[],
     }
 }

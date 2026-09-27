@@ -4,7 +4,9 @@
 //! placeholder token. Live cases need `endpoint.auth = "bearer"`, and the
 //! adapter reads the token from `AZURE_STORAGE_ACCESS_TOKEN`.
 
-use crate::listing::{ListedPage, PageRead, entry_slots, list_all_keys, list_page};
+use crate::listing::{
+    ListedPage, PageRead, decoded_listing_text, entry_slots, list_all_keys, list_page,
+};
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, request_buffers, requested_condition, requested_range,
@@ -302,15 +304,6 @@ fn delete_object(
         }
         _ => error_result(&exchange, exchange.status),
     })
-}
-
-/// The decoded text of a listed value, such as a metadata name or value.
-fn decoded_listing_text(raw_value: &[u8]) -> String {
-    let mut decoded = vec![0; raw_value.len()];
-    match layered::decode_into(raw_value, &mut decoded) {
-        Some(text) => String::from_utf8_lossy(text).into_owned(),
-        None => String::from_utf8_lossy(raw_value).into_owned(),
-    }
 }
 
 fn listed_entry_value(entry: &ListEntry<'_>, metadata_requested: bool) -> Value {

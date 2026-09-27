@@ -31,6 +31,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 - Object listing (GET request on the container or bucket, one page at a time)
   - Supports delimiters, prefixes
   - S3: asks for URL-encoded keys, so keys that XML cannot carry are listed too
+  - S3: start after a key, and list each object's owner
 - Metadata (arbitrary key-value pairs attached to objects) reading and writing
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))

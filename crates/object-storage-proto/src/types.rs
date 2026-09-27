@@ -359,23 +359,34 @@ impl<'h> WriteOptions<'h> {
     }
 }
 
-/// The extra elements that a listing asks Azure to write for each object.
+/// The extra elements that a listing asks the service to write for each
+/// object.
 ///
 /// Combine the constants with `|` and put the set in
 /// [`PhysicalList::include`]. An empty set asks for nothing beyond the
-/// object's own properties. S3 lists none of these, and an S3 client refuses
-/// a listing that asks for any.
+/// object's own properties. Each constant says which service writes it, and
+/// a client refuses a listing that asks the other service for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ListInclude(u32);
 
 impl ListInclude {
-    /// The metadata pairs of each object, as a `Metadata` element.
+    /// The metadata pairs of each object, as a `Metadata` element. Azure
+    /// only.
     ///
     /// Read them with [`ListEntry::metadata`], or in the same pass as the
     /// rest of the page with [`BlobProperty::Metadata`].
     pub const METADATA: Self = Self(1 << 0);
 
-    // The word of each flag, in the order they are written into the query.
+    /// The owner of each object, as an `Owner` element that holds an `ID`.
+    /// S3 only, where the request asks for it with `fetch-owner=true`.
+    ///
+    /// Read the element with [`ListEntry::property`], and the `ID` inside
+    /// it with [`Metadata::new`], which walks the elements of any value
+    /// that holds elements.
+    pub const OWNER: Self = Self(1 << 1);
+
+    // The Azure word of each flag, in the order they are written into the
+    // query.
     const WORDS: [(Self, &'static str); 1] = [(Self::METADATA, "metadata")];
 
     /// Returns `true` if this set holds every flag of `other`.
@@ -721,6 +732,13 @@ pub struct PhysicalList<'h> {
     /// the service's, and means nothing to this crate. On S3 it is the
     /// continuation token of a ListObjectsV2.
     pub marker: Option<&'h str>,
+    /// The key after which the listing starts. S3 only.
+    ///
+    /// The first page reports only the keys, and the groups of keys, that
+    /// sort after this text. It need not name a key. A marker takes over on
+    /// later pages, so a plan that carries one may leave this out. An empty
+    /// text starts at the beginning, as [`None`] does.
+    pub start_after: Option<&'h str>,
     /// Whether to group the keys at each `/` after the prefix.
     ///
     /// A delimited listing reports each group once, as an
@@ -745,6 +763,7 @@ impl<'h> PhysicalList<'h> {
         Self {
             prefix,
             marker: None,
+            start_after: None,
             delimited: false,
             max_results: None,
             include: ListInclude::default(),
@@ -752,10 +771,15 @@ impl<'h> PhysicalList<'h> {
     }
 
     /// Creates a plan from a stored shape and the text that it needs.
+    ///
+    /// The plan has no [`Self::start_after`], because a shape holds no
+    /// borrows. A later page does not need it: its marker says where it
+    /// starts.
     pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,
             marker,
+            start_after: None,
             delimited: shape.delimited,
             max_results: shape.max_results,
             include: shape.include,

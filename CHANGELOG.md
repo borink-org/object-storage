@@ -25,6 +25,8 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - The request asks for URL-encoded keys, and `fill_listing` decodes them. It refuses a page with a key that decoding changed if the page does not say that it encoded its keys.
   - New function `layered::s3::list_requirements`.
   - New function `layered::iso8601_ms`, which reads the date of an S3 listing entry.
+  - New field `PhysicalList::start_after`, which starts an S3 listing after a key. An Azure client refuses it.
+  - New constant `ListInclude::OWNER`, which asks S3 for each object's owner. An Azure client refuses it.
 - AWS Signature Version 4:
   - New module `sigv4`.
   - New struct `sigv4::Credentials`, which holds an access key and an optional session token. `Credentials::new` also takes the function that wipes a client's copy of the secret access key.

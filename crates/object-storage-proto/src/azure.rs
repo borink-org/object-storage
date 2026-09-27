@@ -1267,8 +1267,11 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure
-    /// request. This method validates the plan before it writes any byte, so
-    /// it never reports an invalid plan as a capacity error.
+    /// request. [`PhysicalList::start_after`] and
+    /// [`ListInclude::OWNER`] are S3's, and refused with
+    /// [`InvalidPlan::Option`]. This method validates the plan before it
+    /// writes any byte, so it never reports an invalid plan as a capacity
+    /// error.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots. Grow both buffers and retry, or call
@@ -1819,6 +1822,11 @@ fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<
     }
     if list.max_results == Some(0) {
         return Err(InvalidPlan::MaxResults.into());
+    }
+    // Azure's marker is its own text, so a listing cannot start after a key
+    // of the caller's. Nor does Azure list an owner beside each blob.
+    if list.start_after.is_some() || list.include.contains(ListInclude::OWNER) {
+        return Err(InvalidPlan::Option.into());
     }
     Ok(())
 }

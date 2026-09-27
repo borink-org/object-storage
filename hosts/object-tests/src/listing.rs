@@ -4,7 +4,9 @@
 //! [`list_all_keys`].
 
 use crate::{AdapterError, optional_text, successful_result, unsupported_by_crate};
-use borink_object_storage_proto::{EntryKind, ListEntry, ListInclude, Listing, PhysicalList};
+use borink_object_storage_proto::{
+    EntryKind, ListEntry, ListInclude, Listing, PhysicalList, layered,
+};
 use serde_json::{Value, json};
 
 /// One page, as the result reports it.
@@ -38,6 +40,15 @@ impl ListedPage {
                 .filter(|marker| !marker.is_empty())
                 .map(str::to_owned),
         }
+    }
+}
+
+/// The decoded text of a listed value, such as a metadata name or value.
+pub(crate) fn decoded_listing_text(raw_value: &[u8]) -> String {
+    let mut decoded = vec![0; raw_value.len()];
+    match layered::decode_into(raw_value, &mut decoded) {
+        Some(text) => String::from_utf8_lossy(text).into_owned(),
+        None => String::from_utf8_lossy(raw_value).into_owned(),
     }
 }
 
@@ -76,6 +87,9 @@ pub(crate) fn list_page(
             _ => return Ok(unsupported_by_crate("ListInclude names metadata only")),
         }
     }
+    if call.get("fetch_owner").and_then(Value::as_bool) == Some(true) {
+        include = include | ListInclude::OWNER;
+    }
     let delimited = match optional_text(call, "delimiter") {
         None => false,
         Some("/") => true,
@@ -85,6 +99,7 @@ pub(crate) fn list_page(
     let list_plan = PhysicalList {
         prefix: optional_text(call, "prefix").unwrap_or_default(),
         marker: optional_text(call, "continuation_token"),
+        start_after: optional_text(call, "start_after"),
         delimited,
         max_results: requested_page_size(call),
         include,

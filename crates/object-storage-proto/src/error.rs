@@ -86,8 +86,8 @@ pub enum InvalidPlan {
     /// A provider option is invalid or inapplicable.
     ///
     /// A block listing that names both a snapshot and a version is one. A
-    /// declared MD5 on a write that is not a commit is another, and so is an
-    /// S3 listing that asks for metadata.
+    /// declared MD5 on a write that is not a commit is another, and so is a
+    /// listing that asks a service for what only the other one lists.
     Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,
