@@ -4,8 +4,8 @@
 //! This crate computes neither. An [`s3::Objects`](crate::s3::Objects) client
 //! signs every request with the [`Sha256Provider`] you give it. The
 //! `borink-object-storage-crypto` crate has two, and a trait that turns any
-//! other implementation into one. To build a provider by hand, pass four functions
-//! to [`Sha256Provider::new`].
+//! other implementation into one. To build a provider by hand, pass four
+//! functions to [`Sha256Provider::new`].
 //!
 //! A request is signed over its method, its path, the headers this crate
 //! writes and the SHA-256 of its content. The signature is written into the
@@ -152,8 +152,8 @@ pub const MAX_SECRET_LEN: usize = 124;
 /// The most bytes of region name that a bucket takes.
 pub const MAX_REGION_LEN: usize = 64;
 
-/// The access key that signs requests, and the session token that goes with
-/// it.
+/// The access key that signs requests, the session token that goes with it,
+/// and the function that wipes a copy of the secret.
 ///
 /// This borrows the key. Its [`Debug`](fmt::Debug) output shows the key ID
 /// and hides the secret and the token.
@@ -172,8 +172,9 @@ impl<'a> Credentials<'a> {
     /// A client copies the secret onto its stack to derive a signing key,
     /// and calls `wipe` on that copy. `wipe` must set every byte to zero in
     /// writes that the compiler keeps. This crate forbids `unsafe` code, so
-    /// it cannot guarantee that itself. Pass `borink_object_storage_crypto::wipe`,
-    /// or [`wipe_best_effort`] to accept writes that the compiler may remove.
+    /// it cannot guarantee that itself. Pass
+    /// `borink_object_storage_crypto::wipe`, or [`wipe_best_effort`] to
+    /// accept writes that the compiler may remove.
     ///
     /// # Errors
     ///

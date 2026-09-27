@@ -277,9 +277,13 @@ pub struct MetadataPair<'h> {
     ///
     /// An S3 client sends text outside ASCII or a control character as an
     /// RFC 2047 encoded word, which S3 decodes. Read it back with
-    /// [`s3::metadata_value`](crate::s3::metadata_value). It refuses a value
-    /// that a read would not return exactly: one with CR or LF, with a space
-    /// or tab at either end, or with text that reads as an encoded word.
+    /// [`s3::metadata_value`](crate::s3::metadata_value). The client refuses
+    /// a value that a read would not return exactly:
+    ///
+    /// - a value with CR or LF, which S3 stores as spaces;
+    /// - a value with a space or a tab at either end, which a read drops;
+    /// - a value with a space-separated word that starts with `=?` and ends
+    ///   with `?=`, which S3 reads as an encoded word.
     pub value: &'h str,
 }
 

@@ -96,11 +96,12 @@ pub(crate) mod rfc2047 {
         out(b"?=");
     }
 
-    // Returns whether `text` holds `=?` with a `?=` after it, as every encoded
-    // word does. A service that decodes encoded words may decode such text.
+    // Returns whether a space-separated token of `text` starts with `=?` and
+    // ends with `?=`. S3 reads each such token as an encoded word, and
+    // decodes it or refuses the write.
     pub(crate) fn looks_encoded(text: &str) -> bool {
-        text.find("=?")
-            .is_some_and(|at| text[at + 2..].contains("?="))
+        text.split(' ')
+            .any(|token| token.starts_with("=?") && token.ends_with("?="))
     }
 
     // Writes the text of `value`, one or more UTF-8 encoded words separated by

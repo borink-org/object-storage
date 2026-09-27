@@ -114,17 +114,15 @@ pub enum InvalidPlan {
     /// See [`MetadataPair::name`](crate::MetadataPair::name) for the
     /// characters a name may hold.
     MetadataName = 21,
-    /// A metadata value cannot be sent as an HTTP header value.
+    /// A metadata value cannot be stored as given.
     ///
-    /// It holds CR or LF, starts or ends with a space or a tab, or holds text
-    /// that reads as an RFC 2047 encoded word. An Azure client refuses any
-    /// control character, a space at either end and a byte outside ASCII. See
-    /// [`MetadataPair::value`](crate::MetadataPair::value).
+    /// See [`MetadataPair::value`](crate::MetadataPair::value) for the values
+    /// that each service refuses.
     MetadataValue = 22,
     /// Two metadata pairs have the same name.
     ///
-    /// Azure matches a metadata name without case, so two names that differ
-    /// only in case are the same name.
+    /// Azure and S3 match a metadata name without case, so two names that
+    /// differ only in case are the same name.
     MetadataDuplicate = 23,
     /// A checksum is not the base64 of the bytes it names: sixteen for an
     /// MD5, eight for a CRC64.

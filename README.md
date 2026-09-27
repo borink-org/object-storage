@@ -46,12 +46,12 @@ Not yet in the C and C++ bindings.
 - Object put (PUT request, whole object)
   - Conditional (If-Match, and If-None-Match: * writes only if the object is absent)
   - Content is borrowed or streamed; its SHA-256 is computed, passed in, or left unsigned
-  - Metadata, with text outside ASCII sent and read as RFC 2047 encoded words
+  - Metadata, with text outside ASCII sent and read as RFC 2047 encoded words, and values that would not read back exactly refused
   - `Content-MD5`
 - Object delete (DELETE request)
   - Conditional (If-Match)
 - AWS Signature Version 4, with long-lived or temporary credentials and path-style or virtual-hosted addressing. SHA-256 and HMAC-SHA256 come from a provider you pass; `crates/object-storage-crypto` has two: RustCrypto's `sha2` and `hmac`, and `hmac-sha256`.
-- A client for AWS holds requests and responses to the rules AWS documents; a client for any other service that implements the S3 API accepts every behaviour such a service is known to show
+- A client for AWS holds requests and responses to the rules that AWS documents. A client for any other service that implements the S3 API accepts every behaviour that such a service is known to show.
 
 ## What makes `borink-object-storage` unique?
 

@@ -4,7 +4,8 @@
 //!
 //! 1. Create a [`Bucket`] and [`Credentials`], and from them an [`Objects`]
 //!    client with a [`Sha256Provider`]. The `borink-object-storage-crypto`
-//!    crate has providers.
+//!    crate has providers, and the function that [`Credentials::new`] takes
+//!    to wipe its copy of the secret.
 //! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`] or a
 //!    [`PhysicalDelete`], the same plans that an Azure client takes.
 //! 3. Call [`Objects::encode_get`], [`Objects::encode_put`] or
@@ -99,6 +100,18 @@
 //! default port of its scheme is written without it, as HTTP clients send
 //! it.
 //!
+//! # Metadata
+//!
+//! Put the pairs of a write in [`PhysicalPut::metadata`]. A header value
+//! holds only ASCII without control characters. A value with any other text
+//! is sent as an RFC 2047 encoded word, which S3 decodes. S3 returns
+//! such a value encoded as well: pass each response header to
+//! [`metadata_name`], and its value to [`metadata_value`].
+//!
+//! A value that a read would not return exactly is refused with
+//! [`InvalidPlan::MetadataValue`].
+//! [`MetadataPair::value`](crate::MetadataPair::value) lists those values.
+//!
 //! # Content that is not signed
 //!
 //! [`PayloadHash::Unsigned`] sends a write without the SHA-256 of its
@@ -156,8 +169,9 @@ pub fn metadata_name(header: &str) -> Option<&str> {
 
 /// Returns the text of a metadata value that a response header carries.
 ///
-/// A write sends a value outside ASCII as an RFC 2047 encoded word, such as
-/// `=?UTF-8?B?Y2Fmw6k=?=` for `café`, and S3 returns it in that form. This
+/// A write sends a value outside ASCII, or one with a control character, as
+/// an RFC 2047 encoded word, such as `=?UTF-8?B?Y2Fmw6k=?=` for `café`. S3
+/// returns it in that form. This
 /// function decodes a value of one or more UTF-8 encoded words. It returns
 /// any other value unchanged, including an encoded word that it cannot
 /// decode.
@@ -239,7 +253,8 @@ pub enum Service {
     ///
     /// - A bucket name holds ASCII letters, digits, `-`, `.`, `_` and `~`.
     /// - A region name holds ASCII letters, digits, `-`, `.` and `_`.
-    /// - A condition and the metadata are sent as the plan gives them.
+    /// - A condition is sent as the plan gives it, and the metadata of a write
+    ///   may be of any size.
     /// - A successful GET or HEAD may leave out `Content-Length`.
     /// - A removal succeeds with status 200 or 204.
     Compatible = 2,
@@ -579,6 +594,9 @@ impl<'a> Objects<'a> {
     ///   over a [`Payload::Streamed`].
     /// - [`InvalidPlan::Condition`] if `If-None-Match` carries a value other
     ///   than `*`, for [`Service::Aws`].
+    /// - [`InvalidPlan::MetadataName`], [`InvalidPlan::MetadataValue`] or
+    ///   [`InvalidPlan::MetadataDuplicate`] for a pair that S3 would not
+    ///   store as given. [`MetadataPair`] states the rules.
     /// - [`InvalidPlan::MetadataTooLarge`] if the metadata holds more than
     ///   [`MAX_METADATA_LEN`] bytes, for [`Service::Aws`].
     ///
@@ -833,9 +851,9 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::Response`] if the head cannot be read against
     /// `shape`. A `Content-Range` that is missing, or whose end is before its
     /// start, is [`ResponseFault::Head`], and so is a success without
-    /// `Content-Length` to a [`Service::Aws`] client. A range other than the one the plan
-    /// requested, and a ranged plan answered with status 200, are
-    /// [`ResponseFault::Range`].
+    /// `Content-Length` to a [`Service::Aws`] client. A range other than the
+    /// one the plan requested, and a ranged plan answered with status 200,
+    /// are [`ResponseFault::Range`].
     pub fn accept_get_head<'h>(
         &self,
         shape: GetShape,
@@ -1141,7 +1159,7 @@ fn write_signed_names(
 }
 
 // SigV4 signs a header value without the spaces at either end, and with each
-// run of spaces inside it as one space. A validated value holds no other
+// run of spaces inside it as one space. A value sent as it is holds no other
 // whitespace.
 fn write_canonical_value(out: &mut dyn FnMut(&[u8]), value: &[u8]) {
     let value = value.trim_ascii();
@@ -1297,7 +1315,7 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         // An empty value is a pair with no text, which S3 stores. A value is
         // refused if a read would not return it exactly. S3 stores CR and LF
         // as spaces, even from an encoded word. It returns an ASCII value
-        // unencoded, so HTTP drops the whitespace at either end, and text
+        // unencoded, so HTTP drops the whitespace at either end, and a token
         // that reads as an encoded word is decoded.
         let edge = |byte: Option<&u8>| matches!(byte, Some(b' ' | b'\t'));
         let bytes = pair.value.as_bytes();
@@ -1326,10 +1344,9 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
 }
 
 // Returns whether a write sends `value` as an encoded word. A header value
-// holds neither text outside ASCII nor a control character but a tab. S3
-// returns such a value as an encoded word, which `metadata_value` decodes.
-// A tab is encoded too, because SigV4 signs it as it signs no other
-// character; S3 returns it as it is.
+// cannot hold text outside ASCII or a control character other than a tab,
+// and S3 returns such a value encoded. A tab is encoded too, because the
+// canonical form of SigV4 folds spaces alone. S3 returns a tab as it is.
 fn encodes(value: &str) -> bool {
     !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control())
 }

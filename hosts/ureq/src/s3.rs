@@ -1,7 +1,7 @@
 //! S3 requests, sent with an [`Objects`] client and signed with AWS
 //! Signature Version 4.
 //!
-//! Create the client with the SHA-256 provider of
+//! Create the client with the SHA-256 provider and the `wipe` function of
 //! `borink-object-storage-crypto`, as the `s3_get` example does.
 
 use std::time::{SystemTime, UNIX_EPOCH};
