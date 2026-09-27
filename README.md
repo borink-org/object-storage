@@ -15,7 +15,7 @@ For C and C++, [`crates/object-storage-c`](https://github.com/borink-org/object-
 
 ## Supported features
 
-### Azure Blob Storage only
+### Azure Blob Storage
 
 - Object get (GET request)
   - Conditional (If-Match, If-None-Match)
@@ -33,8 +33,25 @@ For C and C++, [`crates/object-storage-c`](https://github.com/borink-org/object-
   - Supports registering properties you want to read into your own entry type in the main parsing pass
 - Object multipart upload
 - Metadata reading and writing
-- Checksums (crypto implementations through [`crates/object-storage-c`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
+- Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
+
+### S3 and S3-compatible services
+
+Not yet in the C and C++ bindings.
+
+- Object get (GET request) and object metadata (HEAD request)
+  - Conditional (If-Match, If-None-Match)
+  - Byte ranges: offset, bounded and suffix
+- Object put (PUT request, whole object)
+  - Conditional (If-Match, and If-None-Match: * writes only if the object is absent)
+  - Content is borrowed or streamed; its SHA-256 is computed, passed in, or left unsigned
+  - Metadata, with text outside ASCII sent and read as RFC 2047 encoded words
+  - `Content-MD5`
+- Object delete (DELETE request)
+  - Conditional (If-Match)
+- AWS Signature Version 4, with long-lived or temporary credentials and path-style or virtual-hosted addressing. SHA-256 and HMAC-SHA256 come from a provider you pass; `crates/object-storage-crypto` has two: RustCrypto's `sha2` and `hmac`, and `hmac-sha256`.
+- A client for AWS holds requests and responses to the rules AWS documents; a client for any other service that implements the S3 API accepts every behaviour such a service is known to show
 
 ## What makes `borink-object-storage` unique?
 
@@ -82,7 +99,7 @@ lengths this crate reports would no longer describe the bytes you receive.
 ## Limitations
 
 - Currently only ASCII endpoints are supported. Object keys may contain Unicode and are percent-encoded for the request. If you have a use case for internationalized endpoints, please let us know and we'll enable them as an optional feature.
-- The only authorization currently supported is a Microsoft Entra ID OAuth 2.0 bearer token. In the future we will also include code for creating these tokens based on other secrets or even a managed identity.
+- On Azure, the only authorization currently supported is a Microsoft Entra ID OAuth 2.0 bearer token. In the future we will also include code for creating these tokens based on other secrets or even a managed identity. On S3, requests are signed with an access key and optional session token that you pass.
 
 ## LLM disclaimer
 

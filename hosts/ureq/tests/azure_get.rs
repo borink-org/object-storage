@@ -1,10 +1,11 @@
-//! Loopback integration test for the synchronous `ureq` host.
+//! Loopback integration test for the Azure GET of the synchronous `ureq` host.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
 use borink_object_storage_proto::{Blobs, Container};
+use borink_object_storage_ureq::azure;
 
 #[test]
 fn executes_the_generated_request() {
@@ -32,9 +33,6 @@ fn executes_the_generated_request() {
     });
 
     let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
-    assert_eq!(
-        borink_azure_get_ureq::get(&blobs, "a key").unwrap(),
-        b"body"
-    );
+    assert_eq!(azure::get(&blobs, "a key").unwrap(), b"body");
     server.join().unwrap();
 }

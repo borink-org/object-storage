@@ -1,4 +1,5 @@
-//! Azure Blob Storage reads for callers that own their memory and their I/O.
+//! Azure Blob Storage and S3 requests for callers that own their memory and
+//! their I/O.
 //!
 //! This crate builds HTTP requests and reads HTTP responses. It never opens a
 //! socket, never reads the clock, and never allocates. You supply the buffer,
@@ -36,6 +37,11 @@
 //! [`azure::PhysicalCommitBlocks`], and read what is staged with
 //! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
 //! [`azure`] module.
+//!
+//! The same plans drive S3. Create an [`s3::Objects`] client and call its
+//! `encode_*` and `accept_*` methods, as the [`s3`] module describes. It
+//! signs each request with AWS Signature Version 4, using the SHA-256 and
+//! HMAC-SHA256 of a [`sigv4::Sha256Provider`] that you pass.
 //!
 //! # Example
 //!
@@ -139,14 +145,16 @@
 //! To read them back from a listing, put [`ListInclude::METADATA`] in the
 //! plan and call [`ListEntry::metadata`] on each entry. To read them back
 //! from a head read, pass each response header name to
-//! [`azure::metadata_name`].
+//! [`azure::metadata_name`] or [`s3::metadata_name`]. On S3, pass each
+//! value to [`s3::metadata_value`].
 //!
 //! To have Azure check the content of a write, put an MD5 or a CRC64 of it
 //! in [`WriteOptions::checksum`]. Pass the text, or register a
 //! [`checksum::ChecksumProvider`] with [`Blobs::with_checksum`] and ask for
-//! [`TransactionalChecksum::Compute`], which has the encoder compute it. This
-//! crate implements neither checksum. The [`checksum`] module says where to
-//! get one.
+//! [`TransactionalChecksum::Compute`], which has the encoder compute it. S3
+//! takes an MD5 alone, and [`s3::Objects::with_checksum`] registers its
+//! provider. This crate implements neither checksum. The [`checksum`] module
+//! says where to get one.
 //!
 //! # Sizing the buffer
 //!
@@ -155,7 +163,7 @@
 //! call again, or
 //! call [`layered::get_requirements`], [`layered::put_requirements`],
 //! [`layered::list_requirements`] or their block-operation siblings first, as
-//! the example does.
+//! the example does. The functions for an S3 client are in [`layered::s3`].
 //!
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
@@ -165,13 +173,15 @@
 //! nothing, and it reports a plan error that the encoding method reports
 //! again.
 //!
-//! # Staying within Azure's limits
+//! # Staying within the service's limits
 //!
-//! The encoding methods refuse a plan that Azure would refuse, with an
+//! The encoding methods refuse a plan that the service would refuse, with an
 //! [`InvalidPlan`] that names the rule. The rules on a key are documented at
-//! [`PhysicalGet::key`]. The numeric limits are [`azure::MAX_URL_LEN`] for
-//! the whole URL, [`azure::MAX_PUT_LEN`] for one write, and
-//! [`azure::MAX_STAGE_LEN`] for one block.
+//! [`PhysicalGet::key`]. On Azure, the numeric limits are
+//! [`azure::MAX_URL_LEN`] for the whole URL, [`azure::MAX_PUT_LEN`] for one
+//! write, and [`azure::MAX_STAGE_LEN`] for one block. On S3, they are
+//! [`s3::MAX_KEY_LEN`] for a key, [`s3::MAX_PUT_LEN`] for one write, and
+//! [`s3::MAX_METADATA_LEN`] for the metadata of a write to AWS.
 //!
 //! # Host requirements
 //!
@@ -213,6 +223,8 @@ pub mod layered;
 mod outcome;
 mod path;
 mod request;
+pub mod s3;
+pub mod sigv4;
 mod time;
 mod types;
 mod xml;

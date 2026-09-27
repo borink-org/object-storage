@@ -1,13 +1,17 @@
 {
   "core": {
     "azure/get-version": "PhysicalGet selects no snapshot or version",
-    "s3/*": "the crate speaks Azure Blob only"
+    "s3/*-multipart*": "the crate has no S3 multipart upload",
+    "s3/get-version": "an S3 plan selects no version",
+    "s3/list-*": "the crate has no S3 listing",
+    "s3/upload-part": "the crate has no S3 multipart upload"
   },
   "operations": {
     "field:/value/cache_control": "ResponseHead and ObjectMeta carry no Cache-Control",
     "field:/value/content_disposition": "ResponseHead and ObjectMeta carry no Content-Disposition",
     "field:/value/content_language": "ResponseHead and ObjectMeta carry no Content-Language",
     "field:/value/content_md5_base64": "ResponseHead and ObjectMeta carry no Content-MD5",
+    "field:/value/storage_class": "ResponseHead and ObjectMeta carry no x-amz-storage-class",
     "operations/azure*/*-if-modified-since-*": "ConditionKind has no date conditions",
     "operations/azure*/*-if-unmodified-since-*": "ConditionKind has no date conditions",
     "operations/azure*/append-block*": "the crate has no azure.append_block operation",
@@ -65,16 +69,29 @@
     "operations/azure/put-leased-with-lease-id": "the crate's plans carry no lease ID",
     "operations/azure/put-with-tags": "PhysicalPut sets no access tier or tags",
     "operations/azure/put-with-tier": "PhysicalPut sets no access tier or tags",
-    "operations/s3/*": "the crate speaks Azure Blob only"
+    "operations/s3/*-if-modified-since-*": "ConditionKind has no date conditions",
+    "operations/s3/*-if-unmodified-since-*": "ConditionKind has no date conditions",
+    "operations/s3/*-tagging": "the crate has no S3 tagging operation",
+    "operations/s3/abort*": "the crate has no S3 multipart upload",
+    "operations/s3/commit*": "the crate has no S3 multipart upload",
+    "operations/s3/copy*": "the crate has no copy operation",
+    "operations/s3/create-bucket*": "the crate manages no buckets",
+    "operations/s3/delete-bucket": "the crate manages no buckets",
+    "operations/s3/delete-many": "the crate has no delete_many operation",
+    "operations/s3/head-bucket*": "the crate manages no buckets",
+    "operations/s3/list-*": "the crate lists no S3 objects or buckets",
+    "operations/s3/put-content-*": "PhysicalPut sets no content properties",
+    "operations/s3/put-with-*": "PhysicalPut sets no storage class or tags",
+    "operations/s3/stage*": "the crate has no S3 multipart upload",
+    "operations/s3/start*": "the crate has no S3 multipart upload"
   },
   "s3-express": {
-    "operations/s3-express/*": "the crate speaks Azure Blob only"
+    "operations/s3-express/*": "the crate signs no S3 Express session for a directory bucket"
   },
   "vectors": {
     "azure/canonical-shared-key": "the crate authenticates with a bearer token and implements no Shared Key signing",
-    "azure/hmac-sha256-rfc4231": "the crate authenticates with a bearer token and implements no Shared Key signing",
     "azure/shared-key-encoded-name": "the crate authenticates with a bearer token and implements no Shared Key signing",
-    "s3-express/*": "the crate speaks Azure Blob only",
-    "s3/*": "the crate speaks Azure Blob only"
+    "s3-express/*": "the crate signs with SigV4 alone, not with an S3 Express session",
+    "s3/canonical-get-range": "the crate writes a canonical request only as part of a signed request"
   }
 }

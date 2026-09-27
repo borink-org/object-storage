@@ -925,7 +925,9 @@ impl<'a> Blobs<'a> {
         head.header("x-ms-date", |out| out.push(now.rfc1123().as_bytes()));
         head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
         if range != RequestedRange::Whole {
-            head.header("range", |out| write_range(out, range));
+            head.header("range", |out| {
+                write_range(&mut |piece| out.push(piece), range)
+            });
         }
         Ok(())
     }
@@ -985,6 +987,11 @@ impl<'a> Blobs<'a> {
         match head.status {
             206 if !ranged => Err(ResponseFault::Range.into()),
             200 if ranged => Err(ResponseFault::Range.into()),
+            // Azure serves no suffix, so this shape did not pass through
+            // encode_get.
+            206 if matches!(shape.range, RequestedRange::Suffix(_)) => {
+                Err(ResponseFault::Range.into())
+            }
             200 | 206 => accept_success(shape, head),
             // A conditional status the plan did not ask for is a contradiction,
             // not an outcome: nothing in the plan explains it.

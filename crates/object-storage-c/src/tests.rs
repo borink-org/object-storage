@@ -744,9 +744,9 @@ fn every_error_crosses_as_a_status() {
             checked += 1;
         }
     }
-    // Every variant of the two inner enums, and the three that carry no
+    // Every variant of the two inner enums, and the five that carry no
     // inner value.
-    assert_eq!(checked, 3 + 24 + 4);
+    assert_eq!(checked, 5 + 25 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

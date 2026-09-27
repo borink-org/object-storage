@@ -196,6 +196,10 @@ pub struct PhysicalGet<'h> {
     /// name without that dot, and so is a `.` or `..` segment, because a host
     /// resolves those out of the URL before it sends the request. Each would
     /// name an object other than the one asked for.
+    ///
+    /// An S3 client refuses a `.` or `..` segment for the same reason, and a
+    /// key longer than [`s3::MAX_KEY_LEN`](crate::s3::MAX_KEY_LEN) bytes. S3
+    /// takes every other key of UTF-8.
     pub key: &'h str,
     /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
@@ -259,16 +263,23 @@ impl<'h> PhysicalGet<'h> {
 /// One metadata pair of an object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MetadataPair<'h> {
-    /// The name, without the `x-ms-meta-` prefix.
+    /// The name, without the `x-ms-meta-` or `x-amz-meta-` prefix.
     ///
-    /// ASCII letters, digits and underscores, not starting with a digit.
-    /// Azure matches a name without case.
+    /// On Azure, ASCII letters, digits and underscores, not starting with a
+    /// digit. On S3, any character that an HTTP token holds: letters, digits
+    /// and `` !#$%&'*+-.^_`|~ ``. Both services match a name without case.
     pub name: &'h str,
     /// The text stored under that name.
     ///
-    /// The text is sent as one HTTP header value, so it must be ASCII with
-    /// no control character and no space at either end. Encode any other
-    /// text yourself, as base64 or with percent escapes.
+    /// On Azure, the text is sent as one HTTP header value, so it is ASCII,
+    /// with no control character and no space at either end. Encode any
+    /// other text yourself, as base64 or with percent escapes.
+    ///
+    /// An S3 client sends text outside ASCII or a control character as an
+    /// RFC 2047 encoded word, which S3 decodes. Read it back with
+    /// [`s3::metadata_value`](crate::s3::metadata_value). It refuses a value
+    /// that a read would not return exactly: one with CR or LF, with a space
+    /// or tab at either end, or with text that reads as an encoded word.
     pub value: &'h str,
 }
 

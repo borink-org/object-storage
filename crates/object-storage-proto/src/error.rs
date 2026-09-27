@@ -90,8 +90,11 @@ pub enum InvalidPlan {
     RequestTooLarge = 14,
     /// The object key is not UTF-8.
     KeyNotUtf8 = 15,
-    /// The object key exceeds the 1,024 UTF-16 code units that a
-    /// flat-namespace account accepts, and the client was told it is on one.
+    /// The object key is longer than the service accepts.
+    ///
+    /// On Azure, that is 1,024 UTF-16 code units on a flat-namespace account,
+    /// when the client was told it is on one. On S3, it is
+    /// [`s3::MAX_KEY_LEN`](crate::s3::MAX_KEY_LEN) bytes.
     KeyTooLong = 16,
     /// The object key contains an ASCII control character.
     KeyControlCharacter = 17,
@@ -105,16 +108,18 @@ pub enum InvalidPlan {
     /// The endpoint, the container name, the encoded key and the query all
     /// count towards it.
     UrlTooLong = 20,
-    /// A metadata name is empty, or it holds a character that Azure does not
-    /// accept in one.
+    /// A metadata name is empty, or it holds a character that the service
+    /// does not accept in one.
     ///
     /// See [`MetadataPair::name`](crate::MetadataPair::name) for the
     /// characters a name may hold.
     MetadataName = 21,
     /// A metadata value cannot be sent as an HTTP header value.
     ///
-    /// It holds a control character or a byte outside ASCII, or it starts or
-    /// ends with a space. See [`MetadataPair::value`](crate::MetadataPair::value).
+    /// It holds CR or LF, starts or ends with a space or a tab, or holds text
+    /// that reads as an RFC 2047 encoded word. An Azure client refuses any
+    /// control character, a space at either end and a byte outside ASCII. See
+    /// [`MetadataPair::value`](crate::MetadataPair::value).
     MetadataValue = 22,
     /// Two metadata pairs have the same name.
     ///
@@ -126,6 +131,10 @@ pub enum InvalidPlan {
     ///
     /// See [`TransactionalChecksum`](crate::TransactionalChecksum).
     Checksum = 24,
+    /// The metadata pairs together hold more bytes than the service accepts.
+    ///
+    /// See [`s3::MAX_METADATA_LEN`](crate::s3::MAX_METADATA_LEN).
+    MetadataTooLarge = 25,
 }
 
 impl InvalidPlan {
@@ -159,6 +168,7 @@ impl InvalidPlan {
             Self::MetadataValue => "invalid metadata value",
             Self::MetadataDuplicate => "two metadata pairs have the same name",
             Self::Checksum => "the checksum is not the base64 of the bytes it names",
+            Self::MetadataTooLarge => "the metadata is larger than the service accepts",
         }
     }
 
@@ -191,6 +201,7 @@ impl InvalidPlan {
             22 => Self::MetadataValue,
             23 => Self::MetadataDuplicate,
             24 => Self::Checksum,
+            25 => Self::MetadataTooLarge,
             _ => return None,
         })
     }
@@ -308,6 +319,10 @@ pub enum ErrorCode {
     Capacity = 5,
     /// [`Error::Response`].
     Response = 6,
+    /// [`Error::InvalidCredentials`].
+    InvalidCredentials = 7,
+    /// [`Error::InvalidRegion`].
+    InvalidRegion = 8,
 }
 
 impl ErrorCode {
@@ -320,6 +335,8 @@ impl ErrorCode {
             Self::InvalidPlan => "the plan cannot become a request",
             Self::Capacity => "the buffer is too small",
             Self::Response => "the response cannot be read",
+            Self::InvalidCredentials => "invalid credentials",
+            Self::InvalidRegion => "invalid region",
         }
     }
 
@@ -334,6 +351,8 @@ impl ErrorCode {
             4 => Self::InvalidPlan,
             5 => Self::Capacity,
             6 => Self::Response,
+            7 => Self::InvalidCredentials,
+            8 => Self::InvalidRegion,
             _ => return None,
         })
     }
@@ -376,14 +395,21 @@ pub enum Error {
     Capacity(CapacityError),
     /// The response cannot be read.
     Response(ResponseFault),
+    /// The access key ID, the secret access key or the session token is not
+    /// usable in a signed request.
+    InvalidCredentials,
+    /// The region name is not usable in a signed request.
+    InvalidRegion,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidEndpoint | Self::InvalidContainer | Self::InvalidToken => {
-                f.write_str(self.code().as_str())
-            }
+            Self::InvalidEndpoint
+            | Self::InvalidContainer
+            | Self::InvalidToken
+            | Self::InvalidCredentials
+            | Self::InvalidRegion => f.write_str(self.code().as_str()),
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
             Self::Response(fault) => fmt::Display::fmt(fault, f),
@@ -429,6 +455,8 @@ impl Error {
             Self::InvalidPlan(_) => ErrorCode::InvalidPlan,
             Self::Capacity(_) => ErrorCode::Capacity,
             Self::Response(_) => ErrorCode::Response,
+            Self::InvalidCredentials => ErrorCode::InvalidCredentials,
+            Self::InvalidRegion => ErrorCode::InvalidRegion,
         }
     }
 
@@ -455,7 +483,13 @@ impl Error {
             ErrorCode::InvalidEndpoint if detail == 0 => Self::InvalidEndpoint,
             ErrorCode::InvalidContainer if detail == 0 => Self::InvalidContainer,
             ErrorCode::InvalidToken if detail == 0 => Self::InvalidToken,
-            ErrorCode::InvalidEndpoint | ErrorCode::InvalidContainer | ErrorCode::InvalidToken => {
+            ErrorCode::InvalidCredentials if detail == 0 => Self::InvalidCredentials,
+            ErrorCode::InvalidRegion if detail == 0 => Self::InvalidRegion,
+            ErrorCode::InvalidEndpoint
+            | ErrorCode::InvalidContainer
+            | ErrorCode::InvalidToken
+            | ErrorCode::InvalidCredentials
+            | ErrorCode::InvalidRegion => {
                 return None;
             }
             ErrorCode::InvalidPlan => match InvalidPlan::from_discriminant(detail) {
@@ -494,6 +528,8 @@ mod tests {
             Error::InvalidEndpoint,
             Error::InvalidContainer,
             Error::InvalidToken,
+            Error::InvalidCredentials,
+            Error::InvalidRegion,
         ];
         for detail in 1..=u16::MAX {
             if let Some(plan) = InvalidPlan::from_discriminant(detail) {

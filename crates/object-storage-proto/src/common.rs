@@ -1,7 +1,7 @@
 // What both providers share when they write a request head and read a
 // response head.
 
-use crate::request::{HeadWriter, U64Decimal, Writer};
+use crate::request::{HeadWriter, U64Decimal};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
@@ -37,7 +37,7 @@ pub(crate) fn accept_success<'h>(
         content_type: head.content_type,
     };
     if head.status == 200 {
-        // An unranged plan reads from byte zero, and Azure states the whole
+        // An unranged plan reads from byte zero, and the service states the whole
         // object length, so `Content-Length` is both the window and the size.
         return Ok(match shape.kind {
             GetKind::Head => GetHeadOutcome::Complete {
@@ -66,12 +66,17 @@ pub(crate) fn accept_success<'h>(
     if content_length.is_some_and(|length| length != served) {
         return Err(ResponseFault::Head.into());
     }
-    // Azure serves the whole satisfiable range, so a short serve is a
+    // Both services serve the whole satisfiable range, so a short serve is a
     // mismatch: silently accepting it would hand consumers a partial read.
     let requested_start = match shape.range {
         RequestedRange::Bounded { start, .. } | RequestedRange::Offset(start) => start,
-        RequestedRange::Whole | RequestedRange::Suffix(_) => {
-            // Public shapes need not have passed through encode_get.
+        // Where a suffix starts depends on the size, so the head must state it.
+        RequestedRange::Suffix(suffix) => match total {
+            Some(total) => total.saturating_sub(suffix),
+            None => return Err(ResponseFault::Range.into()),
+        },
+        RequestedRange::Whole => {
+            // Public shapes need not have passed through an encoder.
             return Err(ResponseFault::Range.into());
         }
     };
@@ -131,8 +136,9 @@ pub(crate) fn parse_content_range(value: &[u8]) -> Option<ContentRange> {
     Some(ContentRange::Satisfied { start, end, total })
 }
 
-// Reads a header value that carries text. Azure writes `Last-Modified` in
-// ASCII, so a value that is not UTF-8 is a fault in the head.
+// Reads a header value that carries text. Both services write
+// `Last-Modified` in ASCII, so a value that is not UTF-8 is a fault in the
+// head.
 pub(crate) fn text_header(value: Option<&[u8]>) -> Result<Option<&str>> {
     value
         .map(|value| core::str::from_utf8(value).map_err(|_| Error::Response(ResponseFault::Head)))
@@ -189,22 +195,24 @@ pub(crate) fn push_condition(
     }
 }
 
-pub(crate) fn write_range(out: &mut Writer<'_>, range: RequestedRange) {
-    out.push(b"bytes=");
+pub(crate) fn write_range(out: &mut dyn FnMut(&[u8]), range: RequestedRange) {
+    out(b"bytes=");
     match range {
         RequestedRange::Bounded { start, end } => {
-            out.push(U64Decimal::new(start).as_bytes());
-            out.push(b"-");
-            // validate_get requires start < end, so end is nonzero.
-            out.push(U64Decimal::new(end - 1).as_bytes());
+            out(U64Decimal::new(start).as_bytes());
+            out(b"-");
+            // Validation requires start < end, so end is nonzero.
+            out(U64Decimal::new(end - 1).as_bytes());
         }
         RequestedRange::Offset(first) => {
-            out.push(U64Decimal::new(first).as_bytes());
-            out.push(b"-");
+            out(U64Decimal::new(first).as_bytes());
+            out(b"-");
         }
-        RequestedRange::Whole | RequestedRange::Suffix(_) => {
-            unreachable!("the plan was validated")
+        RequestedRange::Suffix(last) => {
+            out(b"-");
+            out(U64Decimal::new(last).as_bytes());
         }
+        RequestedRange::Whole => unreachable!("the plan was validated"),
     }
 }
 

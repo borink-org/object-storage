@@ -1,10 +1,12 @@
-/// An instant that you supply, formatted for Azure request headers.
+/// An instant that you supply, formatted for request headers.
 ///
 /// This crate performs no I/O and cannot read the clock, so pass one of these
-/// to [`Blobs::encode_get`](crate::Blobs::encode_get).
+/// to [`Blobs::encode_get`](crate::Blobs::encode_get) and every other
+/// encoding method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamps {
     rfc1123: [u8; 29],
+    iso8601: [u8; 16],
     unix: u64,
 }
 
@@ -58,8 +60,16 @@ impl Timestamps {
         write_fixed_digits(&mut rfc1123[17..19], hour);
         write_fixed_digits(&mut rfc1123[20..22], minute);
         write_fixed_digits(&mut rfc1123[23..25], second);
+        let mut iso8601 = *b"00000000T000000Z";
+        write_fixed_digits(&mut iso8601[..4], year as u64);
+        write_fixed_digits(&mut iso8601[4..6], month as u64);
+        write_fixed_digits(&mut iso8601[6..8], day as u64);
+        write_fixed_digits(&mut iso8601[9..11], hour);
+        write_fixed_digits(&mut iso8601[11..13], minute);
+        write_fixed_digits(&mut iso8601[13..15], second);
         Self {
             rfc1123,
+            iso8601,
             unix: seconds,
         }
     }
@@ -73,6 +83,16 @@ impl Timestamps {
     pub fn rfc1123(&self) -> &str {
         core::str::from_utf8(&self.rfc1123).expect("HTTP dates are ASCII")
     }
+
+    /// Returns the time as `YYYYMMDDTHHMMSSZ`, for `x-amz-date`.
+    pub fn iso8601(&self) -> &str {
+        core::str::from_utf8(&self.iso8601).expect("ISO 8601 basic dates are ASCII")
+    }
+
+    // The `YYYYMMDD` that a SigV4 credential scope names.
+    pub(crate) fn date(&self) -> &str {
+        &self.iso8601()[..8]
+    }
 }
 
 // Date fields have a width fixed by RFC 1123, so leading zeroes are retained.
@@ -85,6 +105,8 @@ fn write_fixed_digits(output: &mut [u8], mut value: u64) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS};
 
     #[test]
@@ -107,6 +129,9 @@ mod tests {
             assert_eq!(&text[8..11], MONTHS[month - 1], "{year}-{month}-{day}");
             assert_eq!(decimal(&text[12..16]), year, "{year}-{month}-{day}");
             assert_eq!(&text[17..], b"00:00:00 GMT", "{year}-{month}-{day}");
+            let iso = actual.iso8601();
+            assert_eq!(iso, std::format!("{year:04}{month:02}{day:02}T000000Z"));
+            assert_eq!(actual.date(), &iso[..8]);
 
             if (year, month, day) == (2400, 12, 31) {
                 break;
@@ -123,6 +148,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn formats_the_basic_form_that_sigv4_signs() {
+        // The instant of the examples in the AWS Signature Version 4
+        // documentation for S3.
+        assert_eq!(
+            Timestamps::from_unix(1_369_353_600).iso8601(),
+            "20130524T000000Z"
+        );
+        assert_eq!(
+            Timestamps::from_unix(1_787_400_061).iso8601(),
+            "20260822T120101Z"
+        );
     }
 
     #[test]

@@ -344,6 +344,82 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// The `*_requirements` functions of an S3 client.
+pub mod s3 {
+    use super::required;
+    use crate::s3::{Objects, PayloadHash};
+    use crate::{
+        Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestSize, Result, Timestamps,
+    };
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_get`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `get`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_get`],
+    /// which reports it again.
+    pub fn get_requirements(
+        objects: &Objects<'_>,
+        get: &PhysicalGet<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(objects.encode_get(&mut [], &mut [], get, now).map(drop))
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_put`] needs for this plan.
+    ///
+    /// The answer covers the request head only, and never the content. This
+    /// function reads no byte of `content` and computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `put`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_put`],
+    /// which reports it again.
+    pub fn put_requirements(
+        objects: &Objects<'_>,
+        put: &PhysicalPut<'_>,
+        content: Payload<'_>,
+        hash: PayloadHash,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_put(&mut [], &mut [], put, content, hash, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_delete`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `delete`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_delete`], which reports it again.
+    pub fn delete_requirements(
+        objects: &Objects<'_>,
+        delete: &PhysicalDelete<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_delete(&mut [], &mut [], delete, now)
+                .map(drop),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{block_id, http_date_ms, quoted_etag};

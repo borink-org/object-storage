@@ -1,9 +1,9 @@
 //! The checksums themselves, against the vectors Azure answered and the
 //! catalogue's own.
 
-#![cfg(all(feature = "crc64", feature = "md5"))]
+#![cfg(all(feature = "crc64", feature = "md5-rustcrypto"))]
 
-use borink_object_storage_crypto::{Checksum, Crc64, Md5};
+use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto};
 use borink_object_storage_proto::checksum::BASE64_LEN;
 
 fn base64<C: Checksum>(pieces: &[&[u8]]) -> String {
@@ -38,16 +38,19 @@ fn crc64_matches_what_azure_answered() {
 
 #[test]
 fn md5_matches_the_reference_vectors_and_what_azure_stored() {
-    assert_eq!(base64::<Md5>(&[b""]), "1B2M2Y8AsgTpgAmY7PhCfg==");
+    assert_eq!(base64::<Md5RustCrypto>(&[b""]), "1B2M2Y8AsgTpgAmY7PhCfg==");
     // Azure computed and stored this for a `0123456789` write.
-    assert_eq!(base64::<Md5>(&[b"0123456789"]), "eB5eJF1ptWaXm4bijSPyxw==");
     assert_eq!(
-        base64::<Md5>(&[b"01234", b"56789"]),
+        base64::<Md5RustCrypto>(&[b"0123456789"]),
+        "eB5eJF1ptWaXm4bijSPyxw=="
+    );
+    assert_eq!(
+        base64::<Md5RustCrypto>(&[b"01234", b"56789"]),
         "eB5eJF1ptWaXm4bijSPyxw=="
     );
     // The block list of a one-block commit, which is what a commit sums.
     assert_eq!(
-        base64::<Md5>(&[
+        base64::<Md5RustCrypto>(&[
             b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><Latest>AAAAAA==</Latest></BlockList>"
         ]),
         "YzOsE0fk1HdRsGkEw5j/sg=="
@@ -56,9 +59,9 @@ fn md5_matches_the_reference_vectors_and_what_azure_stored() {
     // two.
     let long = [b'a'; 200];
     for len in [55, 56, 63, 64, 65, 119, 120, 128, 200] {
-        let expected = base64::<Md5>(&[&long[..len]]);
+        let expected = base64::<Md5RustCrypto>(&[&long[..len]]);
         assert_eq!(
-            base64::<Md5>(&[&long[..len / 2], &long[len / 2..len]]),
+            base64::<Md5RustCrypto>(&[&long[..len / 2], &long[len / 2..len]]),
             expected,
             "{len}"
         );
@@ -70,8 +73,11 @@ fn every_implementation_fits_the_state_slot() {
     // `provider` asserts this at compile time; this reports the numbers that
     // `ChecksumState::LEN` is chosen against.
     use borink_object_storage_proto::checksum::ChecksumState;
-    for (name, size) in [("Crc64", size_of::<Crc64>()), ("Md5", size_of::<Md5>())] {
+    for (name, size) in [
+        ("Crc64", size_of::<Crc64>()),
+        ("Md5RustCrypto", size_of::<Md5RustCrypto>()),
+    ] {
         assert!(size <= ChecksumState::LEN, "{name} is {size} bytes");
     }
-    assert_eq!(size_of::<Md5>(), 88);
+    assert_eq!(size_of::<Md5RustCrypto>(), 88);
 }

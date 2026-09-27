@@ -36,18 +36,23 @@ pub struct ResponseHead<'h> {
     pub e_tag: Option<&'h [u8]>,
     /// The value of the `Last-Modified` header.
     pub last_modified: Option<&'h [u8]>,
-    /// The value of the `x-ms-version-id` header.
+    /// The value of the `x-ms-version-id` or `x-amz-version-id` header.
     pub version: Option<&'h [u8]>,
     /// The value of the `x-ms-error-code` header.
     ///
     /// Azure names the error here. The methods that read a head return the
     /// named error with the outcome.
     pub error_code: Option<&'h [u8]>,
-    /// The value of the `x-ms-request-id` header.
+    /// The value of the `x-ms-request-id` or `x-amz-request-id` header.
     ///
-    /// Azure assigns one identifier to each request. Record it: Azure support
-    /// uses it to find the request in the service logs.
+    /// The service assigns one identifier to each request. Record it: the
+    /// service's support uses it to find the request in the service logs.
     pub request_id: Option<&'h [u8]>,
+    /// The value of the `x-amz-id-2` header.
+    ///
+    /// S3 sends this second identifier beside `request_id`. AWS support asks
+    /// for both.
+    pub extended_request_id: Option<&'h [u8]>,
 }
 
 impl<'h> ResponseHead<'h> {
@@ -92,12 +97,18 @@ impl<'h> ResponseHead<'h> {
             &mut self.e_tag
         } else if name.eq_ignore_ascii_case("last-modified") {
             &mut self.last_modified
-        } else if name.eq_ignore_ascii_case("x-ms-version-id") {
+        } else if name.eq_ignore_ascii_case("x-ms-version-id")
+            || name.eq_ignore_ascii_case("x-amz-version-id")
+        {
             &mut self.version
         } else if name.eq_ignore_ascii_case("x-ms-error-code") {
             &mut self.error_code
-        } else if name.eq_ignore_ascii_case("x-ms-request-id") {
+        } else if name.eq_ignore_ascii_case("x-ms-request-id")
+            || name.eq_ignore_ascii_case("x-amz-request-id")
+        {
             &mut self.request_id
+        } else if name.eq_ignore_ascii_case("x-amz-id-2") {
+            &mut self.extended_request_id
         } else {
             return;
         };

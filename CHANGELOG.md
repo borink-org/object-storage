@@ -2,6 +2,43 @@
 
 This file lists the changes in each release of `borink-object-storage-proto` and `borink-object-storage-crypto`. Until 1.0, any release can break the API.
 
+## Unreleased
+
+### Added
+
+- S3 and services that implement the S3 API, for get, head, put and delete:
+  - New module `s3`.
+  - New struct `s3::Bucket`, which holds an endpoint, a bucket name and a region. `Bucket::new` refuses what a signed request cannot carry.
+  - New enum `s3::Service`. `Service::Aws` holds requests and responses to the rules that AWS documents, and `Service::Compatible` accepts what any S3-compatible service is known to send.
+  - New enum `s3::Addressing`, for path-style or virtual-hosted URLs.
+  - New method `Bucket::with_addressing`, which returns the bucket with that addressing. A bucket uses path-style addressing by default.
+  - New struct `s3::Objects`, the client. Its `encode_get`, `encode_put` and `encode_delete` methods write a request head signed with AWS Signature Version 4. Its `accept_*` methods read the response, as the methods of `Blobs` do.
+  - New method `Objects::with_signing_key`, which derives the signing key for one day once.
+  - New method `Objects::with_checksum`, which registers a `ChecksumProvider` for the `Content-MD5` of a write.
+  - New enum `s3::PayloadHash`, which `encode_put` takes. It says whether this crate computes the SHA-256 of the content, takes yours, or leaves the content unsigned.
+  - New constants `s3::MAX_KEY_LEN`, `s3::MAX_PUT_LEN`, `s3::MAX_METADATA_LEN` and `s3::METADATA_PREFIX`.
+  - New functions `s3::metadata_name`, `s3::error_code` and `s3::classify_error`.
+  - New function `s3::metadata_value`, which decodes a metadata value that S3 returns as RFC 2047 encoded words. An S3 client sends a value outside ASCII in that form.
+  - New module `layered::s3`, with `get_requirements`, `put_requirements` and `delete_requirements` for an `Objects` client.
+- AWS Signature Version 4:
+  - New module `sigv4`.
+  - New struct `sigv4::Credentials`, which holds an access key and an optional session token.
+  - New struct `sigv4::Sha256Provider`, which holds the SHA-256 and HMAC-SHA256 that a client signs with.
+  - New struct `sigv4::Sha256State`, in which a provider keeps a SHA-256 while it computes it.
+  - New constants `sigv4::MAX_SECRET_LEN` and `sigv4::MAX_REGION_LEN`.
+- New method `Timestamps::iso8601`, which returns the time as `YYYYMMDDTHHMMSSZ`.
+- New field `ResponseHead::extended_request_id`, which holds the `x-amz-id-2` header. `ResponseHead::request_id` and `ResponseHead::version` also read `x-amz-request-id` and `x-amz-version-id`.
+- New variants `Error::InvalidCredentials` and `Error::InvalidRegion`, with `ErrorCode::InvalidCredentials` and `ErrorCode::InvalidRegion`.
+- New variant `InvalidPlan::MetadataTooLarge`, which an S3 client for AWS returns for metadata larger than `s3::MAX_METADATA_LEN`.
+- SHA-256 in `borink-object-storage-crypto`:
+  - New trait `Sha256` and function `sha256_provider`, which turn your own SHA-256 into a `Sha256Provider`.
+  - New struct `Sha256RustCrypto` and constant `SHA256_RUSTCRYPTO`, over RustCrypto's `sha2` and `hmac`, under the `sha256-rustcrypto` feature.
+  - New struct `Sha256Minimal` and constant `SHA256_MINIMAL`, over `hmac-sha256`, under the `sha256-minimal` feature.
+
+### Changed
+
+- In `borink-object-storage-crypto`, renamed the feature `md5` to `md5-rustcrypto`, the struct `Md5` to `Md5RustCrypto` and the constant `MD5` to `MD5_RUSTCRYPTO`.
+
 ## 0.0.2 - 2026-09-26
 
 ### Added

@@ -16,9 +16,15 @@ doctest = false
 
 [dependencies]
 borink-object-storage-proto = { path = "../../crates/object-storage-proto" }
-# Both providers, so the check covers the `md-5` adapter as well as this
-# workspace's own CRC64.
-borink-object-storage-crypto = { path = "../../crates/object-storage-crypto", features = ["crc64", "md5"] }
+# Both checksum providers, so the check covers the `md-5` adapter as well as
+# this workspace's own CRC64, and the two SHA-256 providers that need no
+# `std`.
+borink-object-storage-crypto = { path = "../../crates/object-storage-crypto", features = [
+    "crc64",
+    "md5-rustcrypto",
+    "sha256-rustcrypto",
+    "sha256-minimal",
+] }
 
 [lints.rust]
 missing_docs = "deny"
