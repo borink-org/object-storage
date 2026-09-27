@@ -219,8 +219,29 @@ macro_rules! transport_step {
     };
 }
 
+/// Returns early from a page read with the result for an error from the
+/// crate, as [`crate_step`] does from a whole operation.
+macro_rules! page_step {
+    ($expression:expr) => {
+        match $expression {
+            Ok(value) => value,
+            Err(error) => return Ok(Err($crate::result_for_crate_error(error))),
+        }
+    };
+}
+
+/// The result for a request that could not be sent or answered.
+fn transport_failure(error: &ureq::Error) -> Value {
+    json!({
+        "outcome": "error",
+        "kind": "transport",
+        "reason": error.to_string(),
+    })
+}
+
 // After the macros, which the provider modules use.
 mod azure;
+mod listing;
 mod s3;
 
 fn current_timestamps() -> Timestamps {

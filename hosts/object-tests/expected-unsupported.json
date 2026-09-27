@@ -3,7 +3,6 @@
     "azure/get-version": "PhysicalGet selects no snapshot or version",
     "s3/*-multipart*": "the crate has no S3 multipart upload",
     "s3/get-version": "an S3 plan selects no version",
-    "s3/list-*": "the crate has no S3 listing",
     "s3/upload-part": "the crate has no S3 multipart upload"
   },
   "operations": {
@@ -79,7 +78,8 @@
     "operations/s3/delete-bucket": "the crate manages no buckets",
     "operations/s3/delete-many": "the crate has no delete_many operation",
     "operations/s3/head-bucket*": "the crate manages no buckets",
-    "operations/s3/list-*": "the crate lists no S3 objects or buckets",
+    "operations/s3/list-buckets": "the crate lists no S3 buckets",
+    "operations/s3/list-other-delimiter": "PhysicalList delimits on '/' only",
     "operations/s3/put-content-*": "PhysicalPut sets no content properties",
     "operations/s3/put-with-*": "PhysicalPut sets no storage class or tags",
     "operations/s3/stage*": "the crate has no S3 multipart upload",

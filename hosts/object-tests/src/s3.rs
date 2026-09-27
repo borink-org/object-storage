@@ -1,26 +1,30 @@
-//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT and DELETE,
-//! and for the SigV4 signatures of the vector suite.
+//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT, DELETE and
+//! listing, and for the SigV4 signatures of the vector suite.
 //!
 //! The crate signs with long-lived or temporary credentials. Offline cases
 //! receive placeholder keys, and live cases read `AWS_ACCESS_KEY_ID`,
 //! `AWS_SECRET_ACCESS_KEY` and, if set, `AWS_SESSION_TOKEN`.
 
+use crate::listing::{ListedPage, PageRead, entry_slots, list_all_keys, list_page};
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, request_buffers, requested_condition, requested_range,
-    send_request, successful_result, text_of, unmapped_call_field, unsupported_by_adapter,
-    unsupported_by_crate, unsupported_response_fields,
+    send_request, successful_result, text_of, transport_failure, unmapped_call_field,
+    unsupported_by_adapter, unsupported_by_crate, unsupported_response_fields,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{self, Addressing, Bucket, Objects, PayloadHash, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, MetadataPair, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, PutHeadOutcome, RequestedRange, Timestamps, TransactionalChecksum,
-    WriteOptions, layered,
+    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListHeadOutcome, MetadataPair, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, RequestedRange,
+    Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
+
+// AWS reports at most 1,000 entries on one listing page.
+const MAX_PAGE_ENTRIES: usize = 1_000;
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
     failed_result(status, s3::error_code(&exchange.body))
@@ -262,6 +266,53 @@ fn delete_object(
     })
 }
 
+/// Requests one page and reads it, or returns the result to report instead.
+fn read_page(
+    context: &AdapterContext,
+    objects: &Objects<'_>,
+    list_plan: &PhysicalList<'_>,
+) -> PageRead {
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
+        layered::s3::list_requirements(objects, list_plan, &now)
+    ));
+    let request =
+        page_step!(objects.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
+    let mut exchange = match send_request(context, &request) {
+        Ok(exchange) => exchange,
+        Err(error) => return Ok(Err(transport_failure(&error))),
+    };
+
+    let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
+    let outcome = match head_outcome {
+        ListHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        ListHeadOutcome::Page { .. } => None,
+        ListHeadOutcome::NotFound { .. } => Some(404),
+        ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
+            Some(failure.status)
+        }
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(Err(error_result(&exchange, status)));
+    }
+
+    let mut slots = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+    let listing = page_step!(objects.fill_listing(&mut exchange.body, &mut slots));
+    Ok(Ok(ListedPage::read(&slots, listing, |entry| {
+        json!({
+            "key": entry.key,
+            "size": entry.size.unwrap_or(0),
+            "etag": entry.e_tag.unwrap_or_default(),
+        })
+    })))
+}
+
 /// Reads `2013-05-24T00:00:00Z` or `20130524T000000Z`.
 fn parse_clock(clock: &str) -> Option<Timestamps> {
     let digits: String = clock.chars().filter(char::is_ascii_digit).collect();
@@ -451,6 +502,8 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "checksum",
         ],
         "delete" => &["key", "if_match", "if_none_match"],
+        "list" => &["prefix", "page_size"],
+        "list_page" => &["prefix", "continuation_token", "delimiter", "page_size"],
         _ => &[],
     }
 }
@@ -482,7 +535,6 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
                 "the crate writes a canonical request only as part of a signed request",
             ));
         }
-        "list" | "list_page" => return Ok(unsupported_by_crate("the crate has no S3 listing")),
         _ => {}
     }
     if mapped_call_fields(operation).is_empty() {
@@ -544,6 +596,8 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "head" => read_object(&context, &objects, call, GetKind::Head),
         "put" => write_object(&context, &objects, call),
         "delete" => delete_object(&context, &objects, call),
+        "list" => list_all_keys(call, |plan| read_page(&context, &objects, plan)),
+        "list_page" => list_page(call, |plan| read_page(&context, &objects, plan)),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }
