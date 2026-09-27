@@ -1386,7 +1386,7 @@ impl<'a> Blobs<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+        crate::xml::azure::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
     }
 
     /// Reads a page the way [`Self::fill_listing`] does, and hands you the
@@ -1424,7 +1424,7 @@ impl<'a> Blobs<'a> {
         wanted: PropertySet,
         build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
     ) -> Result<Listing<'b>> {
-        crate::xml::fill_listing(body, into, wanted, build)
+        crate::xml::azure::fill_listing(body, into, wanted, build)
     }
 }
 
@@ -1458,7 +1458,7 @@ fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
-pub(crate) fn validate_block_id(id: &str) -> Result<()> {
+fn validate_block_id(id: &str) -> Result<()> {
     let data = id.trim_end_matches('=');
     // Trimming returns a subslice, so its length cannot exceed id.len().
     let padding = id.len() - data.len();

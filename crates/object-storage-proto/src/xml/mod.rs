@@ -3,28 +3,31 @@
 //
 // The reader walks the document structure directly; it does not tokenise.
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
-// the caller's buffer, and `azure.rs` and `s3.rs` each know the shape of one
-// service's listing page. This file reads the error document, which is only
-// three elements. It also walks the properties of an entry, so the caller
-// can read the ones this crate skips.
+// the caller's buffer, and `page.rs` holds what reading any page takes. Those
+// three serve both services. The files named for a service know the shape of
+// its documents, and nothing outside them uses them: `azure.rs` and `s3.rs`
+// read a listing page, and `azure_blocks.rs` a block list. This file reads
+// the error document, which is only three elements. It also walks the
+// properties of an entry, so the caller can read the ones this crate skips.
 //
-// A page is read in this order. `azure::check_body` checks the body is UTF-8
-// and holds no zero byte. `azure::open_root_element` skips the prolog and
-// reads through the root's opening tag. `azure::read_root_children_into` then
-// loops over the root's children, and on the one that holds the entries calls
-// `azure::read_entries_into`, which reads each entry's fields as spans, takes
-// the entry off the body as its own slice, and has `azure::build_entry`
-// decode those spans in place and build the `ListEntry` from them. An entry
-// the array has no room for is walked but not built, so that the error can
-// say how many entries the page holds.
+// An Azure page is read in this order. `page::check_body` checks the body is
+// UTF-8 and holds no zero byte. `page::open_root_element` skips the prolog
+// and reads through the root's opening tag. `azure::read_root_children_into`
+// then loops over the root's children, and on the one that holds the entries
+// calls `azure::read_entries_into`, which reads each entry's fields as spans,
+// takes the entry off the body as its own slice, and has
+// `azure::build_entry` decode those spans in place and build the `ListEntry`
+// from them. An entry the array has no room for is walked but not built, so
+// that the error can say how many entries the page holds. An S3 page is read
+// the same way, with the entries as children of the root.
 
 pub(crate) mod azure;
 pub(crate) mod azure_blocks;
 pub(crate) mod decode;
+mod page;
 pub(crate) mod s3;
 pub(crate) mod scan;
 
-pub(crate) use azure::fill_listing;
 pub(crate) use decode::decode_text;
 
 use scan::{find_byte, trim};

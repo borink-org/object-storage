@@ -19,8 +19,8 @@
 //   said that it encoded one. A key that holds no `%` and no `+` reads the
 //   same either way.
 
-use super::azure::{check_body, decode_value_in_place, open_root_element, set_once, text};
 use super::decode::{decode, decode_url};
+use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
 use super::scan::{Child, Scan, Span, fault, trim};
 use crate::{CapacityError, EntryKind, Error, ListEntry, Listing, Result};
 
