@@ -259,9 +259,9 @@ pub fn decode_into<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
 
 /// Reads an HTTP date as milliseconds since the Unix epoch.
 ///
-/// Use this on [`ObjectMeta::last_modified`] and on
-/// [`ListEntry::last_modified`]. Returns [`None`] if `value` is not an
-/// RFC 1123 date.
+/// Use this on [`ObjectMeta::last_modified`], and on
+/// [`ListEntry::last_modified`] of an Azure listing. Returns [`None`] if
+/// `value` is not an RFC 1123 date.
 ///
 /// [`ObjectMeta::last_modified`]: crate::ObjectMeta::last_modified
 /// [`ListEntry::last_modified`]: crate::ListEntry::last_modified
@@ -299,8 +299,64 @@ pub fn http_date_ms(value: &str) -> Option<u64> {
     u64::try_from(seconds).ok()?.checked_mul(1000)
 }
 
+/// Reads an ISO 8601 date as milliseconds since the Unix epoch.
+///
+/// Use this on [`ListEntry::last_modified`] of an S3 listing, which is
+/// written as `2026-08-22T12:01:01.000Z`. The fraction of a second is
+/// optional and read to the millisecond. Returns [`None`] if `value` is not
+/// such a date in UTC.
+///
+/// [`ListEntry::last_modified`]: crate::ListEntry::last_modified
+pub fn iso8601_ms(value: &str) -> Option<u64> {
+    let value = value.as_bytes();
+    if value.len() < 20
+        || value[4] != b'-'
+        || value[7] != b'-'
+        || value[10] != b'T'
+        || value[13] != b':'
+        || value[16] != b':'
+        || value.last() != Some(&b'Z')
+    {
+        return None;
+    }
+    let year = number(&value[..4])? as i64;
+    let month = number(&value[5..7])?;
+    let day = number(&value[8..10])?;
+    let hour = number(&value[11..13])?;
+    let minute = number(&value[14..16])?;
+    let second = number(&value[17..19])?;
+    // The fraction, if any, between the seconds and the `Z`.
+    let millis = match &value[19..value.len() - 1] {
+        [] => 0,
+        [b'.', digits @ ..] if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) => {
+            // Three digits are milliseconds; fewer are padded and more cut.
+            digits
+                .iter()
+                .chain(core::iter::repeat(&b'0'))
+                .take(3)
+                .fold(0, |value, digit| value * 10 + (digit - b'0') as u64)
+        }
+        _ => return None,
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add((hour * 3600 + minute * 60 + second) as i64)?;
+    u64::try_from(seconds)
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(millis)
+}
+
 fn number(bytes: &[u8]) -> Option<u64> {
-    // http_date_ms passes only two- or four-byte fields, so the sum is <= 9999.
+    // The date readers pass only two- or four-byte fields, so the sum is <= 9999.
     bytes.iter().try_fold(0, |value, byte| {
         byte.checked_sub(b'0')
             .filter(|digit| *digit <= 9)
@@ -326,7 +382,8 @@ pub mod s3 {
     use super::required;
     use crate::s3::{Objects, PayloadHash};
     use crate::{
-        Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestSize, Result, Timestamps,
+        Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize, Result,
+        Timestamps,
     };
 
     /// Returns the byte and header-slot capacities that
@@ -395,11 +452,30 @@ pub mod s3 {
                 .map(drop),
         )
     }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_list`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `list`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_list`],
+    /// which reports it again.
+    pub fn list_requirements(
+        objects: &Objects<'_>,
+        list: &PhysicalList<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(objects.encode_list(&mut [], &mut [], list, now).map(drop))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{block_id, http_date_ms, quoted_etag};
+    use super::{block_id, http_date_ms, iso8601_ms, quoted_etag};
 
     #[test]
     fn writes_the_base64_of_chosen_bytes() {
@@ -422,6 +498,28 @@ mod tests {
         );
         assert_eq!(http_date_ms("not an HTTP date"), None);
         assert_eq!(http_date_ms("Fri, 24 Xxx 2013 00:00:00 GMT"), None);
+    }
+
+    #[test]
+    fn reads_an_s3_listing_date() {
+        assert_eq!(
+            iso8601_ms("2013-05-24T00:00:00.000Z"),
+            Some(1_369_353_600_000)
+        );
+        assert_eq!(
+            iso8601_ms("2013-05-24T00:00:01.5Z"),
+            Some(1_369_353_601_500)
+        );
+        assert_eq!(iso8601_ms("2013-05-24T00:00:01Z"), Some(1_369_353_601_000));
+        for value in [
+            "2013-05-24T00:00:00.000",
+            "2013-05-24 00:00:00Z",
+            "2013-05-24T00:00:00.Z",
+            "2013-13-24T00:00:00Z",
+            "Fri, 24 May 2013 00:00:00 GMT",
+        ] {
+            assert_eq!(iso8601_ms(value), None, "{value}");
+        }
     }
 
     #[test]

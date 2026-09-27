@@ -8,10 +8,7 @@ use borink_object_storage_proto::{
     Timestamps, layered,
 };
 
-use crate::MAX_ERROR_BODY;
-
-// A page is a document that this host holds whole, so it caps that too.
-const MAX_PAGE: u64 = 8 * 1024 * 1024;
+use crate::{MAX_ERROR_BODY, MAX_PAGE};
 
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

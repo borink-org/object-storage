@@ -24,7 +24,7 @@ pub(crate) fn fill_listing<'b, E>(
 ) -> Result<Listing<'b>> {
     check_body(body)?;
     let mut scan = Scan::new(body);
-    open_root_element(&mut scan)?;
+    open_root_element(&mut scan, ROOT)?;
     // The read below is written once, whatever the entry type: it hands each
     // entry it builds to this closure, which makes the caller's and writes
     // it. A generic read would be compiled once per entry type, and a program
@@ -80,9 +80,9 @@ pub(super) fn check_body(body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// Reads the prolog and the root's opening tag, and leaves the scan where the
-// root's first child begins.
-fn open_root_element(scan: &mut Scan<'_>) -> Result<()> {
+// Reads the prolog and the opening tag of the root, which must be named
+// `root`, and leaves the scan where the root's first child begins.
+pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> {
     // Azure begins a listing with the UTF-8 byte order mark, U+FEFF encoded
     // as these three bytes, before the XML declaration. It is not part of the
     // document.
@@ -96,10 +96,10 @@ fn open_root_element(scan: &mut Scan<'_>) -> Result<()> {
             break;
         }
     }
-    let root = scan.open()?;
+    let tag = scan.open()?;
     // A service can answer a listing with an error document under a success
     // status. That is not a page.
-    if scan.text(root.name) != ROOT || root.empty {
+    if scan.text(tag.name) != root || tag.empty {
         return fault();
     }
     Ok(())
@@ -262,7 +262,7 @@ impl Fields {
 
 // A value written twice is a fault. Choosing one of them would be a rule this
 // crate made up.
-fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
+pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
     if slot.is_some() {
         return fault();
     }
@@ -837,13 +837,16 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
 
 // Returns a decoded value as text. The body was UTF-8 and a reference decodes
 // to a character, so only a percent-decoded key can fail this.
-fn text(bytes: &[u8]) -> Result<&str> {
+pub(super) fn text(bytes: &[u8]) -> Result<&str> {
     core::str::from_utf8(bytes).or_else(|_| fault())
 }
 
 // Trims one value, decodes it in place and returns the range of the decoded
 // text.
-fn decode_value_in_place(chunk: &mut [u8], field: Option<(Span, u8)>) -> Result<Option<Span>> {
+pub(super) fn decode_value_in_place(
+    chunk: &mut [u8],
+    field: Option<(Span, u8)>,
+) -> Result<Option<Span>> {
     let Some((span, flags)) = field else {
         return Ok(None);
     };

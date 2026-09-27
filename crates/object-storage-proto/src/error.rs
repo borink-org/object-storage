@@ -9,8 +9,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// to `required_headers`, then retry. To size both before the first call, use
 /// [`layered::get_requirements`](crate::layered::get_requirements).
 ///
-/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing), `required` counts
-/// entries, not bytes, and `required_headers` is zero.
+/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing) and
+/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing),
+/// `required` counts entries, not bytes, and `required_headers` is zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapacityError {
     /// Required bytes for encoding, or entries for a listing fill.
@@ -80,11 +81,13 @@ pub enum InvalidPlan {
     /// The listing asks for zero entries.
     ///
     /// Azure answers `maxresults=0` with HTTP 400 `OutOfRangeQueryParameterValue`.
+    /// S3 takes zero, and an S3 client sends it.
     MaxResults = 12,
     /// A provider option is invalid or inapplicable.
     ///
     /// A block listing that names both a snapshot and a version is one. A
-    /// declared MD5 on a write that is not a commit is another.
+    /// declared MD5 on a write that is not a commit is another, and so is an
+    /// S3 listing that asks for metadata.
     Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,

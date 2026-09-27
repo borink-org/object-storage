@@ -99,9 +99,9 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         // and percent-encodes the non-characters it does store, marked with
         // `<Name Encoded="true">`. S3 can write one: it stores `U+0001` and,
         // unless the listing asks for `encoding-type=url`, writes it as
-        // `&#x1;`. This crate always asks, so the reference never arrives. If
-        // that changes, this rule refuses a key that AWS stores, and the
-        // decision then belongs with S3 LIST rather than here.
+        // `&#x1;`. An S3 listing always asks, so from a service that honours
+        // the parameter the reference never arrives. A service that ignores
+        // it has its page refused here.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
             return fault();
         };
@@ -166,6 +166,48 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
     Ok(w)
 }
 
+// Undoes the encoding that S3 applies to a key when a listing asks for
+// `encoding-type=url`. It is the encoding of an HTML form: `%` and two
+// hexadecimal digits for a byte, and `+` for a space, so a `+` of the key
+// itself arrives as `%2B`. Returns the decoded length, and whether the text
+// held a `%` or a `+`, which is exactly when decoding changed it.
+pub(crate) fn decode_url(b: &mut [u8]) -> Result<(usize, bool)> {
+    // The same two indexes as in `decode_references`.
+    let (mut r, mut w) = (0, 0);
+    let mut escaped = false;
+    while r < b.len() {
+        let run = b[r..]
+            .iter()
+            .position(|byte| matches!(byte, b'%' | b'+'))
+            .unwrap_or(b.len() - r);
+        if w != r {
+            b.copy_within(r..r + run, w);
+        }
+        r += run;
+        w += run;
+        if r == b.len() {
+            break;
+        }
+        escaped = true;
+        if b[r] == b'+' {
+            b[w] = b' ';
+            r += 1;
+            w += 1;
+            continue;
+        }
+        let (Some(high), Some(low)) = (
+            b.get(r + 1).copied().and_then(hex_digit),
+            b.get(r + 2).copied().and_then(hex_digit),
+        ) else {
+            return fault();
+        };
+        b[w] = high << 4 | low;
+        r += 3;
+        w += 1;
+    }
+    Ok((w, escaped))
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -173,7 +215,26 @@ mod tests {
     use std::string::String;
     use std::vec::Vec;
 
-    use super::decode_text;
+    use super::{decode_text, decode_url};
+
+    fn url(text: &str) -> Option<(String, bool)> {
+        let mut bytes = Vec::from(text.as_bytes());
+        let (len, escaped) = decode_url(&mut bytes).ok()?;
+        Some((
+            String::from_utf8(Vec::from(&bytes[..len])).unwrap(),
+            escaped,
+        ))
+    }
+
+    #[test]
+    fn undoes_the_form_encoding_of_an_s3_key() {
+        assert_eq!(url("a+b%2Bc"), Some(("a b+c".into(), true)));
+        assert_eq!(url("caf%C3%A9%2F"), Some(("caf\u{e9}/".into(), true)));
+        assert_eq!(url("plain/key"), Some(("plain/key".into(), false)));
+        for text in ["a%", "a%2", "a%zzb"] {
+            assert_eq!(url(text), None, "{text}");
+        }
+    }
 
     fn decoded(text: &str, percent: bool) -> String {
         let mut bytes = Vec::from(text.as_bytes());

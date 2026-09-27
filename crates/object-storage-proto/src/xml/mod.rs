@@ -3,10 +3,10 @@
 //
 // The reader walks the document structure directly; it does not tokenise.
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
-// the caller's buffer, and `azure.rs` knows the shape of a listing page. This
-// file reads the error document, which is only three elements. It also walks
-// the properties of an entry, so the caller can read the ones this crate
-// skips.
+// the caller's buffer, and `azure.rs` and `s3.rs` each know the shape of one
+// service's listing page. This file reads the error document, which is only
+// three elements. It also walks the properties of an entry, so the caller
+// can read the ones this crate skips.
 //
 // A page is read in this order. `azure::check_body` checks the body is UTF-8
 // and holds no zero byte. `azure::open_root_element` skips the prolog and
@@ -21,6 +21,7 @@
 pub(crate) mod azure;
 pub(crate) mod azure_blocks;
 pub(crate) mod decode;
+pub(crate) mod s3;
 pub(crate) mod scan;
 
 pub(crate) use azure::fill_listing;
@@ -180,8 +181,18 @@ pub(crate) fn next_pair<'b>(rest: &mut &'b [u8]) -> Option<(&'b [u8], &'b [u8])>
     Some((name, value))
 }
 
-// The elements whose text reading the page decodes in place.
-const DECODED: [&[u8]; 4] = [b"Name", b"Etag", b"Last-Modified", b"Content-Type"];
+// The elements whose text reading the page decodes in place: four of an
+// Azure entry, then four of an S3 one. Neither service writes the other's.
+const DECODED: [&[u8]; 8] = [
+    b"Name",
+    b"Etag",
+    b"Last-Modified",
+    b"Content-Type",
+    b"Key",
+    b"ETag",
+    b"LastModified",
+    b"Prefix",
+];
 
 // Returns the decoded text of an element that reading the page decoded in
 // place, and the bytes after its close tag. Returns `None` if this element

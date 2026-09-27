@@ -6,17 +6,19 @@
 //!    client with a [`Sha256Provider`]. The `borink-object-storage-crypto`
 //!    crate has providers, and the function that [`Credentials::new`] takes
 //!    to wipe its copy of the secret.
-//! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`] or a
-//!    [`PhysicalDelete`], the same plans that an Azure client takes.
-//! 3. Call [`Objects::encode_get`], [`Objects::encode_put`] or
-//!    [`Objects::encode_delete`] to write the signed request head into your
-//!    buffer, and send the [`WireRequest`] with your HTTP client.
+//! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`], a
+//!    [`PhysicalDelete`] or a [`PhysicalList`], the same plans that an Azure
+//!    client takes.
+//! 3. Call [`Objects::encode_get`], [`Objects::encode_put`],
+//!    [`Objects::encode_delete`] or [`Objects::encode_list`] to write the
+//!    signed request head into your buffer, and send the [`WireRequest`]
+//!    with your HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call the
 //!    `accept_*_head` method of the same operation.
 //!
 //! S3 names an error in the response body, not in a header. A failure of a
-//! GET, a PUT or a DELETE is therefore a `NeedErrorBody` outcome. Read the
-//! body and pass it to the `accept_*_error_body` method of the same
+//! GET, a PUT, a DELETE or a listing is therefore a `NeedErrorBody` outcome.
+//! Read the body and pass it to the `accept_*_error_body` method of the same
 //! operation. A HEAD response has no body, and its outcome is final.
 //!
 //! # Example
@@ -112,6 +114,67 @@
 //! [`InvalidPlan::MetadataValue`].
 //! [`MetadataPair::value`](crate::MetadataPair::value) lists those values.
 //!
+//! # Listing
+//!
+//! A listing is one page at a time, as on Azure: encode a [`PhysicalList`]
+//! with [`Objects::encode_list`], read the body of a
+//! [`ListHeadOutcome::Page`] whole, and pass it to
+//! [`Objects::fill_listing`]. Pass the page's
+//! [`Listing::next_marker`] as the marker of the next plan.
+//!
+//! ```
+//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects};
+//! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
+//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
+//! # const SHA256: Sha256Provider =
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! use borink_object_storage_proto::{
+//!     EntryKind, HeaderSpan, ListEntry, PhysicalList, Timestamps, layered,
+//! };
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let bucket = Bucket::new(
+//! #     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
+//! # )?;
+//! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
+//! # let now = Timestamps::from_unix(1_787_400_000);
+//! # let objects = Objects::new(bucket, credentials, SHA256);
+//! let list = PhysicalList {
+//!     delimited: true,
+//!     ..PhysicalList::new("photos/")
+//! };
+//! let size = layered::s3::list_requirements(&objects, &list, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request = objects.encode_list(&mut buffer, &mut headers, &list, &now)?;
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects\
+//!      ?delimiter=%2F&encoding-type=url&list-type=2&prefix=photos%2F"
+//! );
+//!
+//! let mut body = Vec::from(
+//!     b"<ListBucketResult><EncodingType>url</EncodingType>\
+//!       <IsTruncated>false</IsTruncated>\
+//!       <Contents><Key>photos/a+b.jpg</Key><Size>8</Size></Contents>\
+//!       <CommonPrefixes><Prefix>photos/2026/</Prefix></CommonPrefixes>\
+//!       </ListBucketResult>"
+//!         .as_slice(),
+//! );
+//! let mut entries = vec![ListEntry::default(); 1000];
+//! let page = objects.fill_listing(&mut body, &mut entries)?;
+//! assert_eq!(page.filled, 2);
+//! assert_eq!(entries[0].key, "photos/a b.jpg");
+//! assert_eq!(entries[1].kind, EntryKind::Prefix);
+//! assert_eq!(page.next_marker, None);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The request asks S3 to URL-encode the keys of the page, so that a key
+//! with a character that XML cannot carry still arrives, and
+//! [`Objects::fill_listing`] decodes them.
+//!
 //! # Content that is not signed
 //!
 //! [`PayloadHash::Unsigned`] sends a write without the SHA-256 of its
@@ -126,18 +189,18 @@ use core::cmp::Ordering;
 use crate::WriteOptions;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, condition_header, encoded, failure, parse_content_range,
-    text_header, validate_condition, write_range,
+    ContentRange, accept_success, condition_header, decimal_header, encoded, failure,
+    parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
 use crate::request::{HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, MetadataPair, Method, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, TransactionalChecksum,
-    WireRequest,
+    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
+    Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
+    PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result,
+    ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
@@ -391,12 +454,16 @@ impl<'a> Bucket<'a> {
         out(self.authority.as_bytes());
     }
 
-    // The path of the URL, which the signature covers as it is written.
+    // The path of the URL, which the signature covers as it is written. A
+    // request to the bucket itself has the path `/` with virtual-hosted
+    // addressing and `/bucket` with path-style addressing.
     fn write_path(&self, out: &mut dyn FnMut(&[u8]), key: Option<&str>) {
         out(b"/");
         if self.addressing == Addressing::Path {
             out(self.name.as_bytes());
-            out(b"/");
+            if key.is_some() {
+                out(b"/");
+            }
         }
         if let Some(key) = key {
             for part in crate::path::encode_object_key(key) {
@@ -458,6 +525,8 @@ struct Signed<'p> {
     method: Method,
     // The object, or `None` for the bucket itself.
     key: Option<&'p str>,
+    // The query, in the order of its names.
+    query: &'p [Option<QueryParameter<'p>>],
     range: RequestedRange,
     condition: ConditionKind,
     condition_value: Option<&'p [u8]>,
@@ -466,6 +535,10 @@ struct Signed<'p> {
     metadata: &'p [MetadataPair<'p>],
     content_sha256: &'p [u8],
 }
+
+// One parameter of a query: its name, which is usable in a URL as it is, and
+// its value, which is percent-encoded as it is written.
+type QueryParameter<'p> = (&'p str, &'p [u8]);
 
 // Where the value of a signed header comes from.
 #[derive(Clone, Copy)]
@@ -560,6 +633,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method,
             key: Some(get.key),
+            query: &[],
             headers: &[],
             range: get.range,
             condition: get.condition,
@@ -638,6 +712,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Put,
             key: Some(put.key),
+            query: &[],
             headers: &[],
             range: RequestedRange::Whole,
             condition: put.condition,
@@ -703,6 +778,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Delete,
             key: Some(delete.key),
+            query: &[],
             headers: &[],
             range: RequestedRange::Whole,
             condition: delete.condition,
@@ -736,6 +812,10 @@ impl<'a> Objects<'a> {
             self.bucket.write_host(&mut |piece| out.push(piece));
             self.bucket
                 .write_path(&mut |piece| out.push(piece), signed.key);
+            if signed.query.iter().any(Option::is_some) {
+                out.push(b"?");
+                write_query(&mut |piece| out.push(piece), signed.query);
+            }
         });
         let token = self.token();
         head.header("authorization", |out| {
@@ -816,8 +896,11 @@ impl<'a> Objects<'a> {
         out(signed.method.as_str().as_bytes());
         out(b"\n");
         self.bucket.write_path(out, signed.key);
-        // No request here has a query.
-        out(b"\n\n");
+        out(b"\n");
+        // The URL carries the query in its canonical form, so this is the
+        // same text.
+        write_query(out, signed.query);
+        out(b"\n");
         let token = self.token();
         for header in ordered_headers(signed, token) {
             write_header_name(out, header);
@@ -1025,7 +1108,151 @@ impl<'a> Objects<'a> {
             status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
         }
     }
+
+    /// Writes the signed request head for one page of `list` into `buf`.
+    ///
+    /// The request is a ListObjectsV2. [`PhysicalList::marker`] carries the
+    /// continuation token of the previous page. The response carries the
+    /// page as a document in its body: read it whole and pass it to
+    /// [`Self::fill_listing`].
+    ///
+    /// AWS reports at most 1,000 entries in one page, and applies that limit
+    /// to a larger [`PhysicalList::max_results`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `list` cannot become an S3 request:
+    ///
+    /// - [`InvalidPlan::Marker`] for an empty marker. The first page carries
+    ///   none.
+    /// - [`InvalidPlan::Option`] for a non-empty [`PhysicalList::include`].
+    ///   S3 lists no metadata.
+    ///
+    /// This method validates the plan before it writes any byte.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or
+    /// call [`layered::s3::list_requirements`](crate::layered::s3::list_requirements)
+    /// first.
+    pub fn encode_list<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        list: &PhysicalList<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_list(list)?;
+        let max_keys = list.max_results.map(|max| U64Decimal::new(max.into()));
+        // In the order of the names, which SigV4 signs. The keys come back
+        // URL-encoded, so a key that XML cannot carry still arrives.
+        let query = [
+            list.marker
+                .map(|marker| ("continuation-token", marker.as_bytes())),
+            list.delimited.then_some(("delimiter", DELIMITER)),
+            Some(("encoding-type", b"url".as_slice())),
+            Some(("list-type", b"2".as_slice())),
+            max_keys.as_ref().map(|max| ("max-keys", max.as_bytes())),
+            (!list.prefix.is_empty()).then_some(("prefix", list.prefix.as_bytes())),
+        ];
+        let signed = Signed {
+            method: Method::Get,
+            key: None,
+            query: &query,
+            headers: &[],
+            range: RequestedRange::Whole,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: &[],
+            content_sha256: EMPTY_SHA256.as_bytes(),
+        };
+        let dry = buf.is_empty();
+        let mut head = HeadWriter::new(buf, headers);
+        self.write_head(&mut head, &signed, dry, now);
+        encoded(head, Method::Get, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a listing and reports what S3 did.
+    ///
+    /// A page is [`ListHeadOutcome::Page`]. S3 often sends it without
+    /// `Content-Length`, so cap what you read. A failure is
+    /// [`ListHeadOutcome::NeedErrorBody`]: read the body and pass it to
+    /// [`Self::accept_list_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`], and a
+    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
+    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+        match head.status {
+            200 => Ok(ListHeadOutcome::Page {
+                expected_len: decimal_header(head.content_length)?,
+            }),
+            201..=299 => Err(ResponseFault::Status.into()),
+            status => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+        }
+    }
+
+    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_error_body`] for a listing, and reads the body
+    /// the same way. A missing bucket is [`ListHeadOutcome::NotFound`].
+    pub fn accept_list_error_body<'h>(
+        &self,
+        status: u16,
+        request_id: Option<&'h [u8]>,
+        body: &[u8],
+    ) -> ListHeadOutcome<'h> {
+        let kind = body_kind(body);
+        match status {
+            404 => ListHeadOutcome::NotFound { kind },
+            status => ListHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        }
+    }
+
+    /// Reads a page out of the response body of a listing.
+    ///
+    /// This is [`Blobs::fill_listing`](crate::Blobs::fill_listing) for S3,
+    /// under the same rules: reading is destructive, and your array must
+    /// hold the whole page. An array of `max_results` entries always does,
+    /// and so does one of 1,000 entries for AWS.
+    ///
+    /// Each entry is an [`EntryKind::Object`](crate::EntryKind::Object) or
+    /// an [`EntryKind::Prefix`](crate::EntryKind::Prefix). AWS writes every
+    /// object of a page before its groups of keys, so the page is not in the
+    /// order of its keys when it holds both. An object's entity tag keeps
+    /// its quotes, and its date is ISO 8601: read it with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms). Read
+    /// `StorageClass` and the other elements of an object with
+    /// [`ListEntry::property`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Capacity`] if the page holds more entries than the
+    /// array, with `required` set to the number it holds. Ask the service for
+    /// the page again, with a larger array.
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+    /// not a ListObjectsV2 page. That includes a page that says more keys
+    /// follow and names no continuation token. It also includes a page whose
+    /// keys hold a `%` or a `+`, from a service that ignored the request to
+    /// URL-encode them: such a key cannot be read back with certainty.
+    pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [E],
+    ) -> Result<Listing<'b>> {
+        crate::xml::s3::fill_listing(body, into, E::from)
+    }
 }
+
+// S3 groups keys at any delimiter, but a plan groups them at `/`, which Azure
+// takes as well.
+const DELIMITER: &[u8] = b"/";
 
 /// Returns the error code that an S3 error body names.
 ///
@@ -1066,6 +1293,23 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
         b"InternalError" | b"ServiceUnavailable" => ServiceErrorKind::Service,
         _ => return None,
     })
+}
+
+// Writes a query in the canonical form of SigV4, which the URL carries as
+// well: each name and value with every byte but the unreserved ones
+// percent-encoded, in upper case, and the parameters in the order of their
+// names. The caller lists them in that order.
+fn write_query(out: &mut dyn FnMut(&[u8]), query: &[Option<QueryParameter<'_>>]) {
+    for (index, (name, value)) in query.iter().flatten().enumerate() {
+        if index != 0 {
+            out(b"&");
+        }
+        out(name.as_bytes());
+        out(b"=");
+        for part in crate::path::encode_query_value(value) {
+            out(part);
+        }
+    }
 }
 
 // Every signed header in the order of its name: the fixed set sorted, merged
@@ -1302,6 +1546,19 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
         return Err(InvalidPlan::Condition.into());
     }
     validate_condition(delete.condition, delete.condition_value)
+}
+
+// No rule of `validate_key` applies to a prefix, which the query carries, and
+// S3 takes any number of entries, zero among them.
+fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+    // S3 hands out no empty continuation token.
+    if list.marker.is_some_and(str::is_empty) {
+        return Err(InvalidPlan::Marker.into());
+    }
+    if !list.include.is_empty() {
+        return Err(InvalidPlan::Option.into());
+    }
+    Ok(())
 }
 
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a

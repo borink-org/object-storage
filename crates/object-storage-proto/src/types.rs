@@ -363,7 +363,8 @@ impl<'h> WriteOptions<'h> {
 ///
 /// Combine the constants with `|` and put the set in
 /// [`PhysicalList::include`]. An empty set asks for nothing beyond the
-/// object's own properties.
+/// object's own properties. S3 lists none of these, and an S3 client refuses
+/// a listing that asks for any.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ListInclude(u32);
 
@@ -653,6 +654,8 @@ pub enum EntryKind {
     Object = 1,
     /// A group of keys that a delimited listing did not report one by one.
     ///
+    /// On S3, this is one of the page's common prefixes.
+    ///
     /// The listing reports the shared start of those keys once, and you list
     /// again with it as the prefix to see what is under it.
     Prefix = 2,
@@ -698,7 +701,9 @@ pub struct ListShape {
 /// you plan that page with the same shape and that marker.
 ///
 /// Because the fields are public and unchecked,
-/// [`Blobs::encode_list`](crate::Blobs::encode_list) validates the plan.
+/// [`Blobs::encode_list`](crate::Blobs::encode_list) and
+/// [`s3::Objects::encode_list`](crate::s3::Objects::encode_list) validate the
+/// plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalList<'h> {
     /// The keys to list under. An empty prefix lists the whole container.
@@ -713,7 +718,8 @@ pub struct PhysicalList<'h> {
     ///
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
     /// previous page reported. The first page carries [`None`]. The text is
-    /// the service's, and means nothing to this crate.
+    /// the service's, and means nothing to this crate. On S3 it is the
+    /// continuation token of a ListObjectsV2.
     pub marker: Option<&'h str>,
     /// Whether to group the keys at each `/` after the prefix.
     ///
@@ -723,12 +729,13 @@ pub struct PhysicalList<'h> {
     pub delimited: bool,
     /// The most entries that this page reports.
     ///
-    /// [`None`] asks for the service's maximum, which Azure also applies to
-    /// any larger number. The service may report fewer entries than this and
-    /// still name a next page.
+    /// [`None`] asks for the service's maximum, which the service also
+    /// applies to any larger number: 5,000 on Azure and 1,000 on AWS. The
+    /// service may report fewer entries than this and still name a next
+    /// page.
     pub max_results: Option<u32>,
     /// The extra elements that each page reports beside each object. See
-    /// [`ListInclude`].
+    /// [`ListInclude`], which S3 takes none of.
     pub include: ListInclude,
 }
 
@@ -768,12 +775,11 @@ impl<'h> PhysicalList<'h> {
 /// One entry of a listing page.
 ///
 /// Every slice points into the body that
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
-/// until you reuse that buffer.
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
+/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) read, and
+/// stays valid until you reuse that buffer.
 ///
-/// The fields hold the text that the service wrote. Read `last_modified`
-/// with [`layered::http_date_ms`](crate::layered::http_date_ms), as you
-/// would [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified).
+/// The fields hold the text that the service wrote, decoded.
 ///
 /// Azure version and snapshot fields are available through
 /// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and
@@ -795,12 +801,19 @@ pub struct ListEntry<'b> {
     /// Azure lists an entity tag without the quotes that the `ETag` header
     /// carries, and conditions a request on either form. To write the one that
     /// HTTP defines, quote it with
-    /// [`layered::quoted_etag`](crate::layered::quoted_etag).
+    /// [`layered::quoted_etag`](crate::layered::quoted_etag). S3 lists it
+    /// with its quotes.
     pub e_tag: Option<&'b str>,
-    /// The value that the listing gave for the last modification, in the form
-    /// that the `Last-Modified` header uses.
+    /// The value that the listing gave for the last modification.
+    ///
+    /// Azure writes it in the form that the `Last-Modified` header uses:
+    /// read it with [`layered::http_date_ms`](crate::layered::http_date_ms).
+    /// S3 writes it in ISO 8601: read it with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
     pub last_modified: Option<&'b str>,
     /// The stored media type, decoded from `Content-Type` when present.
+    ///
+    /// Only Azure lists it.
     pub content_type: Option<&'b str>,
     /// This entry as the service wrote it, from its opening tag to its closing
     /// one.
