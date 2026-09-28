@@ -134,6 +134,12 @@ pub(crate) struct Sum {
     state: Sha256State,
 }
 
+impl crate::request::ByteSink for Sum {
+    fn push(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
 impl Sum {
     pub(crate) fn update(&mut self, bytes: &[u8]) {
         (self.provider.update)(&mut self.state, bytes);

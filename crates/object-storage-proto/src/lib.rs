@@ -38,10 +38,11 @@
 //! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
 //! [`azure`] module.
 //!
-//! The same plans drive S3. Create an [`s3::Objects`] client and call its
-//! `encode_*` and `accept_*` methods, as the [`s3`] module describes. It
-//! signs each request with AWS Signature Version 4, using the SHA-256 and
-//! HMAC-SHA256 of a [`sigv4::Sha256Provider`] that you pass.
+//! The same plans drive S3. Create an [`s3::Objects`]
+//! client and call its `encode_*`, `accept_*` and `fill_listing` methods, as
+//! the [`s3`] module describes. It signs each request with AWS Signature
+//! Version 4, using the SHA-256 and HMAC-SHA256 of a
+//! [`sigv4::Sha256Provider`] that you pass.
 //!
 //! # Example
 //!
@@ -200,9 +201,9 @@
 //! # Reading a failure
 //!
 //! A `NeedErrorBody` outcome carries a [`Failure`] whose `request_id`
-//! borrows the head. Copy what you need out of it, read the body, and call
-//! the `accept_*_error_body` method of the same operation. That method
-//! returns the same outcome type again, with the error that the body named.
+//! borrows the head. Read the body, and pass it with the failure to the
+//! `accept_*_error_body` method of the same operation. That method returns
+//! the same outcome type again, with the error that the body named.
 //!
 //! Every outcome type is `#[non_exhaustive]`. Treat a variant that your
 //! `match` does not name as a failure of the service, and report the status.
@@ -222,12 +223,12 @@ mod head;
 mod http;
 pub mod layered;
 mod outcome;
-mod path;
 mod request;
 pub mod s3;
 pub mod sigv4;
 mod time;
 mod types;
+mod url;
 mod xml;
 
 pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, classify_error};

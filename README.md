@@ -28,6 +28,10 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 - Object delete (DELETE request)
   - Conditional (If-Match; If-None-Match on Azure only)
   - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
+- Object listing (GET request on the container or bucket, one page at a time)
+  - Custom delimiters, prefixes
+  - Some object properties are always returned, others can be registered to return in a custom entry return type
+  - S3: start after a key (not possible on Azure)
 - Metadata (arbitrary key-value pairs attached to objects) reading and writing
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
@@ -37,9 +41,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 
 ### Azure Blob Storage-only
 
-- Object listing (GET request on the container, one page at a time)
-  - Supports delimiters, prefixes
-  - Supports registering properties you want to read into your own entry type in the main parsing pass
+- Object listing: listing metadata (S3 does not list it)
 - Object multipart upload
 
 ### S3-only

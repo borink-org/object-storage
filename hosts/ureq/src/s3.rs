@@ -8,11 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::s3::{Objects, PayloadHash};
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, GetHeadOutcome, HeaderSpan, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalPut, PutHeadOutcome, ResponseHead, Timestamps, layered,
+    DeleteHeadOutcome, GetHeadOutcome, HeaderSpan, ListEntry, ListHeadOutcome, Listing, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, ResponseHead,
+    Timestamps, layered,
 };
 
-use crate::MAX_ERROR_BODY;
+use crate::{MAX_ERROR_BODY, MAX_PAGE};
 
 /// Builds and executes one GET request, returning an owned response body.
 pub fn get(objects: &Objects<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -55,9 +56,9 @@ pub fn get(objects: &Objects<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::err
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(no_object(objects.accept_error_body(
-                failure.status,
-                failure.request_id,
+            Err(no_object(objects.accept_get_error_body(
+                get.shape(),
+                failure,
                 &body,
             )))
         }
@@ -116,8 +117,8 @@ pub fn put(
                 .read_to_vec()
                 .unwrap_or_default();
             Err(not_stored(objects.accept_put_error_body(
-                failure.status,
-                failure.request_id,
+                put.shape(),
+                failure,
                 &body,
             )))
         }
@@ -169,8 +170,8 @@ pub fn delete(objects: &Objects<'_>, key: &str) -> Result<(), Box<dyn std::error
                 .read_to_vec()
                 .unwrap_or_default();
             Err(not_removed(objects.accept_delete_error_body(
-                failure.status,
-                failure.request_id,
+                delete.shape(),
+                failure,
                 &body,
             )))
         }
@@ -180,4 +181,73 @@ pub fn delete(objects: &Objects<'_>, key: &str) -> Result<(), Box<dyn std::error
 
 fn not_removed(outcome: DeleteHeadOutcome<'_>) -> Box<dyn std::error::Error> {
     format!("S3 removed no object: {outcome}").into()
+}
+
+/// Builds and executes one listing request, and reads the page it answered.
+///
+/// This function reads the page into `body`, and the entries it writes into
+/// `into` borrow those bytes. An array of `max_results` entries always holds a
+/// whole page, and so does one of 1,000 entries for AWS. A smaller one is
+/// refused with the number of entries the page holds.
+///
+/// # Errors
+///
+/// Returns an error if the request could not be sent, or if S3 listed
+/// nothing.
+pub fn list<'b>(
+    objects: &Objects<'_>,
+    plan: &PhysicalList<'_>,
+    body: &'b mut Vec<u8>,
+    into: &mut [ListEntry<'b>],
+) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
+    let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let now = Timestamps::from_unix(unix);
+    let size = layered::s3::list_requirements(objects, plan, &now)?;
+    let mut buf = vec![0; size.bytes];
+    let mut headers = vec![HeaderSpan::default(); size.headers];
+    let request = objects.encode_list(&mut buf, &mut headers, plan, &now)?;
+
+    let mut outgoing = ureq::get(request.url());
+    for (name, value) in request.headers() {
+        outgoing = outgoing.header(name, value);
+    }
+    let mut incoming = outgoing
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()?;
+    let status = incoming.status().as_u16();
+    let headers = incoming.headers().clone();
+    let head = ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes())),
+    );
+    match objects.accept_list_head(head)? {
+        ListHeadOutcome::Page { .. } => {
+            // S3 often sends a page without its length, so the read is
+            // capped whatever the head says.
+            *body = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_PAGE)
+                .read_to_vec()?;
+            objects.fill_listing(body, into).map_err(Into::into)
+        }
+        ListHeadOutcome::NeedErrorBody(failure) => {
+            let error = incoming
+                .body_mut()
+                .with_config()
+                .limit(MAX_ERROR_BODY)
+                .read_to_vec()
+                .unwrap_or_default();
+            Err(not_listed(objects.accept_list_error_body(failure, &error)))
+        }
+        outcome => Err(not_listed(outcome)),
+    }
+}
+
+fn not_listed(outcome: ListHeadOutcome<'_>) -> Box<dyn std::error::Error> {
+    format!("S3 listed no keys: {outcome}").into()
 }

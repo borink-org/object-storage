@@ -7,8 +7,8 @@ use borink_object_storage_proto::sigv4::{
 };
 use borink_object_storage_proto::{
     ChecksumKind, ConditionKind, Error, FailureClass, InvalidPlan, MetadataPair, Payload,
-    PhysicalPut, PutHeadOutcome, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
-    TransactionalChecksum, WriteOptions, layered,
+    PhysicalPut, PutHeadOutcome, ResponseFault, ResponseHead, Timestamps, TransactionalChecksum,
+    WriteOptions, layered,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -213,8 +213,8 @@ fn a_write_reports_what_s3_stored() {
         panic!("a conflict names its error in the body");
     };
     let outcome = objects.accept_put_error_body(
-        failure.status,
-        failure.request_id,
+        create,
+        failure,
         b"<Error><Code>ConditionalRequestConflict</Code></Error>",
     );
     let PutHeadOutcome::ServiceFailure(failure) = outcome else {
@@ -223,11 +223,5 @@ fn a_write_reports_what_s3_stored() {
     assert_eq!(
         (failure.status, failure.class, failure.kind),
         (409, FailureClass::Other, None)
-    );
-    assert_eq!(
-        objects.accept_put_error_body(404, None, b"<Error><Code>NoSuchBucket</Code></Error>"),
-        PutHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
     );
 }

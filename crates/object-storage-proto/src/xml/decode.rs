@@ -1,5 +1,5 @@
-// Undoes the escaping that XML applies to text, and the percent-encoding that
-// the service applies to a name that XML cannot hold.
+// Undoes the escaping that XML applies to text, and, with `url.rs`, the
+// percent-encoding that the service applies to a name that XML cannot hold.
 //
 // Both only ever shorten the text, so both decode in place from left to
 // right. The bytes freed at the end keep whatever they held. Each function
@@ -9,16 +9,16 @@
 
 use super::scan::{AMP, PCT, fault, find_byte};
 use crate::Result;
-use crate::encoding::hex_digit;
+use crate::url::percent_decode_in_place;
 
 /// Undoes both encodings, in the order a document applies them.
 pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
     let len = decode_references(bytes)?;
-    if percent {
-        decode_percent(&mut bytes[..len])
+    Ok(if percent {
+        percent_decode_in_place(&mut bytes[..len])
     } else {
-        Ok(len)
-    }
+        len
+    })
 }
 
 // The same, for a value the scanner has already seen. The scanner's flags say
@@ -32,7 +32,7 @@ pub(crate) fn decode(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize
     // A reference can encode a `%`, so after the references are undone the
     // flag no longer says whether there is one.
     if percent && flags & (PCT | AMP) != 0 {
-        len = decode_percent(&mut bytes[..len])?;
+        len = percent_decode_in_place(&mut bytes[..len]);
     }
     Ok(len)
 }
@@ -99,9 +99,7 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         // and percent-encodes the non-characters it does store, marked with
         // `<Name Encoded="true">`. S3 can write one: it stores `U+0001` and,
         // unless the listing asks for `encoding-type=url`, writes it as
-        // `&#x1;`. This crate always asks, so the reference never arrives. If
-        // that changes, this rule refuses a key that AWS stores, and the
-        // decision then belongs with S3 LIST rather than here.
+        // `&#x1;`. An S3 listing asks for URL encoding, which writes `%01`.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
             return fault();
         };
@@ -134,36 +132,6 @@ fn xml_char(code: u32) -> bool {
         code,
         0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
     )
-}
-
-fn decode_percent(b: &mut [u8]) -> Result<usize> {
-    // The same two indexes as in `decode_references`.
-    let (mut r, mut w) = (0, 0);
-    while r < b.len() {
-        let run = find_byte(b, r, b'%') - r;
-        if w != r {
-            b.copy_within(r..r + run, w);
-        }
-        r += run;
-        w += run;
-        if r == b.len() {
-            break;
-        }
-        // A name marked as encoded is encoded whole, including the separators
-        // between its segments. So every `%` in it begins an escape, and a
-        // `%` that does not is a fault. Measured: a listed name reads
-        // `...azure-list-scratch%2F100%25-%EF%BF%BE...`.
-        let (Some(high), Some(low)) = (
-            b.get(r + 1).copied().and_then(hex_digit),
-            b.get(r + 2).copied().and_then(hex_digit),
-        ) else {
-            return fault();
-        };
-        b[w] = high << 4 | low;
-        r += 3;
-        w += 1;
-    }
-    Ok(w)
 }
 
 #[cfg(test)]
@@ -240,10 +208,7 @@ mod tests {
         // The references are undone first, so a name may hold both.
         assert_eq!(decoded("a&amp;b%20c", true), "a&b c");
         assert_eq!(decoded("100%25", true), "100%");
-        // An encoded name is encoded whole, so a `%` that does not begin an
-        // escape is a fault.
-        for text in ["100%25 %zz", "a%", "a%2", "a%2Gb"] {
-            assert!(refused(text, true), "{text}");
-        }
+        // As the URL Standard decodes, a `%` that begins no escape stays.
+        assert_eq!(decoded("100%25 %zz", true), "100% %zz");
     }
 }

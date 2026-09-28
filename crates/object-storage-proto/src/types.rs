@@ -359,23 +359,27 @@ impl<'h> WriteOptions<'h> {
     }
 }
 
-/// The extra elements that a listing asks Azure to write for each object.
+/// The extra elements that a listing asks the service to write for each
+/// object.
 ///
 /// Combine the constants with `|` and put the set in
 /// [`PhysicalList::include`]. An empty set asks for nothing beyond the
-/// object's own properties.
+/// object's own properties. Each constant says which service writes it, and
+/// a client refuses a listing that asks the other service for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ListInclude(u32);
 
 impl ListInclude {
-    /// The metadata pairs of each object, as a `Metadata` element.
+    /// The metadata pairs of each object, as a `Metadata` element. Azure
+    /// only.
     ///
     /// Read them with [`ListEntry::metadata`], or in the same pass as the
     /// rest of the page with [`BlobProperty::Metadata`].
     pub const METADATA: Self = Self(1 << 0);
 
-    // The word of each flag, in the order they are written into the query.
-    const WORDS: [(Self, &'static str); 1] = [(Self::METADATA, "metadata")];
+    /// The owner of each object, as an `Owner` element. S3 only. Read it as
+    /// [`s3::ObjectProperty::Owner`](crate::s3::ObjectProperty::Owner).
+    pub const OWNER: Self = Self(1 << 1);
 
     /// Returns `true` if this set holds every flag of `other`.
     pub const fn contains(self, other: Self) -> bool {
@@ -385,14 +389,6 @@ impl ListInclude {
     /// Returns `true` if this set holds no flag.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
-    }
-
-    // The words of the set, in one fixed order whatever order it was built
-    // in, so a caller can compare the URL byte for byte.
-    pub(crate) fn words(self) -> impl Iterator<Item = &'static str> {
-        Self::WORDS
-            .into_iter()
-            .filter_map(move |(flag, word)| self.contains(flag).then_some(word))
     }
 }
 
@@ -653,6 +649,8 @@ pub enum EntryKind {
     Object = 1,
     /// A group of keys that a delimited listing did not report one by one.
     ///
+    /// On S3, this is one of the page's common prefixes.
+    ///
     /// The listing reports the shared start of those keys once, and you list
     /// again with it as the prefix to see what is under it.
     Prefix = 2,
@@ -698,7 +696,9 @@ pub struct ListShape {
 /// you plan that page with the same shape and that marker.
 ///
 /// Because the fields are public and unchecked,
-/// [`Blobs::encode_list`](crate::Blobs::encode_list) validates the plan.
+/// [`Blobs::encode_list`](crate::Blobs::encode_list) and
+/// [`s3::Objects::encode_list`](crate::s3::Objects::encode_list) validate the
+/// plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalList<'h> {
     /// The keys to list under. An empty prefix lists the whole container.
@@ -713,8 +713,15 @@ pub struct PhysicalList<'h> {
     ///
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
     /// previous page reported. The first page carries [`None`]. The text is
-    /// the service's, and means nothing to this crate.
+    /// the service's, and means nothing to this crate. On S3 it is the
+    /// continuation token of a ListObjectsV2.
     pub marker: Option<&'h str>,
+    /// The text after which the listing starts. S3 only.
+    ///
+    /// The listing reports only the keys and groups of keys that sort after
+    /// this text, which need not be a key. An empty text is the same as
+    /// [`None`]. A later page starts at its marker instead.
+    pub start_after: Option<&'h str>,
     /// Whether to group the keys at each `/` after the prefix.
     ///
     /// A delimited listing reports each group once, as an
@@ -723,12 +730,13 @@ pub struct PhysicalList<'h> {
     pub delimited: bool,
     /// The most entries that this page reports.
     ///
-    /// [`None`] asks for the service's maximum, which Azure also applies to
-    /// any larger number. The service may report fewer entries than this and
-    /// still name a next page.
+    /// [`None`] asks for the service's maximum, which the service also
+    /// applies to any larger number: 5,000 on Azure and 1,000 on AWS. The
+    /// service may report fewer entries than this and still name a next
+    /// page.
     pub max_results: Option<u32>,
     /// The extra elements that each page reports beside each object. See
-    /// [`ListInclude`].
+    /// [`ListInclude`], which S3 takes none of.
     pub include: ListInclude,
 }
 
@@ -738,6 +746,7 @@ impl<'h> PhysicalList<'h> {
         Self {
             prefix,
             marker: None,
+            start_after: None,
             delimited: false,
             max_results: None,
             include: ListInclude::default(),
@@ -745,10 +754,14 @@ impl<'h> PhysicalList<'h> {
     }
 
     /// Creates a plan from a stored shape and the text that it needs.
+    ///
+    /// The plan has no [`Self::start_after`], which a later page does not
+    /// need.
     pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,
             marker,
+            start_after: None,
             delimited: shape.delimited,
             max_results: shape.max_results,
             include: shape.include,
@@ -768,12 +781,11 @@ impl<'h> PhysicalList<'h> {
 /// One entry of a listing page.
 ///
 /// Every slice points into the body that
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) read, and stays valid
-/// until you reuse that buffer.
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
+/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) read, and
+/// stays valid until you reuse that buffer.
 ///
-/// The fields hold the text that the service wrote. Read `last_modified`
-/// with [`layered::http_date_ms`](crate::layered::http_date_ms), as you
-/// would [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified).
+/// The fields hold the text that the service wrote, decoded.
 ///
 /// Azure version and snapshot fields are available through
 /// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and
@@ -795,12 +807,19 @@ pub struct ListEntry<'b> {
     /// Azure lists an entity tag without the quotes that the `ETag` header
     /// carries, and conditions a request on either form. To write the one that
     /// HTTP defines, quote it with
-    /// [`layered::quoted_etag`](crate::layered::quoted_etag).
+    /// [`layered::quoted_etag`](crate::layered::quoted_etag). S3 lists it
+    /// with its quotes.
     pub e_tag: Option<&'b str>,
-    /// The value that the listing gave for the last modification, in the form
-    /// that the `Last-Modified` header uses.
+    /// The value that the listing gave for the last modification.
+    ///
+    /// Azure writes it in the form that the `Last-Modified` header uses:
+    /// read it with [`layered::http_date_ms`](crate::layered::http_date_ms).
+    /// S3 writes it in ISO 8601: read it with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
     pub last_modified: Option<&'b str>,
     /// The stored media type, decoded from `Content-Type` when present.
+    ///
+    /// Only Azure lists it.
     pub content_type: Option<&'b str>,
     /// This entry as the service wrote it, from its opening tag to its closing
     /// one.
@@ -1018,6 +1037,7 @@ mod tests {
 /// test there checks that every one of these is matched.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BlobProperty {
     /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
     AccessTier,

@@ -1,10 +1,10 @@
 //! Azure listing encoding, response interpretation and page reading.
 
 use borink_object_storage_proto::{
-    AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, Failure,
-    FailureClass, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListShape,
-    Listing, Metadata, Method, PhysicalList, PropertySet, PropertyValues, ResponseFault,
-    ResponseHead, ServiceErrorKind, Timestamps, layered,
+    AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, HeaderSpan,
+    InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListShape, Listing, Metadata, Method,
+    PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind,
+    Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -306,24 +306,10 @@ fn a_failure_without_a_code_header_is_finished_by_the_body() {
     };
     assert_eq!(failure.kind, None);
     assert_eq!(
-        blobs.accept_list_error_body(
-            failure.status,
-            failure.request_id,
-            b"<Error><Code>ContainerNotFound</Code></Error>",
-        ),
+        blobs.accept_list_error_body(failure, b"<Error><Code>ContainerNotFound</Code></Error>",),
         ListHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
-    );
-
-    assert_eq!(
-        blobs.accept_list_error_body(503, None, b""),
-        ListHeadOutcome::ServiceFailure(Failure {
-            status: 503,
-            class: FailureClass::Server,
-            kind: None,
-            request_id: None,
-        })
     );
 }
 

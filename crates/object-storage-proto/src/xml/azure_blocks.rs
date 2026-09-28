@@ -12,8 +12,8 @@
 // stored, and a listed ID is passed back to it unchanged. That is what fixes
 // the 43-byte minimum element that `layered::max_blocks_in` divides by.
 
-use super::azure::check_body;
 use super::decode::decode;
+use super::page::check_body;
 use super::scan::{Child, Scan, fault, trim};
 use crate::azure::{Block, BlockState};
 use crate::{CapacityError, Error, Listing, Result};

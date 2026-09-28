@@ -1,11 +1,4 @@
 {
-  "core": {
-    "azure/get-version": "PhysicalGet selects no snapshot or version",
-    "s3/*-multipart*": "the crate has no S3 multipart upload",
-    "s3/get-version": "an S3 plan selects no version",
-    "s3/list-*": "the crate has no S3 listing",
-    "s3/upload-part": "the crate has no S3 multipart upload"
-  },
   "operations": {
     "field:/value/cache_control": "ResponseHead and ObjectMeta carry no Cache-Control",
     "field:/value/content_disposition": "ResponseHead and ObjectMeta carry no Content-Disposition",
@@ -74,14 +67,21 @@
     "operations/s3/*-tagging": "the crate has no S3 tagging operation",
     "operations/s3/abort*": "the crate has no S3 multipart upload",
     "operations/s3/commit*": "the crate has no S3 multipart upload",
+    "operations/s3/complete-multipart-200-error": "the crate has no S3 multipart upload",
     "operations/s3/copy*": "the crate has no copy operation",
     "operations/s3/create-bucket*": "the crate manages no buckets",
     "operations/s3/delete-bucket": "the crate manages no buckets",
     "operations/s3/delete-many": "the crate has no delete_many operation",
+    "operations/s3/get-version": "an S3 plan selects no version",
     "operations/s3/head-bucket*": "the crate manages no buckets",
-    "operations/s3/list-*": "the crate lists no S3 objects or buckets",
+    "operations/s3/list-buckets": "the crate lists no S3 buckets",
+    "operations/s3/list-other-delimiter": "PhysicalList delimits on '/' only",
     "operations/s3/put-content-*": "PhysicalPut sets no content properties",
-    "operations/s3/put-with-*": "PhysicalPut sets no storage class or tags",
+    "operations/s3/put-two-checksums": "an S3 write carries no checksum but Content-MD5",
+    "operations/s3/put-with-crc32": "an S3 write carries no checksum but Content-MD5",
+    "operations/s3/put-with-storage-class": "PhysicalPut sets no storage class or tags",
+    "operations/s3/put-with-tags": "PhysicalPut sets no storage class or tags",
+    "operations/s3/put-with-unknown-storage-class": "PhysicalPut sets no storage class or tags",
     "operations/s3/stage*": "the crate has no S3 multipart upload",
     "operations/s3/start*": "the crate has no S3 multipart upload"
   },

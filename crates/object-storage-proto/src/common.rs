@@ -1,7 +1,7 @@
 // What both providers share when they write a request head and read a
 // response head.
 
-use crate::request::{HeadWriter, U64Decimal};
+use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
@@ -21,6 +21,50 @@ pub(crate) fn failure<'h>(
         request_id,
     }
 }
+
+// The two outcomes that `finish_with_body` produces, for one operation's
+// outcome type.
+pub(crate) trait FailureOutcome<'h> {
+    fn not_found(kind: Option<ServiceErrorKind>) -> Self;
+    fn service_failure(failure: Failure<'h>) -> Self;
+}
+
+// Finishes a failure whose head named no error, with the error `kind` that
+// its body named. A 404 is not found, and any other status is a failure of
+// the service.
+pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
+    head_failure: Failure<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    match head_failure.status {
+        404 => O::not_found(kind),
+        status => O::service_failure(failure(status, kind, head_failure.request_id)),
+    }
+}
+
+macro_rules! failure_outcome {
+    ($($outcome:ident),*) => {$(
+        impl<'h> FailureOutcome<'h> for crate::$outcome<'h> {
+            fn not_found(kind: Option<ServiceErrorKind>) -> Self {
+                Self::NotFound { kind }
+            }
+
+            fn service_failure(failure: Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+
+failure_outcome!(
+    GetHeadOutcome,
+    PutHeadOutcome,
+    DeleteHeadOutcome,
+    ListHeadOutcome,
+    StageBlockHeadOutcome,
+    CommitBlocksHeadOutcome,
+    ListBlocksHeadOutcome
+);
 
 pub(crate) fn accept_success<'h>(
     shape: GetShape,
@@ -195,22 +239,22 @@ pub(crate) fn push_condition(
     }
 }
 
-pub(crate) fn write_range(out: &mut dyn FnMut(&[u8]), range: RequestedRange) {
-    out(b"bytes=");
+pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
+    out.push(b"bytes=");
     match range {
         RequestedRange::Bounded { start, end } => {
-            out(U64Decimal::new(start).as_bytes());
-            out(b"-");
+            out.push(U64Decimal::new(start).as_bytes());
+            out.push(b"-");
             // Validation requires start < end, so end is nonzero.
-            out(U64Decimal::new(end - 1).as_bytes());
+            out.push(U64Decimal::new(end - 1).as_bytes());
         }
         RequestedRange::Offset(first) => {
-            out(U64Decimal::new(first).as_bytes());
-            out(b"-");
+            out.push(U64Decimal::new(first).as_bytes());
+            out.push(b"-");
         }
         RequestedRange::Suffix(last) => {
-            out(b"-");
-            out(U64Decimal::new(last).as_bytes());
+            out.push(b"-");
+            out.push(U64Decimal::new(last).as_bytes());
         }
         RequestedRange::Whole => unreachable!("the plan was validated"),
     }

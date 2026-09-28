@@ -156,6 +156,20 @@ impl<'r> WireRequest<'r> {
 
 // The writer keeps counting after capacity is exhausted, so one pass produces
 // either the request or its exact requirement. Partial bytes are never returned.
+// Receives the text of a request as it is written: the request buffer, a
+// count of its length, or a checksum or SHA-256 of it. One writer serves them
+// all, so the signed bytes are the sent bytes.
+pub(crate) trait ByteSink {
+    // Takes the next piece of the text.
+    fn push(&mut self, bytes: &[u8]);
+}
+
+impl ByteSink for Writer<'_> {
+    fn push(&mut self, bytes: &[u8]) {
+        Writer::push(self, bytes);
+    }
+}
+
 pub(crate) struct Writer<'a> {
     bytes: &'a mut [u8],
     position: usize,

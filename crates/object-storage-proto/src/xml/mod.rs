@@ -3,27 +3,29 @@
 //
 // The reader walks the document structure directly; it does not tokenise.
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
-// the caller's buffer, and `azure.rs` knows the shape of a listing page. This
-// file reads the error document, which is only three elements. It also walks
-// the properties of an entry, so the caller can read the ones this crate
-// skips.
+// the caller's buffer, and `page.rs` holds what reading any page takes. The
+// files named for a service read that service's documents: `azure.rs` and
+// `s3.rs` a listing page, `azure_blocks.rs` a block list. This file reads the
+// error document, and walks the properties of an entry for the caller.
 //
-// A page is read in this order. `azure::check_body` checks the body is UTF-8
-// and holds no zero byte. `azure::open_root_element` skips the prolog and
-// reads through the root's opening tag. `azure::read_root_children_into` then
-// loops over the root's children, and on the one that holds the entries calls
-// `azure::read_entries_into`, which reads each entry's fields as spans, takes
-// the entry off the body as its own slice, and has `azure::build_entry`
-// decode those spans in place and build the `ListEntry` from them. An entry
-// the array has no room for is walked but not built, so that the error can
-// say how many entries the page holds.
+// An Azure page is read in this order. `page::check_body` checks the body is
+// UTF-8 and holds no zero byte. `page::open_root_element` skips the prolog
+// and reads through the root's opening tag. `azure::read_root_children_into`
+// then loops over the root's children, and on the one that holds the entries
+// calls `azure::read_entries_into`, which reads each entry's fields as spans,
+// takes the entry off the body as its own slice, and has
+// `azure::build_entry` decode those spans in place and build the `ListEntry`
+// from them. An entry the array has no room for is walked but not built, so
+// that the error can say how many entries the page holds. An S3 page is read
+// the same way.
 
 pub(crate) mod azure;
 pub(crate) mod azure_blocks;
 pub(crate) mod decode;
+mod page;
+pub(crate) mod s3;
 pub(crate) mod scan;
 
-pub(crate) use azure::fill_listing;
 pub(crate) use decode::decode_text;
 
 use scan::{find_byte, trim};
@@ -180,8 +182,18 @@ pub(crate) fn next_pair<'b>(rest: &mut &'b [u8]) -> Option<(&'b [u8], &'b [u8])>
     Some((name, value))
 }
 
-// The elements whose text reading the page decodes in place.
-const DECODED: [&[u8]; 4] = [b"Name", b"Etag", b"Last-Modified", b"Content-Type"];
+// The elements whose text reading the page decodes in place: four of an
+// Azure entry, then four of an S3 one.
+const DECODED: [&[u8]; 8] = [
+    b"Name",
+    b"Etag",
+    b"Last-Modified",
+    b"Content-Type",
+    b"Key",
+    b"ETag",
+    b"LastModified",
+    b"Prefix",
+];
 
 // Returns the decoded text of an element that reading the page decoded in
 // place, and the bytes after its close tag. Returns `None` if this element

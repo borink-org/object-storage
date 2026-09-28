@@ -205,9 +205,9 @@ impl FailureClass {
 /// A response head that reports a failure.
 ///
 /// The three head-reading methods return this in the two outcomes that carry a
-/// failure. Its fields are public, so you can store one and hand the parts
-/// back to
-/// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body) later.
+/// failure. Pass it back to the `accept_*_error_body` method of the same
+/// operation, such as
+/// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure<'h> {
     /// The HTTP status code.
@@ -285,9 +285,8 @@ pub enum GetHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
-    /// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body). That
+    /// This outcome is not final. Pass this failure and the response body to
+    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body). That
     /// call returns the final outcome. If you cannot read the body, pass an
     /// empty one and the error stays unnamed.
     ///
@@ -333,8 +332,7 @@ pub enum PutHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
@@ -373,8 +371,7 @@ pub enum DeleteHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
@@ -391,20 +388,23 @@ pub enum DeleteHeadOutcome<'h> {
 /// The result of reading the response head of a listing.
 ///
 /// A head that reports a failure is one of these too;
-/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) returns an
-/// [`Err`] only for a head it cannot read.
+/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) and
+/// [`s3::Objects::accept_list_head`](crate::s3::Objects::accept_list_head)
+/// return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListHeadOutcome<'h> {
     /// The page follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing), which reads the
-    /// entries out of it.
+    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
+    /// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing),
+    /// which reads the entries out of it.
     Page {
         /// The exact length of the response body, if the head states it.
         ///
-        /// Size the body buffer from this.
+        /// Size the body buffer from this. S3 often leaves it out, so cap
+        /// what you read when it is [`None`].
         expected_len: Option<u64>,
     },
     /// The container does not exist, so there was nothing to list.
@@ -414,8 +414,7 @@ pub enum ListHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
@@ -428,8 +427,9 @@ pub enum ListHeadOutcome<'h> {
 
 /// What one page of a listing held.
 ///
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) returns this once the
-/// page has been read to its end.
+/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) and
+/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) return
+/// this once the page has been read to its end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Listing<'b> {
     /// The number of entries that this call wrote into your array.

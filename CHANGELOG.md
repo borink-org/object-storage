@@ -20,6 +20,14 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New functions `s3::metadata_name`, `s3::error_code` and `s3::classify_error`.
   - New function `s3::metadata_value`, which decodes a metadata value that S3 returns as RFC 2047 encoded words. An S3 client sends a value outside ASCII, or one with a control character, in that form.
   - New module `layered::s3`, with `get_requirements`, `put_requirements` and `delete_requirements` for an `Objects` client.
+- S3 listing, with ListObjectsV2. It takes a `PhysicalList` and returns a `ListHeadOutcome`, a `Listing` and `ListEntry` values, as on Azure:
+  - New methods `Objects::encode_list`, `Objects::accept_list_head`, `Objects::accept_list_error_body` and `Objects::fill_listing`.
+  - New method `Objects::fill_listing_with`, which reads the properties you name in the same pass as the page.
+  - New enum `s3::ObjectProperty`, and new structs `s3::PropertySet` and `s3::PropertyValues`, for `fill_listing_with`.
+  - New field `PhysicalList::start_after`. An Azure client refuses it.
+  - New constant `ListInclude::OWNER`. An Azure client refuses it.
+  - New function `layered::s3::list_requirements`.
+  - New function `layered::iso8601_ms`, which reads the date of an S3 listing entry.
 - AWS Signature Version 4:
   - New module `sigv4`.
   - New struct `sigv4::Credentials`, which holds an access key and an optional session token. `Credentials::new` also takes the function that wipes a client's copy of the secret access key.
@@ -41,6 +49,10 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 ### Changed
 
 - In `borink-object-storage-crypto`, renamed the feature `md5` to `md5-rustcrypto`, the struct `Md5` to `Md5RustCrypto` and the constant `MD5` to `MD5_RUSTCRYPTO`.
+- Renamed the method `Blobs::accept_error_body` to `accept_get_error_body`.
+- The enum `BlobProperty` is `#[non_exhaustive]`, so that a property Azure adds later is not a breaking change.
+- The `accept_*_error_body` methods of `Blobs` take the `Failure` of the outcome in place of its `status` and `request_id`.
+- `Blobs::fill_listing` and `Blobs::fill_listing_with` read a `%` that begins no escape in an encoded name as the text `%`, as the WHATWG URL Standard does. They refused the page before.
 
 ## 0.0.2 - 2026-09-26
 

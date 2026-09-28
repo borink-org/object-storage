@@ -1,26 +1,35 @@
-//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT and DELETE,
-//! and for the SigV4 signatures of the vector suite.
+//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT, DELETE and
+//! listing, and for the SigV4 signatures of the vector suite.
 //!
 //! The crate signs with long-lived or temporary credentials. Offline cases
 //! receive placeholder keys, and live cases read `AWS_ACCESS_KEY_ID`,
 //! `AWS_SECRET_ACCESS_KEY` and, if set, `AWS_SESSION_TOKEN`.
 
+use crate::listing::{
+    Listed, ListedPage, PageRead, PageSource, decoded_listing_text, entry_slots, list_all_keys,
+    list_page,
+};
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, request_buffers, requested_condition, requested_range,
-    send_request, successful_result, text_of, unmapped_call_field, unsupported_by_adapter,
-    unsupported_by_crate, unsupported_response_fields,
+    send_request, successful_result, text_of, transport_failure, unmapped_call_field,
+    unsupported_by_adapter, unsupported_by_crate, unsupported_response_fields,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
-use borink_object_storage_proto::s3::{self, Addressing, Bucket, Objects, PayloadHash, Service};
+use borink_object_storage_proto::s3::{
+    self, Addressing, Bucket, ObjectProperty, Objects, PayloadHash, PropertySet, Service,
+};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, MetadataPair, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, PutHeadOutcome, RequestedRange, Timestamps, TransactionalChecksum,
-    WriteOptions, layered,
+    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, Metadata,
+    MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome,
+    RequestedRange, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
+
+// AWS reports at most 1,000 entries on one listing page.
+const MAX_PAGE_ENTRIES: usize = 1_000;
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
     failed_result(status, s3::error_code(&exchange.body))
@@ -75,7 +84,7 @@ fn read_object(
         crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         GetHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -190,7 +199,7 @@ fn write_object(
         crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         PutHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_put_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -246,7 +255,7 @@ fn delete_object(
         crate_step!(objects.accept_delete_head(delete_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_delete_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -260,6 +269,128 @@ fn delete_object(
         }
         _ => error_result(&exchange, exchange.status),
     })
+}
+
+/// The pages of one bucket's listings, read with an `Objects` client.
+struct ObjectPages<'a> {
+    context: &'a AdapterContext,
+    objects: &'a Objects<'a>,
+}
+
+impl PageSource for ObjectPages<'_> {
+    fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
+        let (context, objects) = (self.context, self.objects);
+        let now = current_timestamps();
+        let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
+            layered::s3::list_requirements(objects, list_plan, &now)
+        ));
+        let request =
+            page_step!(objects.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
+        let mut exchange = match send_request(context, &request) {
+            Ok(exchange) => exchange,
+            Err(error) => return Ok(Err(transport_failure(&error))),
+        };
+
+        let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
+        let outcome = match head_outcome {
+            ListHeadOutcome::NeedErrorBody(failure) => {
+                objects.accept_list_error_body(failure, &exchange.body)
+            }
+            outcome => outcome,
+        };
+        let failed_status = match outcome {
+            ListHeadOutcome::Page { .. } => None,
+            ListHeadOutcome::NotFound { .. } => Some(404),
+            ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
+                Some(failure.status)
+            }
+            _ => Some(exchange.status),
+        };
+        if let Some(status) = failed_status {
+            return Ok(Err(error_result(&exchange, status)));
+        }
+
+        let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+        // These properties are read in the same pass as the page.
+        let wanted = PropertySet::of(&[
+            ObjectProperty::StorageClass,
+            ObjectProperty::ChecksumAlgorithm,
+            ObjectProperty::Owner,
+        ]);
+        let listing = page_step!(objects.fill_listing_with(
+            &mut exchange.body,
+            &mut slots,
+            wanted,
+            |entry, values| ObjectWithProperties {
+                entry,
+                storage_class: values.get(ObjectProperty::StorageClass),
+                checksum_algorithm: values.get(ObjectProperty::ChecksumAlgorithm),
+                owner: values.get(ObjectProperty::Owner),
+            }
+        ));
+        Ok(Ok(ListedPage::read(&slots, listing)))
+    }
+}
+
+/// A listed object, with the properties that the page was read for.
+#[derive(Clone, Copy, Default)]
+struct ObjectWithProperties<'b> {
+    entry: ListEntry<'b>,
+    storage_class: Option<&'b [u8]>,
+    checksum_algorithm: Option<&'b [u8]>,
+    owner: Option<&'b [u8]>,
+}
+
+impl Listed for ObjectWithProperties<'_> {
+    fn entry(&self) -> &ListEntry<'_> {
+        &self.entry
+    }
+
+    fn value(&self) -> Value {
+        listed_entry_value(self)
+    }
+}
+
+fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
+    let entry = &listed.entry;
+    let mut value = json!({
+        "key": entry.key,
+        "size": entry.size.unwrap_or(0),
+        "etag": entry.e_tag.unwrap_or_default(),
+    });
+    if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
+        value["last_modified"] = json!(rfc3339(millis / 1000));
+    }
+    if let Some(storage_class) = listed.storage_class {
+        value["storage_class"] = json!(decoded_listing_text(storage_class));
+    }
+    if let Some(algorithm) = listed.checksum_algorithm {
+        value["checksum_algorithm"] = json!(decoded_listing_text(algorithm));
+    }
+    // The owner holds its ID as an element of its own.
+    if let Some((_, id)) = listed
+        .owner
+        .and_then(|owner| Metadata::new(owner).find(|(name, _)| *name == b"ID"))
+    {
+        value["owner_id"] = json!(decoded_listing_text(id));
+    }
+    value
+}
+
+/// Writes a time as `2024-01-02T03:04:05Z`, from the basic form that
+/// `Timestamps::iso8601` writes.
+fn rfc3339(unix_seconds: u64) -> String {
+    let time = Timestamps::from_unix(unix_seconds);
+    let basic = time.iso8601();
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &basic[..4],
+        &basic[4..6],
+        &basic[6..8],
+        &basic[9..11],
+        &basic[11..13],
+        &basic[13..15],
+    )
 }
 
 /// Reads `2013-05-24T00:00:00Z` or `20130524T000000Z`.
@@ -451,6 +582,15 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "checksum",
         ],
         "delete" => &["key", "if_match", "if_none_match"],
+        "list" => &["prefix", "page_size"],
+        "list_page" => &[
+            "prefix",
+            "continuation_token",
+            "start_after",
+            "delimiter",
+            "page_size",
+            "fetch_owner",
+        ],
         _ => &[],
     }
 }
@@ -482,7 +622,6 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
                 "the crate writes a canonical request only as part of a signed request",
             ));
         }
-        "list" | "list_page" => return Ok(unsupported_by_crate("the crate has no S3 listing")),
         _ => {}
     }
     if mapped_call_fields(operation).is_empty() {
@@ -539,11 +678,17 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         .with_checksum(MD5_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
+    let pages = ObjectPages {
+        context: &context,
+        objects: &objects,
+    };
     match operation {
         "get" => read_object(&context, &objects, call, GetKind::Bytes),
         "head" => read_object(&context, &objects, call, GetKind::Head),
         "put" => write_object(&context, &objects, call),
         "delete" => delete_object(&context, &objects, call),
+        "list" => list_all_keys(call, &pages),
+        "list_page" => list_page(call, &pages),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }

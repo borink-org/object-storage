@@ -4,9 +4,9 @@
 
 <https://github.com/paolobarbolini/rusty-s3>, 0.10.1, by Paolo Barbolini and Federico Guerinoni.
 
-`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/path.rs`, the set of bytes that `OBJECT_KEY_ESCAPE` percent-encodes is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, plus the same control characters. 
+`borink-object-storage` is a rewrite of a heavily modified fork of `rusty-s3`. It shares no further structure, other than some basic design goals. However, at least one part survives in full: in `crates/object-storage-proto/src/url.rs`, the set of bytes that `OBJECT_KEY_ESCAPE` percent-encodes is `rusty-s3`'s `FRAGMENT` set from `src/signing/util.rs`, plus the same control characters. 
 
-`rusty-s3` is not a dependency of any crate here. The first SigV4 test in `crates/object-storage-crypto/tests/sigv4.rs`, AWS's "GET Object" example, came from its tests; AWS publishes the same example in its Signature Version 4 documentation for S3. No request signs a query yet, so its canonical-query-string rules are not used.
+`rusty-s3` is not a dependency of any crate here. The first SigV4 test in `crates/object-storage-crypto/tests/sigv4.rs`, AWS's "GET Object" example, came from its tests; AWS publishes the same example in its Signature Version 4 documentation for S3. The canonical query of a listing is written from the SigV4 specification, not from `rusty-s3`.
 
 Its license is reproduced here as required:
 
@@ -36,6 +36,42 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### rust-url: `percent-encoding` and `form_urlencoded` — MIT OR Apache-2.0
+
+<https://github.com/servo/rust-url>, `percent-encoding` 2.3.2 and `form_urlencoded` 1.2.2, by the rust-url developers.
+
+The percent-encoding in `crates/object-storage-proto/src/url.rs` follows these two crates: the `AsciiSet` type with its `CONTROLS` and `NON_ALPHANUMERIC` sets, the encoding iterator, and the decoding rules of `percent_decode` and of `form_urlencoded::parse`. The code here yields bytes instead of `&str` and decodes in place. Neither crate is a dependency of any crate here.
+
+They are used under the MIT license, reproduced here as required:
+
+```
+Copyright (c) 2013-2025 The rust-url developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## Inspiration and reference projects

@@ -6,17 +6,19 @@
 //!    client with a [`Sha256Provider`]. The `borink-object-storage-crypto`
 //!    crate has providers, and the function that [`Credentials::new`] takes
 //!    to wipe its copy of the secret.
-//! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`] or a
-//!    [`PhysicalDelete`], the same plans that an Azure client takes.
-//! 3. Call [`Objects::encode_get`], [`Objects::encode_put`] or
-//!    [`Objects::encode_delete`] to write the signed request head into your
-//!    buffer, and send the [`WireRequest`] with your HTTP client.
+//! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`], a
+//!    [`PhysicalDelete`] or a [`PhysicalList`], the same plans that an Azure
+//!    client takes.
+//! 3. Call [`Objects::encode_get`], [`Objects::encode_put`],
+//!    [`Objects::encode_delete`] or [`Objects::encode_list`] to write the
+//!    signed request head into your buffer, and send the [`WireRequest`]
+//!    with your HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call the
 //!    `accept_*_head` method of the same operation.
 //!
 //! S3 names an error in the response body, not in a header. A failure of a
-//! GET, a PUT or a DELETE is therefore a `NeedErrorBody` outcome. Read the
-//! body and pass it to the `accept_*_error_body` method of the same
+//! GET, a PUT, a DELETE or a listing is therefore a `NeedErrorBody` outcome.
+//! Read the body and pass it to the `accept_*_error_body` method of the same
 //! operation. A HEAD response has no body, and its outcome is final.
 //!
 //! # Example
@@ -73,7 +75,7 @@
 //! };
 //! let body = b"<Error><Code>NoSuchKey</Code></Error>";
 //! assert!(matches!(
-//!     objects.accept_error_body(failure.status, failure.request_id, body),
+//!     objects.accept_get_error_body(get.shape(), failure, body),
 //!     GetHeadOutcome::NotFound { .. }
 //! ));
 //! # Ok(())
@@ -112,6 +114,62 @@
 //! [`InvalidPlan::MetadataValue`].
 //! [`MetadataPair::value`](crate::MetadataPair::value) lists those values.
 //!
+//! # Listing
+//!
+//! A listing reads one page per request. Encode a [`PhysicalList`] with
+//! [`Objects::encode_list`], read the whole body of a
+//! [`ListHeadOutcome::Page`], and pass it to [`Objects::fill_listing`]. Pass
+//! the page's [`Listing::next_marker`] as the marker of the next plan.
+//!
+//! ```
+//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects};
+//! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
+//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
+//! # const SHA256: Sha256Provider =
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! use borink_object_storage_proto::{
+//!     EntryKind, HeaderSpan, ListEntry, PhysicalList, Timestamps, layered,
+//! };
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let bucket = Bucket::new(
+//! #     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
+//! # )?;
+//! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
+//! # let now = Timestamps::from_unix(1_787_400_000);
+//! # let objects = Objects::new(bucket, credentials, SHA256);
+//! let list = PhysicalList {
+//!     delimited: true,
+//!     ..PhysicalList::new("photos/")
+//! };
+//! let size = layered::s3::list_requirements(&objects, &list, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request = objects.encode_list(&mut buffer, &mut headers, &list, &now)?;
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects\
+//!      ?delimiter=%2F&encoding-type=url&list-type=2&prefix=photos%2F"
+//! );
+//!
+//! let mut body = Vec::from(
+//!     b"<ListBucketResult><EncodingType>url</EncodingType>\
+//!       <IsTruncated>false</IsTruncated>\
+//!       <Contents><Key>photos/a+b.jpg</Key><Size>8</Size></Contents>\
+//!       <CommonPrefixes><Prefix>photos/2026/</Prefix></CommonPrefixes>\
+//!       </ListBucketResult>"
+//!         .as_slice(),
+//! );
+//! let mut entries = vec![ListEntry::default(); 1000];
+//! let page = objects.fill_listing(&mut body, &mut entries)?;
+//! assert_eq!(page.filled, 2);
+//! assert_eq!(entries[0].key, "photos/a b.jpg");
+//! assert_eq!(entries[1].kind, EntryKind::Prefix);
+//! assert_eq!(page.next_marker, None);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Content that is not signed
 //!
 //! [`PayloadHash::Unsigned`] sends a write without the SHA-256 of its
@@ -126,18 +184,19 @@ use core::cmp::Ordering;
 use crate::WriteOptions;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, condition_header, encoded, failure, parse_content_range,
-    text_header, validate_condition, write_range,
+    ContentRange, accept_success, condition_header, decimal_header, encoded, failure,
+    finish_with_body, parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
-use crate::request::{HeadWriter, U64Decimal};
+use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
+use crate::url::{self, Parameter, QueryValue};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, MetadataPair, Method, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, TransactionalChecksum,
-    WireRequest,
+    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
+    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
+    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
+    PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
+    ResponseHead, Result, ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
@@ -383,24 +442,28 @@ impl<'a> Bucket<'a> {
     }
 
     // The value of the `host` header that the URL implies.
-    fn write_host(&self, out: &mut dyn FnMut(&[u8])) {
+    fn write_host(&self, out: &mut dyn ByteSink) {
         if self.addressing == Addressing::VirtualHosted {
-            out(self.name.as_bytes());
-            out(b".");
+            out.push(self.name.as_bytes());
+            out.push(b".");
         }
-        out(self.authority.as_bytes());
+        out.push(self.authority.as_bytes());
     }
 
-    // The path of the URL, which the signature covers as it is written.
-    fn write_path(&self, out: &mut dyn FnMut(&[u8]), key: Option<&str>) {
-        out(b"/");
+    // The path of the URL, which the signature covers as it is written. A
+    // request to the bucket itself has the path `/` with virtual-hosted
+    // addressing and `/bucket` with path-style addressing.
+    fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
+        out.push(b"/");
         if self.addressing == Addressing::Path {
-            out(self.name.as_bytes());
-            out(b"/");
+            out.push(self.name.as_bytes());
+            if key.is_some() {
+                out.push(b"/");
+            }
         }
         if let Some(key) = key {
-            for part in crate::path::encode_object_key(key) {
-                out(part);
+            for part in url::encode_object_key(key) {
+                out.push(part);
             }
         }
     }
@@ -426,6 +489,194 @@ pub enum PayloadHash {
     ///
     /// See the module documentation for what this leaves unchecked.
     Unsigned,
+}
+
+/// An element that an S3 listing writes for an object, other than the four
+/// that every [`ListEntry`] carries.
+///
+/// Name the ones you want in a [`PropertySet`] and read a page with
+/// [`Objects::fill_listing_with`], which hands you their values as it goes.
+/// Read anything that is not listed here with [`ListEntry::property`].
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ObjectProperty {
+    /// The storage class, such as `STANDARD` or `GLACIER`.
+    StorageClass,
+    /// The algorithm of the checksum that S3 keeps for the object, such as
+    /// `CRC64NVME`.
+    ///
+    /// S3's API describes this element as a list, and the value is the
+    /// first. Read every one with [`ListEntry::properties`]. An object that
+    /// PutObject wrote has one checksum: S3 refuses a write that sends two.
+    ChecksumAlgorithm,
+    /// Whether that checksum covers the whole object, `FULL_OBJECT`, or is
+    /// made of the checksums of its parts, `COMPOSITE`.
+    ChecksumType,
+    /// The owner, as the bytes between the tags of the `Owner` element. S3
+    /// writes it only for [`ListInclude::OWNER`]. Read its `ID` with
+    /// [`Metadata::new`](crate::Metadata::new).
+    Owner,
+    /// The state of a restore from an archive storage class, as the bytes
+    /// between the tags of the `RestoreStatus` element. Read what it holds
+    /// with [`Metadata::new`](crate::Metadata::new).
+    RestoreStatus,
+}
+
+impl ObjectProperty {
+    /// Every property, in the order of their numbers.
+    pub const ALL: &[Self] = &[
+        Self::StorageClass,
+        Self::ChecksumAlgorithm,
+        Self::ChecksumType,
+        Self::Owner,
+        Self::RestoreStatus,
+    ];
+
+    /// How many properties there are, which is the most a set can hold.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// The element name, as S3 writes it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StorageClass => "StorageClass",
+            Self::ChecksumAlgorithm => "ChecksumAlgorithm",
+            Self::ChecksumType => "ChecksumType",
+            Self::Owner => "Owner",
+            Self::RestoreStatus => "RestoreStatus",
+        }
+    }
+
+    /// Returns the property with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::StorageClass,
+            1 => Self::ChecksumAlgorithm,
+            2 => Self::ChecksumType,
+            3 => Self::Owner,
+            4 => Self::RestoreStatus,
+            _ => return None,
+        })
+    }
+
+    // Whether the element holds other elements rather than one text. The
+    // page reader reads such an element to its close tag and reports
+    // everything between the tags.
+    pub(crate) const fn holds_elements(self) -> bool {
+        matches!(self, Self::Owner | Self::RestoreStatus)
+    }
+
+    // The property that an element name stands for, if it is one of these.
+    pub(crate) fn identify(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|property| property.name().as_bytes() == name)
+    }
+
+    const fn bit(self) -> u64 {
+        1 << (self as u8)
+    }
+}
+
+// `from_bits` shifts by `COUNT`, which must be below the `u64` shift width.
+const _: () = assert!(ObjectProperty::COUNT < 64);
+
+/// The properties that one read of an S3 page is asked for.
+///
+/// Build one with [`Self::of`] and pass it to [`Objects::fill_listing_with`].
+/// The values come back in the order that [`ObjectProperty`] lists them,
+/// whatever order the set was built in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PropertySet(u64);
+
+impl PropertySet {
+    /// A set of these properties. Naming one twice is the same as once.
+    pub const fn of(properties: &[ObjectProperty]) -> Self {
+        let mut mask = 0;
+        let mut i = 0;
+        while i < properties.len() {
+            mask |= properties[i].bit();
+            i += 1;
+        }
+        Self(mask)
+    }
+
+    /// A set from its bits, one per property in the order [`ObjectProperty`]
+    /// numbers them. A bit that names no property is dropped.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits & ((1 << ObjectProperty::COUNT) - 1))
+    }
+
+    /// The set's bits, as [`Self::from_bits`] reads them.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Whether the set holds this property.
+    pub const fn contains(self, property: ObjectProperty) -> bool {
+        self.0 & property.bit() != 0
+    }
+
+    /// How many properties the set holds, which is how many values a read
+    /// reports for each entry.
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Whether the set holds nothing.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Where a property's value stands among the values of an entry: its
+    /// rank among the set's members, in the order [`ObjectProperty`] lists
+    /// them. Meaningful only for a property the set holds.
+    pub const fn slot(self, property: ObjectProperty) -> usize {
+        (self.0 & (property.bit() - 1)).count_ones() as usize
+    }
+}
+
+/// The values that one entry gave for the properties of a set.
+///
+/// [`Objects::fill_listing_with`] hands one to the closure that builds each
+/// entry. Each value is the bytes between the element's tags, as S3 wrote
+/// them, under the rules that [`ListEntry::property`] states. A group of
+/// keys gives no values.
+#[derive(Clone, Copy, Debug)]
+pub struct PropertyValues<'x, 'b> {
+    set: PropertySet,
+    values: &'x [Option<&'b [u8]>],
+}
+
+impl<'x, 'b> PropertyValues<'x, 'b> {
+    pub(crate) fn new(set: PropertySet, values: &'x [Option<&'b [u8]>]) -> Self {
+        Self { set, values }
+    }
+
+    /// The set that the page was read with.
+    pub const fn set(&self) -> PropertySet {
+        self.set
+    }
+
+    /// The value the entry gave for one property.
+    ///
+    /// [`None`] if the property is not in the set or the entry wrote no such
+    /// element; an empty slice if it wrote the element empty.
+    pub fn get(&self, property: ObjectProperty) -> Option<&'b [u8]> {
+        if !self.set.contains(property) {
+            return None;
+        }
+        self.values[self.set.slot(property)]
+    }
+
+    /// Every value, one per member of the set, in the order
+    /// [`ObjectProperty`] lists them.
+    pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
+        self.values
+    }
 }
 
 /// The S3 operations that one set of credentials authorizes on one bucket.
@@ -458,6 +709,8 @@ struct Signed<'p> {
     method: Method,
     // The object, or `None` for the bucket itself.
     key: Option<&'p str>,
+    // The query, in the order of its names. See `url.rs`.
+    query: &'p [Parameter<'p>],
     range: RequestedRange,
     condition: ConditionKind,
     condition_value: Option<&'p [u8]>,
@@ -560,6 +813,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method,
             key: Some(get.key),
+            query: &[],
             headers: &[],
             range: get.range,
             condition: get.condition,
@@ -638,6 +892,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Put,
             key: Some(put.key),
+            query: &[],
             headers: &[],
             range: RequestedRange::Whole,
             condition: put.condition,
@@ -703,6 +958,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Delete,
             key: Some(delete.key),
+            query: &[],
             headers: &[],
             range: RequestedRange::Whole,
             condition: delete.condition,
@@ -733,9 +989,9 @@ impl<'a> Objects<'a> {
         head.url(|out| {
             out.push(self.bucket.scheme.as_bytes());
             out.push(b"://");
-            self.bucket.write_host(&mut |piece| out.push(piece));
-            self.bucket
-                .write_path(&mut |piece| out.push(piece), signed.key);
+            self.bucket.write_host(out);
+            self.bucket.write_path(out, signed.key);
+            url::write_query_in_url(out, signed.query);
         });
         let token = self.token();
         head.header("authorization", |out| {
@@ -743,9 +999,9 @@ impl<'a> Objects<'a> {
             out.push(b" Credential=");
             out.push(self.credentials.key_id().as_bytes());
             out.push(b"/");
-            self.write_scope(&mut |piece| out.push(piece), now);
+            self.write_scope(out, now);
             out.push(b", SignedHeaders=");
-            write_signed_names(&mut |piece| out.push(piece), signed, token);
+            write_signed_names(out, signed, token);
             out.push(b", Signature=");
             out.push(&signature);
         });
@@ -754,7 +1010,7 @@ impl<'a> Objects<'a> {
                 Header::Fixed(_, HeaderValue::Host) => {}
                 Header::Fixed(name, value) => head.header(name, |out| match value {
                     HeaderValue::Bytes(bytes) => out.push(bytes),
-                    HeaderValue::Range => write_range(&mut |piece| out.push(piece), signed.range),
+                    HeaderValue::Range => write_range(out, signed.range),
                     HeaderValue::Date => out.push(now.iso8601().as_bytes()),
                     HeaderValue::Host => {}
                 }),
@@ -765,7 +1021,7 @@ impl<'a> Objects<'a> {
                             out.push(&[byte.to_ascii_lowercase()]);
                         }
                     },
-                    |out| write_metadata_value(&mut |piece| out.push(piece), pair.value),
+                    |out| write_metadata_value(out, pair.value),
                 ),
             }
         }
@@ -778,20 +1034,20 @@ impl<'a> Objects<'a> {
             .map(|token| (self.credentials.token_header(), token))
     }
 
-    fn write_scope(&self, out: &mut dyn FnMut(&[u8]), now: &Timestamps) {
-        out(now.date().as_bytes());
-        out(b"/");
-        out(self.bucket.region.as_bytes());
-        out(b"/");
-        out(self.bucket.signing_service().as_bytes());
-        out(b"/aws4_request");
+    fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
+        out.push(now.date().as_bytes());
+        out.push(b"/");
+        out.push(self.bucket.region.as_bytes());
+        out.push(b"/");
+        out.push(self.bucket.signing_service().as_bytes());
+        out.push(b"/aws4_request");
     }
 
     // Returns the signature of the request, as lowercase hexadecimal. The
     // canonical request is hashed as it is written, so it is never held.
     fn signature(&self, signed: &Signed<'_>, now: &Timestamps) -> [u8; 64] {
         let mut sum = self.sha256.start();
-        self.write_canonical_request(&mut |piece| sum.update(piece), signed, now);
+        self.write_canonical_request(&mut sum, signed, now);
         let canonical = sum.finish();
         let key = match self.signing_key {
             Some(key) if key.covers(now) => key,
@@ -809,33 +1065,36 @@ impl<'a> Objects<'a> {
     // The canonical request of SigV4.
     fn write_canonical_request(
         &self,
-        out: &mut dyn FnMut(&[u8]),
+        out: &mut dyn ByteSink,
         signed: &Signed<'_>,
         now: &Timestamps,
     ) {
-        out(signed.method.as_str().as_bytes());
-        out(b"\n");
+        out.push(signed.method.as_str().as_bytes());
+        out.push(b"\n");
         self.bucket.write_path(out, signed.key);
-        // No request here has a query.
-        out(b"\n\n");
+        out.push(b"\n");
+        // The URL carries the query in canonical form, so this is the same
+        // text.
+        url::write_query(out, signed.query);
+        out.push(b"\n");
         let token = self.token();
         for header in ordered_headers(signed, token) {
             write_header_name(out, header);
-            out(b":");
+            out.push(b":");
             match header {
                 Header::Fixed(_, HeaderValue::Bytes(bytes)) => write_canonical_value(out, bytes),
                 Header::Fixed(_, HeaderValue::Host) => self.bucket.write_host(out),
                 Header::Fixed(_, HeaderValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, HeaderValue::Date) => out(now.iso8601().as_bytes()),
+                Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
                 Header::Meta(pair) if encodes(pair.value) => write_metadata_value(out, pair.value),
                 Header::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
             }
-            out(b"\n");
+            out.push(b"\n");
         }
-        out(b"\n");
+        out.push(b"\n");
         write_signed_names(out, signed, token);
-        out(b"\n");
-        out(signed.content_sha256);
+        out.push(b"\n");
+        out.push(signed.content_sha256);
     }
 
     /// Reads the response head of a GET or a HEAD and reports what to do
@@ -843,7 +1102,7 @@ impl<'a> Objects<'a> {
     ///
     /// Pass the same `shape` that you passed to [`Self::encode_get`]. A
     /// failure of a GET is [`GetHeadOutcome::NeedErrorBody`]: read the body
-    /// and pass it to [`Self::accept_error_body`]. A failure of a HEAD is
+    /// and pass it to [`Self::accept_get_error_body`]. A failure of a HEAD is
     /// final, and names no error.
     ///
     /// # Errors
@@ -899,20 +1158,22 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// Pass the `status` and the `request_id` of that failure, and the body
-    /// that you read. Pass an empty body if you could not read one: the
-    /// outcome is then final with the error unnamed.
-    pub fn accept_error_body<'h>(
+    /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
+    /// [`Failure`] of that outcome, and the body that you
+    /// read. Pass an empty body if you could not read one: the outcome is
+    /// then final with the error unnamed.
+    ///
+    /// S3 reports a failed condition in the head, so this method reads no
+    /// part of `shape`. It takes the same arguments as
+    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+    pub fn accept_get_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: GetShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => GetHeadOutcome::NotFound { kind },
-            status => GetHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the response head of a write and reports what S3 did.
@@ -960,19 +1221,16 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a write, and reads the
+    /// This is [`Self::accept_get_error_body`] for a write, and reads the
     /// body the same way. A missing bucket is [`PutHeadOutcome::NotFound`].
     pub fn accept_put_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: PutShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> PutHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => PutHeadOutcome::NotFound { kind },
-            status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the response head of a removal and reports what S3 did.
@@ -1010,22 +1268,184 @@ impl<'a> Objects<'a> {
     /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_error_body`] for a removal, and reads the
+    /// This is [`Self::accept_get_error_body`] for a removal, and reads the
     /// body the same way. A 404 names a missing bucket, or a missing object
     /// under an `If-Match` condition.
     pub fn accept_delete_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: DeleteShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => DeleteHeadOutcome::NotFound { kind },
-            status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
+    }
+
+    /// Writes the signed request head for one page of `list` into `buf`.
+    ///
+    /// The request is a ListObjectsV2. Read the whole response body and pass
+    /// it to [`Self::fill_listing`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] if `list` cannot become an S3 request:
+    ///
+    /// - [`InvalidPlan::Marker`] for an empty marker.
+    /// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`], which S3 does
+    ///   not list.
+    ///
+    /// This method validates the plan before it writes any byte.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or
+    /// call [`layered::s3::list_requirements`](crate::layered::s3::list_requirements)
+    /// first.
+    pub fn encode_list<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        list: &PhysicalList<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_list(list)?;
+        // SigV4 signs the parameters in the order of their names. With
+        // `encoding-type=url`, a key that XML cannot carry still arrives.
+        let query = [
+            list.marker
+                .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
+            list.delimited
+                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            Some(("encoding-type", QueryValue::Literal("url"))),
+            list.include
+                .contains(ListInclude::OWNER)
+                .then_some(("fetch-owner", QueryValue::Literal("true"))),
+            Some(("list-type", QueryValue::Literal("2"))),
+            list.max_results
+                .map(|max| ("max-keys", QueryValue::Number(max))),
+            (!list.prefix.is_empty())
+                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
+            list.start_after
+                .filter(|key| !key.is_empty())
+                .map(|key| ("start-after", QueryValue::Encoded(key.as_bytes()))),
+        ];
+        let signed = Signed {
+            method: Method::Get,
+            key: None,
+            query: &query,
+            headers: &[],
+            range: RequestedRange::Whole,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: &[],
+            content_sha256: EMPTY_SHA256.as_bytes(),
+        };
+        let dry = buf.is_empty();
+        let mut head = HeadWriter::new(buf, headers);
+        self.write_head(&mut head, &signed, dry, now);
+        encoded(head, Method::Get, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a listing and reports what S3 did.
+    ///
+    /// S3 often sends a page without `Content-Length`, so cap what you read.
+    /// A failure is [`ListHeadOutcome::NeedErrorBody`]: read the body and
+    /// pass it to [`Self::accept_list_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`], and a
+    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
+    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+        match head.status {
+            200 => Ok(ListHeadOutcome::Page {
+                expected_len: decimal_header(head.content_length)?,
+            }),
+            201..=299 => Err(ResponseFault::Status.into()),
+            status => Ok(ListHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
         }
     }
+
+    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+    ///
+    /// This is [`Self::accept_get_error_body`] for a listing, and reads the
+    /// body the same way. A missing bucket is [`ListHeadOutcome::NotFound`].
+    pub fn accept_list_error_body<'h>(
+        &self,
+        failure: Failure<'h>,
+        body: &[u8],
+    ) -> ListHeadOutcome<'h> {
+        finish_with_body(failure, body_kind(body))
+    }
+
+    /// Reads a page out of the response body of a listing.
+    ///
+    /// This is [`Blobs::fill_listing`](crate::Blobs::fill_listing) for S3,
+    /// with the same rules: reading is destructive, and your array must hold
+    /// the whole page. An array of 1,000 entries holds any page from AWS.
+    ///
+    /// AWS writes all objects of a page before its groups of keys. An
+    /// object's entity tag keeps its quotes. Read its date with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Capacity`] if the page holds more entries than the
+    /// array, with `required` set to the number it holds. Ask the service for
+    /// the page again, with a larger array.
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+    /// not a ListObjectsV2 page, or if the page contradicts itself. A page
+    /// that does not say it URL-encoded its keys is refused if decoding
+    /// changes a key.
+    pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [E],
+    ) -> Result<Listing<'b>> {
+        crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+    }
+
+    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
+    /// values of the properties in `wanted` as it goes.
+    ///
+    /// This is [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with)
+    /// for S3. What `build` returns for each entry is written into your
+    /// array.
+    ///
+    /// ```
+    /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};
+    /// # use borink_object_storage_proto::{ListEntry, Result};
+    /// # fn read(objects: &Objects<'_>, body: &mut [u8]) -> Result<()> {
+    /// let wanted = PropertySet::of(&[ObjectProperty::StorageClass]);
+    /// let mut entries = [(ListEntry::default(), None); 1000];
+    /// objects.fill_listing_with(body, &mut entries, wanted, |entry, values| {
+    ///     (entry, values.get(ObjectProperty::StorageClass))
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fill_listing`].
+    pub fn fill_listing_with<'b, E>(
+        &self,
+        body: &'b mut [u8],
+        into: &mut [E],
+        wanted: PropertySet,
+        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+    ) -> Result<Listing<'b>> {
+        crate::xml::s3::fill_listing(body, into, wanted, build)
+    }
 }
+
+// S3 groups keys at any delimiter. A plan groups them at `/`, as on Azure.
+const DELIMITER: &[u8] = b"/";
 
 /// Returns the error code that an S3 error body names.
 ///
@@ -1133,12 +1553,12 @@ fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = 
         .chain(pair.name.bytes().map(|byte| byte.to_ascii_lowercase()))
 }
 
-fn write_header_name(out: &mut dyn FnMut(&[u8]), header: Header<'_>) {
+fn write_header_name(out: &mut dyn ByteSink, header: Header<'_>) {
     match header {
-        Header::Fixed(name, _) => out(name.as_bytes()),
+        Header::Fixed(name, _) => out.push(name.as_bytes()),
         Header::Meta(pair) => {
             for byte in metadata_header_name(pair) {
-                out(&[byte]);
+                out.push(&[byte]);
             }
         }
     }
@@ -1146,13 +1566,13 @@ fn write_header_name(out: &mut dyn FnMut(&[u8]), header: Header<'_>) {
 
 // The names of the signed headers, in order, separated by `;`.
 fn write_signed_names(
-    out: &mut dyn FnMut(&[u8]),
+    out: &mut dyn ByteSink,
     signed: &Signed<'_>,
     token: Option<(&'static str, &str)>,
 ) {
     for (index, header) in ordered_headers(signed, token).enumerate() {
         if index != 0 {
-            out(b";");
+            out.push(b";");
         }
         write_header_name(out, header);
     }
@@ -1161,13 +1581,13 @@ fn write_signed_names(
 // SigV4 signs a header value without the spaces at either end, and with each
 // run of spaces inside it as one space. A value sent as it is holds no other
 // whitespace.
-fn write_canonical_value(out: &mut dyn FnMut(&[u8]), value: &[u8]) {
+fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
     let value = value.trim_ascii();
     let mut start = 0;
     let mut at = 0;
     while at < value.len() {
         if value[at] == b' ' {
-            out(&value[start..=at]);
+            out.push(&value[start..=at]);
             while at < value.len() && value[at] == b' ' {
                 at += 1;
             }
@@ -1176,7 +1596,7 @@ fn write_canonical_value(out: &mut dyn FnMut(&[u8]), value: &[u8]) {
             at += 1;
         }
     }
-    out(&value[start..]);
+    out.push(&value[start..]);
 }
 
 // The pairs in the order of their lowercase names. A plan carries a handful
@@ -1304,6 +1724,19 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     validate_condition(delete.condition, delete.condition_value)
 }
 
+// A prefix is not a key, so `validate_key` does not apply. S3 takes any
+// number of entries, zero included.
+fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+    // S3 hands out no empty continuation token.
+    if list.marker.is_some_and(str::is_empty) {
+        return Err(InvalidPlan::Marker.into());
+    }
+    if list.include.contains(ListInclude::METADATA) {
+        return Err(InvalidPlan::Option.into());
+    }
+    Ok(())
+}
+
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
 // token. `write_metadata_value` writes the value, and S3 matches a name
 // without case.
@@ -1353,11 +1786,11 @@ fn encodes(value: &str) -> bool {
 
 // Writes a metadata value as the header carries it, encoded or as it is. An
 // encoded word holds no space, so its canonical form for SigV4 is the same.
-fn write_metadata_value(out: &mut dyn FnMut(&[u8]), value: &str) {
+fn write_metadata_value(out: &mut dyn ByteSink, value: &str) {
     if encodes(value) {
         rfc2047::write(out, value);
     } else {
-        out(value.as_bytes());
+        out.push(value.as_bytes());
     }
 }
 
@@ -1373,12 +1806,21 @@ mod tests {
 
     use std::vec::Vec;
 
-    use super::{MetadataPair, sorted_metadata, write_canonical_value};
+    use super::{ByteSink, MetadataPair, sorted_metadata, write_canonical_value};
+
+    // Collects what a writer writes, for a test to compare.
+    struct Collected(Vec<u8>);
+
+    impl ByteSink for Collected {
+        fn push(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
 
     fn canonical(value: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        write_canonical_value(&mut |piece| out.extend_from_slice(piece), value.as_bytes());
-        out
+        let mut out = Collected(Vec::new());
+        write_canonical_value(&mut out, value.as_bytes());
+        out.0
     }
 
     #[test]

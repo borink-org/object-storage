@@ -4,11 +4,15 @@
 //! placeholder token. Live cases need `endpoint.auth = "bearer"`, and the
 //! adapter reads the token from `AZURE_STORAGE_ACCESS_TOKEN`.
 
+use crate::listing::{
+    Listed, ListedPage, PageRead, PageSource, decoded_listing_text, entry_slots, list_all_keys,
+    list_page,
+};
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, request_buffers, requested_condition, requested_range,
-    send_request, successful_result, text_of, unmapped_call_field, unsupported_by_adapter,
-    unsupported_by_crate, unsupported_response_fields,
+    send_request, successful_result, text_of, transport_failure, unmapped_call_field,
+    unsupported_by_adapter, unsupported_by_crate, unsupported_response_fields,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_proto::azure::{
@@ -19,8 +23,8 @@ use borink_object_storage_proto::{
     AzureNamespace, Blobs, CommitBlocksHeadOutcome, Container, DeleteHeadOutcome, DeleteKind,
     EntryKind, GetHeadOutcome, GetKind, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome,
     ListInclude, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    PutHeadOutcome, RequestedRange, StageBlockHeadOutcome, TransactionalChecksum, WriteOptions,
-    layered,
+    PropertySet, PutHeadOutcome, RequestedRange, StageBlockHeadOutcome, TransactionalChecksum,
+    WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -92,12 +96,9 @@ fn read_object(
     let head_outcome =
         crate_step!(blobs.accept_get_head(get_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        GetHeadOutcome::NeedErrorBody(failure) => blobs.accept_error_body(
-            get_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        GetHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -216,12 +217,9 @@ fn write_object(
     let head_outcome =
         crate_step!(blobs.accept_put_head(put_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        PutHeadOutcome::NeedErrorBody(failure) => blobs.accept_put_error_body(
-            put_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        PutHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -283,12 +281,9 @@ fn delete_object(
     let head_outcome =
         crate_step!(blobs.accept_delete_head(delete_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        DeleteHeadOutcome::NeedErrorBody(failure) => blobs.accept_delete_error_body(
-            delete_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        DeleteHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -301,15 +296,6 @@ fn delete_object(
         }
         _ => error_result(&exchange, exchange.status),
     })
-}
-
-/// The decoded text of a listed value, such as a metadata name or value.
-fn decoded_listing_text(raw_value: &[u8]) -> String {
-    let mut decoded = vec![0; raw_value.len()];
-    match layered::decode_into(raw_value, &mut decoded) {
-        Some(text) => String::from_utf8_lossy(text).into_owned(),
-        None => String::from_utf8_lossy(raw_value).into_owned(),
-    }
 }
 
 fn listed_entry_value(entry: &ListEntry<'_>, metadata_requested: bool) -> Value {
@@ -357,167 +343,76 @@ fn listed_entry_value(entry: &ListEntry<'_>, metadata_requested: bool) -> Value 
     value
 }
 
-struct ListedPage {
-    entries: Vec<Value>,
-    prefixes: Vec<String>,
-    next_marker: Option<String>,
+/// The pages of one container's listings, read with a `Blobs` client.
+struct BlobPages<'a> {
+    context: &'a AdapterContext,
+    blobs: &'a Blobs<'a>,
 }
 
-/// Requests one page and reads it, or returns the result to report instead.
-fn list_one_page(
-    context: &AdapterContext,
-    blobs: &Blobs<'_>,
-    list_plan: &PhysicalList<'_>,
-) -> Result<Result<ListedPage, Value>, AdapterError> {
-    macro_rules! crate_step_in_page {
-        ($expression:expr) => {
-            match $expression {
-                Ok(value) => value,
-                Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
+impl PageSource for BlobPages<'_> {
+    fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
+        let (context, blobs) = (self.context, self.blobs);
+        let now = current_timestamps();
+        let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
+            layered::list_requirements(blobs, list_plan, &now)
+        ));
+        let request =
+            page_step!(blobs.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
+        let mut exchange = match send_request(context, &request) {
+            Ok(exchange) => exchange,
+            Err(error) => return Ok(Err(transport_failure(&error))),
+        };
+
+        let head_outcome = page_step!(blobs.accept_list_head(exchange.response_head()));
+        let outcome = match head_outcome {
+            ListHeadOutcome::NeedErrorBody(failure) => {
+                blobs.accept_list_error_body(failure, &exchange.body)
             }
+            outcome => outcome,
         };
+        let failed_status = match outcome {
+            ListHeadOutcome::Page { .. } => None,
+            ListHeadOutcome::NotFound { .. } => Some(404),
+            ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
+                Some(failure.status)
+            }
+            _ => Some(exchange.status),
+        };
+        if let Some(status) = failed_status {
+            return Ok(Err(error_result(&exchange, status)));
+        }
+
+        let mut slots: Vec<ListedBlob<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+        let metadata_requested = list_plan.include.contains(ListInclude::METADATA);
+        let listing = page_step!(blobs.fill_listing_with(
+            &mut exchange.body,
+            &mut slots,
+            PropertySet::default(),
+            |entry, _| ListedBlob {
+                entry,
+                metadata_requested,
+            }
+        ));
+        Ok(Ok(ListedPage::read(&slots, listing)))
     }
-
-    let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step_in_page!(
-        layered::list_requirements(blobs, list_plan, &now)
-    ));
-    let request = crate_step_in_page!(blobs.encode_list(
-        &mut request_bytes,
-        &mut header_spans,
-        list_plan,
-        &now
-    ));
-    let mut exchange = match send_request(context, &request) {
-        Ok(exchange) => exchange,
-        Err(error) => {
-            return Ok(Err(json!({
-                "outcome": "error",
-                "kind": "transport",
-                "reason": error.to_string(),
-            })));
-        }
-    };
-
-    let head_outcome = crate_step_in_page!(blobs.accept_list_head(exchange.response_head()));
-    let outcome = match head_outcome {
-        ListHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
-        }
-        outcome => outcome,
-    };
-    let failed_status = match outcome {
-        ListHeadOutcome::Page { .. } => None,
-        ListHeadOutcome::NotFound { .. } => Some(404),
-        ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
-            Some(failure.status)
-        }
-        _ => Some(exchange.status),
-    };
-    if let Some(status) = failed_status {
-        return Ok(Err(error_result(&exchange, status)));
-    }
-
-    // An array of `max_results` entries always holds a whole page.
-    let slot_count = list_plan
-        .max_results
-        .map(|max_results| max_results as usize)
-        .unwrap_or(MAX_PAGE_ENTRIES);
-    let mut slots = vec![ListEntry::default(); slot_count];
-    let listing = crate_step_in_page!(blobs.fill_listing(&mut exchange.body, &mut slots));
-
-    let metadata_requested = list_plan.include.contains(ListInclude::METADATA);
-    let mut entries = Vec::new();
-    let mut prefixes = Vec::new();
-    for entry in &slots[..listing.filled] {
-        match entry.kind {
-            EntryKind::Prefix => prefixes.push(entry.key.to_owned()),
-            _ => entries.push(listed_entry_value(entry, metadata_requested)),
-        }
-    }
-    Ok(Ok(ListedPage {
-        entries,
-        prefixes,
-        next_marker: listing
-            .next_marker
-            .filter(|marker| !marker.is_empty())
-            .map(str::to_owned),
-    }))
 }
 
-fn requested_page_size(call: &Value) -> Option<u32> {
-    call.get("page_size")
-        .and_then(Value::as_u64)
-        .map(|page_size| page_size as u32)
+/// A listed blob, and whether the plan asked for its metadata, which the
+/// result reports as an empty set when the blob has none.
+#[derive(Clone, Copy, Default)]
+struct ListedBlob<'b> {
+    entry: ListEntry<'b>,
+    metadata_requested: bool,
 }
 
-fn list_page(
-    context: &AdapterContext,
-    blobs: &Blobs<'_>,
-    call: &Value,
-) -> Result<Value, AdapterError> {
-    let mut include = ListInclude::default();
-    for include_option in call
-        .get("include")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        match include_option.as_str() {
-            Some("metadata") => include = include | ListInclude::METADATA,
-            _ => return Ok(unsupported_by_crate("ListInclude names metadata only")),
-        }
+impl Listed for ListedBlob<'_> {
+    fn entry(&self) -> &ListEntry<'_> {
+        &self.entry
     }
-    let delimited = match optional_text(call, "delimiter") {
-        None => false,
-        Some("/") => true,
-        Some(_) => return Ok(unsupported_by_crate("PhysicalList delimits on '/' only")),
-    };
 
-    let list_plan = PhysicalList {
-        prefix: optional_text(call, "prefix").unwrap_or_default(),
-        marker: optional_text(call, "continuation_token"),
-        delimited,
-        max_results: requested_page_size(call),
-        include,
-    };
-    Ok(match list_one_page(context, blobs, &list_plan)? {
-        Ok(page) => successful_result(json!({
-            "entries": page.entries,
-            "prefixes": page.prefixes,
-            "continuation_token": page.next_marker.unwrap_or_default(),
-        })),
-        Err(result) => result,
-    })
-}
-
-fn list_all_keys(
-    context: &AdapterContext,
-    blobs: &Blobs<'_>,
-    call: &Value,
-) -> Result<Value, AdapterError> {
-    let prefix = optional_text(call, "prefix").unwrap_or_default();
-    let mut keys = Vec::new();
-    let mut marker: Option<String> = None;
-    loop {
-        let list_plan = PhysicalList {
-            prefix,
-            marker: marker.as_deref(),
-            delimited: false,
-            max_results: requested_page_size(call),
-            include: ListInclude::default(),
-        };
-        let page = match list_one_page(context, blobs, &list_plan)? {
-            Ok(page) => page,
-            Err(result) => return Ok(result),
-        };
-        keys.extend(page.entries.into_iter().map(|entry| entry["key"].clone()));
-        match page.next_marker {
-            Some(next_marker) => marker = Some(next_marker),
-            None => break,
-        }
+    fn value(&self) -> Value {
+        listed_entry_value(&self.entry, self.metadata_requested)
     }
-    Ok(successful_result(json!({"keys": keys})))
 }
 
 fn stage_block(
@@ -551,7 +446,7 @@ fn stage_block(
     let head_outcome = crate_step!(blobs.accept_stage_block_head(exchange.response_head()));
     let outcome = match head_outcome {
         StageBlockHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_stage_block_error_body(failure.status, failure.request_id, &exchange.body)
+            blobs.accept_stage_block_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -626,12 +521,9 @@ fn commit_blocks(
     let head_outcome =
         crate_step!(blobs.accept_commit_blocks_head(commit_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        CommitBlocksHeadOutcome::NeedErrorBody(failure) => blobs.accept_commit_blocks_error_body(
-            commit_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        CommitBlocksHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_commit_blocks_error_body(commit_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -683,7 +575,7 @@ fn list_blocks(
     let head_outcome = crate_step!(blobs.accept_list_blocks_head(exchange.response_head()));
     let outcome = match head_outcome {
         ListBlocksHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_list_blocks_error_body(failure.status, failure.request_id, &exchange.body)
+            blobs.accept_list_blocks_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -852,14 +744,18 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let blobs = crate_step!(Blobs::new(container, &token)).with_namespace(namespace);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
+    let pages = BlobPages {
+        context: &context,
+        blobs: &blobs,
+    };
 
     match operation {
         "get" => read_object(&context, &blobs, call, GetKind::Bytes),
         "head" => read_object(&context, &blobs, call, GetKind::Head),
         "put" => write_object(&context, &blobs, call),
         "delete" => delete_object(&context, &blobs, call),
-        "list" => list_all_keys(&context, &blobs, call),
-        "list_page" => list_page(&context, &blobs, call),
+        "list" => list_all_keys(call, &pages),
+        "list_page" => list_page(call, &pages),
         "azure.stage_block" => stage_block(&context, &blobs, call),
         "azure.commit_blocks" => commit_blocks(&context, &blobs, call),
         "azure.list_blocks" => list_blocks(&context, &blobs, call),
