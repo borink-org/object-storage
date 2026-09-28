@@ -499,11 +499,16 @@ pub enum PayloadHash {
 /// Read anything that is not listed here with [`ListEntry::property`].
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ObjectProperty {
     /// The storage class, such as `STANDARD` or `GLACIER`.
     StorageClass,
     /// The algorithm of the checksum that S3 keeps for the object, such as
-    /// `CRC64NVME`. An object written with more than one reports the first.
+    /// `CRC64NVME`.
+    ///
+    /// S3's API describes this element as a list, and the value is the
+    /// first. Read every one with [`ListEntry::properties`]. An object that
+    /// PutObject wrote has one checksum: S3 refuses a write that sends two.
     ChecksumAlgorithm,
     /// Whether that checksum covers the whole object, `FULL_OBJECT`, or is
     /// made of the checksums of its parts, `COMPOSITE`.
@@ -571,13 +576,13 @@ impl ObjectProperty {
             .find(|property| property.name().as_bytes() == name)
     }
 
-    const fn bit(self) -> u8 {
+    const fn bit(self) -> u64 {
         1 << (self as u8)
     }
 }
 
-// A set is a byte, one bit per property.
-const _: () = assert!(ObjectProperty::COUNT <= 8);
+// `from_bits` shifts by `COUNT`, which must be below the `u64` shift width.
+const _: () = assert!(ObjectProperty::COUNT < 64);
 
 /// The properties that one read of an S3 page is asked for.
 ///
@@ -585,7 +590,7 @@ const _: () = assert!(ObjectProperty::COUNT <= 8);
 /// The values come back in the order that [`ObjectProperty`] lists them,
 /// whatever order the set was built in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct PropertySet(u8);
+pub struct PropertySet(u64);
 
 impl PropertySet {
     /// A set of these properties. Naming one twice is the same as once.
@@ -601,12 +606,12 @@ impl PropertySet {
 
     /// A set from its bits, one per property in the order [`ObjectProperty`]
     /// numbers them. A bit that names no property is dropped.
-    pub const fn from_bits(bits: u8) -> Self {
+    pub const fn from_bits(bits: u64) -> Self {
         Self(bits & ((1 << ObjectProperty::COUNT) - 1))
     }
 
     /// The set's bits, as [`Self::from_bits`] reads them.
-    pub const fn bits(self) -> u8 {
+    pub const fn bits(self) -> u64 {
         self.0
     }
 

@@ -1037,6 +1037,7 @@ mod tests {
 /// test there checks that every one of these is matched.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BlobProperty {
     /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
     AccessTier,
