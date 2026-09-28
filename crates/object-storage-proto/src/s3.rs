@@ -116,11 +116,10 @@
 //!
 //! # Listing
 //!
-//! A listing is one page at a time, as on Azure: encode a [`PhysicalList`]
-//! with [`Objects::encode_list`], read the body of a
-//! [`ListHeadOutcome::Page`] whole, and pass it to
-//! [`Objects::fill_listing`]. Pass the page's
-//! [`Listing::next_marker`] as the marker of the next plan.
+//! A listing reads one page per request. Encode a [`PhysicalList`] with
+//! [`Objects::encode_list`], read the whole body of a
+//! [`ListHeadOutcome::Page`], and pass it to [`Objects::fill_listing`]. Pass
+//! the page's [`Listing::next_marker`] as the marker of the next plan.
 //!
 //! ```
 //! # use borink_object_storage_proto::s3::{Bucket, Service, Objects};
@@ -170,10 +169,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! The request asks S3 to URL-encode the keys of the page, so that a key
-//! with a character that XML cannot carry still arrives, and
-//! [`Objects::fill_listing`] decodes them.
 //!
 //! # Content that is not signed
 //!
@@ -513,14 +508,13 @@ pub enum ObjectProperty {
     /// Whether that checksum covers the whole object, `FULL_OBJECT`, or is
     /// made of the checksums of its parts, `COMPOSITE`.
     ChecksumType,
-    /// The owner, as the bytes between the tags of the `Owner` element,
-    /// which holds an `ID`. S3 writes it only when the plan asked for
-    /// [`ListInclude::OWNER`]. Pass the value to
-    /// [`Metadata::new`](crate::Metadata::new) to read the `ID`.
+    /// The owner, as the bytes between the tags of the `Owner` element. S3
+    /// writes it only for [`ListInclude::OWNER`]. Read its `ID` with
+    /// [`Metadata::new`](crate::Metadata::new).
     Owner,
-    /// The state of a restore out of an archive class, as the bytes between
-    /// the tags of the `RestoreStatus` element. Pass the value to
-    /// [`Metadata::new`](crate::Metadata::new) to read what it holds.
+    /// The state of a restore from an archive storage class, as the bytes
+    /// between the tags of the `RestoreStatus` element. Read what it holds
+    /// with [`Metadata::new`](crate::Metadata::new).
     RestoreStatus,
 }
 
@@ -710,8 +704,7 @@ struct Signed<'p> {
     method: Method,
     // The object, or `None` for the bucket itself.
     key: Option<&'p str>,
-    // The query, in the order of its names, with every value one that reads
-    // the same encoded again. See `url.rs`.
+    // The query, in the order of its names. See `url.rs`.
     query: &'p [Parameter<'p>],
     range: RequestedRange,
     condition: ConditionKind,
@@ -1075,9 +1068,8 @@ impl<'a> Objects<'a> {
         out.push(b"\n");
         self.bucket.write_path(out, signed.key);
         out.push(b"\n");
-        // The URL carries the query in its canonical form: every byte but the
-        // unreserved ones percent-encoded, in upper case, and the parameters
-        // in the order of their names. So this is the same text.
+        // The URL carries the query in canonical form, so this is the same
+        // text.
         url::write_query(out, signed.query);
         out.push(b"\n");
         let token = self.token();
@@ -1290,24 +1282,16 @@ impl<'a> Objects<'a> {
 
     /// Writes the signed request head for one page of `list` into `buf`.
     ///
-    /// The request is a ListObjectsV2. [`PhysicalList::marker`] carries the
-    /// continuation token of the previous page, and
-    /// [`PhysicalList::start_after`] the key to start after.
-    /// [`ListInclude::OWNER`] asks for each object's owner. The response carries the
-    /// page as a document in its body: read it whole and pass it to
-    /// [`Self::fill_listing`].
-    ///
-    /// AWS reports at most 1,000 entries in one page, and applies that limit
-    /// to a larger [`PhysicalList::max_results`].
+    /// The request is a ListObjectsV2. Read the whole response body and pass
+    /// it to [`Self::fill_listing`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `list` cannot become an S3 request:
     ///
-    /// - [`InvalidPlan::Marker`] for an empty marker. The first page carries
-    ///   none.
-    /// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`] in
-    ///   [`PhysicalList::include`]. S3 lists no metadata.
+    /// - [`InvalidPlan::Marker`] for an empty marker.
+    /// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`], which S3 does
+    ///   not list.
     ///
     /// This method validates the plan before it writes any byte.
     ///
@@ -1323,9 +1307,8 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list)?;
-        // In the order of the names, which SigV4 signs. Each literal is
-        // unreserved text, so it reads the same encoded again. The keys come
-        // back URL-encoded, so a key that XML cannot carry still arrives.
+        // SigV4 signs the parameters in the order of their names. With
+        // `encoding-type=url`, a key that XML cannot carry still arrives.
         let query = [
             list.marker
                 .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
@@ -1363,10 +1346,9 @@ impl<'a> Objects<'a> {
 
     /// Reads the response head of a listing and reports what S3 did.
     ///
-    /// A page is [`ListHeadOutcome::Page`]. S3 often sends it without
-    /// `Content-Length`, so cap what you read. A failure is
-    /// [`ListHeadOutcome::NeedErrorBody`]: read the body and pass it to
-    /// [`Self::accept_list_error_body`].
+    /// S3 often sends a page without `Content-Length`, so cap what you read.
+    /// A failure is [`ListHeadOutcome::NeedErrorBody`]: read the body and
+    /// pass it to [`Self::accept_list_error_body`].
     ///
     /// # Errors
     ///
@@ -1407,19 +1389,12 @@ impl<'a> Objects<'a> {
     /// Reads a page out of the response body of a listing.
     ///
     /// This is [`Blobs::fill_listing`](crate::Blobs::fill_listing) for S3,
-    /// under the same rules: reading is destructive, and your array must
-    /// hold the whole page. An array of `max_results` entries always does,
-    /// and so does one of 1,000 entries for AWS.
+    /// with the same rules: reading is destructive, and your array must hold
+    /// the whole page. An array of 1,000 entries holds any page from AWS.
     ///
-    /// Each entry is an [`EntryKind::Object`](crate::EntryKind::Object) or
-    /// an [`EntryKind::Prefix`](crate::EntryKind::Prefix). AWS writes every
-    /// object of a page before its groups of keys, so the page is not in the
-    /// order of its keys when it holds both. An object's entity tag keeps
-    /// its quotes, and its date is ISO 8601: read it with
-    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms). Read
-    /// `StorageClass` and the other elements of an object with
-    /// [`ListEntry::property`], or in the same pass as the rest of the page
-    /// with [`Self::fill_listing_with`].
+    /// AWS writes all objects of a page before its groups of keys. An
+    /// object's entity tag keeps its quotes. Read its date with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
     ///
     /// # Errors
     ///
@@ -1428,10 +1403,9 @@ impl<'a> Objects<'a> {
     /// the page again, with a larger array.
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a ListObjectsV2 page. That includes a page that says more keys
-    /// follow and names no continuation token. It also includes a page whose
-    /// keys hold a `%` or a `+`, from a service that ignored the request to
-    /// URL-encode them: such a key cannot be read back with certainty.
+    /// not a ListObjectsV2 page, or if the page contradicts itself. A page
+    /// that does not say it URL-encoded its keys is refused if a key holds a
+    /// `%` or a `+`.
     pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
         &self,
         body: &'b mut [u8],
@@ -1444,9 +1418,8 @@ impl<'a> Objects<'a> {
     /// values of the properties in `wanted` as it goes.
     ///
     /// This is [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with)
-    /// for S3. `build` is called once per entry, with the entry and its
-    /// values, and what it returns is written into your array. The values
-    /// point into `body`, like the entry. A group of keys gives no values.
+    /// for S3. What `build` returns for each entry is written into your
+    /// array.
     ///
     /// ```
     /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};
@@ -1475,8 +1448,7 @@ impl<'a> Objects<'a> {
     }
 }
 
-// S3 groups keys at any delimiter, but a plan groups them at `/`, which Azure
-// takes as well.
+// S3 groups keys at any delimiter. A plan groups them at `/`, as on Azure.
 const DELIMITER: &[u8] = b"/";
 
 /// Returns the error code that an S3 error body names.
@@ -1756,8 +1728,8 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     validate_condition(delete.condition, delete.condition_value)
 }
 
-// No rule of `validate_key` applies to a prefix, which the query carries, and
-// S3 takes any number of entries, zero among them.
+// A prefix is not a key, so `validate_key` does not apply. S3 takes any
+// number of entries, zero included.
 fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
     // S3 hands out no empty continuation token.
     if list.marker.is_some_and(str::is_empty) {

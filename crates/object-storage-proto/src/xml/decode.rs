@@ -99,9 +99,7 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         // and percent-encodes the non-characters it does store, marked with
         // `<Name Encoded="true">`. S3 can write one: it stores `U+0001` and,
         // unless the listing asks for `encoding-type=url`, writes it as
-        // `&#x1;`. An S3 listing always asks, so from a service that honours
-        // the parameter the reference never arrives. A service that ignores
-        // it has its page refused here.
+        // `&#x1;`. An S3 listing asks for URL encoding, which writes `%01`.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
             return fault();
         };
@@ -166,11 +164,9 @@ fn decode_percent(b: &mut [u8]) -> Result<usize> {
     Ok(w)
 }
 
-// Undoes the encoding that S3 applies to a key when a listing asks for
-// `encoding-type=url`. It is the encoding of an HTML form: `%` and two
-// hexadecimal digits for a byte, and `+` for a space, so a `+` of the key
-// itself arrives as `%2B`. Returns the decoded length, and whether the text
-// held a `%` or a `+`, which is exactly when decoding changed it.
+// Undoes `application/x-www-form-urlencoded`, which S3 applies to a listed
+// key under `encoding-type=url`: `+` is a space and `%XX` is a byte. Returns
+// the decoded length, and whether the text held a `%` or a `+`.
 pub(crate) fn decode_url(b: &mut [u8]) -> Result<(usize, bool)> {
     // The same two indexes as in `decode_references`.
     let (mut r, mut w) = (0, 0);

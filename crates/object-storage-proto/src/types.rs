@@ -377,12 +377,8 @@ impl ListInclude {
     /// rest of the page with [`BlobProperty::Metadata`].
     pub const METADATA: Self = Self(1 << 0);
 
-    /// The owner of each object, as an `Owner` element that holds an `ID`.
-    /// S3 only, where the request asks for it with `fetch-owner=true`.
-    ///
-    /// Read the element with [`ListEntry::property`], and the `ID` inside
-    /// it with [`Metadata::new`], which walks the elements of any value
-    /// that holds elements.
+    /// The owner of each object, as an `Owner` element. S3 only. Read it as
+    /// [`s3::ObjectProperty::Owner`](crate::s3::ObjectProperty::Owner).
     pub const OWNER: Self = Self(1 << 1);
 
     /// Returns `true` if this set holds every flag of `other`.
@@ -720,12 +716,11 @@ pub struct PhysicalList<'h> {
     /// the service's, and means nothing to this crate. On S3 it is the
     /// continuation token of a ListObjectsV2.
     pub marker: Option<&'h str>,
-    /// The key after which the listing starts. S3 only.
+    /// The text after which the listing starts. S3 only.
     ///
-    /// The first page reports only the keys, and the groups of keys, that
-    /// sort after this text. It need not name a key. A marker takes over on
-    /// later pages, so a plan that carries one may leave this out. An empty
-    /// text starts at the beginning, as [`None`] does.
+    /// The listing reports only the keys and groups of keys that sort after
+    /// this text, which need not be a key. An empty text is the same as
+    /// [`None`]. A later page starts at its marker instead.
     pub start_after: Option<&'h str>,
     /// Whether to group the keys at each `/` after the prefix.
     ///
@@ -760,9 +755,8 @@ impl<'h> PhysicalList<'h> {
 
     /// Creates a plan from a stored shape and the text that it needs.
     ///
-    /// The plan has no [`Self::start_after`], because a shape holds no
-    /// borrows. A later page does not need it: its marker says where it
-    /// starts.
+    /// The plan has no [`Self::start_after`], which a later page does not
+    /// need.
     pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,

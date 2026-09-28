@@ -38,7 +38,7 @@
 //! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
 //! [`azure`] module.
 //!
-//! The same plans drive S3, a listing among them. Create an [`s3::Objects`]
+//! The same plans drive S3. Create an [`s3::Objects`]
 //! client and call its `encode_*`, `accept_*` and `fill_listing` methods, as
 //! the [`s3`] module describes. It signs each request with AWS Signature
 //! Version 4, using the SHA-256 and HMAC-SHA256 of a

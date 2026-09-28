@@ -1477,9 +1477,8 @@ fn validate_block_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-// The word that asks Azure for each flag of a listing's include set, in the
-// one order that the query writes them, whatever order the set was built in,
-// so a caller can compare the URL byte for byte.
+// The word for each include flag. The query writes them in this order,
+// whatever order the set was built in.
 const INCLUDE_WORDS: [(ListInclude, &str); 1] = [(ListInclude::METADATA, "metadata")];
 
 fn named<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
@@ -1791,8 +1790,7 @@ fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<
     if list.max_results == Some(0) {
         return Err(InvalidPlan::MaxResults.into());
     }
-    // Azure's marker is its own text, so a listing cannot start after a key
-    // of the caller's. Nor does Azure list an owner beside each blob.
+    // Azure starts a listing only at its own marker, and lists no owner.
     if list.start_after.is_some() || list.include.contains(ListInclude::OWNER) {
         return Err(InvalidPlan::Option.into());
     }

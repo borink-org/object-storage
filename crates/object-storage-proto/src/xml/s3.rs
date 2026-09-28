@@ -1,23 +1,15 @@
-// Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, using
-// the scanner in `scan.rs`.
+// Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, in
+// one pass as the Azure reader does.
 //
-// The read is one pass over the body, as the Azure reader's is, and it shares
-// that reader's checks and decoding. The document differs in three ways.
+// Each object is a `Contents` child of the root, with its properties beside
+// its key. Each group of keys is a `CommonPrefixes` child that holds one
+// `Prefix`.
 //
-// - The entries are children of the root itself. Each object is a `Contents`
-//   element, and each group of keys a `CommonPrefixes` element that holds one
-//   `Prefix`. AWS writes every object of a page before its groups; this
-//   reader takes them in any order.
-// - An object's properties stand in the entry beside its key, not under an
-//   element of their own.
-// - The keys are URL-encoded, because the request asks for
-//   `encoding-type=url`. The page says so in an `EncodingType` element, which
-//   AWS writes before the entries and other services may write after them.
-//   A key is taken off the body and handed out as soon as it has been read,
-//   so the reader cannot wait for that element. It decodes every key, and
-//   refuses the page at its end if decoding changed a key and the page never
-//   said that it encoded one. A key that holds no `%` and no `+` reads the
-//   same either way.
+// The keys are URL-encoded, because the request asks for
+// `encoding-type=url`. An `EncodingType` element confirms it, but it may
+// follow the entries, and each entry is handed out as soon as it is read. So
+// every key is decoded, and the page is refused at its end if decoding
+// changed a key and the page never named the encoding.
 
 use super::decode::{decode, decode_url};
 use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
@@ -38,8 +30,7 @@ pub(crate) fn fill_listing<'b, E>(
     check_body(body)?;
     let mut scan = Scan::new(body);
     open_root_element(&mut scan, ROOT)?;
-    // As in the Azure reader, the read is compiled once whatever the entry
-    // type, and hands each entry to this closure.
+    // As in the Azure reader, the read is compiled once for every entry type.
     let room = into.len();
     let mut built = 0;
     let mut sink = |entry: ListEntry<'b>, values: PropertyValues<'_, 'b>| {
@@ -73,9 +64,8 @@ fn read_root_children_into<'b>(
     sink: &mut Sink<'_, 'b>,
 ) -> Result<Listing<'b>> {
     let mut page = Page::default();
-    // The spans of the wanted properties of one entry, and their values once
-    // it is built. Only the first `wanted.len()` slots are used, so a set
-    // that names nothing costs nothing here.
+    // The spans of the wanted properties of one entry, then their values.
+    // Only the first `wanted.len()` slots are used.
     let mut spans = [None; ObjectProperty::COUNT];
     let mut values: [Option<&'b [u8]>; ObjectProperty::COUNT] = [None; ObjectProperty::COUNT];
     let slots = wanted.len();
@@ -146,8 +136,7 @@ fn read_root_children_into<'b>(
                             .transpose()?;
                         None
                     }
-                    // The echo of the request, and the counts, which the
-                    // entries themselves say.
+                    // The echoed request values and the counts.
                     _ => {
                         scan.skip(tag)?;
                         None
@@ -175,9 +164,7 @@ fn read_root_children_into<'b>(
 }
 
 fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
-    // A key that decoding changed, on a page that never said it encoded its
-    // keys, may have held its `%` or `+` as text. The entries built from it
-    // name keys that are not the objects'.
+    // Without `EncodingType`, a `%` or a `+` in a key may have been text.
     if page.decoded && !page.encoded {
         return fault();
     }
@@ -187,9 +174,8 @@ fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
             ..CapacityError::default()
         }));
     }
-    // A page that names no next one and says that more follow, or names one
-    // and says that none do, contradicts itself. A page that does not say is
-    // taken at its token.
+    // `IsTruncated` and the token must agree. Without `IsTruncated`, the
+    // token decides.
     let next_marker = match (page.truncated, page.token) {
         (Some(true) | None, Some(token)) => Some(token),
         (Some(false) | None, None) => None,
@@ -223,14 +209,11 @@ impl Fields {
     }
 }
 
-// Reads an object. `<Contents>` has been consumed. Each field and each
-// property is matched whole, as AWS spells its start tag, and again by name
-// on the general path, which any legal spelling reaches. One added to one
-// list must be added to the other. Everything else stays in the entry's
-// bytes for `ListEntry::property`.
+// Reads an object. `<Contents>` has been consumed. Each field and property
+// is matched whole, as AWS spells its start tag, and again by name on the
+// general path for any other spelling. Add a new one to both lists.
 //
-// `captured` has one slot per member of `wanted`, and receives the span of
-// each wanted property's value that this object writes.
+// `captured` has one slot per member of `wanted`.
 fn read_object(
     scan: &mut Scan<'_>,
     wanted: PropertySet,
@@ -311,9 +294,8 @@ fn known(
     Ok(())
 }
 
-// Keeps the span of a property's value if the caller asked for it. An object
-// that writes a property twice, as it may `ChecksumAlgorithm`, reports the
-// first.
+// Keeps the span of a property's value if the caller asked for it. A
+// property written twice, as `ChecksumAlgorithm` may be, keeps the first.
 #[inline(always)]
 fn capture(
     property: ObjectProperty,
@@ -321,9 +303,8 @@ fn capture(
     wanted: PropertySet,
     captured: &mut [Option<Span>],
 ) {
-    // A slot is always in range: it is the property's rank in the set, and
-    // there is one slot per member. Written through `get_mut` so that no
-    // bounds check or panic path is compiled in.
+    // The slot is in range: it is the property's rank in the set. `get_mut`
+    // compiles in no panic path.
     if wanted.contains(property)
         && let Some(slot) = captured.get_mut(wanted.slot(property))
         && slot.is_none()
@@ -351,8 +332,8 @@ fn read_group(scan: &mut Scan<'_>) -> Result<Fields> {
     Ok(fields)
 }
 
-// Builds one entry from the bytes it was written in, decoding its key, entity
-// tag and date in place, and returns whether URL-decoding changed the key.
+// Builds one entry from its bytes, decoding its key, entity tag and date in
+// place. Also returns whether URL-decoding changed the key.
 fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)> {
     let Some((key, key_flags)) = fields.key else {
         return fault();
@@ -378,8 +359,8 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
     let escaped = decode(&mut chunk[key.0..key.1], key_flags, false)?;
     let (key_len, decoded) = decode_url(&mut chunk[key.0..key.0 + escaped])?;
     if key_len < key.1 - key.0 {
-        // As on Azure: the bytes the key no longer needs are set to zero, so
-        // that the walk over the entry can tell where the decoded text ends.
+        // As on Azure, zero the bytes the key no longer needs. The walk over
+        // the entry finds the end of the key by them.
         chunk[key.0 + key_len..key.1].fill(0);
         // A percent escape can name a zero byte, which would look like that
         // filler. It is refused, as a key the walk could not read back.

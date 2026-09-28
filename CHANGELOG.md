@@ -20,14 +20,14 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New functions `s3::metadata_name`, `s3::error_code` and `s3::classify_error`.
   - New function `s3::metadata_value`, which decodes a metadata value that S3 returns as RFC 2047 encoded words. An S3 client sends a value outside ASCII, or one with a control character, in that form.
   - New module `layered::s3`, with `get_requirements`, `put_requirements` and `delete_requirements` for an `Objects` client.
-- S3 listing, with ListObjectsV2:
-  - New methods `Objects::encode_list`, `Objects::accept_list_head`, `Objects::accept_list_error_body` and `Objects::fill_listing`. They take the same `PhysicalList` and return the same `ListHeadOutcome`, `Listing` and `ListEntry` as the Azure methods. `PhysicalList::marker` carries the continuation token.
-  - The request asks for URL-encoded keys, and `fill_listing` decodes them. It refuses a page with a key that decoding changed if the page does not say that it encoded its keys.
+- S3 listing, with ListObjectsV2. It takes a `PhysicalList` and returns a `ListHeadOutcome`, a `Listing` and `ListEntry` values, as on Azure:
+  - New methods `Objects::encode_list`, `Objects::accept_list_head`, `Objects::accept_list_error_body` and `Objects::fill_listing`.
+  - New method `Objects::fill_listing_with`, which reads the properties you name in the same pass as the page.
+  - New enum `s3::ObjectProperty`, and new structs `s3::PropertySet` and `s3::PropertyValues`, for `fill_listing_with`.
+  - New field `PhysicalList::start_after`. An Azure client refuses it.
+  - New constant `ListInclude::OWNER`. An Azure client refuses it.
   - New function `layered::s3::list_requirements`.
   - New function `layered::iso8601_ms`, which reads the date of an S3 listing entry.
-  - New field `PhysicalList::start_after`, which starts an S3 listing after a key. An Azure client refuses it.
-  - New constant `ListInclude::OWNER`, which asks S3 for each object's owner. An Azure client refuses it.
-  - New method `Objects::fill_listing_with`, with new types `s3::ObjectProperty`, `s3::PropertySet` and `s3::PropertyValues`. They read the properties you name in the same pass as the page, as `Blobs::fill_listing_with` does for Azure.
 - AWS Signature Version 4:
   - New module `sigv4`.
   - New struct `sigv4::Credentials`, which holds an access key and an optional session token. `Credentials::new` also takes the function that wipes a client's copy of the secret access key.

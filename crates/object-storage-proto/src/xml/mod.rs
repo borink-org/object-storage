@@ -3,12 +3,10 @@
 //
 // The reader walks the document structure directly; it does not tokenise.
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
-// the caller's buffer, and `page.rs` holds what reading any page takes. Those
-// three serve both services. The files named for a service know the shape of
-// its documents, and nothing outside them uses them: `azure.rs` and `s3.rs`
-// read a listing page, and `azure_blocks.rs` a block list. This file reads
-// the error document, which is only three elements. It also walks the
-// properties of an entry, so the caller can read the ones this crate skips.
+// the caller's buffer, and `page.rs` holds what reading any page takes. The
+// files named for a service read that service's documents: `azure.rs` and
+// `s3.rs` a listing page, `azure_blocks.rs` a block list. This file reads the
+// error document, and walks the properties of an entry for the caller.
 //
 // An Azure page is read in this order. `page::check_body` checks the body is
 // UTF-8 and holds no zero byte. `page::open_root_element` skips the prolog
@@ -19,7 +17,7 @@
 // `azure::build_entry` decode those spans in place and build the `ListEntry`
 // from them. An entry the array has no room for is walked but not built, so
 // that the error can say how many entries the page holds. An S3 page is read
-// the same way, with the entries as children of the root.
+// the same way.
 
 pub(crate) mod azure;
 pub(crate) mod azure_blocks;
@@ -185,7 +183,7 @@ pub(crate) fn next_pair<'b>(rest: &mut &'b [u8]) -> Option<(&'b [u8], &'b [u8])>
 }
 
 // The elements whose text reading the page decodes in place: four of an
-// Azure entry, then four of an S3 one. Neither service writes the other's.
+// Azure entry, then four of an S3 one.
 const DECODED: [&[u8]; 8] = [
     b"Name",
     b"Etag",

@@ -39,9 +39,8 @@ fn read(body: &str) -> Result<(Listing<'static>, Vec<ListEntry<'static>>), Error
     Ok((page, entries))
 }
 
-// The URL carries the query as SigV4 signs it: sorted by name, and with
-// every byte but the unreserved ones encoded. The signature covers the same
-// text, so a difference between the two is a refused request.
+// The URL must carry the query exactly as SigV4 signs it: sorted by name,
+// with every byte but the unreserved ones encoded.
 #[test]
 fn the_query_is_written_in_its_canonical_form() {
     let list = PhysicalList {

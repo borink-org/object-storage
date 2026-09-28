@@ -1,19 +1,13 @@
-// Writes the parts of a URL that come from text: the object key in the path,
-// and the query.
+// Writes the parts of a URL that come from text: the object key and the
+// query.
 //
-// The caller's bytes are percent-encoded as they are written. There are two
-// escape sets and one encoder. The encoder yields the runs of bytes that need
-// no escaping as they are, and a three-byte escape for every byte that does.
-// So a key or a marker is written into the request buffer without being
-// copied first.
+// There are two escape sets and one encoder. The encoder yields each run of
+// bytes that needs no escaping, and an escape for each byte that does. Text
+// is therefore written into the request buffer without a copy.
 //
-// A query is optional parameters, each a name and a value, written as
-// `name=value` pairs joined by `&`, in the order given. A name is a constant
-// of this crate, such as `prefix`, and needs no percent-encoding. A value is
-// one of the forms of `QueryValue`. An S3 request signs its query, and the
-// URL carries it in the canonical form that SigV4 signs. That holds only when
-// the caller lists the parameters in the order of their names and every value
-// reads the same whether or not it is percent-encoded again.
+// A query is `name=value` pairs joined by `&`, in the order given. An S3
+// request signs its query, and the URL carries it in SigV4's canonical form.
+// For that, the caller lists the parameters in the order of their names.
 
 use crate::request::{ByteSink, U64Decimal};
 
@@ -124,17 +118,16 @@ impl<'v> Iterator for Encode<'v> {
 // One query value, in the form that the writer needs it.
 #[derive(Clone, Copy)]
 pub(crate) enum QueryValue<'q> {
-    // A constant of this crate, such as `url` in `encoding-type=url`. It
-    // holds only bytes that a URL carries as they are, so it is written
-    // unencoded.
+    // A constant of this crate, such as `url` in `encoding-type=url`,
+    // written unencoded. It holds only unreserved bytes.
     Literal(&'q str),
-    // Text from the caller or the service, such as a prefix or a marker,
-    // which is percent-encoded as it is written.
+    // Text from the caller or the service, such as a prefix, written
+    // percent-encoded.
     Encoded(&'q [u8]),
     Number(u32),
-    // Constants of this crate joined by commas, such as `metadata` in
-    // Azure's `include=metadata`. The commas are written unencoded, and SigV4
-    // would encode them, so a signed query does not use this form.
+    // Constants of this crate joined by commas, such as Azure's
+    // `include=metadata`. SigV4 would encode the commas, so a signed query
+    // does not use this form.
     Words(&'q [&'q str]),
 }
 

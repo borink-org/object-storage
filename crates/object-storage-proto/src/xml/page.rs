@@ -1,6 +1,5 @@
-// What both page readers share: the checks on the whole body, the root
-// element, and the decoding of one value once its entry has been taken off
-// the body.
+// What both page readers share: checking the body, reading the root element,
+// and decoding a value in an entry taken off the body.
 
 use super::decode::decode;
 use super::scan::{Scan, Span, fault, trim};
