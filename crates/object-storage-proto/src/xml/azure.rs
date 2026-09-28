@@ -7,14 +7,45 @@
 // with the number of entries the page holds.
 
 use super::decode::decode;
-use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
-use super::scan::{Child, Scan, Span, Tag, fault, trim};
-use crate::{
-    BlobProperty, CapacityError, EntryKind, Error, ListEntry, Listing, PropertySet, PropertyValues,
-    Result,
+use super::page::{
+    ListProperty, ListPropertySet, capture, check_body, check_room, decode_value_in_place,
+    end_decoded_key, open_root_element, read_known, read_other, read_size, set_once, text,
+    values_of,
 };
+use super::scan::{Child, Scan, Span, Tag, fault, trim};
+use crate::{BlobProperty, EntryKind, ListEntry, Listing, PropertySet, PropertyValues, Result};
 
 const ROOT: &[u8] = b"EnumerationResults";
+
+impl ListProperty for BlobProperty {
+    fn name(self) -> &'static str {
+        BlobProperty::name(self)
+    }
+
+    fn holds_elements(self) -> bool {
+        BlobProperty::holds_elements(self)
+    }
+
+    fn identify(name: &[u8]) -> Option<Self> {
+        BlobProperty::identify(name)
+    }
+}
+
+impl ListPropertySet for PropertySet {
+    type Property = BlobProperty;
+
+    fn contains(self, property: BlobProperty) -> bool {
+        PropertySet::contains(self, property)
+    }
+
+    fn is_empty(self) -> bool {
+        PropertySet::is_empty(self)
+    }
+
+    fn slot(self, property: BlobProperty) -> usize {
+        PropertySet::slot(self, property)
+    }
+}
 const BLOBS: &[u8] = b"Blobs";
 
 pub(crate) fn fill_listing<'b, E>(
@@ -156,10 +187,7 @@ fn read_entries_into<'b>(
         entries.held += 1;
         if entries.built < room {
             let entry = build_entry(chunk, fields)?;
-            for (value, span) in values[..slots].iter_mut().zip(&spans[..slots]) {
-                // The spans were recorded on the chunk, which `raw` is.
-                *value = span.map(|(start, end)| &entry.raw[start..end]);
-            }
+            values_of(entry.raw, &spans[..slots], &mut values[..slots]);
             if wanted.contains(BlobProperty::ContentType) {
                 // This fixed field was decoded, so use its shortened slice.
                 let slot = wanted.slot(BlobProperty::ContentType);
@@ -248,7 +276,7 @@ fn read_blob(
                 b"Properties" if !tag.empty => {
                     read_properties(scan, &mut fields, wanted, captured)?;
                 }
-                _ => read_other_element(scan, tag, wanted, captured)?,
+                _ => read_other(scan, tag, wanted, captured)?,
             },
         }
     }
@@ -323,52 +351,15 @@ fn read_properties(
                         let value = scan.value(tag)?;
                         set_once(&mut fields.resource_type, value.0)?;
                     }
-                    _ => read_other_element(scan, tag, wanted, captured)?,
+                    _ => read_other(scan, tag, wanted, captured)?,
                 },
             },
         }
     }
 }
 
-// Reads past an element that the whole-tag match did not take: one this
-// crate does not know, or a known one in a spelling the service does not
-// use, such as `<AccessTier >` or `<Content-Type/>`. The second kind is
-// still kept if the caller asked for it.
-fn read_other_element(
-    scan: &mut Scan<'_>,
-    tag: Tag,
-    wanted: PropertySet,
-    captured: &mut [Option<Span>],
-) -> Result<()> {
-    if wanted.is_empty() {
-        return scan.skip(tag);
-    }
-    match BlobProperty::identify(scan.text(tag.name)) {
-        Some(property) if wanted.contains(property) => {
-            // An element that holds other elements has no text to read, so
-            // it is read to its close tag instead. The name is the
-            // property's own, which `identify` matched the tag against.
-            let span = if property.holds_elements() && !tag.empty {
-                scan.nested(property.name().as_bytes())?
-            } else {
-                scan.value(tag)?.0
-            };
-            // A slot is always in range: it is the property's rank in the set,
-            // and there is one slot per member. Written through `get_mut` so
-            // that no bounds check or panic path is compiled in.
-            if let Some(slot) = captured.get_mut(wanted.slot(property)) {
-                *slot = Some(span);
-            }
-            Ok(())
-        }
-        _ => scan.skip(tag),
-    }
-}
-
-// Reads past a known element whose start tag was matched whole, and keeps
-// its value if the caller asked for it. The value is found the way a field's
-// is: the text up to the close tag, which a leaf element is.
-// Returns true, for the match above.
+// Reads past a property that `read_known_element` matched, and returns true
+// for it.
 #[inline(always)]
 fn known(
     scan: &mut Scan<'_>,
@@ -376,36 +367,7 @@ fn known(
     wanted: PropertySet,
     captured: &mut [Option<Span>],
 ) -> Result<bool> {
-    let (span, _) = scan.value_of(property.name().as_bytes())?;
-    if wanted.contains(property) {
-        // A slot is always in range: it is the property's rank in the set,
-        // and there is one slot per member. Written through `get_mut` so
-        // that no bounds check or panic path is compiled in.
-        if let Some(slot) = captured.get_mut(wanted.slot(property)) {
-            *slot = Some(span);
-        }
-    }
-    Ok(true)
-}
-
-// The same for an element that holds other elements, which is read to its
-// close tag. Its value is everything between its tags.
-#[inline(always)]
-fn known_nested(
-    scan: &mut Scan<'_>,
-    property: BlobProperty,
-    wanted: PropertySet,
-    captured: &mut [Option<Span>],
-) -> Result<bool> {
-    let span = scan.nested(property.name().as_bytes())?;
-    if wanted.contains(property) {
-        // A slot is always in range: it is the property's rank in the set,
-        // and there is one slot per member. Written through `get_mut` so
-        // that no bounds check or panic path is compiled in.
-        if let Some(slot) = captured.get_mut(wanted.slot(property)) {
-            *slot = Some(span);
-        }
-    }
+    read_known(scan, property, wanted, captured)?;
     Ok(true)
 }
 
@@ -413,11 +375,7 @@ fn known_nested(
 // past. The empty span stands for an element written empty.
 #[inline(always)]
 fn known_empty(property: BlobProperty, wanted: PropertySet, captured: &mut [Option<Span>]) -> bool {
-    if wanted.contains(property)
-        && let Some(slot) = captured.get_mut(wanted.slot(property))
-    {
-        *slot = Some((0, 0));
-    }
+    capture(property, (0, 0), wanted, captured);
     true
 }
 
@@ -631,7 +589,7 @@ fn read_known_element(
                 return Ok(known_empty(Metadata, wanted, captured));
             }
             if scan.lit(b"<Metadata>") {
-                return known_nested(scan, Metadata, wanted, captured);
+                return known(scan, Metadata, wanted, captured);
             }
             Ok(false)
         }
@@ -708,13 +666,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
         None => false,
     };
     let size = match fields.size {
-        Some(span) => {
-            let (start, end) = trim(chunk, span);
-            match crate::common::decimal(&chunk[start..end]) {
-                Some(size) => Some(size),
-                None => return fault(),
-            }
-        }
+        Some(span) => Some(read_size(chunk, span)?),
         // An object always has a length. A group of keys and a directory are
         // not objects and have none.
         None if !fields.prefix && !directory => return fault(),
@@ -729,20 +681,9 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     // A key may begin or end with a space, so the key is not trimmed. Only
     // the values the service writes for itself are.
     let key_len = decode(&mut chunk[key.0..key.1], key_flags, fields.percent)?;
-    if key_len < key.1 - key.0 {
-        // The bytes the decoding no longer needs are set to zero, so that the
-        // walk over the entry can tell where the decoded text ends. A decoded
-        // key can hold `<` and `>`, so the walk cannot find that by looking
-        // for the close tag. See `next_property`. The scanner refused a zero
-        // byte in the document, so only this writes one.
-        chunk[key.0 + key_len..key.1].fill(0);
-        // A percent escape can name a zero byte, which would look like that
-        // filler. XML forbids the character and Azure refuses it in a name,
-        // so this is refused for consistency, not for a case seen.
-        if fields.percent && chunk[key.0..key.0 + key_len].contains(&0) {
-            return fault();
-        }
-    }
+    // XML forbids a zero byte and Azure refuses one in a name, so refusing a
+    // decoded one is for consistency, not for a case seen.
+    end_decoded_key(chunk, key, key_len, fields.percent)?;
     let e_tag = decode_value_in_place(chunk, fields.e_tag)?;
     let last_modified = decode_value_in_place(chunk, fields.last_modified)?;
     let content_type = decode_value_in_place(chunk, fields.content_type)?;
@@ -823,12 +764,7 @@ fn read_root_children_into<'b>(
                 let Some(entries) = entries else {
                     return fault();
                 };
-                if entries.held > room {
-                    return Err(Error::Capacity(CapacityError {
-                        required: entries.held,
-                        ..CapacityError::default()
-                    }));
-                }
+                check_room(entries.held, room)?;
                 return Ok(Listing {
                     filled: entries.built,
                     next_marker,

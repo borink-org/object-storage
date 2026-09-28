@@ -12,15 +12,48 @@
 // changed a key and the page never named the encoding.
 
 use super::decode::decode;
-use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
+use super::page::{
+    ListProperty, ListPropertySet, check_body, check_room, decode_value_in_place, end_decoded_key,
+    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
+};
 use super::scan::{Child, Scan, Span, fault, trim};
 use crate::s3::{ObjectProperty, PropertySet, PropertyValues};
 use crate::url::form_decode_in_place;
-use crate::{CapacityError, EntryKind, Error, ListEntry, Listing, Result};
+use crate::{EntryKind, ListEntry, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";
 const OBJECT: &[u8] = b"Contents";
 const GROUP: &[u8] = b"CommonPrefixes";
+
+impl ListProperty for ObjectProperty {
+    fn name(self) -> &'static str {
+        ObjectProperty::name(self)
+    }
+
+    fn holds_elements(self) -> bool {
+        ObjectProperty::holds_elements(self)
+    }
+
+    fn identify(name: &[u8]) -> Option<Self> {
+        ObjectProperty::identify(name)
+    }
+}
+
+impl ListPropertySet for PropertySet {
+    type Property = ObjectProperty;
+
+    fn contains(self, property: ObjectProperty) -> bool {
+        PropertySet::contains(self, property)
+    }
+
+    fn is_empty(self) -> bool {
+        PropertySet::is_empty(self)
+    }
+
+    fn slot(self, property: ObjectProperty) -> usize {
+        PropertySet::slot(self, property)
+    }
+}
 
 pub(crate) fn fill_listing<'b, E>(
     body: &'b mut [u8],
@@ -153,10 +186,7 @@ fn read_root_children_into<'b>(
         if page.built < room {
             let (entry, decoded) = build_entry(chunk, fields)?;
             page.decoded |= decoded;
-            for (value, span) in values[..slots].iter_mut().zip(&spans[..slots]) {
-                // The spans were recorded on the chunk, which `raw` is.
-                *value = span.map(|(start, end)| &entry.raw[start..end]);
-            }
+            values_of(entry.raw, &spans[..slots], &mut values[..slots]);
             sink(entry, PropertyValues::new(wanted, &values[..slots]));
             page.built += 1;
         }
@@ -169,12 +199,7 @@ fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
     if page.decoded && !page.encoded {
         return fault();
     }
-    if page.held > room {
-        return Err(Error::Capacity(CapacityError {
-            required: page.held,
-            ..CapacityError::default()
-        }));
-    }
+    check_room(page.held, room)?;
     // `IsTruncated` and the token must agree. Without `IsTruncated`, the
     // token decides.
     let next_marker = match (page.truncated, page.token) {
@@ -232,17 +257,19 @@ fn read_object(
             b'E' if scan.lit(b"<ETag>") => set_once(&mut fields.e_tag, scan.value_of(b"ETag")?)?,
             b'S' if scan.lit(b"<Size>") => set_once(&mut fields.size, scan.value_of(b"Size")?.0)?,
             b'S' if scan.lit(b"<StorageClass>") => {
-                known(scan, ObjectProperty::StorageClass, wanted, captured)?;
+                read_known(scan, ObjectProperty::StorageClass, wanted, captured)?;
             }
             b'C' if scan.lit(b"<ChecksumAlgorithm>") => {
-                known(scan, ObjectProperty::ChecksumAlgorithm, wanted, captured)?;
+                read_known(scan, ObjectProperty::ChecksumAlgorithm, wanted, captured)?;
             }
             b'C' if scan.lit(b"<ChecksumType>") => {
-                known(scan, ObjectProperty::ChecksumType, wanted, captured)?;
+                read_known(scan, ObjectProperty::ChecksumType, wanted, captured)?;
             }
-            b'O' if scan.lit(b"<Owner>") => known(scan, ObjectProperty::Owner, wanted, captured)?,
+            b'O' if scan.lit(b"<Owner>") => {
+                read_known(scan, ObjectProperty::Owner, wanted, captured)?
+            }
             b'R' if scan.lit(b"<RestoreStatus>") => {
-                known(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
+                read_known(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
             }
             b'/' if scan.lit(b"</Contents>") => break,
             _ => match scan.child(OBJECT)? {
@@ -252,19 +279,7 @@ fn read_object(
                     b"LastModified" => set_once(&mut fields.last_modified, scan.value(tag)?)?,
                     b"ETag" => set_once(&mut fields.e_tag, scan.value(tag)?)?,
                     b"Size" => set_once(&mut fields.size, scan.value(tag)?.0)?,
-                    name => match ObjectProperty::identify(name) {
-                        Some(property) if wanted.contains(property) => {
-                            // An element that holds other elements has no
-                            // text to read, so it is read to its close tag.
-                            let span = if property.holds_elements() && !tag.empty {
-                                scan.nested(property.name().as_bytes())?
-                            } else {
-                                scan.value(tag)?.0
-                            };
-                            capture(property, span, wanted, captured);
-                        }
-                        _ => scan.skip(tag)?,
-                    },
+                    _ => read_other(scan, tag, wanted, captured)?,
                 },
             },
         }
@@ -274,44 +289,6 @@ fn read_object(
         return fault();
     }
     Ok(fields)
-}
-
-// Reads past a property whose start tag was matched whole, and keeps its
-// value if the caller asked for it.
-#[inline(always)]
-fn known(
-    scan: &mut Scan<'_>,
-    property: ObjectProperty,
-    wanted: PropertySet,
-    captured: &mut [Option<Span>],
-) -> Result<()> {
-    let name = property.name().as_bytes();
-    let span = if property.holds_elements() {
-        scan.nested(name)?
-    } else {
-        scan.value_of(name)?.0
-    };
-    capture(property, span, wanted, captured);
-    Ok(())
-}
-
-// Keeps the span of a property's value if the caller asked for it. A
-// property written twice, as `ChecksumAlgorithm` may be, keeps the first.
-#[inline(always)]
-fn capture(
-    property: ObjectProperty,
-    span: Span,
-    wanted: PropertySet,
-    captured: &mut [Option<Span>],
-) {
-    // The slot is in range: it is the property's rank in the set. `get_mut`
-    // compiles in no panic path.
-    if wanted.contains(property)
-        && let Some(slot) = captured.get_mut(wanted.slot(property))
-        && slot.is_none()
-    {
-        *slot = Some(span);
-    }
 }
 
 // Reads a group of keys. `<CommonPrefixes>` has been consumed. S3 writes one
@@ -344,31 +321,13 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
     if key.0 == key.1 {
         return fault();
     }
-    let size = match fields.size {
-        Some(span) => {
-            let (start, end) = trim(chunk, span);
-            match crate::common::decimal(&chunk[start..end]) {
-                Some(size) => Some(size),
-                None => return fault(),
-            }
-        }
-        None => None,
-    };
+    let size = fields.size.map(|span| read_size(chunk, span)).transpose()?;
 
     // A key may begin or end with a space, so the key is not trimmed. XML
     // escaping is undone first, because the document applied it last.
     let escaped = decode(&mut chunk[key.0..key.1], key_flags, false)?;
     let (key_len, decoded) = form_decode_in_place(&mut chunk[key.0..key.0 + escaped]);
-    if key_len < key.1 - key.0 {
-        // As on Azure, zero the bytes the key no longer needs. The walk over
-        // the entry finds the end of the key by them.
-        chunk[key.0 + key_len..key.1].fill(0);
-        // A percent escape can name a zero byte, which would look like that
-        // filler. It is refused, as a key the walk could not read back.
-        if chunk[key.0..key.0 + key_len].contains(&0) {
-            return fault();
-        }
-    }
+    end_decoded_key(chunk, key, key_len, true)?;
     let e_tag = decode_value_in_place(chunk, fields.e_tag)?;
     let last_modified = decode_value_in_place(chunk, fields.last_modified)?;
 
