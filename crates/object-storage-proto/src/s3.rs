@@ -1404,8 +1404,8 @@ impl<'a> Objects<'a> {
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
     /// not a ListObjectsV2 page, or if the page contradicts itself. A page
-    /// that does not say it URL-encoded its keys is refused if a key holds a
-    /// `%` or a `+`.
+    /// that does not say it URL-encoded its keys is refused if decoding
+    /// changes a key.
     pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
         &self,
         body: &'b mut [u8],

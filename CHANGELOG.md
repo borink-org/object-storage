@@ -49,6 +49,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 ### Changed
 
 - In `borink-object-storage-crypto`, renamed the feature `md5` to `md5-rustcrypto`, the struct `Md5` to `Md5RustCrypto` and the constant `MD5` to `MD5_RUSTCRYPTO`.
+- `Blobs::fill_listing` and `Blobs::fill_listing_with` read a `%` that begins no escape in an encoded name as the text `%`, as the WHATWG URL Standard does. They refused the page before.
 
 ## 0.0.2 - 2026-09-26
 

@@ -11,10 +11,11 @@
 // every key is decoded, and the page is refused at its end if decoding
 // changed a key and the page never named the encoding.
 
-use super::decode::{decode, decode_url};
+use super::decode::decode;
 use super::page::{check_body, decode_value_in_place, open_root_element, set_once, text};
 use super::scan::{Child, Scan, Span, fault, trim};
 use crate::s3::{ObjectProperty, PropertySet, PropertyValues};
+use crate::url::form_decode_in_place;
 use crate::{CapacityError, EntryKind, Error, ListEntry, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";
@@ -357,7 +358,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
     // A key may begin or end with a space, so the key is not trimmed. XML
     // escaping is undone first, because the document applied it last.
     let escaped = decode(&mut chunk[key.0..key.1], key_flags, false)?;
-    let (key_len, decoded) = decode_url(&mut chunk[key.0..key.0 + escaped])?;
+    let (key_len, decoded) = form_decode_in_place(&mut chunk[key.0..key.0 + escaped]);
     if key_len < key.1 - key.0 {
         // As on Azure, zero the bytes the key no longer needs. The walk over
         // the entry finds the end of the key by them.

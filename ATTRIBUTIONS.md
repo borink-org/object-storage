@@ -38,6 +38,42 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### rust-url: `percent-encoding` and `form_urlencoded` — MIT OR Apache-2.0
+
+<https://github.com/servo/rust-url>, `percent-encoding` 2.3.2 and `form_urlencoded` 1.2.2, by the rust-url developers.
+
+The percent-encoding in `crates/object-storage-proto/src/url.rs` follows these two crates: the `AsciiSet` type with its `CONTROLS` and `NON_ALPHANUMERIC` sets, the encoding iterator, and the decoding rules of `percent_decode` and of `form_urlencoded::parse`. The code here yields bytes instead of `&str` and decodes in place. Neither crate is a dependency of any crate here.
+
+They are used under the MIT license, reproduced here as required:
+
+```
+Copyright (c) 2013-2025 The rust-url developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ## Inspiration and reference projects
 
 None of the projects below is a dependency, and no code from any of them is in this tree. `docs/DESIGN.md` states the constraints that were taken into account while studying the dependencies. In many cases, studying revealed what not to do or helped narrow our goals.
