@@ -296,6 +296,12 @@ pub(crate) struct Sum {
     state: ChecksumState,
 }
 
+impl crate::request::ByteSink for Sum {
+    fn push(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
 impl Sum {
     // Adds the next piece of the content.
     pub(crate) fn update(&mut self, bytes: &[u8]) {

@@ -8,8 +8,8 @@ use crate::common::{
     parse_content_range, push_condition, text_header, trim_ascii, valid_header, validate_condition,
     write_range,
 };
-use crate::query::{self, Parameter, QueryValue};
-use crate::request::{HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::url::{self, Parameter, QueryValue};
 use crate::{
     Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind, DeleteHeadOutcome,
     DeleteKind, DeleteShape, Error, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
@@ -570,14 +570,14 @@ impl<'a> Blobs<'a> {
         // content is a checksum of that text. The object's own MD5 is a
         // property of the blob, `x-ms-blob-content-md5`.
         push_checksum(&mut head, &plan.options, &self.checksums, |sum| {
-            write_block_list(&mut |piece| sum.update(piece), blocks.clone());
+            write_block_list(sum, blocks.clone());
         });
         if let Some(md5) = plan.options.declared_md5 {
             head.header("x-ms-blob-content-md5", |out| out.push(md5.as_bytes()));
         }
         push_metadata(&mut head, plan.metadata);
         push_condition(&mut head, plan.condition, plan.condition_value);
-        let body = head.body(|out| write_block_list(&mut |piece| out.push(piece), blocks));
+        let body = head.body(|out| write_block_list(out, blocks));
         let capacity = head.capacity();
         head.finish_with_body(Method::Put, Payload::Slice(&[]), Some(body))
             .ok_or_else(|| capacity_error(capacity))
@@ -914,11 +914,11 @@ impl<'a> Blobs<'a> {
         now: &Timestamps,
     ) -> Result<()> {
         let mut counted = Writer::new(&mut []);
-        self.write_url(&mut |piece| counted.push(piece), key, query);
+        self.write_url(&mut counted, key, query);
         if counted.position() > MAX_URL_LEN {
             return Err(InvalidPlan::UrlTooLong.into());
         }
-        head.url(|out| self.write_url(&mut |piece| out.push(piece), key, query));
+        head.url(|out| self.write_url(out, key, query));
         head.header("authorization", |out| {
             out.push(b"Bearer ");
             out.push(self.token.as_bytes());
@@ -926,24 +926,22 @@ impl<'a> Blobs<'a> {
         head.header("x-ms-date", |out| out.push(now.rfc1123().as_bytes()));
         head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
         if range != RequestedRange::Whole {
-            head.header("range", |out| {
-                write_range(&mut |piece| out.push(piece), range)
-            });
+            head.header("range", |out| write_range(out, range));
         }
         Ok(())
     }
 
-    fn write_url(&self, out: &mut dyn FnMut(&[u8]), key: Option<&str>, query: &[Parameter<'_>]) {
-        out(self.container.endpoint.as_bytes());
-        out(b"/");
-        out(self.container.name.as_bytes());
+    fn write_url(&self, out: &mut dyn ByteSink, key: Option<&str>, query: &[Parameter<'_>]) {
+        out.push(self.container.endpoint.as_bytes());
+        out.push(b"/");
+        out.push(self.container.name.as_bytes());
         if let Some(key) = key {
-            out(b"/");
-            for part in crate::path::encode_object_key(key) {
-                out(part);
+            out.push(b"/");
+            for part in url::encode_object_key(key) {
+                out.push(part);
             }
         }
-        query::write_in_url(out, query);
+        url::write_query_in_url(out, query);
     }
 
     /// Reads a response head and reports what to do next.
@@ -1764,20 +1762,20 @@ fn push_checksum(
 // as the body. Both writes go through this function, so they write the same
 // bytes.
 fn write_block_list<I: AsRef<str>>(
-    out: &mut dyn FnMut(&[u8]),
+    out: &mut dyn ByteSink,
     blocks: impl Iterator<Item = (I, BlockSource)>,
 ) {
-    out(COMMIT_OPEN);
+    out.push(COMMIT_OPEN);
     for (id, source) in blocks {
-        out(b"<");
-        out(source.tag().as_bytes());
-        out(b">");
-        out(id.as_ref().as_bytes());
-        out(b"</");
-        out(source.tag().as_bytes());
-        out(b">");
+        out.push(b"<");
+        out.push(source.tag().as_bytes());
+        out.push(b">");
+        out.push(id.as_ref().as_bytes());
+        out.push(b"</");
+        out.push(source.tag().as_bytes());
+        out.push(b">");
     }
-    out(COMMIT_CLOSE);
+    out.push(COMMIT_CLOSE);
 }
 
 fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<()> {

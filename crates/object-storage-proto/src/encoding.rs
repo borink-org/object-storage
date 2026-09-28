@@ -84,16 +84,17 @@ pub(crate) fn decode_base64(text: &[u8], into: &mut [u8]) -> Option<usize> {
 // the UTF-8 form alone.
 pub(crate) mod rfc2047 {
     use super::{base64_into, decode_base64, hex_digit};
+    use crate::request::ByteSink;
 
     // Writes `text` as one encoded word of its UTF-8, in base64:
     // `=?UTF-8?B?...?=`. The word holds no space.
-    pub(crate) fn write(out: &mut dyn FnMut(&[u8]), text: &str) {
-        out(b"=?UTF-8?B?");
+    pub(crate) fn write(out: &mut dyn ByteSink, text: &str) {
+        out.push(b"=?UTF-8?B?");
         for group in text.as_bytes().chunks(3) {
             let mut encoded = [0; 4];
-            out(base64_into(group, &mut encoded).as_bytes());
+            out.push(base64_into(group, &mut encoded).as_bytes());
         }
-        out(b"?=");
+        out.push(b"?=");
     }
 
     // Returns whether a space-separated token of `text` starts with `=?` and

@@ -1,7 +1,7 @@
 // What both providers share when they write a request head and read a
 // response head.
 
-use crate::request::{HeadWriter, U64Decimal};
+use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
@@ -195,22 +195,22 @@ pub(crate) fn push_condition(
     }
 }
 
-pub(crate) fn write_range(out: &mut dyn FnMut(&[u8]), range: RequestedRange) {
-    out(b"bytes=");
+pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
+    out.push(b"bytes=");
     match range {
         RequestedRange::Bounded { start, end } => {
-            out(U64Decimal::new(start).as_bytes());
-            out(b"-");
+            out.push(U64Decimal::new(start).as_bytes());
+            out.push(b"-");
             // Validation requires start < end, so end is nonzero.
-            out(U64Decimal::new(end - 1).as_bytes());
+            out.push(U64Decimal::new(end - 1).as_bytes());
         }
         RequestedRange::Offset(first) => {
-            out(U64Decimal::new(first).as_bytes());
-            out(b"-");
+            out.push(U64Decimal::new(first).as_bytes());
+            out.push(b"-");
         }
         RequestedRange::Suffix(last) => {
-            out(b"-");
-            out(U64Decimal::new(last).as_bytes());
+            out.push(b"-");
+            out.push(U64Decimal::new(last).as_bytes());
         }
         RequestedRange::Whole => unreachable!("the plan was validated"),
     }

@@ -193,9 +193,9 @@ use crate::common::{
     parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
-use crate::query::{self, Parameter, QueryValue};
-use crate::request::{HeadWriter, U64Decimal};
+use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
+use crate::url::{self, Parameter, QueryValue};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
@@ -447,28 +447,28 @@ impl<'a> Bucket<'a> {
     }
 
     // The value of the `host` header that the URL implies.
-    fn write_host(&self, out: &mut dyn FnMut(&[u8])) {
+    fn write_host(&self, out: &mut dyn ByteSink) {
         if self.addressing == Addressing::VirtualHosted {
-            out(self.name.as_bytes());
-            out(b".");
+            out.push(self.name.as_bytes());
+            out.push(b".");
         }
-        out(self.authority.as_bytes());
+        out.push(self.authority.as_bytes());
     }
 
     // The path of the URL, which the signature covers as it is written. A
     // request to the bucket itself has the path `/` with virtual-hosted
     // addressing and `/bucket` with path-style addressing.
-    fn write_path(&self, out: &mut dyn FnMut(&[u8]), key: Option<&str>) {
-        out(b"/");
+    fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
+        out.push(b"/");
         if self.addressing == Addressing::Path {
-            out(self.name.as_bytes());
+            out.push(self.name.as_bytes());
             if key.is_some() {
-                out(b"/");
+                out.push(b"/");
             }
         }
         if let Some(key) = key {
-            for part in crate::path::encode_object_key(key) {
-                out(part);
+            for part in url::encode_object_key(key) {
+                out.push(part);
             }
         }
     }
@@ -711,7 +711,7 @@ struct Signed<'p> {
     // The object, or `None` for the bucket itself.
     key: Option<&'p str>,
     // The query, in the order of its names, with every value one that reads
-    // the same encoded again. See `query.rs`.
+    // the same encoded again. See `url.rs`.
     query: &'p [Parameter<'p>],
     range: RequestedRange,
     condition: ConditionKind,
@@ -991,10 +991,9 @@ impl<'a> Objects<'a> {
         head.url(|out| {
             out.push(self.bucket.scheme.as_bytes());
             out.push(b"://");
-            self.bucket.write_host(&mut |piece| out.push(piece));
-            self.bucket
-                .write_path(&mut |piece| out.push(piece), signed.key);
-            query::write_in_url(&mut |piece| out.push(piece), signed.query);
+            self.bucket.write_host(out);
+            self.bucket.write_path(out, signed.key);
+            url::write_query_in_url(out, signed.query);
         });
         let token = self.token();
         head.header("authorization", |out| {
@@ -1002,9 +1001,9 @@ impl<'a> Objects<'a> {
             out.push(b" Credential=");
             out.push(self.credentials.key_id().as_bytes());
             out.push(b"/");
-            self.write_scope(&mut |piece| out.push(piece), now);
+            self.write_scope(out, now);
             out.push(b", SignedHeaders=");
-            write_signed_names(&mut |piece| out.push(piece), signed, token);
+            write_signed_names(out, signed, token);
             out.push(b", Signature=");
             out.push(&signature);
         });
@@ -1013,7 +1012,7 @@ impl<'a> Objects<'a> {
                 Header::Fixed(_, HeaderValue::Host) => {}
                 Header::Fixed(name, value) => head.header(name, |out| match value {
                     HeaderValue::Bytes(bytes) => out.push(bytes),
-                    HeaderValue::Range => write_range(&mut |piece| out.push(piece), signed.range),
+                    HeaderValue::Range => write_range(out, signed.range),
                     HeaderValue::Date => out.push(now.iso8601().as_bytes()),
                     HeaderValue::Host => {}
                 }),
@@ -1024,7 +1023,7 @@ impl<'a> Objects<'a> {
                             out.push(&[byte.to_ascii_lowercase()]);
                         }
                     },
-                    |out| write_metadata_value(&mut |piece| out.push(piece), pair.value),
+                    |out| write_metadata_value(out, pair.value),
                 ),
             }
         }
@@ -1037,20 +1036,20 @@ impl<'a> Objects<'a> {
             .map(|token| (self.credentials.token_header(), token))
     }
 
-    fn write_scope(&self, out: &mut dyn FnMut(&[u8]), now: &Timestamps) {
-        out(now.date().as_bytes());
-        out(b"/");
-        out(self.bucket.region.as_bytes());
-        out(b"/");
-        out(self.bucket.signing_service().as_bytes());
-        out(b"/aws4_request");
+    fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
+        out.push(now.date().as_bytes());
+        out.push(b"/");
+        out.push(self.bucket.region.as_bytes());
+        out.push(b"/");
+        out.push(self.bucket.signing_service().as_bytes());
+        out.push(b"/aws4_request");
     }
 
     // Returns the signature of the request, as lowercase hexadecimal. The
     // canonical request is hashed as it is written, so it is never held.
     fn signature(&self, signed: &Signed<'_>, now: &Timestamps) -> [u8; 64] {
         let mut sum = self.sha256.start();
-        self.write_canonical_request(&mut |piece| sum.update(piece), signed, now);
+        self.write_canonical_request(&mut sum, signed, now);
         let canonical = sum.finish();
         let key = match self.signing_key {
             Some(key) if key.covers(now) => key,
@@ -1068,37 +1067,37 @@ impl<'a> Objects<'a> {
     // The canonical request of SigV4.
     fn write_canonical_request(
         &self,
-        out: &mut dyn FnMut(&[u8]),
+        out: &mut dyn ByteSink,
         signed: &Signed<'_>,
         now: &Timestamps,
     ) {
-        out(signed.method.as_str().as_bytes());
-        out(b"\n");
+        out.push(signed.method.as_str().as_bytes());
+        out.push(b"\n");
         self.bucket.write_path(out, signed.key);
-        out(b"\n");
+        out.push(b"\n");
         // The URL carries the query in its canonical form: every byte but the
         // unreserved ones percent-encoded, in upper case, and the parameters
         // in the order of their names. So this is the same text.
-        query::write(out, signed.query);
-        out(b"\n");
+        url::write_query(out, signed.query);
+        out.push(b"\n");
         let token = self.token();
         for header in ordered_headers(signed, token) {
             write_header_name(out, header);
-            out(b":");
+            out.push(b":");
             match header {
                 Header::Fixed(_, HeaderValue::Bytes(bytes)) => write_canonical_value(out, bytes),
                 Header::Fixed(_, HeaderValue::Host) => self.bucket.write_host(out),
                 Header::Fixed(_, HeaderValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, HeaderValue::Date) => out(now.iso8601().as_bytes()),
+                Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
                 Header::Meta(pair) if encodes(pair.value) => write_metadata_value(out, pair.value),
                 Header::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
             }
-            out(b"\n");
+            out.push(b"\n");
         }
-        out(b"\n");
+        out.push(b"\n");
         write_signed_names(out, signed, token);
-        out(b"\n");
-        out(signed.content_sha256);
+        out.push(b"\n");
+        out.push(signed.content_sha256);
     }
 
     /// Reads the response head of a GET or a HEAD and reports what to do
@@ -1586,12 +1585,12 @@ fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = 
         .chain(pair.name.bytes().map(|byte| byte.to_ascii_lowercase()))
 }
 
-fn write_header_name(out: &mut dyn FnMut(&[u8]), header: Header<'_>) {
+fn write_header_name(out: &mut dyn ByteSink, header: Header<'_>) {
     match header {
-        Header::Fixed(name, _) => out(name.as_bytes()),
+        Header::Fixed(name, _) => out.push(name.as_bytes()),
         Header::Meta(pair) => {
             for byte in metadata_header_name(pair) {
-                out(&[byte]);
+                out.push(&[byte]);
             }
         }
     }
@@ -1599,13 +1598,13 @@ fn write_header_name(out: &mut dyn FnMut(&[u8]), header: Header<'_>) {
 
 // The names of the signed headers, in order, separated by `;`.
 fn write_signed_names(
-    out: &mut dyn FnMut(&[u8]),
+    out: &mut dyn ByteSink,
     signed: &Signed<'_>,
     token: Option<(&'static str, &str)>,
 ) {
     for (index, header) in ordered_headers(signed, token).enumerate() {
         if index != 0 {
-            out(b";");
+            out.push(b";");
         }
         write_header_name(out, header);
     }
@@ -1614,13 +1613,13 @@ fn write_signed_names(
 // SigV4 signs a header value without the spaces at either end, and with each
 // run of spaces inside it as one space. A value sent as it is holds no other
 // whitespace.
-fn write_canonical_value(out: &mut dyn FnMut(&[u8]), value: &[u8]) {
+fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
     let value = value.trim_ascii();
     let mut start = 0;
     let mut at = 0;
     while at < value.len() {
         if value[at] == b' ' {
-            out(&value[start..=at]);
+            out.push(&value[start..=at]);
             while at < value.len() && value[at] == b' ' {
                 at += 1;
             }
@@ -1629,7 +1628,7 @@ fn write_canonical_value(out: &mut dyn FnMut(&[u8]), value: &[u8]) {
             at += 1;
         }
     }
-    out(&value[start..]);
+    out.push(&value[start..]);
 }
 
 // The pairs in the order of their lowercase names. A plan carries a handful
@@ -1819,11 +1818,11 @@ fn encodes(value: &str) -> bool {
 
 // Writes a metadata value as the header carries it, encoded or as it is. An
 // encoded word holds no space, so its canonical form for SigV4 is the same.
-fn write_metadata_value(out: &mut dyn FnMut(&[u8]), value: &str) {
+fn write_metadata_value(out: &mut dyn ByteSink, value: &str) {
     if encodes(value) {
         rfc2047::write(out, value);
     } else {
-        out(value.as_bytes());
+        out.push(value.as_bytes());
     }
 }
 
@@ -1839,12 +1838,21 @@ mod tests {
 
     use std::vec::Vec;
 
-    use super::{MetadataPair, sorted_metadata, write_canonical_value};
+    use super::{ByteSink, MetadataPair, sorted_metadata, write_canonical_value};
+
+    // Collects what a writer writes, for a test to compare.
+    struct Collected(Vec<u8>);
+
+    impl ByteSink for Collected {
+        fn push(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
 
     fn canonical(value: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        write_canonical_value(&mut |piece| out.extend_from_slice(piece), value.as_bytes());
-        out
+        let mut out = Collected(Vec::new());
+        write_canonical_value(&mut out, value.as_bytes());
+        out.0
     }
 
     #[test]
