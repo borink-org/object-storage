@@ -22,6 +22,50 @@ pub(crate) fn failure<'h>(
     }
 }
 
+// The two outcomes that `finish_with_body` produces, for one operation's
+// outcome type.
+pub(crate) trait FailureOutcome<'h> {
+    fn not_found(kind: Option<ServiceErrorKind>) -> Self;
+    fn service_failure(failure: Failure<'h>) -> Self;
+}
+
+// Finishes a failure whose head named no error, with the error `kind` that
+// its body named. A 404 is not found, and any other status is a failure of
+// the service.
+pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
+    head_failure: Failure<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    match head_failure.status {
+        404 => O::not_found(kind),
+        status => O::service_failure(failure(status, kind, head_failure.request_id)),
+    }
+}
+
+macro_rules! failure_outcome {
+    ($($outcome:ident),*) => {$(
+        impl<'h> FailureOutcome<'h> for crate::$outcome<'h> {
+            fn not_found(kind: Option<ServiceErrorKind>) -> Self {
+                Self::NotFound { kind }
+            }
+
+            fn service_failure(failure: Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+
+failure_outcome!(
+    GetHeadOutcome,
+    PutHeadOutcome,
+    DeleteHeadOutcome,
+    ListHeadOutcome,
+    StageBlockHeadOutcome,
+    CommitBlocksHeadOutcome,
+    ListBlocksHeadOutcome
+);
+
 pub(crate) fn accept_success<'h>(
     shape: GetShape,
     head: ResponseHead<'h>,

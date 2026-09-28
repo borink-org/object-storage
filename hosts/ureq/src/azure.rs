@@ -57,10 +57,9 @@ pub fn get(blobs: &Blobs<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::error::
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(no_object(blobs.accept_error_body(
+            Err(no_object(blobs.accept_get_error_body(
                 get.shape(),
-                failure.status,
-                failure.request_id,
+                failure,
                 &body,
             )))
         }
@@ -112,8 +111,7 @@ pub fn put(blobs: &Blobs<'_>, key: &str, content: &[u8]) -> Result<(), Box<dyn s
                 .unwrap_or_default();
             Err(not_stored(blobs.accept_put_error_body(
                 put.shape(),
-                failure.status,
-                failure.request_id,
+                failure,
                 &body,
             )))
         }
@@ -166,8 +164,7 @@ pub fn delete(blobs: &Blobs<'_>, key: &str) -> Result<(), Box<dyn std::error::Er
                 .unwrap_or_default();
             Err(not_removed(blobs.accept_delete_error_body(
                 delete.shape(),
-                failure.status,
-                failure.request_id,
+                failure,
                 &body,
             )))
         }
@@ -238,11 +235,7 @@ pub fn list<'b>(
                 .limit(MAX_ERROR_BODY)
                 .read_to_vec()
                 .unwrap_or_default();
-            Err(not_listed(blobs.accept_list_error_body(
-                failure.status,
-                failure.request_id,
-                &error,
-            )))
+            Err(not_listed(blobs.accept_list_error_body(failure, &error)))
         }
         outcome => Err(not_listed(outcome)),
     }

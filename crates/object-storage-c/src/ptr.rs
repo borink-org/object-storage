@@ -135,19 +135,21 @@ pub(crate) unsafe fn headers<'a>(
         .map(|header| unsafe { (slice(header.name), slice(header.value)) })
 }
 
-/// Reads the status and the request identifier of a failure. A null `failure`
-/// reads nothing.
+/// Reads a failure as the core crate's record. A null `failure` reads
+/// nothing, and so does one whose category this crate does not define.
 ///
 /// # Safety
 ///
 /// `failure` must be null or point at one readable value whose `request_id`
 /// satisfies `maybe_slice` for the lifetime `'a`.
-pub(crate) unsafe fn failure<'a>(failure: *const Failure) -> Option<(u16, Option<&'a [u8]>)> {
+pub(crate) unsafe fn failure<'a>(
+    failure: *const Failure,
+) -> Option<borink_object_storage_proto::Failure<'a>> {
     // SAFETY: the caller states that a non-null `failure` is readable, and
     // that so is the identifier it borrows.
     unsafe {
-        failure
-            .as_ref()
-            .map(|failure| (failure.status, maybe_slice(failure.request_id)))
+        failure.as_ref().and_then(|failure| {
+            crate::sentence::failure_of(failure, maybe_slice(failure.request_id))
+        })
     }
 }

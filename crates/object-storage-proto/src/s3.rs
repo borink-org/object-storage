@@ -75,7 +75,7 @@
 //! };
 //! let body = b"<Error><Code>NoSuchKey</Code></Error>";
 //! assert!(matches!(
-//!     objects.accept_error_body(failure.status, failure.request_id, body),
+//!     objects.accept_get_error_body(get.shape(), failure, body),
 //!     GetHeadOutcome::NotFound { .. }
 //! ));
 //! # Ok(())
@@ -185,14 +185,14 @@ use crate::WriteOptions;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
     ContentRange, accept_success, condition_header, decimal_header, encoded, failure,
-    parse_content_range, text_header, validate_condition, write_range,
+    finish_with_body, parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::url::{self, Parameter, QueryValue};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
+    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
     ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
     PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
@@ -1097,7 +1097,7 @@ impl<'a> Objects<'a> {
     ///
     /// Pass the same `shape` that you passed to [`Self::encode_get`]. A
     /// failure of a GET is [`GetHeadOutcome::NeedErrorBody`]: read the body
-    /// and pass it to [`Self::accept_error_body`]. A failure of a HEAD is
+    /// and pass it to [`Self::accept_get_error_body`]. A failure of a HEAD is
     /// final, and names no error.
     ///
     /// # Errors
@@ -1153,20 +1153,22 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// Pass the `status` and the `request_id` of that failure, and the body
-    /// that you read. Pass an empty body if you could not read one: the
-    /// outcome is then final with the error unnamed.
-    pub fn accept_error_body<'h>(
+    /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
+    /// [`Failure`] of that outcome, and the body that you
+    /// read. Pass an empty body if you could not read one: the outcome is
+    /// then final with the error unnamed.
+    ///
+    /// S3 reports a failed condition in the head, so this method reads no
+    /// part of `shape`. It takes the same arguments as
+    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+    pub fn accept_get_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: GetShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => GetHeadOutcome::NotFound { kind },
-            status => GetHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the response head of a write and reports what S3 did.
@@ -1214,19 +1216,16 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a write, and reads the
+    /// This is [`Self::accept_get_error_body`] for a write, and reads the
     /// body the same way. A missing bucket is [`PutHeadOutcome::NotFound`].
     pub fn accept_put_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: PutShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> PutHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => PutHeadOutcome::NotFound { kind },
-            status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the response head of a removal and reports what S3 did.
@@ -1264,20 +1263,17 @@ impl<'a> Objects<'a> {
     /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_error_body`] for a removal, and reads the
+    /// This is [`Self::accept_get_error_body`] for a removal, and reads the
     /// body the same way. A 404 names a missing bucket, or a missing object
     /// under an `If-Match` condition.
     pub fn accept_delete_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        shape: DeleteShape,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => DeleteHeadOutcome::NotFound { kind },
-            status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        let _ = shape;
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Writes the signed request head for one page of `list` into `buf`.
@@ -1371,19 +1367,14 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a listing, and reads the body
-    /// the same way. A missing bucket is [`ListHeadOutcome::NotFound`].
+    /// This is [`Self::accept_get_error_body`] for a listing, and reads the
+    /// body the same way. A missing bucket is [`ListHeadOutcome::NotFound`].
     pub fn accept_list_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> ListHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => ListHeadOutcome::NotFound { kind },
-            status => ListHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads a page out of the response body of a listing.

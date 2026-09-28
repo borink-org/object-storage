@@ -38,15 +38,13 @@ pub(crate) fn ready<'a, V, S>(
     Ok((open(session)?, convert(shape.ok_or(UNKNOWN)?)?))
 }
 
-// What every finishing call needs: the failure was passed, and its status and
-// request identifier are the values the outcome carried.
+// What every finishing call needs: the failure was passed, and it is the one
+// the outcome carried.
 pub(crate) fn finishing<'a>(
     session: Option<[&'a [u8]; 3]>,
-    failure: Option<(u16, Option<&'a [u8]>)>,
-) -> proto::Result<(Blobs<'a>, u16, Option<&'a [u8]>)> {
-    let blobs = open(session)?;
-    let (status, request_id) = failure.ok_or(UNKNOWN)?;
-    Ok((blobs, status, request_id))
+    failure: Option<proto::Failure<'a>>,
+) -> proto::Result<(Blobs<'a>, proto::Failure<'a>)> {
+    Ok((open(session)?, failure.ok_or(UNKNOWN)?))
 }
 
 // A finishing call whose outcome also depends on the plan: the shape was
@@ -55,11 +53,10 @@ pub(crate) fn finishing_with<'a, V, S>(
     session: Option<[&'a [u8]; 3]>,
     shape: Option<&V>,
     convert: impl FnOnce(&V) -> proto::Result<S>,
-    failure: Option<(u16, Option<&'a [u8]>)>,
-) -> proto::Result<(Blobs<'a>, S, u16, Option<&'a [u8]>)> {
+    failure: Option<proto::Failure<'a>>,
+) -> proto::Result<(Blobs<'a>, S, proto::Failure<'a>)> {
     let (blobs, shape) = ready(session, shape, convert)?;
-    let (status, request_id) = failure.ok_or(UNKNOWN)?;
-    Ok((blobs, shape, status, request_id))
+    Ok((blobs, shape, failure.ok_or(UNKNOWN)?))
 }
 
 // The bytes as text, or `error` if they are not.

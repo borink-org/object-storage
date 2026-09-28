@@ -96,12 +96,9 @@ fn read_object(
     let head_outcome =
         crate_step!(blobs.accept_get_head(get_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        GetHeadOutcome::NeedErrorBody(failure) => blobs.accept_error_body(
-            get_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        GetHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -220,12 +217,9 @@ fn write_object(
     let head_outcome =
         crate_step!(blobs.accept_put_head(put_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        PutHeadOutcome::NeedErrorBody(failure) => blobs.accept_put_error_body(
-            put_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        PutHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -287,12 +281,9 @@ fn delete_object(
     let head_outcome =
         crate_step!(blobs.accept_delete_head(delete_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        DeleteHeadOutcome::NeedErrorBody(failure) => blobs.accept_delete_error_body(
-            delete_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        DeleteHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -375,7 +366,7 @@ impl PageSource for BlobPages<'_> {
         let head_outcome = page_step!(blobs.accept_list_head(exchange.response_head()));
         let outcome = match head_outcome {
             ListHeadOutcome::NeedErrorBody(failure) => {
-                blobs.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
+                blobs.accept_list_error_body(failure, &exchange.body)
             }
             outcome => outcome,
         };
@@ -455,7 +446,7 @@ fn stage_block(
     let head_outcome = crate_step!(blobs.accept_stage_block_head(exchange.response_head()));
     let outcome = match head_outcome {
         StageBlockHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_stage_block_error_body(failure.status, failure.request_id, &exchange.body)
+            blobs.accept_stage_block_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -530,12 +521,9 @@ fn commit_blocks(
     let head_outcome =
         crate_step!(blobs.accept_commit_blocks_head(commit_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        CommitBlocksHeadOutcome::NeedErrorBody(failure) => blobs.accept_commit_blocks_error_body(
-            commit_plan.shape(),
-            failure.status,
-            failure.request_id,
-            &exchange.body,
-        ),
+        CommitBlocksHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_commit_blocks_error_body(commit_plan.shape(), failure, &exchange.body)
+        }
         outcome => outcome,
     };
 
@@ -587,7 +575,7 @@ fn list_blocks(
     let head_outcome = crate_step!(blobs.accept_list_blocks_head(exchange.response_head()));
     let outcome = match head_outcome {
         ListBlocksHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_list_blocks_error_body(failure.status, failure.request_id, &exchange.body)
+            blobs.accept_list_blocks_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };

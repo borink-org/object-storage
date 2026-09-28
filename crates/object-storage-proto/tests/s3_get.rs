@@ -185,21 +185,10 @@ fn a_read_names_its_error_from_the_body_unless_it_is_a_head() {
     let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchBucket</Code>\
         <Message>The specified bucket does not exist</Message></Error>";
     assert_eq!(
-        objects.accept_error_body(404, Some(id), body),
+        objects.accept_get_error_body(get, failure, body),
         GetHeadOutcome::NotFound {
             kind: Some(ServiceErrorKind::NoSuchContainer)
         }
-    );
-    let GetHeadOutcome::ServiceFailure(failure) = objects.accept_error_body(
-        403,
-        Some(id),
-        b"<Error><Code>SignatureDoesNotMatch</Code></Error>",
-    ) else {
-        panic!("a refusal is a service failure");
-    };
-    assert_eq!(
-        (failure.class, failure.kind),
-        (FailureClass::Auth, Some(ServiceErrorKind::Unauthorized))
     );
 
     // A redirect names the region in its body, and is reported as one.

@@ -201,9 +201,9 @@
 //! # Reading a failure
 //!
 //! A `NeedErrorBody` outcome carries a [`Failure`] whose `request_id`
-//! borrows the head. Copy what you need out of it, read the body, and call
-//! the `accept_*_error_body` method of the same operation. That method
-//! returns the same outcome type again, with the error that the body named.
+//! borrows the head. Read the body, and pass it with the failure to the
+//! `accept_*_error_body` method of the same operation. That method returns
+//! the same outcome type again, with the error that the body named.
 //!
 //! Every outcome type is `#[non_exhaustive]`. Treat a variant that your
 //! `match` does not name as a failure of the service, and report the status.

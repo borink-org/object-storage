@@ -84,7 +84,7 @@ fn read_object(
         crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         GetHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -199,7 +199,7 @@ fn write_object(
         crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         PutHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_put_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -255,7 +255,7 @@ fn delete_object(
         crate_step!(objects.accept_delete_head(delete_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_delete_error_body(failure.status, failure.request_id, &exchange.body)
+            objects.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -294,7 +294,7 @@ impl PageSource for ObjectPages<'_> {
         let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
         let outcome = match head_outcome {
             ListHeadOutcome::NeedErrorBody(failure) => {
-                objects.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
+                objects.accept_list_error_body(failure, &exchange.body)
             }
             outcome => outcome,
         };

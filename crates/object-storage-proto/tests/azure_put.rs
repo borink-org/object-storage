@@ -301,21 +301,11 @@ fn a_412_is_a_failed_condition_only_when_azure_names_one() {
     };
     let body = b"<Error><Code>ConditionNotMet</Code></Error>";
     assert_eq!(
-        blobs.accept_put_error_body(
-            conditional(ConditionKind::IfMatch),
-            failure.status,
-            failure.request_id,
-            body
-        ),
+        blobs.accept_put_error_body(conditional(ConditionKind::IfMatch), failure, body),
         PutHeadOutcome::PreconditionFailed
     );
     assert!(matches!(
-        blobs.accept_put_error_body(
-            PutShape::default(),
-            failure.status,
-            failure.request_id,
-            body
-        ),
+        blobs.accept_put_error_body(PutShape::default(), failure, body),
         PutHeadOutcome::ServiceFailure(_)
     ));
 
@@ -365,8 +355,7 @@ fn a_write_to_a_missing_container_reports_the_container() {
     assert_eq!(
         blobs.accept_put_error_body(
             PutShape::default(),
-            failure.status,
-            failure.request_id,
+            failure,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
         PutHeadOutcome::NotFound {
@@ -374,7 +363,7 @@ fn a_write_to_a_missing_container_reports_the_container() {
         }
     );
     assert_eq!(
-        blobs.accept_put_error_body(PutShape::default(), failure.status, failure.request_id, b""),
+        blobs.accept_put_error_body(PutShape::default(), failure, b""),
         PutHeadOutcome::NotFound { kind: None }
     );
 }
@@ -391,8 +380,7 @@ fn a_refused_write_carries_the_category_and_the_request_id() {
     assert_eq!(
         blobs.accept_put_error_body(
             PutShape::default(),
-            failure.status,
-            failure.request_id,
+            failure,
             b"<Error><Code>ServerBusy</Code></Error>"
         ),
         PutHeadOutcome::ServiceFailure(Failure {

@@ -205,9 +205,9 @@ impl FailureClass {
 /// A response head that reports a failure.
 ///
 /// The three head-reading methods return this in the two outcomes that carry a
-/// failure. Its fields are public, so you can store one and hand the parts
-/// back to
-/// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body) later.
+/// failure. Pass it back to the `accept_*_error_body` method of the same
+/// operation, such as
+/// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure<'h> {
     /// The HTTP status code.
@@ -285,9 +285,8 @@ pub enum GetHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
-    /// [`Blobs::accept_error_body`](crate::Blobs::accept_error_body). That
+    /// This outcome is not final. Pass this failure and the response body to
+    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body). That
     /// call returns the final outcome. If you cannot read the body, pass an
     /// empty one and the error stays unnamed.
     ///
@@ -333,8 +332,7 @@ pub enum PutHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
@@ -373,8 +371,7 @@ pub enum DeleteHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
@@ -417,8 +414,7 @@ pub enum ListHeadOutcome<'h> {
     },
     /// The head reports a failure but names no error.
     ///
-    /// This outcome is not final. Read the response body and pass it, with the
-    /// status and the request identifier of this failure, to
+    /// This outcome is not final. Pass this failure and the response body to
     /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.

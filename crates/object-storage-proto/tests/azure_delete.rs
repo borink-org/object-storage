@@ -165,8 +165,7 @@ fn a_412_is_a_failed_condition_only_when_azure_names_one() {
     assert_eq!(
         blobs.accept_delete_error_body(
             conditional(ConditionKind::IfMatch),
-            failure.status,
-            failure.request_id,
+            failure,
             b"<Error><Code>ConditionNotMet</Code></Error>"
         ),
         DeleteHeadOutcome::PreconditionFailed
@@ -195,8 +194,7 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
     assert_eq!(
         blobs.accept_delete_error_body(
             DeleteShape::default(),
-            failure.status,
-            failure.request_id,
+            failure,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
         DeleteHeadOutcome::NotFound {

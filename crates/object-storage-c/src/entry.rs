@@ -332,7 +332,7 @@ pub unsafe extern "C" fn borink_finish_get_error_body(
         )
     };
     finishing_with(session, shape, get_shape, failure)
-        .map(|(blobs, shape, status, id)| blobs.accept_error_body(shape, status, id, body))
+        .map(|(blobs, shape, failure)| blobs.accept_get_error_body(shape, failure, body))
         .map_or_else(invalid, |outcome| get_outcome(&outcome))
 }
 
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn borink_finish_put_error_body(
         )
     };
     finishing_with(session, shape, put_shape, failure)
-        .map(|(blobs, shape, status, id)| blobs.accept_put_error_body(shape, status, id, body))
+        .map(|(blobs, shape, failure)| blobs.accept_put_error_body(shape, failure, body))
         .map_or_else(invalid, |outcome| put_outcome(&outcome))
 }
 
@@ -392,7 +392,7 @@ pub unsafe extern "C" fn borink_finish_delete_error_body(
         )
     };
     finishing_with(session, shape, delete_shape, failure)
-        .map(|(blobs, shape, status, id)| blobs.accept_delete_error_body(shape, status, id, body))
+        .map(|(blobs, shape, failure)| blobs.accept_delete_error_body(shape, failure, body))
         .map_or_else(invalid, |outcome| delete_outcome(&outcome))
 }
 
@@ -498,7 +498,7 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
         )
     };
     finishing(session, failure)
-        .map(|(blobs, status, id)| blobs.accept_list_error_body(status, id, body))
+        .map(|(blobs, failure)| blobs.accept_list_error_body(failure, body))
         .map_or_else(invalid, |outcome| list_outcome(&outcome))
 }
 

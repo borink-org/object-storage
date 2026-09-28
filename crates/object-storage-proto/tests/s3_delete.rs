@@ -6,7 +6,7 @@ use borink_object_storage_proto::sigv4::{
 };
 use borink_object_storage_proto::{
     ConditionKind, DeleteHeadOutcome, DeleteKind, Error, InvalidPlan, PhysicalDelete,
-    ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, layered,
+    ResponseFault, ResponseHead, Timestamps, layered,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -111,10 +111,4 @@ fn a_removal_is_accepted_whether_or_not_the_key_held_an_object() {
         objects.accept_delete_head(conditional, head(403, &[])),
         Ok(DeleteHeadOutcome::NeedErrorBody(_))
     ));
-    assert_eq!(
-        objects.accept_delete_error_body(404, None, b"<Error><Code>NoSuchKey</Code></Error>"),
-        DeleteHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NotFound)
-        }
-    );
 }

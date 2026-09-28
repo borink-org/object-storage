@@ -5,19 +5,19 @@
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
 use crate::common::{
     ContentRange, accept_success, capacity_error, decimal_header, encoded, failure,
-    parse_content_range, push_condition, text_header, trim_ascii, valid_header, validate_condition,
-    write_range,
+    finish_with_body, parse_content_range, push_condition, text_header, trim_ascii, valid_header,
+    validate_condition, write_range,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::{self, Parameter, QueryValue};
 use crate::{
     Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind, DeleteHeadOutcome,
-    DeleteKind, DeleteShape, Error, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
-    ListBlocksHeadOutcome, ListEntry, ListHeadOutcome, ListInclude, Listing, MetadataPair, Method,
-    ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PropertySet,
-    PropertyValues, PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result,
-    ServiceErrorKind, StageBlockHeadOutcome, Timestamps, TransactionalChecksum, WireRequest,
-    WriteOptions,
+    DeleteKind, DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan,
+    InvalidPlan, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome, ListInclude, Listing,
+    MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
+    PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape, RequestedRange,
+    ResponseFault, ResponseHead, Result, ServiceErrorKind, StageBlockHeadOutcome, Timestamps,
+    TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -641,18 +641,17 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a missing error code with the response body.
+    /// Finishes a [`StageBlockHeadOutcome::NeedErrorBody`] with the response
+    /// body.
+    ///
+    /// Pass the [`Failure`] of that outcome and the body
+    /// that you read.
     pub fn accept_stage_block_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> StageBlockHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => StageBlockHeadOutcome::NotFound { kind },
-            status => StageBlockHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the head that answers a commit.
@@ -702,24 +701,22 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a missing error code with the response body.
+    /// Finishes a [`CommitBlocksHeadOutcome::NeedErrorBody`] with the
+    /// response body.
+    ///
+    /// Pass the `shape` of the commit, the [`Failure`] of
+    /// that outcome and the body that you read.
     pub fn accept_commit_blocks_error_body<'h>(
         &self,
         shape: CommitBlocksShape,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> CommitBlocksHeadOutcome<'h> {
         let kind = body_kind(body);
-        match status {
-            412 if shape.condition != ConditionKind::None
-                && kind == Some(ServiceErrorKind::Precondition) =>
-            {
-                CommitBlocksHeadOutcome::PreconditionFailed
-            }
-            404 => CommitBlocksHeadOutcome::NotFound { kind },
-            status => CommitBlocksHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+            return CommitBlocksHeadOutcome::PreconditionFailed;
         }
+        finish_with_body(failure, kind)
     }
 
     /// Reads the head that answers a block listing.
@@ -762,18 +759,17 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a missing error code with the response body.
+    /// Finishes a [`ListBlocksHeadOutcome::NeedErrorBody`] with the response
+    /// body.
+    ///
+    /// Pass the [`Failure`] of that outcome and the body
+    /// that you read.
     pub fn accept_list_blocks_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> ListBlocksHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => ListBlocksHeadOutcome::NotFound { kind },
-            status => ListBlocksHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Creates a client from a container and a bearer token.
@@ -1030,33 +1026,30 @@ impl<'a> Blobs<'a> {
     /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
     ///
     /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
-    /// `status` and the `request_id` of that [`Failure`](crate::Failure), and
-    /// the body that you read. The body names
-    /// the error, exactly as the `x-ms-error-code` header would have. Pass an
-    /// empty body if you could not read one: the outcome is then final with
-    /// the error unnamed.
+    /// [`Failure`] of that outcome, and the body that you
+    /// read. The body names the error, exactly as the `x-ms-error-code`
+    /// header would have. Pass an empty body if you could not read one: the
+    /// outcome is then final with the error unnamed.
     ///
     /// To tell a body that your read limit cut short from a body that names an
     /// error this crate does not recognize, call [`classify_error`] instead.
-    pub fn accept_error_body<'h>(
+    pub fn accept_get_error_body<'h>(
         &self,
         shape: GetShape,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
         let kind = body_kind(body);
-        match status {
-            412 if shape.condition == ConditionKind::IfMatch
-                && kind == Some(ServiceErrorKind::Precondition) =>
-            {
-                GetHeadOutcome::PreconditionFailed
-            }
-            404 => GetHeadOutcome::NotFound { kind },
-            // The body's code refines the category too, exactly as the
-            // header's would have.
-            status => GetHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        // A read fails `If-None-Match` with 304, so only `If-Match` fails
+        // with 412.
+        if names_failed_condition(
+            failure.status,
+            shape.condition == ConditionKind::IfMatch,
+            kind,
+        ) {
+            return GetHeadOutcome::PreconditionFailed;
         }
+        finish_with_body(failure, kind)
     }
 
     /// Writes the request head for `delete` into `buf`.
@@ -1144,25 +1137,19 @@ impl<'a> Blobs<'a> {
 
     /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a removal, and reads the body
-    /// the same way.
+    /// This is [`Self::accept_get_error_body`] for a removal, and reads the
+    /// body the same way.
     pub fn accept_delete_error_body<'h>(
         &self,
         shape: DeleteShape,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
         let kind = body_kind(body);
-        match status {
-            412 if shape.condition != ConditionKind::None
-                && kind == Some(ServiceErrorKind::Precondition) =>
-            {
-                DeleteHeadOutcome::PreconditionFailed
-            }
-            404 => DeleteHeadOutcome::NotFound { kind },
-            status => DeleteHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+            return DeleteHeadOutcome::PreconditionFailed;
         }
+        finish_with_body(failure, kind)
     }
 
     /// Reads the response head of a write and reports what Azure did.
@@ -1227,25 +1214,19 @@ impl<'a> Blobs<'a> {
 
     /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a write, and reads the body the
-    /// same way.
+    /// This is [`Self::accept_get_error_body`] for a write, and reads the
+    /// body the same way.
     pub fn accept_put_error_body<'h>(
         &self,
         shape: PutShape,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> PutHeadOutcome<'h> {
         let kind = body_kind(body);
-        match status {
-            412 if shape.condition != ConditionKind::None
-                && kind == Some(ServiceErrorKind::Precondition) =>
-            {
-                PutHeadOutcome::PreconditionFailed
-            }
-            404 => PutHeadOutcome::NotFound { kind },
-            status => PutHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
+        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+            return PutHeadOutcome::PreconditionFailed;
         }
+        finish_with_body(failure, kind)
     }
 
     /// Writes the request head for one page of `list` into `buf`.
@@ -1339,19 +1320,14 @@ impl<'a> Blobs<'a> {
 
     /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_error_body`] for a listing, and reads the body
-    /// the same way.
+    /// This is [`Self::accept_get_error_body`] for a listing, and reads the
+    /// body the same way.
     pub fn accept_list_error_body<'h>(
         &self,
-        status: u16,
-        request_id: Option<&'h [u8]>,
+        failure: Failure<'h>,
         body: &[u8],
     ) -> ListHeadOutcome<'h> {
-        let kind = body_kind(body);
-        match status {
-            404 => ListHeadOutcome::NotFound { kind },
-            status => ListHeadOutcome::ServiceFailure(failure(status, kind, request_id)),
-        }
+        finish_with_body(failure, body_kind(body))
     }
 
     /// Reads a page out of the response body of a listing.
@@ -1530,6 +1506,13 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
         | b"BlockListTooLong" => ServiceErrorKind::InvalidUpload,
         _ => return None,
     })
+}
+
+// Whether a 412 is the plan's failed condition: the plan carried one, and
+// Azure names the failure. Azure also answers 412 for other reasons, such as
+// `LeaseIdMissing` on a leased blob.
+fn names_failed_condition(status: u16, carried: bool, kind: Option<ServiceErrorKind>) -> bool {
+    status == 412 && carried && kind == Some(ServiceErrorKind::Precondition)
 }
 
 // The error that a failed response body names, if it names one this crate

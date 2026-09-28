@@ -130,10 +130,9 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
         panic!("unexpected outcome: {unnamed:?}");
     };
     assert_eq!(
-        blobs().accept_error_body(
+        blobs().accept_get_error_body(
             conditional(ConditionKind::IfMatch),
-            failure.status,
-            failure.request_id,
+            failure,
             b"<Error><Code>ConditionNotMet</Code></Error>"
         ),
         GetHeadOutcome::PreconditionFailed
@@ -381,10 +380,9 @@ fn the_error_body_names_an_error_the_head_left_out() {
     let blobs = blobs();
     let missing = need_error_body(&blobs, 404);
     assert_eq!(
-        blobs.accept_error_body(
+        blobs.accept_get_error_body(
             GetShape::default(),
-            missing.status,
-            missing.request_id,
+            missing,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
         GetHeadOutcome::NotFound {
@@ -396,10 +394,9 @@ fn the_error_body_names_an_error_the_head_left_out() {
     // header would have.
     let refused = need_error_body(&blobs, 400);
     assert!(matches!(
-        blobs.accept_error_body(
+        blobs.accept_get_error_body(
             GetShape::default(),
-            refused.status,
-            refused.request_id,
+            refused,
             b"<Error><Code>ServerBusy</Code></Error>"
         ),
         GetHeadOutcome::ServiceFailure(Failure {
@@ -412,7 +409,7 @@ fn the_error_body_names_an_error_the_head_left_out() {
     // A host that could read no body still gets a final outcome, with the
     // error unnamed.
     assert_eq!(
-        blobs.accept_error_body(GetShape::default(), missing.status, missing.request_id, b""),
+        blobs.accept_get_error_body(GetShape::default(), missing, b""),
         GetHeadOutcome::NotFound { kind: None }
     );
 
