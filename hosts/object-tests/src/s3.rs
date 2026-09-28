@@ -311,8 +311,12 @@ impl PageSource for ObjectPages<'_> {
         }
 
         let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
-        // The storage class and the owner are read in the same pass as the page.
-        let wanted = PropertySet::of(&[ObjectProperty::StorageClass, ObjectProperty::Owner]);
+        // These properties are read in the same pass as the page.
+        let wanted = PropertySet::of(&[
+            ObjectProperty::StorageClass,
+            ObjectProperty::ChecksumAlgorithm,
+            ObjectProperty::Owner,
+        ]);
         let listing = page_step!(objects.fill_listing_with(
             &mut exchange.body,
             &mut slots,
@@ -320,6 +324,7 @@ impl PageSource for ObjectPages<'_> {
             |entry, values| ObjectWithProperties {
                 entry,
                 storage_class: values.get(ObjectProperty::StorageClass),
+                checksum_algorithm: values.get(ObjectProperty::ChecksumAlgorithm),
                 owner: values.get(ObjectProperty::Owner),
             }
         ));
@@ -332,6 +337,7 @@ impl PageSource for ObjectPages<'_> {
 struct ObjectWithProperties<'b> {
     entry: ListEntry<'b>,
     storage_class: Option<&'b [u8]>,
+    checksum_algorithm: Option<&'b [u8]>,
     owner: Option<&'b [u8]>,
 }
 
@@ -357,6 +363,9 @@ fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
     }
     if let Some(storage_class) = listed.storage_class {
         value["storage_class"] = json!(decoded_listing_text(storage_class));
+    }
+    if let Some(algorithm) = listed.checksum_algorithm {
+        value["checksum_algorithm"] = json!(decoded_listing_text(algorithm));
     }
     // The owner holds its ID as an element of its own.
     if let Some((_, id)) = listed
