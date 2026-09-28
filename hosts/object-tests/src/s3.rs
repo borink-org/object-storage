@@ -6,7 +6,8 @@
 //! `AWS_SECRET_ACCESS_KEY` and, if set, `AWS_SESSION_TOKEN`.
 
 use crate::listing::{
-    Listed, ListedPage, PageRead, decoded_listing_text, entry_slots, list_all_keys, list_page,
+    Listed, ListedPage, PageRead, PageSource, decoded_listing_text, entry_slots, list_all_keys,
+    list_page,
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
@@ -270,56 +271,60 @@ fn delete_object(
     })
 }
 
-/// Requests one page and reads it, or returns the result to report instead.
-fn read_page(
-    context: &AdapterContext,
-    objects: &Objects<'_>,
-    list_plan: &PhysicalList<'_>,
-) -> PageRead {
-    let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
-        layered::s3::list_requirements(objects, list_plan, &now)
-    ));
-    let request =
-        page_step!(objects.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
-    let mut exchange = match send_request(context, &request) {
-        Ok(exchange) => exchange,
-        Err(error) => return Ok(Err(transport_failure(&error))),
-    };
+/// The pages of one bucket's listings, read with an `Objects` client.
+struct ObjectPages<'a> {
+    context: &'a AdapterContext,
+    objects: &'a Objects<'a>,
+}
 
-    let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
-    let outcome = match head_outcome {
-        ListHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
+impl PageSource for ObjectPages<'_> {
+    fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
+        let (context, objects) = (self.context, self.objects);
+        let now = current_timestamps();
+        let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
+            layered::s3::list_requirements(objects, list_plan, &now)
+        ));
+        let request =
+            page_step!(objects.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
+        let mut exchange = match send_request(context, &request) {
+            Ok(exchange) => exchange,
+            Err(error) => return Ok(Err(transport_failure(&error))),
+        };
+
+        let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
+        let outcome = match head_outcome {
+            ListHeadOutcome::NeedErrorBody(failure) => {
+                objects.accept_list_error_body(failure.status, failure.request_id, &exchange.body)
+            }
+            outcome => outcome,
+        };
+        let failed_status = match outcome {
+            ListHeadOutcome::Page { .. } => None,
+            ListHeadOutcome::NotFound { .. } => Some(404),
+            ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
+                Some(failure.status)
+            }
+            _ => Some(exchange.status),
+        };
+        if let Some(status) = failed_status {
+            return Ok(Err(error_result(&exchange, status)));
         }
-        outcome => outcome,
-    };
-    let failed_status = match outcome {
-        ListHeadOutcome::Page { .. } => None,
-        ListHeadOutcome::NotFound { .. } => Some(404),
-        ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
-            Some(failure.status)
-        }
-        _ => Some(exchange.status),
-    };
-    if let Some(status) = failed_status {
-        return Ok(Err(error_result(&exchange, status)));
+
+        let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+        // The storage class and the owner are read in the same pass as the page.
+        let wanted = PropertySet::of(&[ObjectProperty::StorageClass, ObjectProperty::Owner]);
+        let listing = page_step!(objects.fill_listing_with(
+            &mut exchange.body,
+            &mut slots,
+            wanted,
+            |entry, values| ObjectWithProperties {
+                entry,
+                storage_class: values.get(ObjectProperty::StorageClass),
+                owner: values.get(ObjectProperty::Owner),
+            }
+        ));
+        Ok(Ok(ListedPage::read(&slots, listing)))
     }
-
-    let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
-    // The storage class and the owner are read in the same pass as the page.
-    let wanted = PropertySet::of(&[ObjectProperty::StorageClass, ObjectProperty::Owner]);
-    let listing = page_step!(objects.fill_listing_with(
-        &mut exchange.body,
-        &mut slots,
-        wanted,
-        |entry, values| ObjectWithProperties {
-            entry,
-            storage_class: values.get(ObjectProperty::StorageClass),
-            owner: values.get(ObjectProperty::Owner),
-        }
-    ));
-    Ok(Ok(ListedPage::read(&slots, listing, listed_entry_value)))
 }
 
 /// A listed object, with the properties that the page was read for.
@@ -333,6 +338,10 @@ struct ObjectWithProperties<'b> {
 impl Listed for ObjectWithProperties<'_> {
     fn entry(&self) -> &ListEntry<'_> {
         &self.entry
+    }
+
+    fn value(&self) -> Value {
+        listed_entry_value(self)
     }
 }
 
@@ -660,13 +669,17 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         .with_checksum(MD5_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
+    let pages = ObjectPages {
+        context: &context,
+        objects: &objects,
+    };
     match operation {
         "get" => read_object(&context, &objects, call, GetKind::Bytes),
         "head" => read_object(&context, &objects, call, GetKind::Head),
         "put" => write_object(&context, &objects, call),
         "delete" => delete_object(&context, &objects, call),
-        "list" => list_all_keys(call, |plan| read_page(&context, &objects, plan)),
-        "list_page" => list_page(call, |plan| read_page(&context, &objects, plan)),
+        "list" => list_all_keys(call, &pages),
+        "list_page" => list_page(call, &pages),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }

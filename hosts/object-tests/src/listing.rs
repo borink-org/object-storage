@@ -1,7 +1,7 @@
 //! What a listing call shares between the providers: the plan it asks for,
 //! the page a provider reads, and the result it reports. Each provider reads
-//! one page with its own client, and passes that read to [`list_page`] or
-//! [`list_all_keys`].
+//! one page with its own client, as a [`PageSource`], and passes that source
+//! to [`list_page`] or [`list_all_keys`].
 
 use crate::{AdapterError, optional_text, successful_result, unsupported_by_crate};
 use borink_object_storage_proto::{
@@ -16,32 +16,31 @@ pub(crate) struct ListedPage {
     next_marker: Option<String>,
 }
 
-/// An entry that a fill wrote: a [`ListEntry`], or one with the values of
-/// properties read in the same pass.
+/// An entry that a provider's fill wrote, with whatever it read beside the
+/// [`ListEntry`] in the same pass.
 pub(crate) trait Listed {
     fn entry(&self) -> &ListEntry<'_>;
+
+    /// The object as the result reports it.
+    fn value(&self) -> Value;
 }
 
-impl Listed for ListEntry<'_> {
-    fn entry(&self) -> &ListEntry<'_> {
-        self
-    }
+/// Reads one page of a listing with one provider's client.
+pub(crate) trait PageSource {
+    /// Requests the page that `plan` names and reads it, or returns the
+    /// result to report instead.
+    fn read_page(&self, plan: &PhysicalList<'_>) -> PageRead;
 }
 
 impl ListedPage {
-    /// Splits the entries that a fill wrote into objects and groups of keys,
-    /// writing each object with `object_value`.
-    pub(crate) fn read<T: Listed>(
-        slots: &[T],
-        listing: Listing<'_>,
-        object_value: impl Fn(&T) -> Value,
-    ) -> Self {
+    /// Splits the entries that a fill wrote into objects and groups of keys.
+    pub(crate) fn read<T: Listed>(slots: &[T], listing: Listing<'_>) -> Self {
         let mut entries = Vec::new();
         let mut prefixes = Vec::new();
         for slot in &slots[..listing.filled] {
             match slot.entry().kind {
                 EntryKind::Prefix => prefixes.push(slot.entry().key.to_owned()),
-                _ => entries.push(object_value(slot)),
+                _ => entries.push(slot.value()),
             }
         }
         Self {
@@ -82,11 +81,8 @@ fn requested_page_size(call: &Value) -> Option<u32> {
         .map(|page_size| page_size as u32)
 }
 
-/// Performs a `list_page` call with `read_page`.
-pub(crate) fn list_page(
-    call: &Value,
-    read_page: impl FnOnce(&PhysicalList<'_>) -> PageRead,
-) -> Result<Value, AdapterError> {
+/// Performs a `list_page` call, reading the page from `source`.
+pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value, AdapterError> {
     let mut include = ListInclude::default();
     for include_option in call
         .get("include")
@@ -116,7 +112,7 @@ pub(crate) fn list_page(
         max_results: requested_page_size(call),
         include,
     };
-    Ok(match read_page(&list_plan)? {
+    Ok(match source.read_page(&list_plan)? {
         Ok(page) => successful_result(json!({
             "entries": page.entries,
             "prefixes": page.prefixes,
@@ -126,11 +122,8 @@ pub(crate) fn list_page(
     })
 }
 
-/// Performs a `list` call with `read_page`, one page after another.
-pub(crate) fn list_all_keys(
-    call: &Value,
-    mut read_page: impl FnMut(&PhysicalList<'_>) -> PageRead,
-) -> Result<Value, AdapterError> {
+/// Performs a `list` call, reading one page after another from `source`.
+pub(crate) fn list_all_keys(call: &Value, source: &impl PageSource) -> Result<Value, AdapterError> {
     let prefix = optional_text(call, "prefix").unwrap_or_default();
     let mut keys = Vec::new();
     let mut marker: Option<String> = None;
@@ -140,7 +133,7 @@ pub(crate) fn list_all_keys(
             max_results: requested_page_size(call),
             ..PhysicalList::new(prefix)
         };
-        let page = match read_page(&list_plan)? {
+        let page = match source.read_page(&list_plan)? {
             Ok(page) => page,
             Err(result) => return Ok(result),
         };
