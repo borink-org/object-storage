@@ -1,5 +1,6 @@
 // Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, in
-// one pass as the Azure reader does.
+// one pass as the Azure reader does. `read_session` at the end reads the
+// answer to an S3 Express CreateSession.
 //
 // Each object is a `Contents` child of the root, with its properties beside
 // its key. Each group of keys is a `CommonPrefixes` child that holds one
@@ -17,7 +18,8 @@ use super::page::{
     open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use super::scan::{Child, Scan, Span, fault, trim};
-use crate::s3::{ObjectProperty, PropertySet, PropertyValues};
+use crate::layered::iso8601_ms;
+use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
 use crate::{EntryKind, ListEntry, Listing, Result};
 
@@ -350,4 +352,66 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
         raw,
     };
     Ok((entry, decoded))
+}
+
+// Reads a `CreateSessionResult`, the answer to an S3 Express CreateSession.
+// Its `Credentials` child holds the key, the secret, the token and when they
+// expire. Nothing is taken off the body until the root is closed, so every
+// span indexes the whole document, and each value is decoded in place after.
+pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
+    check_body(body)?;
+    let mut scan = Scan::new(body);
+    open_root_element(&mut scan, b"CreateSessionResult")?;
+    let mut fields: [Option<(Span, u8)>; 4] = [None; 4];
+    let mut seen_credentials = false;
+    loop {
+        match scan.child(b"CreateSessionResult")? {
+            Child::Close => break,
+            Child::Open(tag) if scan.text(tag.name) == b"Credentials" && !tag.empty => {
+                if seen_credentials {
+                    return fault();
+                }
+                seen_credentials = true;
+                loop {
+                    match scan.child(b"Credentials")? {
+                        Child::Close => break,
+                        Child::Open(tag) => {
+                            let slot = match scan.text(tag.name) {
+                                b"AccessKeyId" => 0,
+                                b"SecretAccessKey" => 1,
+                                b"SessionToken" => 2,
+                                b"Expiration" => 3,
+                                _ => {
+                                    scan.skip(tag)?;
+                                    continue;
+                                }
+                            };
+                            set_once(&mut fields[slot], scan.value(tag)?)?;
+                        }
+                    }
+                }
+            }
+            Child::Open(tag) => scan.skip(tag)?,
+        }
+    }
+    let chunk = scan.take();
+    let mut spans = [None; 4];
+    for (span, field) in spans.iter_mut().zip(fields) {
+        *span = decode_value_in_place(chunk, field)?;
+    }
+    let [Some(key_id), Some(secret), Some(token), expiration] = spans else {
+        return fault();
+    };
+    Ok(Session {
+        key_id: text(&chunk[key_id.0..key_id.1])?,
+        secret: text(&chunk[secret.0..secret.1])?,
+        token: text(&chunk[token.0..token.1])?,
+        expires_at: match expiration {
+            Some((start, end)) => match iso8601_ms(text(&chunk[start..end])?) {
+                Some(millis) => Some(millis / 1000),
+                None => return fault(),
+            },
+            None => None,
+        },
+    })
 }

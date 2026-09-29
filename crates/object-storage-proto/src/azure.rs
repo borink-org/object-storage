@@ -174,6 +174,7 @@ impl InvalidPlan {
             (Self::MaxResults, _) => (400, "OutOfRangeQueryParameterValue"),
             (Self::KeyTooLong, AzureNamespace::Flat) => (400, "OutOfRangeInput"),
             (Self::UrlTooLong, _) => (414, ""),
+            (Self::Delimiter, AzureNamespace::Hierarchical) => (400, "DelimiterIsInvalidForHNS"),
             _ => return None,
         };
         Some(AzureRejection { status, code })
@@ -1270,8 +1271,8 @@ impl<'a> Blobs<'a> {
             Some(("comp", QueryValue::Literal("list"))),
             (!list.prefix.is_empty())
                 .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.delimited
-                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            list.delimiter
+                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
             list.marker
                 .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
             list.max_results
@@ -1403,10 +1404,6 @@ impl<'a> Blobs<'a> {
         crate::xml::azure::fill_listing(body, into, wanted, build)
     }
 }
-
-// Both providers group keys at `/` and at nothing else, so the delimiter is
-// what a plan turns on rather than a byte that it carries.
-const DELIMITER: &[u8] = b"/";
 
 /// The most bytes that Azure stages in one `Put Block` request.
 ///
@@ -1760,7 +1757,7 @@ fn write_block_list<I: AsRef<str>>(
     out.push(COMMIT_CLOSE);
 }
 
-fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<()> {
+fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
     // No rule of `validate_key` applies to a prefix. It is written into the
     // query, where nothing resolves a `..` and nothing drops a trailing dot,
     // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
@@ -1772,6 +1769,14 @@ fn validate_list(list: &PhysicalList<'_>, _namespace: AzureNamespace) -> Result<
     }
     if list.max_results == Some(0) {
         return Err(InvalidPlan::MaxResults.into());
+    }
+    // A flat account groups names at any text. A hierarchical one groups
+    // them at `/` alone, and answers any other with 400
+    // `DelimiterIsInvalidForHNS`.
+    if let Some(delimiter) = list.delimiter
+        && (delimiter.is_empty() || (namespace == AzureNamespace::Hierarchical && delimiter != "/"))
+    {
+        return Err(InvalidPlan::Delimiter.into());
     }
     // Azure starts a listing only at its own marker, and lists no owner.
     if list.start_after.is_some() || list.include.contains(ListInclude::OWNER) {

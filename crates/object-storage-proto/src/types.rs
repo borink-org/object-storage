@@ -682,7 +682,10 @@ impl EntryKind {
 /// next page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListShape {
-    /// Whether the listing groups keys at each `/` after the prefix.
+    /// Whether the listing groups keys at a delimiter after the prefix.
+    ///
+    /// The shape holds no delimiter text. [`PhysicalList::from_shape`] plans
+    /// `/`.
     pub delimited: bool,
     /// The most entries that one page reports.
     pub max_results: Option<u32>,
@@ -722,12 +725,13 @@ pub struct PhysicalList<'h> {
     /// this text, which need not be a key. An empty text is the same as
     /// [`None`]. A later page starts at its marker instead.
     pub start_after: Option<&'h str>,
-    /// Whether to group the keys at each `/` after the prefix.
+    /// The text at which to group the keys after the prefix, usually `/`, or
+    /// [`None`] to report every key.
     ///
     /// A delimited listing reports each group once, as an
     /// [`EntryKind::Prefix`] entry, instead of reporting every key in it. This
     /// is how a listing walks one level of a hierarchy at a time.
-    pub delimited: bool,
+    pub delimiter: Option<&'h str>,
     /// The most entries that this page reports.
     ///
     /// [`None`] asks for the service's maximum, which the service also
@@ -747,7 +751,7 @@ impl<'h> PhysicalList<'h> {
             prefix,
             marker: None,
             start_after: None,
-            delimited: false,
+            delimiter: None,
             max_results: None,
             include: ListInclude::default(),
         }
@@ -756,13 +760,14 @@ impl<'h> PhysicalList<'h> {
     /// Creates a plan from a stored shape and the text that it needs.
     ///
     /// The plan has no [`Self::start_after`], which a later page does not
-    /// need.
+    /// need. A delimited shape groups the keys at `/`: set
+    /// [`Self::delimiter`] on the plan for another delimiter.
     pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,
             marker,
             start_after: None,
-            delimited: shape.delimited,
+            delimiter: shape.delimited.then_some("/"),
             max_results: shape.max_results,
             include: shape.include,
         }
@@ -771,7 +776,7 @@ impl<'h> PhysicalList<'h> {
     /// Returns the part of this plan that holds no borrows.
     pub fn shape(&self) -> ListShape {
         ListShape {
-            delimited: self.delimited,
+            delimited: self.delimiter.is_some(),
             max_results: self.max_results,
             include: self.include,
         }

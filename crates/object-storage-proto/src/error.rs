@@ -71,7 +71,8 @@ pub enum InvalidPlan {
     BlockId = 8,
     /// The block list holds more entries than the service accepts.
     Blocks = 9,
-    /// The listing prefix is not UTF-8.
+    /// The listing prefix is not UTF-8, or the service lists at no such
+    /// prefix.
     Prefix = 10,
     /// The listing marker is empty, or it is not UTF-8.
     ///
@@ -136,6 +137,9 @@ pub enum InvalidPlan {
     ///
     /// See [`s3::MAX_METADATA_LEN`](crate::s3::MAX_METADATA_LEN).
     MetadataTooLarge = 25,
+    /// The listing delimiter is empty, or the service groups keys at no such
+    /// delimiter.
+    Delimiter = 26,
 }
 
 impl InvalidPlan {
@@ -170,6 +174,7 @@ impl InvalidPlan {
             Self::MetadataDuplicate => "two metadata pairs have the same name",
             Self::Checksum => "the checksum is not the base64 of the bytes it names",
             Self::MetadataTooLarge => "the metadata is larger than the service accepts",
+            Self::Delimiter => "the listing delimiter is invalid",
         }
     }
 
@@ -203,6 +208,7 @@ impl InvalidPlan {
             23 => Self::MetadataDuplicate,
             24 => Self::Checksum,
             25 => Self::MetadataTooLarge,
+            26 => Self::Delimiter,
             _ => return None,
         })
     }

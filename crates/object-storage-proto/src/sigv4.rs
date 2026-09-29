@@ -168,6 +168,9 @@ pub struct Credentials<'a> {
     key_id: &'a str,
     secret: &'a str,
     session_token: Option<&'a str>,
+    // The header that carries the token: `x-amz-security-token`, or
+    // `x-amz-s3session-token` for the credentials of an S3 Express session.
+    token_header: &'static str,
     wipe: fn(&mut [u8]),
 }
 
@@ -201,6 +204,7 @@ impl<'a> Credentials<'a> {
             key_id,
             secret,
             session_token: None,
+            token_header: "x-amz-security-token",
             wipe,
         })
     }
@@ -233,7 +237,18 @@ impl<'a> Credentials<'a> {
 
     // The header that carries the session token.
     pub(crate) fn token_header(&self) -> &'static str {
-        "x-amz-security-token"
+        self.token_header
+    }
+
+    // These credentials, sending their token as the token of an S3 Express
+    // session rather than of temporary credentials.
+    pub(crate) fn for_s3_session(mut self) -> Self {
+        self.token_header = "x-amz-s3session-token";
+        self
+    }
+
+    pub(crate) fn wipe(&self) -> fn(&mut [u8]) {
+        self.wipe
     }
 }
 

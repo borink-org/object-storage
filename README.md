@@ -47,6 +47,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 ### S3-only
 
 - SigV4 handling for every request (crypto implementations again through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto) or user-provided)
+- Directory buckets (S3 Express One Zone), including CreateSession and signing with the session's credentials
 
 ## What makes `borink-object-storage` unique?
 

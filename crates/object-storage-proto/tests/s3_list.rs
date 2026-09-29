@@ -46,7 +46,7 @@ fn the_query_is_written_in_its_canonical_form() {
     let list = PhysicalList {
         marker: Some("1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM="),
         start_after: Some("a b/c"),
-        delimited: true,
+        delimiter: Some("/"),
         max_results: Some(2),
         include: ListInclude::OWNER,
         ..PhysicalList::new("a b/é+")

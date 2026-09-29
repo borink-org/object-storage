@@ -108,7 +108,7 @@ fn every_query_parameter_is_written_in_one_order() {
     );
     assert_eq!(
         url(&PhysicalList {
-            delimited: true,
+            delimiter: Some("/"),
             ..PhysicalList::new("")
         }),
         format!("{base}&delimiter=%2F")
