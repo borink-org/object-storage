@@ -54,6 +54,8 @@ pub enum Method {
     Put = 3,
     /// `DELETE`.
     Delete = 4,
+    /// `POST`. S3 creates and commits an upload with it.
+    Post = 5,
 }
 
 impl Method {
@@ -64,6 +66,7 @@ impl Method {
             Self::Head => "HEAD",
             Self::Put => "PUT",
             Self::Delete => "DELETE",
+            Self::Post => "POST",
         }
     }
 }

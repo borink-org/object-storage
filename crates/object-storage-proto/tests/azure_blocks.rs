@@ -1,13 +1,13 @@
 //! Azure block operations: staging, committing and listing blocks.
 
 use borink_object_storage_proto::azure::{
-    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState,
-    PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock,
+    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, PhysicalListBlocks,
+    PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
-    Blobs, CommitBlocksHeadOutcome, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
-    ListBlocksHeadOutcome, MetadataPair, Method, Payload, ResponseHead, StageBlockHeadOutcome,
-    Timestamps, WriteOptions, layered,
+    Blobs, CommitHeadOutcome, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
+    ListPartsHeadOutcome, MetadataPair, Method, Payload, PhysicalCommit, ResponseHead,
+    StageHeadOutcome, Timestamps, WriteOptions, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -65,7 +65,7 @@ fn a_stage_names_the_block_in_the_query_and_states_the_length() {
 fn the_block_id_is_checked_locally_before_any_byte_is_written() {
     let refused = |id: &str| {
         assert!(
-            matches!(stage_id(id), Err(Error::InvalidPlan(InvalidPlan::BlockId))),
+            matches!(stage_id(id), Err(Error::InvalidPlan(InvalidPlan::PartId))),
             "{id:?}"
         );
     };
@@ -90,7 +90,7 @@ fn the_block_id_is_checked_locally_before_any_byte_is_written() {
             Payload::Slice(b""),
             &now(),
         ),
-        Err(Error::InvalidPlan(InvalidPlan::BlockId))
+        Err(Error::InvalidPlan(InvalidPlan::PartId))
     ));
 }
 
@@ -110,7 +110,7 @@ fn a_commit_writes_the_selectors_in_order_after_the_head() {
             source: BlockSource::Latest,
         },
     ];
-    let plan = PhysicalCommitBlocks::new("object");
+    let plan = PhysicalCommit::new("object");
     let size = layered::commit_blocks_requirements(&blobs(), &plan, &blocks, &now()).unwrap();
     let mut buf = vec![0; size.bytes];
     let mut headers = vec![HeaderSpan::default(); size.headers];
@@ -166,7 +166,7 @@ fn a_commit_from_an_iterator_writes_the_same_request_as_a_slice() {
         id,
         source: BlockSource::Uncommitted,
     });
-    let plan = PhysicalCommitBlocks::new("object");
+    let plan = PhysicalCommit::new("object");
     let mut from_slice = [0; 1024];
     let mut from_iter = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
@@ -194,7 +194,7 @@ fn an_empty_commit_writes_an_empty_list() {
         .encode_commit_blocks(
             &mut buf,
             &mut headers,
-            &PhysicalCommitBlocks::new("object"),
+            &PhysicalCommit::new("object"),
             &[],
             &now(),
         )
@@ -208,7 +208,7 @@ fn an_empty_commit_writes_an_empty_list() {
 #[test]
 fn a_commit_refuses_more_blocks_than_the_service_takes() {
     let one = ("YQ==", BlockSource::Latest);
-    let plan = PhysicalCommitBlocks::new("object");
+    let plan = PhysicalCommit::new("object");
     assert!(matches!(
         blobs().encode_commit_blocks_from_iter(
             &mut [],
@@ -217,7 +217,7 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
             core::iter::repeat_n(one, 50_001),
             &now(),
         ),
-        Err(Error::InvalidPlan(InvalidPlan::Blocks))
+        Err(Error::InvalidPlan(InvalidPlan::Parts))
     ));
     assert!(matches!(
         blobs().encode_commit_blocks_from_iter(
@@ -233,10 +233,10 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
 
 #[test]
 fn a_conditional_commit_sends_the_condition_and_keeps_it_in_the_shape() {
-    let plan = PhysicalCommitBlocks {
+    let plan = PhysicalCommit {
         condition: ConditionKind::IfNoneMatch,
         condition_value: Some(b"*"),
-        ..PhysicalCommitBlocks::new("object")
+        ..PhysicalCommit::new("object")
     };
     let mut buf = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
@@ -263,7 +263,7 @@ fn a_staged_block_has_no_entity_tag_but_keeps_its_checksum() {
     assert_eq!(head.content_crc64, Some(b"AAAAAAAAAAA=".as_slice()));
     assert_eq!(
         blobs().accept_stage_block_head(head.common).unwrap(),
-        StageBlockHeadOutcome::Staged
+        StageHeadOutcome::Staged { e_tag: None }
     );
 }
 
@@ -272,28 +272,28 @@ fn a_lease_refusal_is_not_a_failed_condition() {
     let lease =
         ResponseHead::from_headers(412, [("x-ms-error-code", b"LeaseIdMissing".as_slice())]);
     match blobs().accept_stage_block_head(lease).unwrap() {
-        StageBlockHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
+        StageHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
         other => panic!("{other:?}"),
     }
-    let unconditional = PhysicalCommitBlocks::new("object").shape();
+    let unconditional = PhysicalCommit::new("object").shape();
     match blobs()
         .accept_commit_blocks_head(unconditional, lease)
         .unwrap()
     {
-        CommitBlocksHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
+        CommitHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
         other => panic!("{other:?}"),
     }
-    let conditional = PhysicalCommitBlocks {
+    let conditional = PhysicalCommit {
         condition: ConditionKind::IfMatch,
         condition_value: Some(b"\"tag\""),
-        ..PhysicalCommitBlocks::new("object")
+        ..PhysicalCommit::new("object")
     }
     .shape();
     match blobs()
         .accept_commit_blocks_head(conditional, lease)
         .unwrap()
     {
-        CommitBlocksHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
+        CommitHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
         other => panic!("{other:?}"),
     }
     let stale =
@@ -302,7 +302,7 @@ fn a_lease_refusal_is_not_a_failed_condition() {
         blobs()
             .accept_commit_blocks_head(conditional, stale)
             .unwrap(),
-        CommitBlocksHeadOutcome::PreconditionFailed
+        CommitHeadOutcome::PreconditionFailed
     );
     // The same code without a condition in the plan is not a failed condition
     // of ours either.
@@ -310,7 +310,7 @@ fn a_lease_refusal_is_not_a_failed_condition() {
         blobs()
             .accept_commit_blocks_head(unconditional, stale)
             .unwrap(),
-        CommitBlocksHeadOutcome::ServiceFailure(_)
+        CommitHeadOutcome::ServiceFailure(_)
     ));
 }
 
@@ -334,7 +334,7 @@ fn a_block_list_read_sizes_its_body() {
     ));
     let head = ResponseHead::from_headers(200, [("Content-Length", b"86".as_slice())]);
     match blobs().accept_list_blocks_head(head).unwrap() {
-        ListBlocksHeadOutcome::Blocks { expected_len, .. } => assert_eq!(expected_len, Some(86)),
+        ListPartsHeadOutcome::Parts { expected_len, .. } => assert_eq!(expected_len, Some(86)),
         other => panic!("{other:?}"),
     }
 }
@@ -396,7 +396,7 @@ fn a_listed_id_is_passed_back_unchanged() {
         .encode_commit_blocks(
             &mut buf,
             &mut headers,
-            &PhysicalCommitBlocks::new("object"),
+            &PhysicalCommit::new("object"),
             &[block],
             &now(),
         )
@@ -439,13 +439,13 @@ fn a_commit_carries_the_metadata_and_states_the_object_md5_as_a_property() {
         name: "source_mtime",
         value: "1787400000",
     }];
-    let plan = PhysicalCommitBlocks {
+    let plan = PhysicalCommit {
         metadata: &metadata,
         options: WriteOptions {
             declared_md5: Some("rL0Y20zC+Fzt72VPzMSk2A=="),
             ..Default::default()
         },
-        ..PhysicalCommitBlocks::new("object")
+        ..PhysicalCommit::new("object")
     };
     let blocks = [BlockRef {
         id: "AAAAAA==",
@@ -472,9 +472,9 @@ fn a_commit_refuses_metadata_that_a_request_cannot_carry() {
         name: "source mtime",
         value: "1",
     }];
-    let plan = PhysicalCommitBlocks {
+    let plan = PhysicalCommit {
         metadata: &metadata,
-        ..PhysicalCommitBlocks::new("object")
+        ..PhysicalCommit::new("object")
     };
     assert_eq!(
         blobs()

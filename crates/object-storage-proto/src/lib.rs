@@ -32,11 +32,16 @@
 //! content with a [`Payload`], which names a length whether or not you hold
 //! the bytes, so a write can stream from a file or a socket.
 //!
-//! An object can also be written in blocks. Stage each block with
-//! [`azure::PhysicalStageBlock`], publish an ordered list of them with
-//! [`azure::PhysicalCommitBlocks`], and read what is staged with
-//! [`azure::PhysicalListBlocks`]. These are Azure's own operations, under the
-//! [`azure`] module.
+//! An object can also be written in parts. Stage each part, publish an
+//! ordered list of them with a [`PhysicalCommit`], and read what is staged
+//! with a listing of the parts. Both services take the same commit plan and
+//! answer with the same [`StageHeadOutcome`], [`CommitHeadOutcome`] and
+//! [`ListPartsHeadOutcome`]. They name a part differently. On Azure a part
+//! is a block, named by an ID that you choose: see
+//! [`azure::PhysicalStageBlock`] and [`azure::PhysicalListBlocks`]. On S3 a
+//! part belongs to an upload that S3 creates, and is named by its number and
+//! the entity tag that S3 returned for it: see
+//! [Uploads in parts](s3#uploads-in-parts).
 //!
 //! The same plans drive S3. Create an [`s3::Objects`]
 //! client and call its `encode_*`, `accept_*` and `fill_listing` methods, as
@@ -142,7 +147,8 @@
 //! # Metadata and checksums
 //!
 //! To store metadata pairs with an object, put them in
-//! [`PhysicalPut::metadata`] or [`azure::PhysicalCommitBlocks::metadata`].
+//! [`PhysicalPut::metadata`], [`PhysicalCommit::metadata`] or, on S3,
+//! [`s3::PhysicalCreateUpload::metadata`].
 //! To read them back from a listing, put [`ListInclude::METADATA`] in the
 //! plan and call [`ListEntry::metadata`] on each entry. To read them back
 //! from a head read, pass each response header name to
@@ -181,8 +187,10 @@
 //! [`PhysicalGet::key`]. On Azure, the numeric limits are
 //! [`azure::MAX_URL_LEN`] for the whole URL, [`azure::MAX_PUT_LEN`] for one
 //! write, and [`azure::MAX_STAGE_LEN`] for one block. On S3, they are
-//! [`s3::MAX_KEY_LEN`] for a key, [`s3::MAX_PUT_LEN`] for one write, and
-//! [`s3::MAX_METADATA_LEN`] for the metadata of a write to AWS.
+//! [`s3::MAX_KEY_LEN`] for a key, [`s3::MAX_PUT_LEN`] for one write,
+//! [`s3::MAX_PART_LEN`] for one part, [`s3::MAX_PARTS`] for the parts of an
+//! upload to AWS, and [`s3::MAX_METADATA_LEN`] for the metadata of a write
+//! to AWS.
 //!
 //! # Host requirements
 //!
@@ -215,6 +223,7 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
+mod azure_blocks;
 pub mod checksum;
 mod common;
 mod encoding;
@@ -225,6 +234,7 @@ pub mod layered;
 mod outcome;
 mod request;
 pub mod s3;
+mod s3_parts;
 pub mod sigv4;
 mod time;
 mod types;
@@ -236,15 +246,15 @@ pub use checksum::{ChecksumKind, ChecksumProvider, ChecksumState, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, CommitBlocksHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
-    GetHeadOutcome, ListBlocksHeadOutcome, ListHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
-    ServiceErrorKind, StageBlockHeadOutcome,
+    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
+    GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
+    ServiceErrorKind, StageHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, CommitBlocksShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
-    GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalList, PhysicalPut, Properties, PropertySet, PropertyValues, PutShape,
-    RangeForm, RequestedRange, TransactionalChecksum, WriteOptions,
+    BlobProperty, CommitShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
+    GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair, Payload, PhysicalCommit,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Properties, PropertySet,
+    PropertyValues, PutShape, RangeForm, RequestedRange, TransactionalChecksum, WriteOptions,
 };

@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::{FailureClass, ServiceErrorKind};
+
 /// The result type that this crate returns.
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -56,9 +58,10 @@ pub enum InvalidPlan {
     Condition = 5,
     /// The content is longer than the service writes in one request.
     ///
-    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN) and
-    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN) state the
-    /// limits.
+    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN),
+    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN),
+    /// [`s3::MAX_PUT_LEN`](crate::s3::MAX_PUT_LEN) and
+    /// [`s3::MAX_PART_LEN`](crate::s3::MAX_PART_LEN) state the limits.
     PayloadTooLarge = 6,
     /// A field of the plan holds a discriminant that this crate does not
     /// define.
@@ -67,10 +70,19 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    /// The block ID is empty, is not base64, or decodes to over 64 bytes.
-    BlockId = 8,
-    /// The block list holds more entries than the service accepts.
-    Blocks = 9,
+    /// A part is named in a way the service cannot take.
+    ///
+    /// On Azure, the block ID is empty, is not base64, or decodes to over 64
+    /// bytes. On S3, the part number is outside 1 to
+    /// [`s3::MAX_PARTS`](crate::s3::MAX_PARTS), or the entity tag of a part
+    /// is not one header value.
+    PartId = 8,
+    /// The list of parts to commit is longer than the service takes, or S3
+    /// would refuse its order.
+    ///
+    /// An S3 commit names at least one part, and names them in ascending
+    /// order of their numbers, each once.
+    Parts = 9,
     /// The listing prefix is not UTF-8, or the service lists at no such
     /// prefix.
     Prefix = 10,
@@ -140,6 +152,11 @@ pub enum InvalidPlan {
     /// The listing delimiter is empty, or the service groups keys at no such
     /// delimiter.
     Delimiter = 26,
+    /// The ID of an S3 upload is empty.
+    ///
+    /// Pass the ID that [`s3::Objects::read_upload_id`](crate::s3::Objects::read_upload_id)
+    /// read, unchanged.
+    UploadId = 27,
 }
 
 impl InvalidPlan {
@@ -161,8 +178,8 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
-            Self::BlockId => "invalid block identifier",
-            Self::Blocks => "invalid block list",
+            Self::PartId => "invalid part identifier",
+            Self::Parts => "invalid list of parts",
             Self::Option => "invalid provider option",
             Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
@@ -175,6 +192,7 @@ impl InvalidPlan {
             Self::Checksum => "the checksum is not the base64 of the bytes it names",
             Self::MetadataTooLarge => "the metadata is larger than the service accepts",
             Self::Delimiter => "the listing delimiter is invalid",
+            Self::UploadId => "the upload ID is empty",
         }
     }
 
@@ -190,8 +208,8 @@ impl InvalidPlan {
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
-            8 => Self::BlockId,
-            9 => Self::Blocks,
+            8 => Self::PartId,
+            9 => Self::Parts,
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,
@@ -209,6 +227,7 @@ impl InvalidPlan {
             24 => Self::Checksum,
             25 => Self::MetadataTooLarge,
             26 => Self::Delimiter,
+            27 => Self::UploadId,
             _ => return None,
         })
     }
@@ -330,6 +349,8 @@ pub enum ErrorCode {
     InvalidCredentials = 7,
     /// [`Error::InvalidRegion`].
     InvalidRegion = 8,
+    /// [`Error::Service`].
+    Service = 9,
 }
 
 impl ErrorCode {
@@ -344,6 +365,7 @@ impl ErrorCode {
             Self::Response => "the response cannot be read",
             Self::InvalidCredentials => "invalid credentials",
             Self::InvalidRegion => "invalid region",
+            Self::Service => "the service answered a success status with an error",
         }
     }
 
@@ -360,6 +382,7 @@ impl ErrorCode {
             6 => Self::Response,
             7 => Self::InvalidCredentials,
             8 => Self::InvalidRegion,
+            9 => Self::Service,
             _ => return None,
         })
     }
@@ -378,6 +401,10 @@ impl fmt::Display for ErrorCode {
 /// failed precondition, is not an error here. It is a
 /// [`GetHeadOutcome`](crate::GetHeadOutcome) or a
 /// [`PutHeadOutcome`](crate::PutHeadOutcome) instead.
+///
+/// The one exception is [`Error::Service`]: an error that the service writes
+/// into the body of a success. The methods that read such a body return a
+/// result, not an outcome, so they report the error here.
 ///
 /// No value of this type carries text. [`Error::code`] and [`Error::detail`]
 /// describe every value as two numbers, so you can carry an error across a
@@ -407,6 +434,15 @@ pub enum Error {
     InvalidCredentials,
     /// The region name is not usable in a signed request.
     InvalidRegion,
+    /// The service answered with a success status, and with an error
+    /// document as the body.
+    ///
+    /// S3 can do this for any request whose answer has a body, and the
+    /// methods that read such a body return this error. The value is the
+    /// error that the document names, or [`None`] if this crate does not know
+    /// its code. [`Self::class`] says whether a retry can help. The request
+    /// ID is in the response head.
+    Service(Option<ServiceErrorKind>),
 }
 
 impl fmt::Display for Error {
@@ -420,6 +456,8 @@ impl fmt::Display for Error {
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
             Self::Response(fault) => fmt::Display::fmt(fault, f),
+            Self::Service(Some(kind)) => write!(f, "{}: {}", self.code().as_str(), kind.as_str()),
+            Self::Service(None) => f.write_str(self.code().as_str()),
         }
     }
 }
@@ -464,18 +502,34 @@ impl Error {
             Self::Response(_) => ErrorCode::Response,
             Self::InvalidCredentials => ErrorCode::InvalidCredentials,
             Self::InvalidRegion => ErrorCode::InvalidRegion,
+            Self::Service(_) => ErrorCode::Service,
         }
     }
 
     /// Returns the discriminant of the value inside, or 0 if there is none.
     ///
     /// [`Self::Capacity`] carries two sizes rather than a discriminant, and
-    /// returns 0 here. Read those sizes with [`Self::capacity`].
+    /// returns 0 here. Read those sizes with [`Self::capacity`]. A
+    /// [`Self::Service`] that names no known error returns 0 too.
     pub const fn detail(&self) -> u16 {
         match *self {
             Self::InvalidPlan(plan) => plan as u16,
             Self::Response(fault) => fault as u16,
+            Self::Service(Some(kind)) => kind as u16,
             _ => 0,
+        }
+    }
+
+    /// Returns the category of the service's failure, if this is
+    /// [`Self::Service`].
+    ///
+    /// A [`FailureClass::Server`] or [`FailureClass::Throttled`] failure can
+    /// succeed if you send the request again. The category is the one that
+    /// a [`Failure`](crate::Failure) with the same error carries.
+    pub fn class(&self) -> Option<FailureClass> {
+        match *self {
+            Self::Service(kind) => Some(crate::common::failure_class(200, kind)),
+            _ => None,
         }
     }
 
@@ -507,6 +561,11 @@ impl Error {
                 Some(fault) => Self::Response(fault),
                 None => return None,
             },
+            ErrorCode::Service if detail == 0 => Self::Service(None),
+            ErrorCode::Service => match ServiceErrorKind::from_discriminant(detail) {
+                Some(kind) => Self::Service(Some(kind)),
+                None => return None,
+            },
             ErrorCode::Capacity => return None,
         })
     }
@@ -516,7 +575,7 @@ impl Error {
 mod tests {
     extern crate std;
 
-    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault};
+    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, ServiceErrorKind};
     use std::string::ToString;
     use std::vec::Vec;
 
@@ -537,6 +596,7 @@ mod tests {
             Error::InvalidToken,
             Error::InvalidCredentials,
             Error::InvalidRegion,
+            Error::Service(None),
         ];
         for detail in 1..=u16::MAX {
             if let Some(plan) = InvalidPlan::from_discriminant(detail) {
@@ -544,6 +604,9 @@ mod tests {
             }
             if let Some(fault) = ResponseFault::from_discriminant(detail) {
                 errors.push(Error::Response(fault));
+            }
+            if let Some(kind) = ServiceErrorKind::from_discriminant(detail) {
+                errors.push(Error::Service(Some(kind)));
             }
         }
         errors

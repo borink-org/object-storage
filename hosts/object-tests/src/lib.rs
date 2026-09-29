@@ -35,13 +35,23 @@ struct HttpExchange {
 
 impl HttpExchange {
     fn response_head(&self) -> ResponseHead<'_> {
-        ResponseHead::from_headers(
-            self.status,
-            self.headers
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_slice())),
-        )
+        head_of(self.status, &self.headers)
     }
+
+    /// Returns the response head, and the body to decode in place, as two
+    /// borrows that the crate can hold at once.
+    fn head_and_body(&mut self) -> (ResponseHead<'_>, &mut [u8]) {
+        (head_of(self.status, &self.headers), &mut self.body)
+    }
+}
+
+fn head_of(status: u16, headers: &[(String, Vec<u8>)]) -> ResponseHead<'_> {
+    ResponseHead::from_headers(
+        status,
+        headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice())),
+    )
 }
 
 struct AdapterContext {
@@ -168,8 +178,12 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "Range" | "UnsupportedRange" | "RangedHead" => "range",
         "Condition" => named_field("if_match", "if_none_match"),
         "PayloadTooLarge" => "body_base64",
-        "BlockId" => named_field("block_id_base64", "blocks"),
-        "Blocks" => "blocks",
+        // An Azure call names a part by its block ID, and an S3 call by its
+        // part number. A commit names its parts in a list.
+        "PartId" if call.get("block_id_base64").is_some() => "block_id_base64",
+        "PartId" if call.get("part_number").is_some() => "part_number",
+        "PartId" | "Parts" => named_field("blocks", "parts"),
+        "UploadId" => "upload_id",
         "Prefix" => "prefix",
         "Delimiter" => "delimiter",
         "Marker" => "continuation_token",
@@ -207,6 +221,13 @@ fn result_for_crate_error(error: CrateError) -> Value {
             }
             result
         }
+        // The service wrote an error into the body of a success.
+        CrateError::Service(_) => json!({
+            "outcome": "error",
+            "status": 200,
+            "kind": error_kind_for_status(200),
+            "reason": error.to_string(),
+        }),
         other => json!({
             "outcome": "error",
             "kind": "other",

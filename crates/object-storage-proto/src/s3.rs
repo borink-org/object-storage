@@ -7,8 +7,7 @@
 //!    crate has providers, and the function that [`Credentials::new`] takes
 //!    to wipe its copy of the secret.
 //! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`], a
-//!    [`PhysicalDelete`] or a [`PhysicalList`], the same plans that an Azure
-//!    client takes.
+//!    [`PhysicalDelete`] or a [`PhysicalList`].
 //! 3. Call [`Objects::encode_get`], [`Objects::encode_put`],
 //!    [`Objects::encode_delete`] or [`Objects::encode_list`] to write the
 //!    signed request head into your buffer, and send the [`WireRequest`]
@@ -170,6 +169,116 @@
 //! # }
 //! ```
 //!
+//! # Uploads in parts
+//!
+//! An object longer than [`MAX_PUT_LEN`], or one that you send as it
+//! arrives, is written in parts:
+//!
+//! 1. Create an upload with [`Objects::encode_create_upload`], and read its
+//!    ID out of the answer with [`Objects::read_upload_id`]. The metadata of
+//!    the object goes into this request.
+//! 2. Stage each part with [`Objects::encode_stage_part`], under a number
+//!    from 1, in any order and at once if you like. Keep the entity tag that
+//!    [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged) carries
+//!    for each. On AWS, every part but the last holds at least
+//!    [`MIN_PART_LEN`] bytes.
+//! 3. Commit the parts with [`Objects::encode_commit_parts`], which takes a
+//!    [`PhysicalCommit`](crate::PhysicalCommit).
+//!    S3 answers with status 200 before it has finished, and writes the
+//!    result into the body, which may still be an error. Read it with
+//!    [`Objects::accept_commit_parts_body`].
+//!
+//! [`Objects::encode_list_parts`] reads the parts that an upload holds, to
+//! resume it. [`Objects::encode_abort_upload`] ends an upload without an
+//! object. An upload that is neither committed nor aborted keeps its parts,
+//! and AWS bills them.
+//!
+//! ```
+//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects, PayloadHash};
+//! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
+//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
+//! # const SHA256: Sha256Provider =
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! use borink_object_storage_proto::s3::{PartRef, PhysicalCreateUpload, PhysicalStagePart};
+//! use borink_object_storage_proto::{
+//!     CommitHeadOutcome, HeaderSpan, Payload, PhysicalCommit, ResponseHead, StageHeadOutcome,
+//!     Timestamps, layered,
+//! };
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let bucket = Bucket::new(
+//! #     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
+//! # )?;
+//! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
+//! # let now = Timestamps::from_unix(1_787_400_000);
+//! # let objects = Objects::new(bucket, credentials, SHA256);
+//! let create = PhysicalCreateUpload::new("large.bin");
+//! let size = layered::s3::create_upload_requirements(&objects, &create, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request = objects.encode_create_upload(&mut buffer, &mut headers, &create, &now)?;
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploads="
+//! );
+//! let mut body = Vec::from(
+//!     b"<InitiateMultipartUploadResult><Bucket>objects</Bucket><Key>large.bin</Key>\
+//!       <UploadId>VXBsb2FkSUQ</UploadId></InitiateMultipartUploadResult>"
+//!         .as_slice(),
+//! );
+//! let upload_id = String::from(objects.read_upload_id(&mut body)?);
+//!
+//! let stage = PhysicalStagePart::new("large.bin", &upload_id, 1);
+//! let part = Payload::Slice(b"the only part");
+//! let hash = PayloadHash::Compute;
+//! let size = layered::s3::stage_part_requirements(&objects, &stage, part, hash, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request = objects.encode_stage_part(&mut buffer, &mut headers, &stage, part, hash, &now)?;
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?partNumber=1&uploadId=VXBsb2FkSUQ"
+//! );
+//! let head = ResponseHead::from_headers(200, [("ETag", b"\"e1\"".as_slice())]);
+//! let StageHeadOutcome::Staged { e_tag: Some(e_tag) } = objects.accept_stage_part_head(head)?
+//! else {
+//!     panic!("S3 staged no part");
+//! };
+//!
+//! let commit = PhysicalCommit::new("large.bin");
+//! let parts = [PartRef { number: 1, e_tag }];
+//! let size = layered::s3::commit_parts_requirements(&objects, &commit, &upload_id, &parts, &now)?;
+//! let mut buffer = vec![0; size.bytes];
+//! let mut headers = vec![HeaderSpan::default(); size.headers];
+//! let request =
+//!     objects.encode_commit_parts(&mut buffer, &mut headers, &commit, &upload_id, &parts, &now)?;
+//! assert_eq!(
+//!     request.payload().bytes(),
+//!     Some(
+//!         b"<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+//!           <Part><PartNumber>1</PartNumber><ETag>\"e1\"</ETag></Part>\
+//!           </CompleteMultipartUpload>"
+//!             .as_slice()
+//!     )
+//! );
+//! let head = ResponseHead::new(200);
+//! let outcome = objects.accept_commit_parts_head(commit.shape(), head)?;
+//! assert!(matches!(outcome, CommitHeadOutcome::NeedResultBody { .. }));
+//! let mut body = Vec::from(
+//!     b"<CompleteMultipartUploadResult><Key>large.bin</Key>\
+//!       <ETag>&quot;c0-1&quot;</ETag></CompleteMultipartUploadResult>"
+//!         .as_slice(),
+//! );
+//! let CommitHeadOutcome::Committed { meta } =
+//!     objects.accept_commit_parts_body(commit.shape(), head, &mut body)?
+//! else {
+//!     panic!("S3 committed no object");
+//! };
+//! assert_eq!(meta.e_tag, Some(b"\"c0-1\"".as_slice()));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Directory buckets
 //!
 //! A bucket of [`Service::AwsDirectory`] is a directory bucket, as in S3
@@ -202,6 +311,12 @@
 //!   metadata value that a general purpose bucket would store other than as
 //!   given, such as one with a line break, is sent as an encoded word rather
 //!   than refused.
+//! - A commit of parts reports most errors under status 200, such as
+//!   `NoSuchUpload` and `PreconditionFailed`.
+//!   [`Objects::accept_commit_parts_body`] reads them as the outcomes that
+//!   a general purpose bucket answers with. A directory bucket refuses a
+//!   commit whose part numbers are not consecutive, such as 1 and 3, with
+//!   `InvalidPartOrder`. The client sends such a commit as given.
 //!
 //! # Content that is not signed
 //!
@@ -213,12 +328,11 @@
 
 use core::cmp::Ordering;
 
-#[cfg(doc)]
-use crate::WriteOptions;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
     ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
-    failure, finish_with_body, parse_content_range, text_header, validate_condition, write_range,
+    failure, finish_with_body, parse_content_range, push_checksum, text_header, validate_checksum,
+    validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
@@ -230,10 +344,32 @@ use crate::{
     ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
     PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
     ResponseHead, Result, ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest,
+    WriteOptions,
+};
+
+pub use crate::s3_parts::{
+    CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
+    PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+
+// The value of `x-amz-content-sha256`: the SHA-256 of the content in
+// lowercase hexadecimal, or `UNSIGNED-PAYLOAD`.
+pub(crate) enum ContentSha256 {
+    Hex([u8; 64]),
+    Unsigned,
+}
+
+impl ContentSha256 {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Hex(hex) => hex,
+            Self::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
+        }
+    }
+}
 
 /// The most bytes that an S3 object key holds.
 ///
@@ -384,7 +520,7 @@ pub struct Bucket<'a> {
     name: &'a str,
     region: &'a str,
     addressing: Addressing,
-    service: Service,
+    pub(crate) service: Service,
 }
 
 impl<'a> Bucket<'a> {
@@ -820,11 +956,11 @@ impl core::fmt::Display for SessionHeadOutcome<'_> {
 /// `now`. It signs the request for that time.
 #[derive(Clone, Copy)]
 pub struct Objects<'a> {
-    bucket: Bucket<'a>,
+    pub(crate) bucket: Bucket<'a>,
     credentials: Credentials<'a>,
-    sha256: Sha256Provider,
+    pub(crate) sha256: Sha256Provider,
     signing_key: Option<SigningKey>,
-    checksums: [Option<ChecksumProvider>; KINDS],
+    pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
 }
 
 impl core::fmt::Debug for Objects<'_> {
@@ -839,19 +975,19 @@ impl core::fmt::Debug for Objects<'_> {
 }
 
 // What the signature of one request covers, beside the client's own values.
-struct Signed<'p> {
-    method: Method,
+pub(crate) struct Signed<'p> {
+    pub(crate) method: Method,
     // The object, or `None` for the bucket itself.
-    key: Option<&'p str>,
+    pub(crate) key: Option<&'p str>,
     // The query, in the order of its names. See `url.rs`.
-    query: &'p [Parameter<'p>],
-    range: RequestedRange,
-    condition: ConditionKind,
-    condition_value: Option<&'p [u8]>,
+    pub(crate) query: &'p [Parameter<'p>],
+    pub(crate) range: RequestedRange,
+    pub(crate) condition: ConditionKind,
+    pub(crate) condition_value: Option<&'p [u8]>,
     // Further signed headers, with lowercase names.
-    headers: &'p [(&'p str, &'p [u8])],
-    metadata: &'p [MetadataPair<'p>],
-    content_sha256: &'p [u8],
+    pub(crate) headers: &'p [(&'p str, &'p [u8])],
+    pub(crate) metadata: &'p [MetadataPair<'p>],
+    pub(crate) content_sha256: &'p [u8],
 }
 
 // Where the value of a signed header comes from.
@@ -919,8 +1055,8 @@ impl<'a> Objects<'a> {
 
     /// Writes the signed request head for `get` into `buf`.
     ///
-    /// A [`GetKind::Head`] plan becomes a HEAD request. Unlike Azure, S3
-    /// serves a [`RequestedRange::Suffix`].
+    /// A [`GetKind::Head`] plan becomes a HEAD request. S3 serves every
+    /// [`RequestedRange`], including a [`RequestedRange::Suffix`].
     ///
     /// # Errors
     ///
@@ -1005,24 +1141,7 @@ impl<'a> Objects<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content, hash, &self.checksums, self.bucket.service)?;
         let dry = buf.is_empty();
-        let hex;
-        let content_sha256 = match hash {
-            PayloadHash::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
-            PayloadHash::Sha256(digest) => {
-                hex = encoding::hex(&digest);
-                hex.as_slice()
-            }
-            PayloadHash::Compute => {
-                // A dry run returns no request, so it does not read the
-                // content. The digest is the same length whatever it is.
-                hex = if dry {
-                    [b'0'; 64]
-                } else {
-                    encoding::hex(&self.sha256.hash(content.bytes().unwrap_or_default()))
-                };
-                hex.as_slice()
-            }
-        };
+        let content_sha256 = self.content_sha256(hash, content, dry);
         let signed = Signed {
             method: Method::Put,
             key: Some(put.key),
@@ -1032,30 +1151,11 @@ impl<'a> Objects<'a> {
             condition: put.condition,
             condition_value: put.condition_value,
             metadata: put.metadata,
-            content_sha256,
+            content_sha256: content_sha256.as_bytes(),
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(content.len()).as_bytes());
-        });
-        match put.options.checksum {
-            Some(TransactionalChecksum::Md5(text)) => {
-                head.header("content-md5", |out| out.push(text.as_bytes()));
-            }
-            Some(TransactionalChecksum::Compute(kind)) => {
-                // Validation refused any other kind, and a kind with no
-                // provider.
-                if let Some(provider) = &self.checksums[kind.slot()] {
-                    let mut sum = provider.start();
-                    sum.update(content.bytes().unwrap_or_default());
-                    let mut into = [0; crate::checksum::BASE64_LEN];
-                    let text = sum.finish().base64(&mut into);
-                    head.header("content-md5", |out| out.push(text.as_bytes()));
-                }
-            }
-            _ => {}
-        }
+        self.push_content(&mut head, content, put.options.checksum);
         encoded(head, Method::Put, content)
     }
 
@@ -1198,7 +1298,11 @@ impl<'a> Objects<'a> {
     /// not a `CreateSessionResult` that holds an access key ID, a secret
     /// access key and a session token, or if its expiration is not an
     /// ISO 8601 time in UTC.
+    ///
+    /// Returns [`Error::Service`] if `body` is an error document, which S3
+    /// can send under status 200.
     pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::read_session(body)
     }
 
@@ -1231,7 +1335,7 @@ impl<'a> Objects<'a> {
 
     // Writes the URL and every signed header. A dry run writes a signature
     // of zeros, which is as long as a real one.
-    fn write_head(
+    pub(crate) fn write_head(
         &self,
         head: &mut HeadWriter<'_>,
         signed: &Signed<'_>,
@@ -1289,6 +1393,41 @@ impl<'a> Objects<'a> {
         self.credentials
             .session_token()
             .map(|token| (self.credentials.token_header(), token))
+    }
+
+    // The text of `x-amz-content-sha256` for `content`. A dry run returns no
+    // request, so it does not read the content: the digest is the same
+    // length whatever it is.
+    pub(crate) fn content_sha256(
+        &self,
+        hash: PayloadHash,
+        content: Payload<'_>,
+        dry: bool,
+    ) -> ContentSha256 {
+        match hash {
+            PayloadHash::Unsigned => ContentSha256::Unsigned,
+            PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
+            PayloadHash::Compute if dry => ContentSha256::Hex([b'0'; 64]),
+            PayloadHash::Compute => ContentSha256::Hex(encoding::hex(
+                &self.sha256.hash(content.bytes().unwrap_or_default()),
+            )),
+        }
+    }
+
+    // The headers that describe the content of a write, after the signed
+    // ones: its length, and its MD5 if the plan carries one.
+    pub(crate) fn push_content(
+        &self,
+        head: &mut HeadWriter<'_>,
+        content: Payload<'_>,
+        checksum: Option<TransactionalChecksum<'_>>,
+    ) {
+        head.header("content-length", |out| {
+            out.push(U64Decimal::new(content.len()).as_bytes());
+        });
+        push_checksum(head, checksum, &self.checksums, |sum| {
+            sum.update(content.bytes().unwrap_or_default());
+        });
     }
 
     fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
@@ -1427,8 +1566,7 @@ impl<'a> Objects<'a> {
     /// then final with the error unnamed.
     ///
     /// S3 reports a failed condition in the head, so this method reads no
-    /// part of `shape`. It takes the same arguments as
-    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+    /// part of `shape`.
     pub fn accept_get_error_body<'h>(
         &self,
         shape: GetShape,
@@ -1651,9 +1789,8 @@ impl<'a> Objects<'a> {
 
     /// Reads a page out of the response body of a listing.
     ///
-    /// This is [`Blobs::fill_listing`](crate::Blobs::fill_listing) for S3,
-    /// with the same rules: reading is destructive, and your array must hold
-    /// the whole page. An array of 1,000 entries holds any page from AWS.
+    /// Reading is destructive, and your array must hold the whole page. An
+    /// array of 1,000 entries holds any page from AWS.
     ///
     /// AWS writes all objects of a page before its groups of keys. An
     /// object's entity tag keeps its quotes. Read its date with
@@ -1669,20 +1806,22 @@ impl<'a> Objects<'a> {
     /// not a ListObjectsV2 page, or if the page contradicts itself. A page
     /// that does not say it URL-encoded its keys is refused if decoding
     /// changes a key.
+    ///
+    /// Returns [`Error::Service`] if `body` is an error document, which S3
+    /// can send under status 200.
     pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
         &self,
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
     }
 
     /// Reads a page the way [`Self::fill_listing`] does, and hands you the
     /// values of the properties in `wanted` as it goes.
     ///
-    /// This is [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with)
-    /// for S3. What `build` returns for each entry is written into your
-    /// array.
+    /// What `build` returns for each entry is written into your array.
     ///
     /// ```
     /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};
@@ -1707,6 +1846,7 @@ impl<'a> Objects<'a> {
         wanted: PropertySet,
         build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
     ) -> Result<Listing<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::fill_listing(body, into, wanted, build)
     }
 }
@@ -1728,14 +1868,31 @@ pub fn classify_error(body: &[u8], truncated: bool) -> Classification {
     }
 }
 
-fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
+pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
     crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+}
+
+// Returns whether `body` is an error document rather than the result of a
+// request. S3 can send one under status 200.
+pub(crate) fn is_error_document(body: &[u8]) -> bool {
+    crate::xml::root_is(body, b"Error")
+}
+
+// Returns the error that `body` names if it is an error document, so that a
+// method that reads a result does not report it as a malformed result.
+pub(crate) fn refuse_error_document(body: &[u8]) -> Result<()> {
+    if is_error_document(body) {
+        return Err(Error::Service(body_kind(body)));
+    }
+    Ok(())
 }
 
 fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     Some(match code {
         b"NoSuchKey" => ServiceErrorKind::NotFound,
         b"NoSuchBucket" => ServiceErrorKind::NoSuchContainer,
+        b"NoSuchUpload" => ServiceErrorKind::NoSuchUpload,
+        b"InvalidPart" | b"InvalidPartOrder" | b"EntityTooSmall" => ServiceErrorKind::InvalidUpload,
         b"PreconditionFailed" => ServiceErrorKind::Precondition,
         b"InvalidRange" => ServiceErrorKind::RangeNotSatisfiable,
         b"SlowDown" | b"RequestLimitExceeded" | b"TooManyRequests" => ServiceErrorKind::Throttled,
@@ -1937,7 +2094,7 @@ fn looks_like_ipv4(name: &str) -> bool {
         })
 }
 
-fn validate_key(key: &str) -> Result<()> {
+pub(crate) fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(InvalidPlan::EmptyKey.into());
     }
@@ -1978,26 +2135,49 @@ fn validate_put(
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
     validate_metadata(put.metadata, service)?;
+    validate_content(&put.options, content, hash, checksums)?;
+    validate_write_condition(put.condition, put.condition_value, service)
+}
+
+// Checks what a write sends beside its content. S3 takes an MD5 of the
+// content and no other checksum, and stores no declared one. A checksum or
+// a SHA-256 that the encoder computes needs the bytes.
+pub(crate) fn validate_content(
+    options: &WriteOptions<'_>,
+    content: Payload<'_>,
+    hash: PayloadHash,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+) -> Result<()> {
     let has_bytes = content.bytes().is_some();
-    match put.options.checksum {
-        None => {}
-        Some(TransactionalChecksum::Md5(text)) => ChecksumKind::Md5.check_base64(text)?,
-        Some(TransactionalChecksum::Compute(ChecksumKind::Md5))
-            if has_bytes && checksums[ChecksumKind::Md5.slot()].is_some() => {}
-        Some(_) => return Err(InvalidPlan::Option.into()),
-    }
-    if put.options.declared_md5.is_some() || (hash == PayloadHash::Compute && !has_bytes) {
+    let md5_or_none = matches!(
+        options.checksum,
+        None | Some(
+            TransactionalChecksum::Md5(_) | TransactionalChecksum::Compute(ChecksumKind::Md5)
+        )
+    );
+    if !md5_or_none
+        || options.declared_md5.is_some()
+        || (hash == PayloadHash::Compute && !has_bytes)
+    {
         return Err(InvalidPlan::Option.into());
     }
-    validate_condition(put.condition, put.condition_value)?;
+    validate_checksum(options.checksum, has_bytes, checksums)
+}
+
+// Checks the condition of a write: a whole object, or a commit of parts.
+pub(crate) fn validate_write_condition(
+    condition: ConditionKind,
+    value: Option<&[u8]>,
+    service: Service,
+) -> Result<()> {
+    validate_condition(condition, value)?;
     // AWS writes on `If-None-Match` only if no object holds the key, and takes
     // no value but `*`.
     let only_star = match service {
         Service::Aws | Service::AwsDirectory => true,
         Service::Compatible => false,
     };
-    if only_star && put.condition == ConditionKind::IfNoneMatch && put.condition_value != Some(b"*")
-    {
+    if only_star && condition == ConditionKind::IfNoneMatch && value != Some(b"*") {
         return Err(InvalidPlan::Condition.into());
     }
     Ok(())
@@ -2050,7 +2230,7 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
 // token. `write_metadata_value` writes the value, and S3 matches a name
 // without case.
-fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
+pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
         if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
             return Err(InvalidPlan::MetadataName.into());

@@ -1,6 +1,7 @@
 // Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, in
-// one pass as the Azure reader does. `read_session` at the end reads the
-// answer to an S3 Express CreateSession.
+// one pass. `read_session` at the end reads the
+// answer to an S3 Express CreateSession. `s3_parts.rs` reads the answers of
+// an upload in parts.
 //
 // Each object is a `Contents` child of the root, with its properties beside
 // its key. Each group of keys is a `CommonPrefixes` child that holds one
@@ -66,7 +67,7 @@ pub(crate) fn fill_listing<'b, E>(
     check_body(body)?;
     let mut scan = Scan::new(body);
     open_root_element(&mut scan, ROOT)?;
-    // As in the Azure reader, the read is compiled once for every entry type.
+    // The read is compiled once for every entry type.
     let room = into.len();
     let mut built = 0;
     let mut sink = |entry: ListEntry<'b>, values: PropertyValues<'_, 'b>| {

@@ -1,5 +1,6 @@
-//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT, DELETE and
-//! listing, and for the SigV4 signatures of the vector suite.
+//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT, DELETE,
+//! listing and uploads in parts, and for the SigV4 signatures of the vector
+//! suite.
 //!
 //! The crate signs with long-lived or temporary credentials. Offline cases
 //! receive placeholder keys, and live cases read `AWS_ACCESS_KEY_ID`,
@@ -18,19 +19,22 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, ObjectProperty, Objects, PayloadHash, PropertySet, Service, Session,
-    SessionHeadOutcome,
+    self, Addressing, Bucket, CreateUploadHeadOutcome, ObjectProperty, Objects, Part, PartRef,
+    PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
+    PropertySet, Service, Session, SessionHeadOutcome,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, Metadata,
-    MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome,
-    RequestedRange, Timestamps, TransactionalChecksum, WriteOptions, layered,
+    CommitHeadOutcome, DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry,
+    ListHeadOutcome, ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, RequestedRange,
+    StageHeadOutcome, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
 
-// AWS reports at most 1,000 entries on one listing page.
+// AWS reports at most 1,000 entries on one listing page, and 1,000 parts on
+// one page of a ListParts.
 const MAX_PAGE_ENTRIES: usize = 1_000;
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
@@ -363,6 +367,299 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         }
         _ => error_result(&exchange, exchange.status),
     })
+}
+
+fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let create_plan = PhysicalCreateUpload::new(key);
+
+    let now = current_timestamps();
+    crate_step!(layered::s3::create_upload_requirements(
+        &client.objects,
+        &create_plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::create_upload_requirements(objects, &create_plan, &now)
+    ));
+    let request = crate_step!(objects.encode_create_upload(
+        &mut request_bytes,
+        &mut header_spans,
+        &create_plan,
+        &now
+    ));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let head_outcome = crate_step!(objects.accept_create_upload_head(exchange.response_head()));
+    let outcome = match head_outcome {
+        CreateUploadHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_create_upload_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        CreateUploadHeadOutcome::Created { .. } => None,
+        CreateUploadHeadOutcome::NotFound { .. } => Some(404),
+        CreateUploadHeadOutcome::NeedErrorBody(failure)
+        | CreateUploadHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(error_result(&exchange, status));
+    }
+
+    let upload_id = crate_step!(objects.read_upload_id(&mut exchange.body));
+    Ok(successful_result(json!({"upload_id": upload_id})))
+}
+
+fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
+    // A number that no `u32` holds is above every limit, as `u32::MAX` is.
+    let number = call
+        .get("part_number")
+        .and_then(Value::as_u64)
+        .ok_or("missing part_number")?;
+    let stage_plan =
+        PhysicalStagePart::new(key, upload_id, u32::try_from(number).unwrap_or(u32::MAX));
+    let body = decode_base64_field(call, "body_base64")?;
+    let payload = Payload::Slice(&body);
+
+    let now = current_timestamps();
+    crate_step!(layered::s3::stage_part_requirements(
+        &client.objects,
+        &stage_plan,
+        payload,
+        PayloadHash::Compute,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) =
+        request_buffers(crate_step!(layered::s3::stage_part_requirements(
+            objects,
+            &stage_plan,
+            payload,
+            PayloadHash::Compute,
+            &now
+        )));
+    let request = crate_step!(objects.encode_stage_part(
+        &mut request_bytes,
+        &mut header_spans,
+        &stage_plan,
+        payload,
+        PayloadHash::Compute,
+        &now
+    ));
+    let exchange = transport_step!(send_request(&client.context, &request));
+
+    let head_outcome = crate_step!(objects.accept_stage_part_head(exchange.response_head()));
+    let outcome = match head_outcome {
+        StageHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_stage_part_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+
+    Ok(match outcome {
+        StageHeadOutcome::Staged { e_tag } => {
+            successful_result(json!({"etag": text_of(e_tag).unwrap_or_default()}))
+        }
+        StageHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
+        StageHeadOutcome::NeedErrorBody(failure) | StageHeadOutcome::ServiceFailure(failure) => {
+            error_result(&exchange, failure.status)
+        }
+        _ => error_result(&exchange, exchange.status),
+    })
+}
+
+fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(unsupported_by_crate(
+            "PhysicalCommit carries one precondition",
+        ));
+    };
+    let mut part_references = Vec::new();
+    for part in call
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let number = part
+            .get("number")
+            .and_then(Value::as_u64)
+            .ok_or("part without number")?;
+        part_references.push(PartRef {
+            number: u32::try_from(number).unwrap_or(u32::MAX),
+            e_tag: optional_text(part, "etag").unwrap_or_default().as_bytes(),
+        });
+    }
+
+    let key = optional_text(call, "key").unwrap_or_default();
+    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
+    let commit_plan = PhysicalCommit {
+        condition,
+        condition_value,
+        ..PhysicalCommit::new(key)
+    };
+
+    let now = current_timestamps();
+    crate_step!(layered::s3::commit_parts_requirements(
+        &client.objects,
+        &commit_plan,
+        upload_id,
+        &part_references,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) =
+        request_buffers(crate_step!(layered::s3::commit_parts_requirements(
+            objects,
+            &commit_plan,
+            upload_id,
+            &part_references,
+            &now
+        )));
+    let request = crate_step!(objects.encode_commit_parts(
+        &mut request_bytes,
+        &mut header_spans,
+        &commit_plan,
+        upload_id,
+        &part_references,
+        &now
+    ));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let shape = commit_plan.shape();
+    let (head, body) = exchange.head_and_body();
+    let outcome = match crate_step!(objects.accept_commit_parts_head(shape, head)) {
+        CommitHeadOutcome::NeedResultBody { .. } => {
+            crate_step!(objects.accept_commit_parts_body(shape, head, body))
+        }
+        CommitHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_commit_parts_error_body(shape, failure, body)
+        }
+        outcome => outcome,
+    };
+
+    // S3 can refuse a commit under status 200, which the result reports.
+    Ok(match outcome {
+        CommitHeadOutcome::Committed { meta } => {
+            let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
+            if let Some(version) = text_of(meta.version) {
+                value["version"] = json!(version);
+            }
+            successful_result(value)
+        }
+        _ => error_result(&exchange, exchange.status),
+    })
+}
+
+fn abort_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
+    let abort_plan = PhysicalAbortUpload::new(key, upload_id);
+
+    let now = current_timestamps();
+    crate_step!(layered::s3::abort_upload_requirements(
+        &client.objects,
+        &abort_plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::abort_upload_requirements(objects, &abort_plan, &now)
+    ));
+    let request = crate_step!(objects.encode_abort_upload(
+        &mut request_bytes,
+        &mut header_spans,
+        &abort_plan,
+        &now
+    ));
+    let exchange = transport_step!(send_request(&client.context, &request));
+
+    let head_outcome = crate_step!(objects.accept_abort_upload_head(exchange.response_head()));
+    let outcome = match head_outcome {
+        DeleteHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_abort_upload_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+
+    Ok(match outcome {
+        DeleteHeadOutcome::Accepted => successful_result(json!({})),
+        DeleteHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
+        DeleteHeadOutcome::NeedErrorBody(failure) | DeleteHeadOutcome::ServiceFailure(failure) => {
+            error_result(&exchange, failure.status)
+        }
+        _ => error_result(&exchange, exchange.status),
+    })
+}
+
+/// Lists every part of an upload, one page after another.
+fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
+
+    let mut listed = Vec::new();
+    let mut marker: Option<String> = None;
+    loop {
+        let list_plan = PhysicalListParts {
+            marker: marker.as_deref(),
+            ..PhysicalListParts::new(key, upload_id)
+        };
+        let now = current_timestamps();
+        crate_step!(layered::s3::list_parts_requirements(
+            &client.objects,
+            &list_plan,
+            &now
+        ));
+        let objects = &signer_step!(client);
+        let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+            layered::s3::list_parts_requirements(objects, &list_plan, &now)
+        ));
+        let request = crate_step!(objects.encode_list_parts(
+            &mut request_bytes,
+            &mut header_spans,
+            &list_plan,
+            &now
+        ));
+        let mut exchange = transport_step!(send_request(&client.context, &request));
+
+        let head_outcome = crate_step!(objects.accept_list_parts_head(exchange.response_head()));
+        let outcome = match head_outcome {
+            ListPartsHeadOutcome::NeedErrorBody(failure) => {
+                objects.accept_list_parts_error_body(failure, &exchange.body)
+            }
+            outcome => outcome,
+        };
+        let failed_status = match outcome {
+            ListPartsHeadOutcome::Parts { .. } => None,
+            ListPartsHeadOutcome::NotFound { .. } => Some(404),
+            ListPartsHeadOutcome::NeedErrorBody(failure)
+            | ListPartsHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+            _ => Some(exchange.status),
+        };
+        if let Some(status) = failed_status {
+            return Ok(error_result(&exchange, status));
+        }
+
+        let mut parts = vec![Part::default(); MAX_PAGE_ENTRIES];
+        let page = crate_step!(objects.fill_parts(&mut exchange.body, &mut parts));
+        listed.extend(
+            parts[..page.filled]
+                .iter()
+                .map(|part| json!({"number": part.number, "size": part.size, "etag": part.e_tag})),
+        );
+        // A page that names itself as the next one would never end.
+        match page.next_marker {
+            Some(next) if marker.as_deref() != Some(next) => marker = Some(next.to_owned()),
+            Some(_) => return Err("ListParts named the same page twice".into()),
+            None => break,
+        }
+    }
+    Ok(successful_result(json!({"parts": listed})))
 }
 
 /// The pages of the bucket's listings.
@@ -704,6 +1001,11 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "page_size",
             "fetch_owner",
         ],
+        "s3.create_multipart" => &["key"],
+        "s3.upload_part" => &["key", "upload_id", "part_number", "body_base64"],
+        "s3.complete_multipart" => &["key", "upload_id", "parts", "if_match", "if_none_match"],
+        "s3.abort_multipart" => &["key", "upload_id"],
+        "s3.list_parts" => &["key", "upload_id"],
         _ => &[],
     }
 }
@@ -819,6 +1121,11 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "delete" => delete_object(&client, call),
         "list" => list_all_keys(call, &client),
         "list_page" => list_page(call, &client),
+        "s3.create_multipart" => create_upload(&client, call),
+        "s3.upload_part" => stage_part(&client, call),
+        "s3.complete_multipart" => commit_parts(&client, call),
+        "s3.abort_multipart" => abort_upload(&client, call),
+        "s3.list_parts" => list_parts(&client, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }

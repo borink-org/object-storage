@@ -1,11 +1,12 @@
 // What both providers share when they write a request head and read a
 // response head.
 
-use crate::request::{ByteSink, HeadWriter, U64Decimal};
+use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
+use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, WireRequest,
+    ResponseHead, Result, ServiceErrorKind, TransactionalChecksum, WireRequest,
 };
 
 // The one record that every failing head becomes, whichever operation asked.
@@ -61,9 +62,9 @@ failure_outcome!(
     PutHeadOutcome,
     DeleteHeadOutcome,
     ListHeadOutcome,
-    StageBlockHeadOutcome,
-    CommitBlocksHeadOutcome,
-    ListBlocksHeadOutcome
+    StageHeadOutcome,
+    CommitHeadOutcome,
+    ListPartsHeadOutcome
 );
 
 pub(crate) fn accept_success<'h>(
@@ -333,4 +334,74 @@ pub(crate) fn validate_condition(condition: ConditionKind, value: Option<&[u8]>)
 
 pub(crate) fn valid_header(value: &[u8]) -> bool {
     !value.is_empty() && value.is_ascii() && !value.iter().any(u8::is_ascii_control)
+}
+
+// Checks the checksum of a write. Text must be the base64 of a digest of its
+// kind. A computed checksum needs the content, which the encoder holds only
+// if `has_bytes`, and a provider of its kind among `checksums`. A provider
+// that refuses a kind refuses it before this.
+pub(crate) fn validate_checksum(
+    checksum: Option<TransactionalChecksum<'_>>,
+    has_bytes: bool,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+) -> Result<()> {
+    match checksum {
+        Some(TransactionalChecksum::Md5(text)) => ChecksumKind::Md5.check_base64(text),
+        Some(TransactionalChecksum::Crc64(text)) => ChecksumKind::Crc64.check_base64(text),
+        Some(TransactionalChecksum::Compute(kind))
+            if !has_bytes || checksums[kind.slot()].is_none() =>
+        {
+            Err(InvalidPlan::Option.into())
+        }
+        Some(TransactionalChecksum::Compute(_)) | None => Ok(()),
+    }
+}
+
+// Writes the checksum header of a write, if the plan carries a checksum.
+// Text that the plan gave is written as it is; `validate_checksum` checked
+// it. A computed checksum is summed here by the provider of its kind, which
+// `validate_checksum` checked is registered. `content` feeds the content to
+// the sum one piece at a time: a put or a stage has one piece, and a commit
+// writes its list of parts piece by piece.
+pub(crate) fn push_checksum(
+    head: &mut HeadWriter<'_>,
+    checksum: Option<TransactionalChecksum<'_>>,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+    content: impl FnOnce(&mut Sum),
+) {
+    match checksum {
+        Some(TransactionalChecksum::Md5(text)) => {
+            head.header(ChecksumKind::Md5.header(), |out| out.push(text.as_bytes()));
+        }
+        Some(TransactionalChecksum::Crc64(text)) => {
+            head.header(ChecksumKind::Crc64.header(), |out| {
+                out.push(text.as_bytes())
+            });
+        }
+        Some(TransactionalChecksum::Compute(kind)) => {
+            // Validation refused the plan if this is `None`.
+            if let Some(provider) = &checksums[kind.slot()] {
+                let mut sum = provider.start();
+                content(&mut sum);
+                let mut into = [0; crate::checksum::BASE64_LEN];
+                let text = sum.finish().base64(&mut into);
+                head.header(kind.header(), |out| out.push(text.as_bytes()));
+            }
+        }
+        None => {}
+    }
+}
+
+// Writes the body that the encoder generates, such as the list of parts of
+// a commit, after the head, and finishes the request with it. `write` must
+// write the bytes that the head states the length of.
+pub(crate) fn encoded_with_body<'r>(
+    mut head: HeadWriter<'r>,
+    method: Method,
+    write: impl FnOnce(&mut Writer<'r>),
+) -> Result<WireRequest<'r>> {
+    let body = head.body(write);
+    let capacity = head.capacity();
+    head.finish_with_body(method, Payload::Slice(&[]), Some(body))
+        .ok_or_else(|| capacity_error(capacity))
 }

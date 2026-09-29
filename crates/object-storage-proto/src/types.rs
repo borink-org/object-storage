@@ -1,11 +1,3 @@
-/// The part of a [`PhysicalCommitBlocks`](crate::azure::PhysicalCommitBlocks)
-/// that reading the response needs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CommitBlocksShape {
-    /// The precondition on the object being committed.
-    pub condition: ConditionKind,
-}
-
 /// What a plan asks the service to return.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -311,9 +303,10 @@ pub enum TransactionalChecksum<'h> {
     /// A checksum of this kind that the encoder computes and sends.
     ///
     /// The encoder computes it with the provider of that kind that
-    /// [`Blobs::with_checksum`](crate::Blobs::with_checksum) registered. It
-    /// can only sum content that it holds: a [`Payload::Slice`], or the block
-    /// list of a commit. It refuses the plan with
+    /// [`Blobs::with_checksum`](crate::Blobs::with_checksum) or
+    /// [`s3::Objects::with_checksum`](crate::s3::Objects::with_checksum)
+    /// registered. It can only sum content that it holds: a
+    /// [`Payload::Slice`], or the list of parts of a commit. It refuses the plan with
     /// [`InvalidPlan::Option`](crate::InvalidPlan::Option) if no provider of
     /// that kind is registered, or if the payload is [`Payload::Streamed`].
     /// For a streamed payload, compute the checksum yourself before you
@@ -323,27 +316,28 @@ pub enum TransactionalChecksum<'h> {
 
 /// The options of a write.
 ///
-/// [`PhysicalPut::options`],
-/// [`azure::PhysicalCommitBlocks::options`](crate::azure::PhysicalCommitBlocks::options)
-/// and
+/// [`PhysicalPut::options`], [`PhysicalCommit::options`],
 /// [`azure::PhysicalStageBlock::options`](crate::azure::PhysicalStageBlock::options)
+/// and [`s3::PhysicalStagePart::options`](crate::s3::PhysicalStagePart::options)
 /// each hold one. Build it with `..Default::default()` or [`Self::new`], so
 /// that a field added later does not break your code.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriteOptions<'h> {
-    /// A checksum of the content, which Azure compares against the bytes it
-    /// receives.
+    /// A checksum of the content, which the service compares against the
+    /// bytes it receives. S3 takes an MD5 alone.
     ///
-    /// The content of a commit is its block list, so on a commit this is a
+    /// The content of a commit is its list of parts, so on a commit this is a
     /// checksum of that text.
     pub checksum: Option<TransactionalChecksum<'h>>,
-    /// The base64 of an MD5 to store as the object's `Content-MD5`.
+    /// The base64 of an MD5 to store as the object's `Content-MD5`. Azure
+    /// only.
     ///
     /// Azure stores this value without comparing it to the content. Only a
     /// commit takes it, because an object written in blocks stores no
     /// checksum unless the commit declares one. A whole-object write or a
     /// stage that sets it is refused with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option), and so is any S3
+    /// write that sets it.
     pub declared_md5: Option<&'h str>,
 }
 
@@ -479,6 +473,93 @@ impl<'h> PhysicalPut<'h> {
     /// Returns the part of this plan that holds no borrows.
     pub fn shape(&self) -> PutShape {
         PutShape {
+            condition: self.condition,
+        }
+    }
+}
+
+/// The part of a [`PhysicalCommit`] that holds no borrows.
+///
+/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to the
+/// method that reads the response, such as
+/// [`Blobs::accept_commit_blocks_head`](crate::Blobs::accept_commit_blocks_head).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitShape {
+    /// The precondition on the object being committed.
+    pub condition: ConditionKind,
+}
+
+/// One commit, which publishes an ordered list of staged parts as an object.
+///
+/// An object written in parts is written in three steps. Stage each part,
+/// commit the list of them with this plan, and read what the service holds
+/// with a listing of the parts. On Azure, a part is a block: see
+/// [`Blobs::encode_commit_blocks`](crate::Blobs::encode_commit_blocks). On
+/// S3, the parts belong to an upload, which you create first: see
+/// [`s3::Objects::encode_commit_parts`](crate::s3::Objects::encode_commit_parts).
+///
+/// The list of parts is not in the plan. Pass it beside the plan: it may be
+/// long, and a binding produces it rather than holding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalCommit<'a> {
+    /// The object key, as for [`PhysicalPut::key`].
+    ///
+    /// On S3 it is also the key the upload was created for.
+    pub key: &'a str,
+    /// The condition that the commit carries.
+    ///
+    /// The commit publishes the object only if the condition holds for the
+    /// object that the key holds before. [`ConditionKind::IfNoneMatch`] with
+    /// `*` publishes it only if the key holds none.
+    pub condition: ConditionKind,
+    /// The entity tag that `condition` compares against, or `*`.
+    pub condition_value: Option<&'a [u8]>,
+    /// The metadata pairs to store with the object.
+    ///
+    /// A commit replaces the whole set, as [`PhysicalPut::metadata`] does.
+    /// Azure takes them here. S3 takes them when the upload is created, and
+    /// refuses a commit that carries any with [`InvalidPlan::Option`].
+    ///
+    /// [`InvalidPlan::Option`]: crate::InvalidPlan::Option
+    pub metadata: &'a [MetadataPair<'a>],
+    /// The options of the commit.
+    ///
+    /// The content of a commit is its list of parts, so a checksum in
+    /// [`WriteOptions::checksum`] is a checksum of that list as the request
+    /// writes it.
+    ///
+    /// An object written in parts stores no checksum of its own on Azure
+    /// unless the commit declares one in [`WriteOptions::declared_md5`]. S3
+    /// computes an entity tag from the parts, and takes no declared MD5.
+    pub options: WriteOptions<'a>,
+    /// The length of the object that the commit publishes, if you know it.
+    ///
+    /// S3 refuses the commit with 400 `InvalidRequest` if the parts add up
+    /// to another length, which catches a part left out of the list. Azure
+    /// has no such check, and refuses a plan that sets it with
+    /// [`InvalidPlan::Option`].
+    ///
+    /// [`InvalidPlan::Option`]: crate::InvalidPlan::Option
+    pub size: Option<u64>,
+}
+
+impl<'a> PhysicalCommit<'a> {
+    /// Creates a plan that commits parts to `key` with no condition, no
+    /// metadata, no options and no size.
+    pub const fn new(key: &'a str) -> Self {
+        Self {
+            key,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: &[],
+            options: WriteOptions::new(),
+            size: None,
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub const fn shape(&self) -> CommitShape {
+        CommitShape {
             condition: self.condition,
         }
     }

@@ -2,12 +2,10 @@
 
 #![cfg(all(feature = "crc64", feature = "md5-rustcrypto"))]
 
-use borink_object_storage_proto::azure::{
-    BlockRef, BlockSource, PhysicalCommitBlocks, PhysicalStageBlock,
-};
+use borink_object_storage_proto::azure::{BlockRef, BlockSource, PhysicalStageBlock};
 use borink_object_storage_proto::{
-    Blobs, ChecksumKind, Container, Error, HeaderSpan, InvalidPlan, Payload, PhysicalPut,
-    Timestamps, TransactionalChecksum, WriteOptions, layered,
+    Blobs, ChecksumKind, Container, Error, HeaderSpan, InvalidPlan, Payload, PhysicalCommit,
+    PhysicalPut, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -140,9 +138,9 @@ fn a_stage_and_a_commit_compute_the_checksum_of_what_they_send() {
         checksum: Some(TransactionalChecksum::Compute(ChecksumKind::Md5)),
         ..Default::default()
     };
-    let commit = PhysicalCommitBlocks {
+    let commit = PhysicalCommit {
         options,
-        ..PhysicalCommitBlocks::new("object")
+        ..PhysicalCommit::new("object")
     };
     let blocks = [BlockRef {
         id: "AAAAAA==",

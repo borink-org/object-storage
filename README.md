@@ -36,18 +36,20 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
   - CRC64 on Azure only, MD5 on both
+- Object multipart upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
 
 ### Azure Blob Storage-only
 
 - Object listing: listing metadata (S3 does not list it)
-- Object multipart upload
 
 ### S3-only
 
 - SigV4 handling for every request (crypto implementations again through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto) or user-provided)
 - Directory buckets (S3 Express One Zone), including CreateSession and signing with the session's credentials
+- Uploads in parts: create and abort an upload, read a commit that fails under status 200, and have S3 check the length of the committed object
+- Errors that S3 writes into the body of a success response, on every operation that reads the body
 
 ## What makes `borink-object-storage` unique?
 
@@ -65,7 +67,7 @@ The core library functionality is not expected to change a lot from now on, but 
 Roadmap:
 - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
 - S3 multipart -> 0.0.5 release
-- Refine API, performance improvements
+- ... potentially various other features: Azure snapshots, versions, more S3 checksum algorithms
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - ... support for various AWS and Azure authorization schemes -> 0.2 release
 - Generic API (so layer over the providers) -> 0.3 release

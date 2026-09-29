@@ -5,8 +5,9 @@
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
 // the caller's buffer, and `page.rs` holds what reading any page takes. The
 // files named for a service read that service's documents: `azure.rs` and
-// `s3.rs` a listing page, `s3.rs` also a session's credentials, and
-// `azure_blocks.rs` a block list. This file reads the error document, and
+// `s3.rs` a listing page, `s3.rs` also a session's credentials,
+// `azure_blocks.rs` a block list, and `s3_parts.rs` the answers of an upload
+// in parts. This file reads the error document, finds the root element, and
 // walks the properties of an entry for the caller.
 //
 // An Azure page is read in this order. `page::check_body` checks the body is
@@ -25,6 +26,7 @@ pub(crate) mod azure_blocks;
 pub(crate) mod decode;
 mod page;
 pub(crate) mod s3;
+pub(crate) mod s3_parts;
 pub(crate) mod scan;
 
 pub(crate) use decode::decode_text;
@@ -65,6 +67,32 @@ pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
         at = close + 1;
     }
     None
+}
+
+// Returns whether the root element of `body` is named `name`. The byte order
+// mark, the XML declaration and whitespace before the root are skipped, and
+// so is a comment or a document type declaration that holds no `>`.
+pub(crate) fn root_is(body: &[u8], name: &[u8]) -> bool {
+    let mut rest = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    loop {
+        rest = rest.trim_ascii_start();
+        let Some(after) = rest.strip_prefix(b"<") else {
+            return false;
+        };
+        if after.starts_with(b"?") || after.starts_with(b"!") {
+            let end = find_byte(rest, 0, b'>');
+            if end == rest.len() {
+                return false;
+            }
+            rest = &rest[end + 1..];
+            continue;
+        }
+        // The name ends where the tag does, or where an attribute begins.
+        return after
+            .strip_prefix(name)
+            .and_then(|tail| tail.first())
+            .is_some_and(|&byte| byte == b'>' || byte == b'/' || byte.is_ascii_whitespace());
+    }
 }
 
 // The element that holds the properties of one entry. The walk below reports
