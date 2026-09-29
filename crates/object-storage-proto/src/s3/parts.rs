@@ -470,7 +470,8 @@ impl<'a> Objects<'a> {
     ///   one header value.
     /// - [`InvalidPlan::Parts`] if `parts` is empty, or for AWS, if their
     ///   numbers do not ascend. AWS refuses a list out of order with
-    ///   `InvalidPartOrder`.
+    ///   `InvalidPartOrder`. To commit an empty object, stage one empty part
+    ///   and commit it.
     ///
     /// Returns [`Error::Capacity`](crate::Error::Capacity) with the bytes
     /// that the head and the body need together, or call
@@ -584,7 +585,8 @@ impl<'a> Objects<'a> {
     ///
     /// A conditional commit that another conditional write overtook is
     /// refused with 409 `ConditionalRequestConflict`, which reaches you as a
-    /// service failure. Retry it.
+    /// service failure. Do not retry the commit. Create a new upload and
+    /// stage every part again, as AWS documents for this error.
     ///
     /// # Errors
     ///
