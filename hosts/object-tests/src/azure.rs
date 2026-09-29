@@ -496,14 +496,13 @@ fn commit_blocks(
 
     let key = optional_text(call, "key").unwrap_or_default();
     let commit_plan = PhysicalCommit {
-        key,
         condition,
         condition_value,
-        metadata: &[],
         options: WriteOptions {
             declared_md5: optional_text(call, "content_md5_base64"),
             ..WriteOptions::default()
         },
+        ..PhysicalCommit::new(key)
     };
 
     let now = current_timestamps();

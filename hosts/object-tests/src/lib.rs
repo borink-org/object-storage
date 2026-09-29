@@ -221,6 +221,13 @@ fn result_for_crate_error(error: CrateError) -> Value {
             }
             result
         }
+        // The service wrote an error into the body of a success.
+        CrateError::Service(_) => json!({
+            "outcome": "error",
+            "status": 200,
+            "kind": error_kind_for_status(200),
+            "reason": error.to_string(),
+        }),
         other => json!({
             "outcome": "error",
             "kind": "other",

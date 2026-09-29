@@ -744,9 +744,9 @@ fn every_error_crosses_as_a_status() {
             checked += 1;
         }
     }
-    // Every variant of the two inner enums, and the five that carry no
-    // inner value.
-    assert_eq!(checked, 5 + 27 + 4);
+    // The five codes that carry no inner value, every variant of the three
+    // inner enums, and a service error that names no known error.
+    assert_eq!(checked, 5 + 27 + 4 + 11 + 1);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

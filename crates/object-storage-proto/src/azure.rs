@@ -450,9 +450,11 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// if `blocks` holds more than 50,000 entries or an ID that fails the
-    /// checks on [`BlockRef::id`]. Returns [`Error::Capacity`] with the bytes
-    /// that the head and the body need together, or call
+    /// such as [`InvalidPlan::Option`] for a plan that sets
+    /// [`PhysicalCommit::size`], if `blocks` holds more than 50,000 entries or
+    /// an ID that fails the checks on [`BlockRef::id`]. Returns
+    /// [`Error::Capacity`] with the bytes that the head and the body need
+    /// together, or call
     /// [`layered::commit_blocks_requirements`](crate::layered::commit_blocks_requirements)
     /// first.
     pub fn encode_commit_blocks<'r>(
@@ -503,6 +505,10 @@ impl<'a> Blobs<'a> {
         validate_condition(plan.condition, plan.condition_value)?;
         validate_metadata(plan.metadata)?;
         validate_options(&plan.options, Write::Commit, true, &self.checksums)?;
+        // Azure does not check the length of the blocks it commits.
+        if plan.size.is_some() {
+            return Err(InvalidPlan::Option.into());
+        }
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
         for (index, (id, source)) in blocks.clone().enumerate() {
             if index >= MAX_BLOCKS {

@@ -1301,7 +1301,11 @@ impl<'a> Objects<'a> {
     /// not a `CreateSessionResult` that holds an access key ID, a secret
     /// access key and a session token, or if its expiration is not an
     /// ISO 8601 time in UTC.
+    ///
+    /// Returns [`Error::Service`] if `body` is an error document, which S3
+    /// can send under status 200.
     pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::read_session(body)
     }
 
@@ -1802,11 +1806,15 @@ impl<'a> Objects<'a> {
     /// not a ListObjectsV2 page, or if the page contradicts itself. A page
     /// that does not say it URL-encoded its keys is refused if decoding
     /// changes a key.
+    ///
+    /// Returns [`Error::Service`] if `body` is an error document, which S3
+    /// can send under status 200.
     pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
         &self,
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
     }
 
@@ -1840,6 +1848,7 @@ impl<'a> Objects<'a> {
         wanted: PropertySet,
         build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
     ) -> Result<Listing<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::fill_listing(body, into, wanted, build)
     }
 }
@@ -1863,6 +1872,21 @@ pub fn classify_error(body: &[u8], truncated: bool) -> Classification {
 
 fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
     crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+}
+
+// Returns whether `body` is an error document rather than the result of a
+// request. S3 can send one under status 200.
+fn is_error_document(body: &[u8]) -> bool {
+    crate::xml::root_is(body, b"Error")
+}
+
+// Returns the error that `body` names if it is an error document, so that a
+// method that reads a result does not report it as a malformed result.
+fn refuse_error_document(body: &[u8]) -> Result<()> {
+    if is_error_document(body) {
+        return Err(Error::Service(body_kind(body)));
+    }
+    Ok(())
 }
 
 fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {

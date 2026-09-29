@@ -49,7 +49,8 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 
 - SigV4 handling for every request (crypto implementations again through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto) or user-provided)
 - Directory buckets (S3 Express One Zone), including CreateSession and signing with the session's credentials
-- Uploads in parts: create and abort an upload, and read a commit that fails under status 200
+- Uploads in parts: create and abort an upload, read a commit that fails under status 200, and have S3 check the length of the committed object
+- Errors that S3 writes into the body of a success response, on every operation that reads the body
 
 ## What makes `borink-object-storage` unique?
 

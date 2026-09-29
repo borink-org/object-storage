@@ -20,16 +20,19 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New methods `Objects::encode_abort_upload`, `Objects::accept_abort_upload_head` and `Objects::accept_abort_upload_error_body`, with the plan `s3::PhysicalAbortUpload`. They answer with a `DeleteHeadOutcome`.
   - New methods `Objects::encode_list_parts`, `Objects::accept_list_parts_head`, `Objects::accept_list_parts_error_body` and `Objects::fill_parts`, with the plan `s3::PhysicalListParts` and the entry `s3::Part`, which converts to a `PartRef`.
   - New constants `s3::MAX_PART_LEN`, `s3::MIN_PART_LEN` and `s3::MAX_PARTS`.
+  - New field `PhysicalCommit::size`, the length of the object that the commit publishes. S3 sends it as `x-amz-mp-object-size` and refuses a commit whose parts add up to another length. Azure refuses a plan that sets it with `InvalidPlan::Option`.
   - New functions `layered::s3::create_upload_requirements`, `stage_part_requirements`, `commit_parts_requirements`, `abort_upload_requirements` and `list_parts_requirements`.
 - New variant `CommitHeadOutcome::NeedResultBody`, which only S3 returns.
 - New variant `ServiceErrorKind::NoSuchUpload`, for S3's `NoSuchUpload`. S3's `InvalidPart`, `InvalidPartOrder` and `EntityTooSmall` are `ServiceErrorKind::InvalidUpload`.
 - New variant `InvalidPlan::UploadId`, for an empty upload ID.
 - New variant `Method::Post`.
+- New variant `Error::Service`, for an error document that S3 sends as the body of a success, with the error it names. New variant `ErrorCode::Service` and new method `Error::class`, which says whether a retry can help.
 
 ### Changed
 
 - Listings group keys at any delimiter. The field `PhysicalList::delimited` is now `delimiter`, which holds the delimiter text. `PhysicalList::from_shape` plans `/` for a delimited `ListShape`.
 - An S3 client for a directory bucket refuses a listing prefix that does not end in `/` with `InvalidPlan::Prefix`, and sends a metadata value that a general purpose bucket would not store as given as an RFC 2047 encoded word, instead of refusing it.
+- `s3::Objects::fill_listing`, `fill_listing_with` and `read_session` return `Error::Service` for a body that is an error document, instead of `Error::Response` with `ResponseFault::Body`. So do the new `read_upload_id` and `fill_parts`.
 - The operations on parts share their plan and outcomes between Azure and S3, and are named for parts rather than blocks:
   - `azure::PhysicalCommitBlocks` is `PhysicalCommit`, at the crate root, and `CommitBlocksShape` is `CommitShape`. An S3 commit takes the same plan, and refuses its metadata, which S3 takes when it creates the upload.
   - `StageBlockHeadOutcome` is `StageHeadOutcome`, and its `Staged` variant carries the `e_tag` of the part, which S3 needs at the commit. Azure sends none.

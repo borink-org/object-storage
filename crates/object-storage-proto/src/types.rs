@@ -532,11 +532,20 @@ pub struct PhysicalCommit<'a> {
     /// unless the commit declares one in [`WriteOptions::declared_md5`]. S3
     /// computes an entity tag from the parts, and takes no declared MD5.
     pub options: WriteOptions<'a>,
+    /// The length of the object that the commit publishes, if you know it.
+    ///
+    /// S3 refuses the commit with 400 `InvalidRequest` if the parts add up
+    /// to another length, which catches a part left out of the list. Azure
+    /// has no such check, and refuses a plan that sets it with
+    /// [`InvalidPlan::Option`].
+    ///
+    /// [`InvalidPlan::Option`]: crate::InvalidPlan::Option
+    pub size: Option<u64>,
 }
 
 impl<'a> PhysicalCommit<'a> {
     /// Creates a plan that commits parts to `key` with no condition, no
-    /// metadata and no options.
+    /// metadata, no options and no size.
     pub const fn new(key: &'a str) -> Self {
         Self {
             key,
@@ -544,6 +553,7 @@ impl<'a> PhysicalCommit<'a> {
             condition_value: None,
             metadata: &[],
             options: WriteOptions::new(),
+            size: None,
         }
     }
 

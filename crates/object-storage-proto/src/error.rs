@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::{FailureClass, ServiceErrorKind};
+
 /// The result type that this crate returns.
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -347,6 +349,8 @@ pub enum ErrorCode {
     InvalidCredentials = 7,
     /// [`Error::InvalidRegion`].
     InvalidRegion = 8,
+    /// [`Error::Service`].
+    Service = 9,
 }
 
 impl ErrorCode {
@@ -361,6 +365,7 @@ impl ErrorCode {
             Self::Response => "the response cannot be read",
             Self::InvalidCredentials => "invalid credentials",
             Self::InvalidRegion => "invalid region",
+            Self::Service => "the service answered a success status with an error",
         }
     }
 
@@ -377,6 +382,7 @@ impl ErrorCode {
             6 => Self::Response,
             7 => Self::InvalidCredentials,
             8 => Self::InvalidRegion,
+            9 => Self::Service,
             _ => return None,
         })
     }
@@ -395,6 +401,10 @@ impl fmt::Display for ErrorCode {
 /// failed precondition, is not an error here. It is a
 /// [`GetHeadOutcome`](crate::GetHeadOutcome) or a
 /// [`PutHeadOutcome`](crate::PutHeadOutcome) instead.
+///
+/// The one exception is [`Error::Service`]: an error that the service writes
+/// into the body of a success. The methods that read such a body return a
+/// result, not an outcome, so they report the error here.
 ///
 /// No value of this type carries text. [`Error::code`] and [`Error::detail`]
 /// describe every value as two numbers, so you can carry an error across a
@@ -424,6 +434,15 @@ pub enum Error {
     InvalidCredentials,
     /// The region name is not usable in a signed request.
     InvalidRegion,
+    /// The service answered with a success status, and with an error
+    /// document as the body.
+    ///
+    /// S3 can do this for any request whose answer has a body, and the
+    /// methods that read such a body return this error. The value is the
+    /// error that the document names, or [`None`] if this crate does not know
+    /// its code. [`Self::class`] says whether a retry can help. The request
+    /// ID is in the response head.
+    Service(Option<ServiceErrorKind>),
 }
 
 impl fmt::Display for Error {
@@ -437,6 +456,8 @@ impl fmt::Display for Error {
             Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
             Self::Response(fault) => fmt::Display::fmt(fault, f),
+            Self::Service(Some(kind)) => write!(f, "{}: {}", self.code().as_str(), kind.as_str()),
+            Self::Service(None) => f.write_str(self.code().as_str()),
         }
     }
 }
@@ -481,18 +502,34 @@ impl Error {
             Self::Response(_) => ErrorCode::Response,
             Self::InvalidCredentials => ErrorCode::InvalidCredentials,
             Self::InvalidRegion => ErrorCode::InvalidRegion,
+            Self::Service(_) => ErrorCode::Service,
         }
     }
 
     /// Returns the discriminant of the value inside, or 0 if there is none.
     ///
     /// [`Self::Capacity`] carries two sizes rather than a discriminant, and
-    /// returns 0 here. Read those sizes with [`Self::capacity`].
+    /// returns 0 here. Read those sizes with [`Self::capacity`]. A
+    /// [`Self::Service`] that names no known error returns 0 too.
     pub const fn detail(&self) -> u16 {
         match *self {
             Self::InvalidPlan(plan) => plan as u16,
             Self::Response(fault) => fault as u16,
+            Self::Service(Some(kind)) => kind as u16,
             _ => 0,
+        }
+    }
+
+    /// Returns the category of the service's failure, if this is
+    /// [`Self::Service`].
+    ///
+    /// A [`FailureClass::Server`] or [`FailureClass::Throttled`] failure can
+    /// succeed if you send the request again. The category is the one that
+    /// a [`Failure`](crate::Failure) with the same error carries.
+    pub fn class(&self) -> Option<FailureClass> {
+        match *self {
+            Self::Service(kind) => Some(crate::common::failure_class(200, kind)),
+            _ => None,
         }
     }
 
@@ -524,6 +561,11 @@ impl Error {
                 Some(fault) => Self::Response(fault),
                 None => return None,
             },
+            ErrorCode::Service if detail == 0 => Self::Service(None),
+            ErrorCode::Service => match ServiceErrorKind::from_discriminant(detail) {
+                Some(kind) => Self::Service(Some(kind)),
+                None => return None,
+            },
             ErrorCode::Capacity => return None,
         })
     }
@@ -533,7 +575,7 @@ impl Error {
 mod tests {
     extern crate std;
 
-    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault};
+    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, ServiceErrorKind};
     use std::string::ToString;
     use std::vec::Vec;
 
@@ -554,6 +596,7 @@ mod tests {
             Error::InvalidToken,
             Error::InvalidCredentials,
             Error::InvalidRegion,
+            Error::Service(None),
         ];
         for detail in 1..=u16::MAX {
             if let Some(plan) = InvalidPlan::from_discriminant(detail) {
@@ -561,6 +604,9 @@ mod tests {
             }
             if let Some(fault) = ResponseFault::from_discriminant(detail) {
                 errors.push(Error::Response(fault));
+            }
+            if let Some(kind) = ServiceErrorKind::from_discriminant(detail) {
+                errors.push(Error::Service(Some(kind)));
             }
         }
         errors

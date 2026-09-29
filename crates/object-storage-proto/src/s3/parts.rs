@@ -9,8 +9,8 @@
 // entity tag that S3 returned when it staged the part.
 
 use super::{
-    Objects, PayloadHash, Service, Signed, body_kind, validate_content, validate_key,
-    validate_metadata, validate_write_condition,
+    Objects, PayloadHash, Service, Signed, body_kind, is_error_document, refuse_error_document,
+    validate_content, validate_key, validate_metadata, validate_write_condition,
 };
 use crate::common::{
     FailureOutcome, decimal_header, encoded, encoded_with_body, failure, finish_with_body,
@@ -335,7 +335,11 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::Response`](crate::Error::Response) with
     /// [`ResponseFault::Body`] if `body` is not an
     /// `InitiateMultipartUploadResult` that holds an upload ID.
+    ///
+    /// Returns [`Error::Service`](crate::Error::Service) if `body` is an
+    /// error document, which S3 can send under status 200.
     pub fn read_upload_id<'b>(&self, body: &'b mut [u8]) -> Result<&'b str> {
+        refuse_error_document(body)?;
         crate::xml::s3::read_upload_id(body)
     }
 
@@ -453,6 +457,8 @@ impl<'a> Objects<'a> {
     /// The request signs the SHA-256 of the body.
     ///
     /// The commit ends the upload. The parts it does not name are dropped.
+    /// A plan that sets [`PhysicalCommit::size`] sends it as
+    /// `x-amz-mp-object-size`.
     ///
     /// # Errors
     ///
@@ -550,11 +556,15 @@ impl<'a> Objects<'a> {
             "uploadId",
             QueryValue::Encoded(upload_id.as_bytes()),
         ))];
+        let size = plan.size.map(U64Decimal::new);
+        let size_header = size
+            .as_ref()
+            .map(|size| ("x-amz-mp-object-size", size.as_bytes()));
         let signed = Signed {
             method: Method::Post,
             key: Some(plan.key),
             query: &query,
-            headers: &[],
+            headers: size_header.as_slice(),
             range: RequestedRange::Whole,
             condition: plan.condition,
             condition_value: plan.condition_value,
@@ -649,10 +659,9 @@ impl<'a> Objects<'a> {
         if head.status != 200 {
             return Err(ResponseFault::Status.into());
         }
-        // A result holds no `Code` element, and an error document does. A
-        // directory bucket reports under status 200 what a general purpose
+        // A directory bucket reports under status 200 what a general purpose
         // bucket reports under 404 or 412, so those become the same outcomes.
-        if crate::xml::error_code(body).is_some() {
+        if is_error_document(body) {
             let kind = body_kind(body);
             return Ok(match kind {
                 Some(ServiceErrorKind::Precondition) if shape.condition != ConditionKind::None => {
@@ -897,11 +906,15 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::Response`](crate::Error::Response) with
     /// [`ResponseFault::Body`] if `body` is not a `ListPartsResult`, or if
     /// the page does not say whether it is the last.
+    ///
+    /// Returns [`Error::Service`](crate::Error::Service) if `body` is an
+    /// error document, which S3 can send under status 200.
     pub fn fill_parts<'b, E: From<Part<'b>>>(
         &self,
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
+        refuse_error_document(body)?;
         crate::xml::s3::fill_parts(body, into)
     }
 }
