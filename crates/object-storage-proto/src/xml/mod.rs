@@ -5,8 +5,9 @@
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
 // the caller's buffer, and `page.rs` holds what reading any page takes. The
 // files named for a service read that service's documents: `azure.rs` and
-// `s3.rs` a listing page, `s3.rs` also a session's credentials, and
-// `azure_blocks.rs` a block list. This file reads the error document, and
+// `s3.rs` a listing page, `s3.rs` also a session's credentials,
+// `azure_blocks.rs` a block list, and `s3_parts.rs` the answers of an upload
+// in parts. This file reads the error document, finds the root element, and
 // walks the properties of an entry for the caller.
 //
 // An Azure page is read in this order. `page::check_body` checks the body is
@@ -25,6 +26,7 @@ pub(crate) mod azure_blocks;
 pub(crate) mod decode;
 mod page;
 pub(crate) mod s3;
+pub(crate) mod s3_parts;
 pub(crate) mod scan;
 
 pub(crate) use decode::decode_text;

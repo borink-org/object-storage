@@ -348,9 +348,7 @@ use crate::{
     WriteOptions,
 };
 
-mod parts;
-
-pub use parts::{
+pub use crate::s3_parts::{
     CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
     PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
 };
@@ -360,13 +358,13 @@ const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
 // The value of `x-amz-content-sha256`: the SHA-256 of the content in
 // lowercase hexadecimal, or `UNSIGNED-PAYLOAD`.
-enum ContentSha256 {
+pub(crate) enum ContentSha256 {
     Hex([u8; 64]),
     Unsigned,
 }
 
 impl ContentSha256 {
-    fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Hex(hex) => hex,
             Self::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
@@ -523,7 +521,7 @@ pub struct Bucket<'a> {
     name: &'a str,
     region: &'a str,
     addressing: Addressing,
-    service: Service,
+    pub(crate) service: Service,
 }
 
 impl<'a> Bucket<'a> {
@@ -959,11 +957,11 @@ impl core::fmt::Display for SessionHeadOutcome<'_> {
 /// `now`. It signs the request for that time.
 #[derive(Clone, Copy)]
 pub struct Objects<'a> {
-    bucket: Bucket<'a>,
+    pub(crate) bucket: Bucket<'a>,
     credentials: Credentials<'a>,
-    sha256: Sha256Provider,
+    pub(crate) sha256: Sha256Provider,
     signing_key: Option<SigningKey>,
-    checksums: [Option<ChecksumProvider>; KINDS],
+    pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
 }
 
 impl core::fmt::Debug for Objects<'_> {
@@ -978,19 +976,19 @@ impl core::fmt::Debug for Objects<'_> {
 }
 
 // What the signature of one request covers, beside the client's own values.
-struct Signed<'p> {
-    method: Method,
+pub(crate) struct Signed<'p> {
+    pub(crate) method: Method,
     // The object, or `None` for the bucket itself.
-    key: Option<&'p str>,
+    pub(crate) key: Option<&'p str>,
     // The query, in the order of its names. See `url.rs`.
-    query: &'p [Parameter<'p>],
-    range: RequestedRange,
-    condition: ConditionKind,
-    condition_value: Option<&'p [u8]>,
+    pub(crate) query: &'p [Parameter<'p>],
+    pub(crate) range: RequestedRange,
+    pub(crate) condition: ConditionKind,
+    pub(crate) condition_value: Option<&'p [u8]>,
     // Further signed headers, with lowercase names.
-    headers: &'p [(&'p str, &'p [u8])],
-    metadata: &'p [MetadataPair<'p>],
-    content_sha256: &'p [u8],
+    pub(crate) headers: &'p [(&'p str, &'p [u8])],
+    pub(crate) metadata: &'p [MetadataPair<'p>],
+    pub(crate) content_sha256: &'p [u8],
 }
 
 // Where the value of a signed header comes from.
@@ -1338,7 +1336,7 @@ impl<'a> Objects<'a> {
 
     // Writes the URL and every signed header. A dry run writes a signature
     // of zeros, which is as long as a real one.
-    fn write_head(
+    pub(crate) fn write_head(
         &self,
         head: &mut HeadWriter<'_>,
         signed: &Signed<'_>,
@@ -1401,7 +1399,12 @@ impl<'a> Objects<'a> {
     // The text of `x-amz-content-sha256` for `content`. A dry run returns no
     // request, so it does not read the content: the digest is the same
     // length whatever it is.
-    fn content_sha256(&self, hash: PayloadHash, content: Payload<'_>, dry: bool) -> ContentSha256 {
+    pub(crate) fn content_sha256(
+        &self,
+        hash: PayloadHash,
+        content: Payload<'_>,
+        dry: bool,
+    ) -> ContentSha256 {
         match hash {
             PayloadHash::Unsigned => ContentSha256::Unsigned,
             PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
@@ -1414,7 +1417,7 @@ impl<'a> Objects<'a> {
 
     // The headers that describe the content of a write, after the signed
     // ones: its length, and its MD5 if the plan carries one.
-    fn push_content(
+    pub(crate) fn push_content(
         &self,
         head: &mut HeadWriter<'_>,
         content: Payload<'_>,
@@ -1870,19 +1873,19 @@ pub fn classify_error(body: &[u8], truncated: bool) -> Classification {
     }
 }
 
-fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
+pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
     crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
 // Returns whether `body` is an error document rather than the result of a
 // request. S3 can send one under status 200.
-fn is_error_document(body: &[u8]) -> bool {
+pub(crate) fn is_error_document(body: &[u8]) -> bool {
     crate::xml::root_is(body, b"Error")
 }
 
 // Returns the error that `body` names if it is an error document, so that a
 // method that reads a result does not report it as a malformed result.
-fn refuse_error_document(body: &[u8]) -> Result<()> {
+pub(crate) fn refuse_error_document(body: &[u8]) -> Result<()> {
     if is_error_document(body) {
         return Err(Error::Service(body_kind(body)));
     }
@@ -2096,7 +2099,7 @@ fn looks_like_ipv4(name: &str) -> bool {
         })
 }
 
-fn validate_key(key: &str) -> Result<()> {
+pub(crate) fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(InvalidPlan::EmptyKey.into());
     }
@@ -2144,7 +2147,7 @@ fn validate_put(
 // Checks what a write sends beside its content. S3 takes an MD5 of the
 // content and no other checksum, and stores no declared one. A checksum or
 // a SHA-256 that the encoder computes needs the bytes.
-fn validate_content(
+pub(crate) fn validate_content(
     options: &WriteOptions<'_>,
     content: Payload<'_>,
     hash: PayloadHash,
@@ -2167,7 +2170,7 @@ fn validate_content(
 }
 
 // Checks the condition of a write: a whole object, or a commit of parts.
-fn validate_write_condition(
+pub(crate) fn validate_write_condition(
     condition: ConditionKind,
     value: Option<&[u8]>,
     service: Service,
@@ -2232,7 +2235,7 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
 // token. `write_metadata_value` writes the value, and S3 matches a name
 // without case.
-fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
+pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
         if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
             return Err(InvalidPlan::MetadataName.into());

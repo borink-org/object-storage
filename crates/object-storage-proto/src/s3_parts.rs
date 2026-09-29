@@ -8,16 +8,16 @@
 // names a part by its number within an upload that S3 created, and by the
 // entity tag that S3 returned when it staged the part.
 
-use super::{
-    Objects, PayloadHash, Service, Signed, body_kind, is_error_document, refuse_error_document,
-    validate_content, validate_key, validate_metadata, validate_write_condition,
-};
 use crate::common::{
     FailureOutcome, decimal_header, encoded, encoded_with_body, failure, finish_with_body,
     push_checksum, valid_header,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::s3::{
+    Objects, PayloadHash, Service, Signed, body_kind, is_error_document, refuse_error_document,
+    validate_content, validate_key, validate_metadata, validate_write_condition,
+};
 use crate::sigv4::EMPTY_SHA256;
 use crate::url::QueryValue;
 use crate::{
@@ -340,7 +340,7 @@ impl<'a> Objects<'a> {
     /// error document, which S3 can send under status 200.
     pub fn read_upload_id<'b>(&self, body: &'b mut [u8]) -> Result<&'b str> {
         refuse_error_document(body)?;
-        crate::xml::s3::read_upload_id(body)
+        crate::xml::s3_parts::read_upload_id(body)
     }
 
     /// Writes the signed request head of an UploadPart into `buf`.
@@ -671,7 +671,7 @@ impl<'a> Objects<'a> {
                 _ => finish_with_body(failure(head.status, None, head.request_id), kind),
             });
         }
-        let e_tag = crate::xml::s3::read_committed(body)?;
+        let e_tag = crate::xml::s3_parts::read_committed(body)?;
         Ok(CommitHeadOutcome::Committed {
             meta: ObjectMeta {
                 e_tag: Some(e_tag.as_bytes()),
@@ -915,7 +915,7 @@ impl<'a> Objects<'a> {
         into: &mut [E],
     ) -> Result<Listing<'b>> {
         refuse_error_document(body)?;
-        crate::xml::s3::fill_parts(body, into)
+        crate::xml::s3_parts::fill_parts(body, into)
     }
 }
 

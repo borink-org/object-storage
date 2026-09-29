@@ -223,6 +223,7 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
+mod azure_blocks;
 pub mod checksum;
 mod common;
 mod encoding;
@@ -233,6 +234,7 @@ pub mod layered;
 mod outcome;
 mod request;
 pub mod s3;
+mod s3_parts;
 pub mod sigv4;
 mod time;
 mod types;
