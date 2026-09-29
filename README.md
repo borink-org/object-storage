@@ -36,6 +36,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
   - CRC64 on Azure only, MD5 on both
+  - S3's other checksums (`x-amz-checksum-*`) are not supported yet, see the roadmap
 - Object upload in parts: stage parts, commit an ordered list of them (conditional, as a whole write is), list what is staged
   - One commit plan and one set of outcomes for both services; Azure names a part by a block ID, S3 by its number within an upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
@@ -68,6 +69,7 @@ The core library functionality is not expected to change a lot from now on, but 
 Roadmap:
 - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
 - S3 multipart -> 0.0.5 release
+- S3 additional checksums: CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, SHA-512 and the XXHash family, on whole writes, on each part of an upload and for the whole object (full-object and composite)
 - Refine API, performance improvements
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - ... support for various AWS and Azure authorization schemes -> 0.2 release
