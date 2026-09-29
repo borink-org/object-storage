@@ -151,7 +151,7 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
     let mut request_headers = [HeaderSpan::default(); 8];
     let mut buf = [0; 256];
     let list = PhysicalList {
-        delimited: true,
+        delimiter: Some("/"),
         max_results: Some(2),
         ..PhysicalList::new("directory/")
     };

@@ -139,7 +139,7 @@
 //! # let now = Timestamps::from_unix(1_787_400_000);
 //! # let objects = Objects::new(bucket, credentials, SHA256);
 //! let list = PhysicalList {
-//!     delimited: true,
+//!     delimiter: Some("/"),
 //!     ..PhysicalList::new("photos/")
 //! };
 //! let size = layered::s3::list_requirements(&objects, &list, &now)?;
@@ -170,6 +170,39 @@
 //! # }
 //! ```
 //!
+//! # Directory buckets
+//!
+//! A bucket of [`Service::AwsDirectory`] is a directory bucket, as in S3
+//! Express One Zone. Its endpoint is the zonal endpoint, such as
+//! `https://s3express-euc1-az1.eu-central-1.amazonaws.com`, and its name
+//! ends in the zone and `--x-s3`, as in `objects--euc1-az1--x-s3`.
+//!
+//! It serves its objects to requests signed with the credentials of a
+//! session, which it hands out itself:
+//!
+//! 1. Encode a CreateSession with [`Objects::encode_create_session`], signed
+//!    with your own credentials, and send it.
+//! 2. Read the head with [`Objects::accept_create_session_head`], and the
+//!    body with [`Objects::read_session`].
+//! 3. Encode the requests to the objects with the client that
+//!    [`Objects::with_session`] returns. Each carries the token in
+//!    `x-amz-s3session-token`.
+//!
+//! AWS ends a session five minutes after it creates it, so create the next
+//! one before [`Session::expiration`].
+//!
+//! Beside the rules of [`Service::Aws`], the client follows those that AWS
+//! documents for a directory bucket:
+//!
+//! - Requests are signed for the service `s3express`, and go to
+//!   virtual-hosted URLs.
+//! - A listing prefix ends in `/`. Any other is refused with
+//!   [`InvalidPlan::Prefix`].
+//! - A directory bucket stores an RFC 2047 encoded word as it is sent. So a
+//!   metadata value that a general purpose bucket would store other than as
+//!   given, such as one with a line break, is sent as an encoded word rather
+//!   than refused.
+//!
 //! # Content that is not signed
 //!
 //! [`PayloadHash::Unsigned`] sends a write without the SHA-256 of its
@@ -184,8 +217,8 @@ use core::cmp::Ordering;
 use crate::WriteOptions;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, condition_header, decimal_header, encoded, failure,
-    finish_with_body, parse_content_range, text_header, validate_condition, write_range,
+    ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
+    failure, finish_with_body, parse_content_range, text_header, validate_condition, write_range,
 };
 use crate::encoding::{self, rfc2047};
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
@@ -317,6 +350,10 @@ pub enum Service {
     /// - A successful GET or HEAD may leave out `Content-Length`.
     /// - A removal succeeds with status 200 or 204.
     Compatible = 2,
+    /// Amazon S3, with a directory bucket, as in S3 Express One Zone.
+    ///
+    /// See [Directory buckets](self#directory-buckets).
+    AwsDirectory = 3,
 }
 
 impl Service {
@@ -327,8 +364,14 @@ impl Service {
         Some(match value {
             1 => Self::Aws,
             2 => Self::Compatible,
+            3 => Self::AwsDirectory,
             _ => return None,
         })
+    }
+
+    // Whether AWS answers, with a general purpose or a directory bucket.
+    const fn is_aws(self) -> bool {
+        matches!(self, Self::Aws | Self::AwsDirectory)
     }
 }
 
@@ -351,7 +394,8 @@ pub struct Bucket<'a> {
 
 impl<'a> Bucket<'a> {
     /// Creates a bucket reference with path-style addressing, answered by
-    /// `service`.
+    /// `service`. A [directory bucket](self#directory-buckets) is addressed
+    /// virtual-hosted.
     ///
     /// `endpoint` is the origin of the service, such as
     /// `https://s3.eu-west-1.amazonaws.com`. `region` is the region that the
@@ -390,6 +434,7 @@ impl<'a> Bucket<'a> {
         }
         let name_is_valid = match service {
             Service::Aws => valid_aws_bucket_name(name),
+            Service::AwsDirectory => valid_directory_bucket_name(name),
             Service::Compatible => {
                 !name.is_empty()
                     && name.bytes().all(|byte| {
@@ -401,7 +446,9 @@ impl<'a> Bucket<'a> {
             return Err(Error::InvalidContainer);
         }
         let region_byte = |byte: u8| match service {
-            Service::Aws => byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-',
+            Service::Aws | Service::AwsDirectory => {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+            }
             Service::Compatible => {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_')
             }
@@ -409,18 +456,23 @@ impl<'a> Bucket<'a> {
         if region.is_empty() || region.len() > MAX_REGION_LEN || !region.bytes().all(region_byte) {
             return Err(Error::InvalidRegion);
         }
+        // AWS serves a directory bucket at virtual-hosted URLs alone.
+        let addressing = match service {
+            Service::AwsDirectory => Addressing::VirtualHosted,
+            _ => Addressing::Path,
+        };
         Ok(Self {
             scheme,
             authority,
             name,
             region,
-            addressing: Addressing::Path,
+            addressing,
             service,
         })
     }
 
-    /// Returns this bucket with `addressing` in place of path-style
-    /// addressing.
+    /// Returns this bucket with `addressing` in place of the addressing that
+    /// [`Self::new`] chose.
     pub const fn with_addressing(mut self, addressing: Addressing) -> Self {
         self.addressing = addressing;
         self
@@ -438,7 +490,10 @@ impl<'a> Bucket<'a> {
 
     // The service name that requests to this bucket are signed for.
     fn signing_service(&self) -> &'static str {
-        "s3"
+        match self.service {
+            Service::AwsDirectory => "s3express",
+            _ => "s3",
+        }
     }
 
     // The value of the `host` header that the URL implies.
@@ -676,6 +731,90 @@ impl<'x, 'b> PropertyValues<'x, 'b> {
     /// [`ObjectProperty`] lists them.
     pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
         self.values
+    }
+}
+
+/// The temporary credentials of a session with a
+/// [directory bucket](self#directory-buckets).
+///
+/// Its [`Debug`](core::fmt::Debug) output shows the key ID and hides the
+/// secret and the token.
+#[derive(Clone, Copy)]
+pub struct Session<'a> {
+    /// The access key ID.
+    pub key_id: &'a str,
+    /// The secret access key.
+    pub secret: &'a str,
+    /// The token of the session.
+    pub token: &'a str,
+    /// When the credentials expire, such as `2026-09-29T10:05:00Z`, if the
+    /// answer says. Read it with
+    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
+    pub expiration: Option<&'a str>,
+}
+
+impl core::fmt::Debug for Session<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("key_id", &self.key_id)
+            .field("secret", &"<redacted>")
+            .field("token", &"<redacted>")
+            .field("expiration", &self.expiration)
+            .finish()
+    }
+}
+
+/// The result of reading the response head of a CreateSession.
+///
+/// A head that reports a failure is one of these too.
+/// [`Objects::accept_create_session_head`] returns an [`Err`] only for a
+/// head it cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionHeadOutcome<'h> {
+    /// The credentials follow in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Objects::read_session`].
+    Session {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
+    /// The bucket does not exist.
+    NotFound {
+        /// The specific error, if the body names one.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// The head reports a failure but names no error.
+    ///
+    /// This outcome is not final. Pass this failure and the response body to
+    /// [`Objects::accept_create_session_error_body`], which returns the final
+    /// outcome. If you cannot read the body, pass an empty one and the error
+    /// stays unnamed.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused to create the session, or it failed to.
+    ServiceFailure(Failure<'h>),
+}
+
+impl<'h> FailureOutcome<'h> for SessionHeadOutcome<'h> {
+    fn not_found(kind: Option<ServiceErrorKind>) -> Self {
+        Self::NotFound { kind }
+    }
+
+    fn service_failure(failure: Failure<'h>) -> Self {
+        Self::ServiceFailure(failure)
+    }
+}
+
+impl core::fmt::Display for SessionHeadOutcome<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Session { .. } => f.write_str("the credentials follow in the response body"),
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
+            Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
+                core::fmt::Display::fmt(failure, f)
+            }
+        }
     }
 }
 
@@ -972,6 +1111,127 @@ impl<'a> Objects<'a> {
         encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
+    /// Writes the signed request head of a CreateSession into `buf`, which
+    /// asks a [directory bucket](self#directory-buckets) for the credentials
+    /// of a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] with [`InvalidPlan::Option`] unless the
+    /// bucket is of [`Service::AwsDirectory`].
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots. Grow both buffers and retry, or
+    /// call [`layered::s3::create_session_requirements`](crate::layered::s3::create_session_requirements)
+    /// first.
+    pub fn encode_create_session<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        if self.bucket.service != Service::AwsDirectory {
+            return Err(InvalidPlan::Option.into());
+        }
+        let signed = Signed {
+            method: Method::Get,
+            key: None,
+            query: &[Some(("session", QueryValue::Literal("")))],
+            headers: &[],
+            range: RequestedRange::Whole,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: &[],
+            content_sha256: EMPTY_SHA256.as_bytes(),
+        };
+        let dry = buf.is_empty();
+        let mut head = HeadWriter::new(buf, headers);
+        self.write_head(&mut head, &signed, dry, now);
+        encoded(head, Method::Get, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a CreateSession and reports what to do
+    /// next.
+    ///
+    /// A failure is [`SessionHeadOutcome::NeedErrorBody`]: read the body and
+    /// pass it to [`Self::accept_create_session_error_body`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`], and a
+    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
+    pub fn accept_create_session_head<'h>(
+        &self,
+        head: ResponseHead<'h>,
+    ) -> Result<SessionHeadOutcome<'h>> {
+        match head.status {
+            200 => Ok(SessionHeadOutcome::Session {
+                expected_len: decimal_header(head.content_length)?,
+            }),
+            201..=299 => Err(ResponseFault::Status.into()),
+            status => Ok(SessionHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+        }
+    }
+
+    /// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response
+    /// body.
+    ///
+    /// This is [`Self::accept_get_error_body`] for a CreateSession, and reads
+    /// the body the same way. A missing bucket is
+    /// [`SessionHeadOutcome::NotFound`].
+    pub fn accept_create_session_error_body<'h>(
+        &self,
+        failure: Failure<'h>,
+        body: &[u8],
+    ) -> SessionHeadOutcome<'h> {
+        finish_with_body(failure, body_kind(body))
+    }
+
+    /// Reads the credentials out of the response body of a CreateSession.
+    ///
+    /// The body is decoded in place, and the [`Session`] borrows it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+    /// not a `CreateSessionResult` that holds an access key ID, a secret
+    /// access key and a session token.
+    pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
+        crate::xml::s3::read_session(body)
+    }
+
+    /// Returns a client that signs its requests with the credentials of
+    /// `session`, which [`Self::read_session`] read.
+    ///
+    /// The client wipes its copy of the secret with the function of this
+    /// client's credentials. It has no signing key yet: call
+    /// [`Self::with_signing_key`] on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCredentials`] if [`Credentials::new`] would
+    /// refuse the key ID or the secret of `session`, or if the token is not
+    /// usable as one HTTP header value.
+    pub fn with_session<'s>(self, session: Session<'s>) -> Result<Objects<'s>>
+    where
+        'a: 's,
+    {
+        let credentials =
+            Credentials::new(session.key_id, session.secret, self.credentials.wipe())?
+                .with_session_token(session.token)?
+                .for_s3_session();
+        Ok(Objects {
+            credentials,
+            signing_key: None,
+            ..self
+        })
+    }
+
     // Writes the URL and every signed header. A dry run writes a signature
     // of zeros, which is as long as a real one.
     fn write_head(
@@ -1021,7 +1281,7 @@ impl<'a> Objects<'a> {
                             out.push(&[byte.to_ascii_lowercase()]);
                         }
                     },
-                    |out| write_metadata_value(out, pair.value),
+                    |out| write_metadata_value(out, pair.value, self.bucket.service),
                 ),
             }
         }
@@ -1086,7 +1346,9 @@ impl<'a> Objects<'a> {
                 Header::Fixed(_, HeaderValue::Host) => self.bucket.write_host(out),
                 Header::Fixed(_, HeaderValue::Range) => write_range(out, signed.range),
                 Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
-                Header::Meta(pair) if encodes(pair.value) => write_metadata_value(out, pair.value),
+                Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
+                    write_metadata_value(out, pair.value, self.bucket.service)
+                }
                 Header::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
             }
             out.push(b"\n");
@@ -1123,7 +1385,7 @@ impl<'a> Objects<'a> {
             206 if !ranged => Err(ResponseFault::Range.into()),
             200 if ranged => Err(ResponseFault::Range.into()),
             // AWS states the length of every response that it serves.
-            200 | 206 if self.bucket.service == Service::Aws && head.content_length.is_none() => {
+            200 | 206 if self.bucket.service.is_aws() && head.content_length.is_none() => {
                 Err(ResponseFault::Head.into())
             }
             200 | 206 => accept_success(shape, head),
@@ -1307,14 +1569,14 @@ impl<'a> Objects<'a> {
         list: &PhysicalList<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        validate_list(list)?;
+        validate_list(list, self.bucket.service)?;
         // SigV4 signs the parameters in the order of their names. With
         // `encoding-type=url`, a key that XML cannot carry still arrives.
         let query = [
             list.marker
                 .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
-            list.delimited
-                .then_some(("delimiter", QueryValue::Encoded(DELIMITER))),
+            list.delimiter
+                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
             Some(("encoding-type", QueryValue::Literal("url"))),
             list.include
                 .contains(ListInclude::OWNER)
@@ -1443,9 +1705,6 @@ impl<'a> Objects<'a> {
         crate::xml::s3::fill_listing(body, into, wanted, build)
     }
 }
-
-// S3 groups keys at any delimiter. A plan groups them at `/`, as on Azure.
-const DELIMITER: &[u8] = b"/";
 
 /// Returns the error code that an S3 error body names.
 ///
@@ -1641,6 +1900,30 @@ fn valid_aws_bucket_name(name: &str) -> bool {
         && !SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
+// The naming rules that AWS documents for directory buckets: a base name,
+// the zone ID and `--x-s3`, in 3 to 63 lowercase letters, digits and `-`.
+// The base name starts with a letter or a digit.
+fn valid_directory_bucket_name(name: &str) -> bool {
+    let Some((base, zone)) = name
+        .strip_suffix("--x-s3")
+        .and_then(|rest| rest.rsplit_once("--"))
+    else {
+        return false;
+    };
+    (3..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && base
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && zone
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+}
+
 // Four groups of one to three digits, separated by dots.
 fn looks_like_ipv4(name: &str) -> bool {
     name.split('.').count() == 4
@@ -1704,7 +1987,7 @@ fn validate_put(
     validate_condition(put.condition, put.condition_value)?;
     // AWS writes on `If-None-Match` only if no object holds the key, and takes
     // no value but `*`.
-    if service == Service::Aws
+    if service.is_aws()
         && put.condition == ConditionKind::IfNoneMatch
         && put.condition_value != Some(b"*")
     {
@@ -1718,7 +2001,7 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     if delete.kind != DeleteKind::Object {
         return Err(InvalidPlan::Option.into());
     }
-    if service == Service::Aws && delete.condition == ConditionKind::IfNoneMatch {
+    if service.is_aws() && delete.condition == ConditionKind::IfNoneMatch {
         return Err(InvalidPlan::Condition.into());
     }
     validate_condition(delete.condition, delete.condition_value)
@@ -1726,10 +2009,21 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
 
 // A prefix is not a key, so `validate_key` does not apply. S3 takes any
 // number of entries, zero included.
-fn validate_list(list: &PhysicalList<'_>) -> Result<()> {
+fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
     // S3 hands out no empty continuation token.
     if list.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
+    }
+    // A general purpose bucket groups keys at any text. A directory bucket
+    // groups them at `/` alone, lists only at a prefix that ends in it, and
+    // answers anything else with 400 `InvalidRequest`.
+    if let Some(delimiter) = list.delimiter
+        && (delimiter.is_empty() || (service == Service::AwsDirectory && delimiter != "/"))
+    {
+        return Err(InvalidPlan::Delimiter.into());
+    }
+    if service == Service::AwsDirectory && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
+        return Err(InvalidPlan::Prefix.into());
     }
     if list.include.contains(ListInclude::METADATA) {
         return Err(InvalidPlan::Option.into());
@@ -1746,17 +2040,13 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
             return Err(InvalidPlan::MetadataName.into());
         }
         // An empty value is a pair with no text, which S3 stores. A value is
-        // refused if a read would not return it exactly. S3 stores CR and LF
-        // as spaces, even from an encoded word. It returns an ASCII value
-        // unencoded, so HTTP drops the whitespace at either end, and a token
-        // that reads as an encoded word is decoded.
-        let edge = |byte: Option<&u8>| matches!(byte, Some(b' ' | b'\t'));
-        let bytes = pair.value.as_bytes();
-        if pair.value.contains(['\r', '\n'])
-            || edge(bytes.first())
-            || edge(bytes.last())
-            || rfc2047::looks_encoded(pair.value)
-        {
+        // refused if a read would not return it exactly. A general purpose
+        // bucket stores CR and LF as spaces, even from an encoded word. It
+        // returns an ASCII value unencoded, so HTTP drops the whitespace at
+        // either end, and a token that reads as an encoded word is decoded. A
+        // directory bucket stores an encoded word as it is sent, so
+        // `encodes` sends each of these values as one.
+        if service != Service::AwsDirectory && general_purpose_changes(pair.value) {
             return Err(InvalidPlan::MetadataValue.into());
         }
         if metadata[..index]
@@ -1770,7 +2060,7 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         len.saturating_add(pair.name.len())
             .saturating_add(pair.value.len())
     });
-    if service == Service::Aws && len > MAX_METADATA_LEN {
+    if service.is_aws() && len > MAX_METADATA_LEN {
         return Err(InvalidPlan::MetadataTooLarge.into());
     }
     Ok(())
@@ -1780,14 +2070,32 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
 // cannot hold text outside ASCII or a control character other than a tab,
 // and S3 returns such a value encoded. A tab is encoded too, because the
 // canonical form of SigV4 folds spaces alone. S3 returns a tab as it is.
-fn encodes(value: &str) -> bool {
-    !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control())
+//
+// A directory bucket stores an encoded word as it is sent, and a read
+// decodes it, so the values that a general purpose bucket would change are
+// encoded for it as well.
+fn encodes(value: &str, service: Service) -> bool {
+    !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || (service == Service::AwsDirectory && general_purpose_changes(value))
+}
+
+// Whether a general purpose bucket would store `value` other than as it is
+// given, sent as it is or as an encoded word: CR and LF, whitespace at
+// either end, or text that reads as an encoded word.
+fn general_purpose_changes(value: &str) -> bool {
+    let edge = |byte: Option<&u8>| matches!(byte, Some(b' ' | b'\t'));
+    let bytes = value.as_bytes();
+    value.contains(['\r', '\n'])
+        || edge(bytes.first())
+        || edge(bytes.last())
+        || rfc2047::looks_encoded(value)
 }
 
 // Writes a metadata value as the header carries it, encoded or as it is. An
 // encoded word holds no space, so its canonical form for SigV4 is the same.
-fn write_metadata_value(out: &mut dyn ByteSink, value: &str) {
-    if encodes(value) {
+fn write_metadata_value(out: &mut dyn ByteSink, value: &str, service: Service) {
+    if encodes(value, service) {
         rfc2047::write(out, value);
     } else {
         out.push(value.as_bytes());

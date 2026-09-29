@@ -2,6 +2,23 @@
 
 This file lists the changes in each release of `borink-object-storage-proto` and `borink-object-storage-crypto`. Until 1.0, any release can break the API. Note: these changelogs are not human-written and only lightly reviewed before 1.0.
 
+## Unreleased
+
+### Added
+
+- S3 directory buckets, as in S3 Express One Zone:
+  - New variant `s3::Service::AwsDirectory`. Its requests are signed for `s3express` and go to virtual-hosted URLs.
+  - New methods `Objects::encode_create_session`, `Objects::accept_create_session_head`, `Objects::accept_create_session_error_body` and `Objects::read_session`, which create a session.
+  - New struct `s3::Session` and enum `s3::SessionHeadOutcome`.
+  - New method `Objects::with_session`, which returns a client that signs with the credentials of a session and sends its token in `x-amz-s3session-token`.
+  - New function `layered::s3::create_session_requirements`.
+- New variant `InvalidPlan::Delimiter`, for an empty listing delimiter, and for one other than `/` on a hierarchical-namespace Azure account or a directory bucket. `InvalidPlan::azure_rejection` names Azure's `DelimiterIsInvalidForHNS` for it.
+
+### Changed
+
+- Listings group keys at any delimiter. The field `PhysicalList::delimited` is now `delimiter`, which holds the delimiter text. `PhysicalList::from_shape` plans `/` for a delimited `ListShape`.
+- An S3 client for a directory bucket refuses a listing prefix that does not end in `/` with `InvalidPlan::Prefix`, and sends a metadata value that a general purpose bucket would not store as given as an RFC 2047 encoded word, instead of refusing it.
+
 ## 0.0.3 - 2026-09-29
 
 ### Added

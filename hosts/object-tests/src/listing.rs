@@ -98,17 +98,12 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
     if call.get("fetch_owner").and_then(Value::as_bool) == Some(true) {
         include = include | ListInclude::OWNER;
     }
-    let delimited = match optional_text(call, "delimiter") {
-        None => false,
-        Some("/") => true,
-        Some(_) => return Ok(unsupported_by_crate("PhysicalList delimits on '/' only")),
-    };
 
     let list_plan = PhysicalList {
         prefix: optional_text(call, "prefix").unwrap_or_default(),
         marker: optional_text(call, "continuation_token"),
         start_after: optional_text(call, "start_after"),
-        delimited,
+        delimiter: optional_text(call, "delimiter"),
         max_results: requested_page_size(call),
         include,
     };

@@ -84,7 +84,7 @@
 //!
 //! // A listing reads its result out of the response body.
 //! let list = PhysicalList {
-//!     delimited: true,
+//!     delimiter: Some("/"),
 //!     max_results: Some(2),
 //!     ..PhysicalList::new("directory/")
 //! };

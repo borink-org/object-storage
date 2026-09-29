@@ -5,8 +5,9 @@
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
 // the caller's buffer, and `page.rs` holds what reading any page takes. The
 // files named for a service read that service's documents: `azure.rs` and
-// `s3.rs` a listing page, `azure_blocks.rs` a block list. This file reads the
-// error document, and walks the properties of an entry for the caller.
+// `s3.rs` a listing page, `s3.rs` also a session's credentials, and
+// `azure_blocks.rs` a block list. This file reads the error document, and
+// walks the properties of an entry for the caller.
 //
 // An Azure page is read in this order. `page::check_body` checks the body is
 // UTF-8 and holds no zero byte. `page::open_root_element` skips the prolog

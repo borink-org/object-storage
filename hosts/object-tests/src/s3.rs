@@ -18,7 +18,8 @@ use crate::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, ObjectProperty, Objects, PayloadHash, PropertySet, Service,
+    self, Addressing, Bucket, ObjectProperty, Objects, PayloadHash, PropertySet, Service, Session,
+    SessionHeadOutcome,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
@@ -27,6 +28,7 @@ use borink_object_storage_proto::{
     RequestedRange, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
+use std::cell::OnceCell;
 
 // AWS reports at most 1,000 entries on one listing page.
 const MAX_PAGE_ENTRIES: usize = 1_000;
@@ -49,12 +51,92 @@ fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
         .collect()
 }
 
-fn read_object(
+/// The clients of one case: the one of the case's own credentials, and for a
+/// directory bucket the one of a session, which is opened for the first
+/// request that needs it.
+struct Client<'a> {
+    context: AdapterContext,
+    objects: Objects<'a>,
+    directory: bool,
+    session: OnceCell<Objects<'a>>,
+}
+
+impl<'a> Client<'a> {
+    /// Returns the client that signs requests to the objects, or the result
+    /// to report if no session could be opened.
+    ///
+    /// Call it after the crate checked the plan with `self.objects`, so that
+    /// a refused plan sends no request, not even a CreateSession.
+    fn signer(&self) -> Result<Result<Objects<'a>, Value>, AdapterError> {
+        if !self.directory {
+            return Ok(Ok(self.objects));
+        }
+        if let Some(objects) = self.session.get() {
+            return Ok(Ok(*objects));
+        }
+        let session = match open_session(&self.context, &self.objects)? {
+            Ok(session) => session,
+            Err(result) => return Ok(Err(result)),
+        };
+        let objects = match self.objects.with_session(session) {
+            Ok(objects) => objects.with_signing_key(&current_timestamps()),
+            Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
+        };
+        Ok(Ok(*self.session.get_or_init(|| objects)))
+    }
+}
+
+/// Sends a CreateSession and reads the credentials of the session, or
+/// returns the result to report instead.
+///
+/// The session borrows the response body, which is leaked: the process
+/// grades one case and exits.
+fn open_session(
     context: &AdapterContext,
     objects: &Objects<'_>,
-    call: &Value,
-    kind: GetKind,
-) -> Result<Value, AdapterError> {
+) -> Result<Result<Session<'static>, Value>, AdapterError> {
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
+        layered::s3::create_session_requirements(objects, &now)
+    ));
+    let request =
+        page_step!(objects.encode_create_session(&mut request_bytes, &mut header_spans, &now));
+    let exchange = match send_request(context, &request) {
+        Ok(exchange) => exchange,
+        Err(error) => return Ok(Err(transport_failure(&error))),
+    };
+    let head_outcome = page_step!(objects.accept_create_session_head(exchange.response_head()));
+    let outcome = match head_outcome {
+        SessionHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_create_session_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        SessionHeadOutcome::Session { .. } => None,
+        SessionHeadOutcome::NotFound { .. } => Some(404),
+        SessionHeadOutcome::NeedErrorBody(failure)
+        | SessionHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(Err(error_result(&exchange, status)));
+    }
+    let body = Vec::leak(exchange.body);
+    Ok(Ok(page_step!(objects.read_session(body))))
+}
+
+/// Returns early with the result to report if no session could be opened.
+macro_rules! signer_step {
+    ($client:expr) => {
+        match $client.signer()? {
+            Ok(objects) => objects,
+            Err(result) => return Ok(result),
+        }
+    };
+}
+
+fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate("PhysicalGet carries one precondition"));
     };
@@ -73,12 +155,18 @@ fn read_object(
     };
 
     let now = current_timestamps();
+    crate_step!(layered::s3::get_requirements(
+        &client.objects,
+        &get_plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
         layered::s3::get_requirements(objects, &get_plan, &now)
     ));
     let request =
         crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request(&client.context, &request));
 
     let head_outcome =
         crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
@@ -133,11 +221,7 @@ fn read_object(
     })
 }
 
-fn write_object(
-    context: &AdapterContext,
-    objects: &Objects<'_>,
-    call: &Value,
-) -> Result<Value, AdapterError> {
+fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
     };
@@ -182,6 +266,14 @@ fn write_object(
     let payload = Payload::Slice(&body);
 
     let now = current_timestamps();
+    crate_step!(layered::s3::put_requirements(
+        &client.objects,
+        &put_plan,
+        payload,
+        PayloadHash::Compute,
+        &now
+    ));
+    let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
         layered::s3::put_requirements(objects, &put_plan, payload, PayloadHash::Compute, &now)
     ));
@@ -193,7 +285,7 @@ fn write_object(
         PayloadHash::Compute,
         &now
     ));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request(&client.context, &request));
 
     let head_outcome =
         crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
@@ -221,11 +313,7 @@ fn write_object(
     })
 }
 
-fn delete_object(
-    context: &AdapterContext,
-    objects: &Objects<'_>,
-    call: &Value,
-) -> Result<Value, AdapterError> {
+fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate(
             "PhysicalDelete carries one precondition",
@@ -240,6 +328,12 @@ fn delete_object(
     };
 
     let now = current_timestamps();
+    crate_step!(layered::s3::delete_requirements(
+        &client.objects,
+        &delete_plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
         layered::s3::delete_requirements(objects, &delete_plan, &now)
     ));
@@ -249,7 +343,7 @@ fn delete_object(
         &delete_plan,
         &now
     ));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request(&client.context, &request));
 
     let head_outcome =
         crate_step!(objects.accept_delete_head(delete_plan.shape(), exchange.response_head()));
@@ -271,16 +365,20 @@ fn delete_object(
     })
 }
 
-/// The pages of one bucket's listings, read with an `Objects` client.
-struct ObjectPages<'a> {
-    context: &'a AdapterContext,
-    objects: &'a Objects<'a>,
-}
-
-impl PageSource for ObjectPages<'_> {
+/// The pages of the bucket's listings.
+impl PageSource for Client<'_> {
     fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
-        let (context, objects) = (self.context, self.objects);
         let now = current_timestamps();
+        page_step!(layered::s3::list_requirements(
+            &self.objects,
+            list_plan,
+            &now
+        ));
+        let objects = &match self.signer()? {
+            Ok(objects) => objects,
+            Err(result) => return Ok(Err(result)),
+        };
+        let context = &self.context;
         let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
             layered::s3::list_requirements(objects, list_plan, &now)
         ));
@@ -434,16 +532,16 @@ fn parse_range_header(value: &str) -> Option<RequestedRange> {
 /// the case adds. The crate derives every other signed header itself, so a
 /// header it does not write is unsupported.
 fn sign(call: &Value) -> Result<Value, AdapterError> {
-    if optional_text(call, "signing_algorithm").is_some_and(|algorithm| algorithm != "sigv4") {
-        return Ok(unsupported_by_crate(
-            "the crate signs with SigV4 alone, not with an S3 Express session",
-        ));
-    }
-    if optional_text(call, "service").is_some_and(|service| service != "s3") {
-        return Ok(unsupported_by_crate(
-            "the crate signs for the s3 service only",
-        ));
-    }
+    // An S3 Express session signs for a directory bucket, and the crate
+    // derives the service name from the bucket.
+    let service = match (
+        optional_text(call, "signing_algorithm"),
+        optional_text(call, "service"),
+    ) {
+        (None | Some("sigv4"), None | Some("s3")) => Service::Aws,
+        (Some("sigv4_s3express"), None | Some("s3express")) => Service::AwsDirectory,
+        _ => return Ok(unsupported_by_adapter("signing algorithm not mapped")),
+    };
     let Some(now) = optional_text(call, "clock").and_then(parse_clock) else {
         return Ok(unsupported_by_adapter("clock not mapped"));
     };
@@ -494,13 +592,28 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
         }
     }
 
-    let bucket = crate_step!(Bucket::new(&endpoint, bucket_name, region, Service::Aws))
+    let bucket = crate_step!(Bucket::new(&endpoint, bucket_name, region, service))
         .with_addressing(Addressing::VirtualHosted);
     let mut credentials = crate_step!(Credentials::new(key_id, secret, wipe));
-    if let Some(token) = session_token {
+    if let Some(token) = session_token
+        && service == Service::Aws
+    {
         credentials = crate_step!(credentials.with_session_token(token));
     }
     let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO);
+    // The credentials of the case are those of a session that CreateSession
+    // returned.
+    let objects = match session_token {
+        Some(token) if service == Service::AwsDirectory => {
+            crate_step!(objects.with_session(Session {
+                key_id,
+                secret,
+                token,
+                expiration: None,
+            }))
+        }
+        _ => objects,
+    };
     let body = STANDARD.decode(optional_text(call, "body_base64").unwrap_or_default())?;
 
     let method = optional_text(call, "method").unwrap_or("GET");
@@ -624,7 +737,7 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         }
         _ => {}
     }
-    if mapped_call_fields(operation).is_empty() {
+    if operation != "s3.create_session" && mapped_call_fields(operation).is_empty() {
         return Ok(unsupported_by_crate(&format!(
             "the crate has no S3 {operation} operation"
         )));
@@ -636,21 +749,26 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     }
 
     let endpoint = message.get("endpoint").ok_or("missing endpoint")?;
-    if endpoint
+    let service = if endpoint
         .get("directory_bucket")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
+        Service::AwsDirectory
+    } else if operation == "s3.create_session" {
         return Ok(unsupported_by_crate(
-            "the crate signs no S3 Express session for a directory bucket",
+            "only a directory bucket creates a session",
         ));
-    }
+    } else {
+        Service::Aws
+    };
     let is_live = message.get("mode").and_then(Value::as_str) == Some("live");
     let invalid_credentials =
         call.get("credential_mode").and_then(Value::as_str) == Some("invalid");
     let (key_id, secret, session_token) = if !is_live {
+        // The S3 Express cases expect this key ID.
         (
-            "AKIDOFFLINEPLACEHOLDER".to_owned(),
+            "offline".to_owned(),
             "offline-placeholder-secret".to_owned(),
             None,
         )
@@ -667,7 +785,7 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let endpoint_url = optional_text(endpoint, "url").ok_or("missing endpoint url")?;
     let bucket_name = optional_text(endpoint, "bucket").ok_or("missing endpoint bucket")?;
     let region = optional_text(endpoint, "region").unwrap_or("us-east-1");
-    let bucket = crate_step!(Bucket::new(endpoint_url, bucket_name, region, Service::Aws));
+    let bucket = crate_step!(Bucket::new(endpoint_url, bucket_name, region, service));
     let mut credentials = crate_step!(Credentials::new(&key_id, &secret, wipe));
     if let Some(token) = &session_token {
         credentials = crate_step!(credentials.with_session_token(token));
@@ -678,17 +796,29 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         .with_checksum(MD5_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
-    let pages = ObjectPages {
-        context: &context,
-        objects: &objects,
+    if operation == "s3.create_session" {
+        return Ok(match open_session(&context, &objects)? {
+            Ok(session) => successful_result(json!({
+                "has_access_key": !session.key_id.is_empty(),
+                "has_secret_key": !session.secret.is_empty(),
+                "has_session_token": !session.token.is_empty(),
+            })),
+            Err(result) => result,
+        });
+    }
+    let client = Client {
+        context,
+        objects,
+        directory: service == Service::AwsDirectory,
+        session: OnceCell::new(),
     };
     match operation {
-        "get" => read_object(&context, &objects, call, GetKind::Bytes),
-        "head" => read_object(&context, &objects, call, GetKind::Head),
-        "put" => write_object(&context, &objects, call),
-        "delete" => delete_object(&context, &objects, call),
-        "list" => list_all_keys(call, &pages),
-        "list_page" => list_page(call, &pages),
+        "get" => read_object(&client, call, GetKind::Bytes),
+        "head" => read_object(&client, call, GetKind::Head),
+        "put" => write_object(&client, call),
+        "delete" => delete_object(&client, call),
+        "list" => list_all_keys(call, &client),
+        "list_page" => list_page(call, &client),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }

@@ -45,7 +45,7 @@ fn reads_the_page_that_the_generated_request_asked_for() {
 
     let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
     let plan = PhysicalList {
-        delimited: true,
+        delimiter: Some("/"),
         max_results: Some(1000),
         ..PhysicalList::new("directory/")
     };

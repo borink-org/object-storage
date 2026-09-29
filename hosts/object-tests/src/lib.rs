@@ -46,20 +46,39 @@ impl HttpExchange {
 
 struct AdapterContext {
     http_agent: ureq::Agent,
+    /// The origin of the endpoint's proxy, which takes a plain HTTP request
+    /// as the host of its URL would, and the agent that sends it there.
+    plain_proxy: Option<(String, ureq::Agent)>,
 }
 
 impl AdapterContext {
     /// An agent that hands every status back, follows no redirect, and goes
     /// through the endpoint's proxy if it names one.
+    ///
+    /// The grader names a proxy for an endpoint whose host it cannot serve,
+    /// such as the zonal host of an S3 Express bucket. ureq would open a
+    /// CONNECT tunnel to it, which the grader does not take, so a plain HTTP
+    /// request goes to the proxy directly, with the `host` of its URL. A
+    /// request over HTTPS goes through ureq's tunnel.
     fn for_endpoint(endpoint: &Value) -> Result<Self, AdapterError> {
-        let mut agent_config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .max_redirects(0);
-        if let Some(proxy_url) = optional_text(endpoint, "proxy_url") {
-            agent_config = agent_config.proxy(Some(ureq::Proxy::new(proxy_url)?));
-        }
+        let agent_config = || {
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+        };
+        let Some(proxy_url) = optional_text(endpoint, "proxy_url") else {
+            return Ok(Self {
+                http_agent: agent_config().build().into(),
+                plain_proxy: None,
+            });
+        };
+        let proxy = ureq::Proxy::new(proxy_url)?;
         Ok(Self {
-            http_agent: agent_config.build().into(),
+            http_agent: agent_config().proxy(Some(proxy)).build().into(),
+            plain_proxy: Some((
+                proxy_url.trim_end_matches('/').to_owned(),
+                agent_config().build().into(),
+            )),
         })
     }
 }
@@ -152,6 +171,7 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "BlockId" => named_field("block_id_base64", "blocks"),
         "Blocks" => "blocks",
         "Prefix" => "prefix",
+        "Delimiter" => "delimiter",
         "Marker" => "continuation_token",
         "MaxResults" => "page_size",
         reason if reason.starts_with("Metadata") => "metadata",
@@ -219,8 +239,9 @@ macro_rules! transport_step {
     };
 }
 
-/// Returns early from a page read with the result for an error from the
-/// crate, as [`crate_step`] does from a whole operation.
+/// Returns early from a page read, or from opening an S3 Express session,
+/// with the result for an error from the crate, as [`crate_step`] does from a
+/// whole operation.
 macro_rules! page_step {
     ($expression:expr) => {
         match $expression {
@@ -264,16 +285,31 @@ fn send_request(
     context: &AdapterContext,
     request: &WireRequest<'_>,
 ) -> Result<HttpExchange, ureq::Error> {
-    let mut builder = ureq::http::Request::builder()
-        .method(request.method().as_str())
-        .uri(request.url());
+    let url = request.url();
+    let mut builder = ureq::http::Request::builder().method(request.method().as_str());
+    // See `AdapterContext::for_endpoint`.
+    let agent = match context
+        .plain_proxy
+        .as_ref()
+        .zip(url.strip_prefix("http://"))
+    {
+        Some(((proxy, agent), rest)) => {
+            let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+            builder = builder.uri(format!("{proxy}{path}")).header("host", host);
+            agent
+        }
+        None => {
+            builder = builder.uri(url);
+            &context.http_agent
+        }
+    };
     for (name, value) in request.headers() {
         builder = builder.header(name, value);
     }
 
     let mut response = match request.payload().bytes() {
-        Some(payload) => context.http_agent.run(builder.body(payload.to_vec())?)?,
-        None => context.http_agent.run(builder.body(())?)?,
+        Some(payload) => agent.run(builder.body(payload.to_vec())?)?,
+        None => agent.run(builder.body(())?)?,
     };
 
     let status = response.status().as_u16();

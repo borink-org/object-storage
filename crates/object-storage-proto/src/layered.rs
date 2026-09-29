@@ -471,6 +471,28 @@ pub mod s3 {
     ) -> Result<RequestSize> {
         required(objects.encode_list(&mut [], &mut [], list, now).map(drop))
     }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_create_session`] needs.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if the
+    /// client cannot create a session, unchanged from
+    /// [`Objects::encode_create_session`], which reports it again.
+    pub fn create_session_requirements(
+        objects: &Objects<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_create_session(&mut [], &mut [], now)
+                .map(drop),
+        )
+    }
 }
 
 #[cfg(test)]
