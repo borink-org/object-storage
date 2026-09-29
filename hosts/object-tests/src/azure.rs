@@ -16,14 +16,14 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_proto::azure::{
-    self, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalCommitBlocks,
-    PhysicalListBlocks, PhysicalStageBlock,
+    self, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
+    PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, CommitBlocksHeadOutcome, Container, DeleteHeadOutcome, DeleteKind,
-    EntryKind, GetHeadOutcome, GetKind, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome,
-    ListInclude, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    PropertySet, PutHeadOutcome, RequestedRange, StageBlockHeadOutcome, TransactionalChecksum,
+    AzureNamespace, Blobs, CommitHeadOutcome, Container, DeleteHeadOutcome, DeleteKind, EntryKind,
+    GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome,
+    MetadataPair, Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+    PropertySet, PutHeadOutcome, RequestedRange, StageHeadOutcome, TransactionalChecksum,
     WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
@@ -445,17 +445,18 @@ fn stage_block(
 
     let head_outcome = crate_step!(blobs.accept_stage_block_head(exchange.response_head()));
     let outcome = match head_outcome {
-        StageBlockHeadOutcome::NeedErrorBody(failure) => {
+        StageHeadOutcome::NeedErrorBody(failure) => {
             blobs.accept_stage_block_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
 
     Ok(match outcome {
-        StageBlockHeadOutcome::Staged => successful_result(json!({})),
-        StageBlockHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
-        StageBlockHeadOutcome::NeedErrorBody(failure)
-        | StageBlockHeadOutcome::ServiceFailure(failure) => error_result(&exchange, failure.status),
+        StageHeadOutcome::Staged { .. } => successful_result(json!({})),
+        StageHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
+        StageHeadOutcome::NeedErrorBody(failure) | StageHeadOutcome::ServiceFailure(failure) => {
+            error_result(&exchange, failure.status)
+        }
         _ => error_result(&exchange, exchange.status),
     })
 }
@@ -467,7 +468,7 @@ fn commit_blocks(
 ) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate(
-            "PhysicalCommitBlocks carries one precondition",
+            "PhysicalCommit carries one precondition",
         ));
     };
 
@@ -494,7 +495,7 @@ fn commit_blocks(
     }
 
     let key = optional_text(call, "key").unwrap_or_default();
-    let commit_plan = PhysicalCommitBlocks {
+    let commit_plan = PhysicalCommit {
         key,
         condition,
         condition_value,
@@ -521,24 +522,23 @@ fn commit_blocks(
     let head_outcome =
         crate_step!(blobs.accept_commit_blocks_head(commit_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
-        CommitBlocksHeadOutcome::NeedErrorBody(failure) => {
+        CommitHeadOutcome::NeedErrorBody(failure) => {
             blobs.accept_commit_blocks_error_body(commit_plan.shape(), failure, &exchange.body)
         }
         outcome => outcome,
     };
 
     Ok(match outcome {
-        CommitBlocksHeadOutcome::Committed { meta, .. } => {
+        CommitHeadOutcome::Committed { meta, .. } => {
             let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
             if let Some(version) = text_of(meta.version) {
                 value["version"] = json!(version);
             }
             successful_result(value)
         }
-        CommitBlocksHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
-        CommitBlocksHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
-        CommitBlocksHeadOutcome::NeedErrorBody(failure)
-        | CommitBlocksHeadOutcome::ServiceFailure(failure) => {
+        CommitHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
+        CommitHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
+        CommitHeadOutcome::NeedErrorBody(failure) | CommitHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }
         _ => error_result(&exchange, exchange.status),
@@ -574,16 +574,16 @@ fn list_blocks(
 
     let head_outcome = crate_step!(blobs.accept_list_blocks_head(exchange.response_head()));
     let outcome = match head_outcome {
-        ListBlocksHeadOutcome::NeedErrorBody(failure) => {
+        ListPartsHeadOutcome::NeedErrorBody(failure) => {
             blobs.accept_list_blocks_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
     let failed_status = match outcome {
-        ListBlocksHeadOutcome::Blocks { .. } => None,
-        ListBlocksHeadOutcome::NotFound { .. } => Some(404),
-        ListBlocksHeadOutcome::NeedErrorBody(failure)
-        | ListBlocksHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+        ListPartsHeadOutcome::Parts { .. } => None,
+        ListPartsHeadOutcome::NotFound { .. } => Some(404),
+        ListPartsHeadOutcome::NeedErrorBody(failure)
+        | ListPartsHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
     };
     if let Some(status) = failed_status {

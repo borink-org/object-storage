@@ -404,7 +404,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     // variant no number reaches and the loop above never sees. These three
     // fail until someone states the new count. They also check `sweep`
     // itself: a discriminant above its Miri bound would be missing here.
-    assert_eq!((kinds, classes, outcomes), (10, 5, 13));
+    assert_eq!((kinds, classes, outcomes), (11, 5, 13));
     assert_eq!(kind_of(kind_view(None)), None);
     assert_eq!(kind_of(4095), None);
     assert_eq!(class_of(4095), None);
@@ -746,7 +746,7 @@ fn every_error_crosses_as_a_status() {
     }
     // Every variant of the two inner enums, and the five that carry no
     // inner value.
-    assert_eq!(checked, 5 + 26 + 4);
+    assert_eq!(checked, 5 + 27 + 4);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

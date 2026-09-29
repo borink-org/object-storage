@@ -56,9 +56,10 @@ pub enum InvalidPlan {
     Condition = 5,
     /// The content is longer than the service writes in one request.
     ///
-    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN) and
-    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN) state the
-    /// limits.
+    /// [`azure::MAX_PUT_LEN`](crate::azure::MAX_PUT_LEN),
+    /// [`azure::MAX_STAGE_LEN`](crate::azure::MAX_STAGE_LEN),
+    /// [`s3::MAX_PUT_LEN`](crate::s3::MAX_PUT_LEN) and
+    /// [`s3::MAX_PART_LEN`](crate::s3::MAX_PART_LEN) state the limits.
     PayloadTooLarge = 6,
     /// A field of the plan holds a discriminant that this crate does not
     /// define.
@@ -67,10 +68,19 @@ pub enum InvalidPlan {
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
-    /// The block ID is empty, is not base64, or decodes to over 64 bytes.
-    BlockId = 8,
-    /// The block list holds more entries than the service accepts.
-    Blocks = 9,
+    /// A part is named in a way the service cannot take.
+    ///
+    /// On Azure, the block ID is empty, is not base64, or decodes to over 64
+    /// bytes. On S3, the part number is outside 1 to
+    /// [`s3::MAX_PARTS`](crate::s3::MAX_PARTS), or the entity tag of a part
+    /// is not one header value.
+    PartId = 8,
+    /// The list of parts to commit is longer than the service takes, or S3
+    /// would refuse its order.
+    ///
+    /// An S3 commit names at least one part, and names them in ascending
+    /// order of their numbers, each once.
+    Parts = 9,
     /// The listing prefix is not UTF-8, or the service lists at no such
     /// prefix.
     Prefix = 10,
@@ -140,6 +150,11 @@ pub enum InvalidPlan {
     /// The listing delimiter is empty, or the service groups keys at no such
     /// delimiter.
     Delimiter = 26,
+    /// The ID of an S3 upload is empty.
+    ///
+    /// Pass the ID that [`s3::Objects::read_upload_id`](crate::s3::Objects::read_upload_id)
+    /// read, unchanged.
+    UploadId = 27,
 }
 
 impl InvalidPlan {
@@ -161,8 +176,8 @@ impl InvalidPlan {
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
             Self::Unknown => "the plan holds a value that this crate does not define",
-            Self::BlockId => "invalid block identifier",
-            Self::Blocks => "invalid block list",
+            Self::PartId => "invalid part identifier",
+            Self::Parts => "invalid list of parts",
             Self::Option => "invalid provider option",
             Self::RequestTooLarge => "the encoded request exceeds the address space",
             Self::Prefix => "invalid listing prefix",
@@ -175,6 +190,7 @@ impl InvalidPlan {
             Self::Checksum => "the checksum is not the base64 of the bytes it names",
             Self::MetadataTooLarge => "the metadata is larger than the service accepts",
             Self::Delimiter => "the listing delimiter is invalid",
+            Self::UploadId => "the upload ID is empty",
         }
     }
 
@@ -190,8 +206,8 @@ impl InvalidPlan {
             5 => Self::Condition,
             6 => Self::PayloadTooLarge,
             7 => Self::Unknown,
-            8 => Self::BlockId,
-            9 => Self::Blocks,
+            8 => Self::PartId,
+            9 => Self::Parts,
             10 => Self::Prefix,
             11 => Self::Marker,
             12 => Self::MaxResults,
@@ -209,6 +225,7 @@ impl InvalidPlan {
             24 => Self::Checksum,
             25 => Self::MetadataTooLarge,
             26 => Self::Delimiter,
+            27 => Self::UploadId,
             _ => return None,
         })
     }

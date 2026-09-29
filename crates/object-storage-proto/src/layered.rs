@@ -6,10 +6,10 @@
 //! The `*_requirements` functions encode the request into an empty buffer
 //! and read the capacities from the refusal. They allocate nothing.
 
-use crate::azure::{BlockRef, PhysicalCommitBlocks, PhysicalListBlocks, PhysicalStageBlock};
+use crate::azure::{BlockRef, PhysicalListBlocks, PhysicalStageBlock};
 use crate::{
-    Blobs, Error, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize,
-    Result, Timestamps,
+    Blobs, Error, Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+    RequestSize, Result, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
@@ -128,7 +128,7 @@ pub fn stage_block_requirements(
 /// unchanged from [`Blobs::encode_commit_blocks`], which reports it again.
 pub fn commit_blocks_requirements(
     blobs: &Blobs<'_>,
-    plan: &PhysicalCommitBlocks<'_>,
+    plan: &PhysicalCommit<'_>,
     blocks: &[BlockRef<'_>],
     now: &Timestamps,
 ) -> Result<RequestSize> {
@@ -164,7 +164,7 @@ pub fn list_blocks_requirements(
 ///
 /// Use it to size the array for [`Blobs::fill_blocks`] from the
 /// `expected_len` of
-/// [`ListBlocksHeadOutcome::Blocks`](crate::ListBlocksHeadOutcome::Blocks).
+/// [`ListPartsHeadOutcome::Parts`](crate::ListPartsHeadOutcome::Parts).
 /// The smallest element that the reader accepts is
 /// `<Block><Name>x</Name><Size>0</Size></Block>`, 43 bytes. The reader
 /// requires a name and a size, and does not check that the name is base64.
@@ -380,10 +380,13 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
 /// The `*_requirements` functions of an S3 client.
 pub mod s3 {
     use super::required;
-    use crate::s3::{Objects, PayloadHash};
+    use crate::s3::{
+        Objects, PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload,
+        PhysicalListParts, PhysicalStagePart,
+    };
     use crate::{
-        Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, RequestSize, Result,
-        Timestamps,
+        Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+        RequestSize, Result, Timestamps,
     };
 
     /// Returns the byte and header-slot capacities that
@@ -490,6 +493,126 @@ pub mod s3 {
         required(
             objects
                 .encode_create_session(&mut [], &mut [], now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_create_upload`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_create_upload`], which reports it again.
+    pub fn create_upload_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalCreateUpload<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_create_upload(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_stage_part`] needs for this plan.
+    ///
+    /// As [`put_requirements`]: the answer covers the head, and this
+    /// function reads no byte of `content` and computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_stage_part`], which reports it again.
+    pub fn stage_part_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalStagePart<'_>,
+        content: Payload<'_>,
+        hash: PayloadHash,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_stage_part(&mut [], &mut [], plan, content, hash, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_commit_parts`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact,
+    /// and the bytes include the XML body that the request carries. This
+    /// function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if the
+    /// commit cannot become an S3 request, unchanged from
+    /// [`Objects::encode_commit_parts`], which reports it again.
+    pub fn commit_parts_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalCommit<'_>,
+        upload_id: &str,
+        parts: &[PartRef<'_>],
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_commit_parts(&mut [], &mut [], plan, upload_id, parts, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_abort_upload`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_abort_upload`], which reports it again.
+    pub fn abort_upload_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalAbortUpload<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_abort_upload(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_list_parts`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_list_parts`], which reports it again.
+    pub fn list_parts_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalListParts<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_list_parts(&mut [], &mut [], plan, now)
                 .map(drop),
         )
     }

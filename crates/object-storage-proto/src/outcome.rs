@@ -1,18 +1,30 @@
 use core::fmt;
 
-/// The result of a Put Block response head.
+/// The result of reading the response head of a stage: an Azure Put Block,
+/// or an S3 UploadPart.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StageBlockHeadOutcome<'h> {
-    /// The service holds the block.
-    ///
-    /// Put Block answers no entity tag. The checksum and encryption headers
-    /// it does answer are on
-    /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
-    Staged,
-    /// The object or container does not exist.
+pub enum StageHeadOutcome<'h> {
+    /// The service holds the part.
+    Staged {
+        /// The entity tag of the part, if the head carries one.
+        ///
+        /// S3 names a part at the commit by its number and this tag, so keep
+        /// it: see [`s3::PartRef`](crate::s3::PartRef). Azure names a block by
+        /// the ID you chose, and sends no tag. The checksum and encryption
+        /// headers that Azure does send are on
+        /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
+        e_tag: Option<&'h [u8]>,
+    },
+    /// The container does not exist, or on S3 the upload does not.
     NotFound {
         /// The service's reason, if known.
+        ///
+        /// [`ServiceErrorKind::NoSuchUpload`] means the upload is gone: it
+        /// was committed or aborted, or it never existed.
         kind: Option<ServiceErrorKind>,
     },
     /// Read the error body to finish this response.
@@ -21,29 +33,45 @@ pub enum StageBlockHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for StageBlockHeadOutcome<'_> {
+impl fmt::Display for StageHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Staged => f.write_str("the service holds the block"),
-            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::Staged { .. } => f.write_str("the service holds the part"),
+            Self::NotFound { kind } => not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
     }
 }
 
-/// The result of a Put Block List response head.
+/// The result of reading the response head of a commit: an Azure Put Block
+/// List, or an S3 CompleteMultipartUpload.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CommitBlocksHeadOutcome<'h> {
+pub enum CommitHeadOutcome<'h> {
     /// The object is committed.
     Committed {
         /// The committed object's metadata.
         meta: ObjectMeta<'h>,
     },
+    /// The service took the commit, and says in the body whether it
+    /// succeeded.
+    ///
+    /// S3 answers a commit with status 200 before it has finished, and then
+    /// writes either the result or an error into the body. This outcome is
+    /// not final. Read the whole body and pass it with the head to
+    /// [`s3::Objects::accept_commit_parts_body`](crate::s3::Objects::accept_commit_parts_body),
+    /// which returns the final outcome. Azure never returns this.
+    NeedResultBody {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
     /// The commit's condition failed.
     PreconditionFailed,
-    /// The object or container does not exist.
+    /// The container does not exist, or on S3 the upload does not.
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -51,37 +79,46 @@ pub enum CommitBlocksHeadOutcome<'h> {
     /// Read the error body to finish this response.
     NeedErrorBody(Failure<'h>),
     /// The service refused the request.
+    ///
+    /// A list of parts that the service cannot commit is refused here, with
+    /// [`ServiceErrorKind::InvalidUpload`].
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for CommitBlocksHeadOutcome<'_> {
+impl fmt::Display for CommitHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Committed { .. } => f.write_str("the object is committed"),
+            Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
             Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
-            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::NotFound { kind } => not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
     }
 }
 
-/// The result of a Get Block List response head.
+/// The result of reading the response head of a listing of parts: an Azure
+/// Get Block List, or an S3 ListParts.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ListBlocksHeadOutcome<'h> {
-    /// The blocks follow in the response body.
+pub enum ListPartsHeadOutcome<'h> {
+    /// The parts follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_blocks`](crate::Blobs::fill_blocks).
+    /// [`Blobs::fill_blocks`](crate::Blobs::fill_blocks) or
+    /// [`s3::Objects::fill_parts`](crate::s3::Objects::fill_parts).
     #[non_exhaustive]
-    Blocks {
-        /// Metadata of the committed object, if any.
+    Parts {
+        /// Metadata of the committed object, if any. Only Azure sends it.
         meta: ObjectMeta<'h>,
         /// The result body's byte length.
         expected_len: Option<u64>,
     },
-    /// The object or container does not exist.
+    /// The object or container does not exist, or on S3 the upload does not.
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -92,14 +129,27 @@ pub enum ListBlocksHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-impl fmt::Display for ListBlocksHeadOutcome<'_> {
+impl fmt::Display for ListPartsHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Blocks { .. } => f.write_str("the blocks follow in the response body"),
-            Self::NotFound { .. } => f.write_str("the object or container does not exist"),
+            Self::Parts { .. } => f.write_str("the parts follow in the response body"),
+            Self::NotFound { kind } => not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
+    }
+}
+
+// What a `NotFound` of an operation on parts writes: what the service named
+// as missing, or all that can be.
+fn not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt::Result {
+    match kind {
+        Some(
+            kind @ (ServiceErrorKind::NotFound
+            | ServiceErrorKind::NoSuchContainer
+            | ServiceErrorKind::NoSuchUpload),
+        ) => f.write_str(kind.as_str()),
+        _ => f.write_str("the object, the upload or the container does not exist"),
     }
 }
 
@@ -491,6 +541,9 @@ pub enum ServiceErrorKind {
     Service = 9,
     /// The named parts do not match what the service can commit.
     InvalidUpload = 10,
+    /// The upload does not exist: it was committed or aborted, or it never
+    /// existed. Only S3 keeps uploads.
+    NoSuchUpload = 11,
 }
 
 impl ServiceErrorKind {
@@ -508,6 +561,7 @@ impl ServiceErrorKind {
             Self::Timeout => "the service timed out while it processed the request",
             Self::Service => "the service failed, or it was unavailable",
             Self::InvalidUpload => "the service refused the upload's parts",
+            Self::NoSuchUpload => "the upload does not exist",
         }
     }
 
@@ -526,6 +580,7 @@ impl ServiceErrorKind {
             8 => Self::Timeout,
             9 => Self::Service,
             10 => Self::InvalidUpload,
+            11 => Self::NoSuchUpload,
             _ => return None,
         })
     }

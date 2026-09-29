@@ -36,18 +36,20 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
   - CRC64 on Azure only, MD5 on both
+- Object upload in parts: stage parts, commit an ordered list of them (conditional, as a whole write is), list what is staged
+  - One commit plan and one set of outcomes for both services; Azure names a part by a block ID, S3 by its number within an upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
 
 ### Azure Blob Storage-only
 
 - Object listing: listing metadata (S3 does not list it)
-- Object multipart upload
 
 ### S3-only
 
 - SigV4 handling for every request (crypto implementations again through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto) or user-provided)
 - Directory buckets (S3 Express One Zone), including CreateSession and signing with the session's credentials
+- Uploads in parts: create and abort an upload, and read a commit that fails under status 200
 
 ## What makes `borink-object-storage` unique?
 

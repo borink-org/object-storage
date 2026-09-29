@@ -2,22 +2,22 @@
 //!
 //! Put Block From URL and structured-body framing are not implemented.
 
-use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
+use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, capacity_error, decimal_header, encoded, failure,
-    finish_with_body, parse_content_range, push_condition, text_header, trim_ascii, valid_header,
-    validate_condition, write_range,
+    ContentRange, accept_success, decimal_header, encoded, encoded_with_body, failure,
+    finish_with_body, parse_content_range, push_checksum, push_condition, text_header, trim_ascii,
+    valid_header, validate_checksum, validate_condition, write_range,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::{self, Parameter, QueryValue};
 use crate::{
-    Classification, CommitBlocksHeadOutcome, CommitBlocksShape, ConditionKind, DeleteHeadOutcome,
-    DeleteKind, DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan,
-    InvalidPlan, ListBlocksHeadOutcome, ListEntry, ListHeadOutcome, ListInclude, Listing,
-    MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
-    PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape, RequestedRange,
-    ResponseFault, ResponseHead, Result, ServiceErrorKind, StageBlockHeadOutcome, Timestamps,
-    TransactionalChecksum, WireRequest, WriteOptions,
+    Classification, CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome, Listing, MetadataPair, Method,
+    ObjectMeta, Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
+    PropertySet, PropertyValues, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
+    ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps, WireRequest,
+    WriteOptions,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -317,49 +317,6 @@ impl<'a> PhysicalStageBlock<'a> {
     }
 }
 
-/// A native Put Block List plan: publish an ordered list of blocks as the
-/// object.
-#[derive(Debug, Clone, Copy)]
-pub struct PhysicalCommitBlocks<'a> {
-    /// Object key.
-    pub key: &'a str,
-    /// Object precondition.
-    pub condition: ConditionKind,
-    /// ETag or wildcard for the precondition.
-    pub condition_value: Option<&'a [u8]>,
-    /// The metadata pairs to store with the object.
-    ///
-    /// A commit replaces the whole set, as
-    /// [`PhysicalPut::metadata`](crate::PhysicalPut::metadata) does.
-    pub metadata: &'a [MetadataPair<'a>],
-    /// The options of the commit.
-    ///
-    /// An object written in blocks stores no checksum unless the commit
-    /// declares one in [`WriteOptions::declared_md5`].
-    pub options: WriteOptions<'a>,
-}
-
-impl<'a> PhysicalCommitBlocks<'a> {
-    /// Creates a plan that commits blocks to `key` with no condition, no
-    /// metadata and no options.
-    pub const fn new(key: &'a str) -> Self {
-        Self {
-            key,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            options: WriteOptions::new(),
-        }
-    }
-
-    /// The part of the plan that reading the response needs.
-    pub const fn shape(&self) -> CommitBlocksShape {
-        CommitBlocksShape {
-            condition: self.condition,
-        }
-    }
-}
-
 /// A native Get Block List plan: read which blocks an object holds.
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalListBlocks<'a> {
@@ -476,7 +433,7 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(content.len()).as_bytes())
         });
-        push_checksum(&mut head, &plan.options, &self.checksums, |sum| {
+        push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
         encoded(head, Method::Put, content)
@@ -502,7 +459,7 @@ impl<'a> Blobs<'a> {
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
-        plan: &PhysicalCommitBlocks<'_>,
+        plan: &PhysicalCommit<'_>,
         blocks: &[BlockRef<'_>],
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
@@ -535,7 +492,7 @@ impl<'a> Blobs<'a> {
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
-        plan: &PhysicalCommitBlocks<'_>,
+        plan: &PhysicalCommit<'_>,
         blocks: impl Iterator<Item = (I, BlockSource)> + Clone,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>>
@@ -549,7 +506,7 @@ impl<'a> Blobs<'a> {
         let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
         for (index, (id, source)) in blocks.clone().enumerate() {
             if index >= MAX_BLOCKS {
-                return Err(InvalidPlan::Blocks.into());
+                return Err(InvalidPlan::Parts.into());
             }
             validate_block_id(id.as_ref())?;
             // At most 50,000 IDs of 88 bytes and tags of 11 bytes: < 6 MiB,
@@ -570,7 +527,7 @@ impl<'a> Blobs<'a> {
         // The content of a commit is the block list, so a checksum of the
         // content is a checksum of that text. The object's own MD5 is a
         // property of the blob, `x-ms-blob-content-md5`.
-        push_checksum(&mut head, &plan.options, &self.checksums, |sum| {
+        push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             write_block_list(sum, blocks.clone());
         });
         if let Some(md5) = plan.options.declared_md5 {
@@ -578,10 +535,7 @@ impl<'a> Blobs<'a> {
         }
         push_metadata(&mut head, plan.metadata);
         push_condition(&mut head, plan.condition, plan.condition_value);
-        let body = head.body(|out| write_block_list(out, blocks));
-        let capacity = head.capacity();
-        head.finish_with_body(Method::Put, Payload::Slice(&[]), Some(body))
-            .ok_or_else(|| capacity_error(capacity))
+        encoded_with_body(head, Method::Put, |out| write_block_list(out, blocks))
     }
 
     /// Reads a Get Block List body whole into `into`.
@@ -609,9 +563,9 @@ impl<'a> Blobs<'a> {
 
     /// Reads the head that answers a stage.
     ///
-    /// Every head that Azure sends becomes a [`StageBlockHeadOutcome`],
+    /// Every head that Azure sends becomes a [`StageHeadOutcome`],
     /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`StageBlockHeadOutcome::NeedErrorBody`]: read the
+    /// code, the outcome is [`StageHeadOutcome::NeedErrorBody`]: read the
     /// body and pass it to [`Self::accept_stage_block_error_body`].
     ///
     /// # Errors
@@ -621,20 +575,22 @@ impl<'a> Blobs<'a> {
     pub fn accept_stage_block_head<'h>(
         &self,
         head: ResponseHead<'h>,
-    ) -> Result<StageBlockHeadOutcome<'h>> {
+    ) -> Result<StageHeadOutcome<'h>> {
         match head.status {
-            201 => Ok(StageBlockHeadOutcome::Staged),
-            404 if head.error_code.is_none() => Ok(StageBlockHeadOutcome::NeedErrorBody(failure(
+            201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
+            404 if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
                 head.request_id,
             ))),
-            404 => Ok(StageBlockHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(StageHeadOutcome::NotFound { kind: named(&head) }),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(StageBlockHeadOutcome::NeedErrorBody(
-                failure(status, None, head.request_id),
-            )),
-            status => Ok(StageBlockHeadOutcome::ServiceFailure(failure(
+            status if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(StageHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -642,7 +598,7 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a [`StageBlockHeadOutcome::NeedErrorBody`] with the response
+    /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
     /// Pass the [`Failure`] of that outcome and the body
@@ -651,21 +607,21 @@ impl<'a> Blobs<'a> {
         &self,
         failure: Failure<'h>,
         body: &[u8],
-    ) -> StageBlockHeadOutcome<'h> {
+    ) -> StageHeadOutcome<'h> {
         finish_with_body(failure, body_kind(body))
     }
 
     /// Reads the head that answers a commit.
     ///
-    /// Pass the `shape` that [`PhysicalCommitBlocks::shape`] gave you before
+    /// Pass the `shape` that [`PhysicalCommit::shape`] gave you before
     /// the request. A failed condition is reported as
-    /// [`CommitBlocksHeadOutcome::PreconditionFailed`] only if that plan
+    /// [`CommitHeadOutcome::PreconditionFailed`] only if that plan
     /// carried a condition. Otherwise a 412 is a service failure that names
     /// its code.
     ///
-    /// Every head that Azure sends becomes a [`CommitBlocksHeadOutcome`],
+    /// Every head that Azure sends becomes a [`CommitHeadOutcome`],
     /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`CommitBlocksHeadOutcome::NeedErrorBody`]: read the
+    /// code, the outcome is [`CommitHeadOutcome::NeedErrorBody`]: read the
     /// body and pass it to [`Self::accept_commit_blocks_error_body`].
     ///
     /// # Errors
@@ -674,27 +630,31 @@ impl<'a> Blobs<'a> {
     /// status that a commit never returns is [`ResponseFault::Status`].
     pub fn accept_commit_blocks_head<'h>(
         &self,
-        shape: CommitBlocksShape,
+        shape: CommitShape,
         head: ResponseHead<'h>,
-    ) -> Result<CommitBlocksHeadOutcome<'h>> {
+    ) -> Result<CommitHeadOutcome<'h>> {
         match head.status {
-            201 => Ok(CommitBlocksHeadOutcome::Committed {
+            201 => Ok(CommitHeadOutcome::Committed {
                 meta: multipart_meta(head)?,
             }),
             412 if shape.condition != ConditionKind::None
                 && named(&head) == Some(ServiceErrorKind::Precondition) =>
             {
-                Ok(CommitBlocksHeadOutcome::PreconditionFailed)
+                Ok(CommitHeadOutcome::PreconditionFailed)
             }
-            404 if head.error_code.is_none() => Ok(CommitBlocksHeadOutcome::NeedErrorBody(
-                failure(404, None, head.request_id),
-            )),
-            404 => Ok(CommitBlocksHeadOutcome::NotFound { kind: named(&head) }),
+            404 if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
+                404,
+                None,
+                head.request_id,
+            ))),
+            404 => Ok(CommitHeadOutcome::NotFound { kind: named(&head) }),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(CommitBlocksHeadOutcome::NeedErrorBody(
-                failure(status, None, head.request_id),
-            )),
-            status => Ok(CommitBlocksHeadOutcome::ServiceFailure(failure(
+            status if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(CommitHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -702,29 +662,29 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a [`CommitBlocksHeadOutcome::NeedErrorBody`] with the
+    /// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the
     /// response body.
     ///
     /// Pass the `shape` of the commit, the [`Failure`] of
     /// that outcome and the body that you read.
     pub fn accept_commit_blocks_error_body<'h>(
         &self,
-        shape: CommitBlocksShape,
+        shape: CommitShape,
         failure: Failure<'h>,
         body: &[u8],
-    ) -> CommitBlocksHeadOutcome<'h> {
+    ) -> CommitHeadOutcome<'h> {
         let kind = body_kind(body);
         if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
-            return CommitBlocksHeadOutcome::PreconditionFailed;
+            return CommitHeadOutcome::PreconditionFailed;
         }
         finish_with_body(failure, kind)
     }
 
     /// Reads the head that answers a block listing.
     ///
-    /// Every head that Azure sends becomes a [`ListBlocksHeadOutcome`],
+    /// Every head that Azure sends becomes a [`ListPartsHeadOutcome`],
     /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`ListBlocksHeadOutcome::NeedErrorBody`]: read the
+    /// code, the outcome is [`ListPartsHeadOutcome::NeedErrorBody`]: read the
     /// body and pass it to [`Self::accept_list_blocks_error_body`].
     ///
     /// # Errors
@@ -735,24 +695,24 @@ impl<'a> Blobs<'a> {
     pub fn accept_list_blocks_head<'h>(
         &self,
         head: ResponseHead<'h>,
-    ) -> Result<ListBlocksHeadOutcome<'h>> {
+    ) -> Result<ListPartsHeadOutcome<'h>> {
         match head.status {
-            200 => Ok(ListBlocksHeadOutcome::Blocks {
+            200 => Ok(ListPartsHeadOutcome::Parts {
                 meta: multipart_meta(head)?,
                 expected_len: decimal_header(head.content_length)?,
             }),
 
-            404 if head.error_code.is_none() => Ok(ListBlocksHeadOutcome::NeedErrorBody(failure(
+            404 if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(failure(
                 404,
                 None,
                 head.request_id,
             ))),
-            404 => Ok(ListBlocksHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(ListPartsHeadOutcome::NotFound { kind: named(&head) }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(ListBlocksHeadOutcome::NeedErrorBody(
+            status if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(
                 failure(status, None, head.request_id),
             )),
-            status => Ok(ListBlocksHeadOutcome::ServiceFailure(failure(
+            status => Ok(ListPartsHeadOutcome::ServiceFailure(failure(
                 status,
                 named(&head),
                 head.request_id,
@@ -760,7 +720,7 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Finishes a [`ListBlocksHeadOutcome::NeedErrorBody`] with the response
+    /// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
     /// Pass the [`Failure`] of that outcome and the body
@@ -769,7 +729,7 @@ impl<'a> Blobs<'a> {
         &self,
         failure: Failure<'h>,
         body: &[u8],
-    ) -> ListBlocksHeadOutcome<'h> {
+    ) -> ListPartsHeadOutcome<'h> {
         finish_with_body(failure, body_kind(body))
     }
 
@@ -804,7 +764,7 @@ impl<'a> Blobs<'a> {
     /// Returns this client with `provider` registered for the kind that it
     /// computes.
     ///
-    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
+    /// A write that asks for [`TransactionalChecksum::Compute`](crate::TransactionalChecksum::Compute) of that kind
     /// then has the encoder compute the checksum. Register a provider for
     /// each kind you compute: the encoder refuses `Compute` of a kind with no
     /// provider as [`InvalidPlan::Option`]. Registering a kind twice keeps
@@ -885,7 +845,7 @@ impl<'a> Blobs<'a> {
         head.header("content-length", |out| {
             out.push(U64Decimal::new(length).as_bytes());
         });
-        push_checksum(&mut head, &put.options, &self.checksums, |sum| {
+        push_checksum(&mut head, put.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
         push_metadata(&mut head, put.metadata);
@@ -1445,7 +1405,7 @@ fn validate_block_id(id: &str) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
     {
-        return Err(InvalidPlan::BlockId.into());
+        return Err(InvalidPlan::PartId.into());
     }
     Ok(())
 }
@@ -1678,17 +1638,7 @@ fn validate_options(
     has_bytes: bool,
     checksums: &[Option<ChecksumProvider>; KINDS],
 ) -> Result<()> {
-    match options.checksum {
-        Some(TransactionalChecksum::Md5(text)) => ChecksumKind::Md5.check_base64(text)?,
-        Some(TransactionalChecksum::Crc64(text)) => ChecksumKind::Crc64.check_base64(text)?,
-        // A computed checksum needs the content and a provider of its kind.
-        Some(TransactionalChecksum::Compute(kind))
-            if !has_bytes || checksums[kind.slot()].is_none() =>
-        {
-            return Err(InvalidPlan::Option.into());
-        }
-        Some(TransactionalChecksum::Compute(_)) | None => {}
-    }
+    validate_checksum(options.checksum, has_bytes, checksums)?;
     if let Some(text) = options.declared_md5 {
         // A whole-object write stores the MD5 that Azure checked, and a block
         // is not an object. Only a commit declares one.
@@ -1698,41 +1648,6 @@ fn validate_options(
         ChecksumKind::Md5.check_base64(text)?;
     }
     Ok(())
-}
-
-// Writes the checksum header of a write, if the plan carries a checksum.
-// Text that the plan gave is written as it is; `validate_options` checked
-// it. A computed checksum is summed here by the provider of its kind, which
-// `validate_options` checked is registered. `content` feeds the content to
-// the sum one piece at a time: a put or a stage has one piece, and a commit
-// writes its block list piece by piece.
-fn push_checksum(
-    head: &mut HeadWriter<'_>,
-    options: &WriteOptions<'_>,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-    content: impl FnOnce(&mut Sum),
-) {
-    match options.checksum {
-        Some(TransactionalChecksum::Md5(text)) => {
-            head.header(ChecksumKind::Md5.header(), |out| out.push(text.as_bytes()));
-        }
-        Some(TransactionalChecksum::Crc64(text)) => {
-            head.header(ChecksumKind::Crc64.header(), |out| {
-                out.push(text.as_bytes())
-            });
-        }
-        Some(TransactionalChecksum::Compute(kind)) => {
-            // Validation refused the plan if this is `None`.
-            if let Some(provider) = &checksums[kind.slot()] {
-                let mut sum = provider.start();
-                content(&mut sum);
-                let mut into = [0; crate::checksum::BASE64_LEN];
-                let text = sum.finish().base64(&mut into);
-                head.header(kind.header(), |out| out.push(text.as_bytes()));
-            }
-        }
-        None => {}
-    }
 }
 
 // Writes the block list of a commit into `out`, one piece at a time. The

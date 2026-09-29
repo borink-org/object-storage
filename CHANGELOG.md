@@ -13,11 +13,29 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New method `Objects::with_session`, which returns a client that signs with the credentials of a session and sends its token in `x-amz-s3session-token`.
   - New function `layered::s3::create_session_requirements`.
 - New variant `InvalidPlan::Delimiter`, for an empty listing delimiter, and for one other than `/` on a hierarchical-namespace Azure account or a directory bucket. `InvalidPlan::azure_rejection` names Azure's `DelimiterIsInvalidForHNS` for it.
+- S3 uploads in parts, with CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload and ListParts:
+  - New methods `Objects::encode_create_upload`, `Objects::accept_create_upload_head`, `Objects::accept_create_upload_error_body` and `Objects::read_upload_id`, with the plan `s3::PhysicalCreateUpload` and the outcome `s3::CreateUploadHeadOutcome`.
+  - New methods `Objects::encode_stage_part`, `Objects::accept_stage_part_head` and `Objects::accept_stage_part_error_body`, with the plan `s3::PhysicalStagePart`.
+  - New methods `Objects::encode_commit_parts`, `Objects::encode_commit_parts_from_iter`, `Objects::accept_commit_parts_head`, `Objects::accept_commit_parts_body` and `Objects::accept_commit_parts_error_body`, which take a `PhysicalCommit` and a list of `s3::PartRef`. S3 answers a commit with status 200 and writes the result or an error into the body. The head is therefore `CommitHeadOutcome::NeedResultBody`, and `accept_commit_parts_body` reads the body into the final outcome.
+  - New methods `Objects::encode_abort_upload`, `Objects::accept_abort_upload_head` and `Objects::accept_abort_upload_error_body`, with the plan `s3::PhysicalAbortUpload`. They answer with a `DeleteHeadOutcome`.
+  - New methods `Objects::encode_list_parts`, `Objects::accept_list_parts_head`, `Objects::accept_list_parts_error_body` and `Objects::fill_parts`, with the plan `s3::PhysicalListParts` and the entry `s3::Part`, which converts to a `PartRef`.
+  - New constants `s3::MAX_PART_LEN`, `s3::MIN_PART_LEN` and `s3::MAX_PARTS`.
+  - New functions `layered::s3::create_upload_requirements`, `stage_part_requirements`, `commit_parts_requirements`, `abort_upload_requirements` and `list_parts_requirements`.
+- New variant `CommitHeadOutcome::NeedResultBody`, which only S3 returns.
+- New variant `ServiceErrorKind::NoSuchUpload`, for S3's `NoSuchUpload`. S3's `InvalidPart`, `InvalidPartOrder` and `EntityTooSmall` are `ServiceErrorKind::InvalidUpload`.
+- New variant `InvalidPlan::UploadId`, for an empty upload ID.
+- New variant `Method::Post`.
 
 ### Changed
 
 - Listings group keys at any delimiter. The field `PhysicalList::delimited` is now `delimiter`, which holds the delimiter text. `PhysicalList::from_shape` plans `/` for a delimited `ListShape`.
 - An S3 client for a directory bucket refuses a listing prefix that does not end in `/` with `InvalidPlan::Prefix`, and sends a metadata value that a general purpose bucket would not store as given as an RFC 2047 encoded word, instead of refusing it.
+- The operations on parts share their plan and outcomes between Azure and S3, and are named for parts rather than blocks:
+  - `azure::PhysicalCommitBlocks` is `PhysicalCommit`, at the crate root, and `CommitBlocksShape` is `CommitShape`. An S3 commit takes the same plan, and refuses its metadata, which S3 takes when it creates the upload.
+  - `StageBlockHeadOutcome` is `StageHeadOutcome`, and its `Staged` variant carries the `e_tag` of the part, which S3 needs at the commit. Azure sends none.
+  - `CommitBlocksHeadOutcome` is `CommitHeadOutcome`.
+  - `ListBlocksHeadOutcome` is `ListPartsHeadOutcome`, and its `Blocks` variant is `Parts`.
+  - `InvalidPlan::BlockId` is `InvalidPlan::PartId`, and `InvalidPlan::Blocks` is `InvalidPlan::Parts`. Their numbers are unchanged.
 
 ## 0.0.3 - 2026-09-29
 
