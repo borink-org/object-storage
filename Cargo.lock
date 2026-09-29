@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "borink-object-storage-crypto"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "borink-object-storage-proto",
  "hmac",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "borink-object-storage-proto"
-version = "0.0.2"
+version = "0.0.3"
 
 [[package]]
 name = "borink-object-storage-ureq"

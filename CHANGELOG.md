@@ -1,8 +1,8 @@
 # Changelog
 
-This file lists the changes in each release of `borink-object-storage-proto` and `borink-object-storage-crypto`. Until 1.0, any release can break the API.
+This file lists the changes in each release of `borink-object-storage-proto` and `borink-object-storage-crypto`. Until 1.0, any release can break the API. Note: these changelogs are not human-written and only lightly reviewed before 1.0.
 
-## Unreleased
+## 0.0.3 - 2026-09-29
 
 ### Added
 
