@@ -963,6 +963,9 @@ fn validate_parts<E: AsRef<[u8]>>(
     Ok(())
 }
 
+// The URL is the XML namespace of S3's API, whose only version is dated
+// 2006-03-01. Nothing fetches it. S3 declares it on its own documents, and
+// the AWS SDKs send it on this one.
 const COMMIT_OPEN: &[u8] =
     b"<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 const COMMIT_CLOSE: &[u8] = b"</CompleteMultipartUpload>";
