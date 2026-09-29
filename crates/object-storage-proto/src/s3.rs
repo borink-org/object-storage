@@ -368,11 +368,6 @@ impl Service {
             _ => return None,
         })
     }
-
-    // Whether AWS answers, with a general purpose or a directory bucket.
-    const fn is_aws(self) -> bool {
-        matches!(self, Self::Aws | Self::AwsDirectory)
-    }
 }
 
 /// The most bytes of metadata that a write takes for [`Service::Aws`].
@@ -459,7 +454,7 @@ impl<'a> Bucket<'a> {
         // AWS serves a directory bucket at virtual-hosted URLs alone.
         let addressing = match service {
             Service::AwsDirectory => Addressing::VirtualHosted,
-            _ => Addressing::Path,
+            Service::Aws | Service::Compatible => Addressing::Path,
         };
         Ok(Self {
             scheme,
@@ -492,7 +487,7 @@ impl<'a> Bucket<'a> {
     fn signing_service(&self) -> &'static str {
         match self.service {
             Service::AwsDirectory => "s3express",
-            _ => "s3",
+            Service::Aws | Service::Compatible => "s3",
         }
     }
 
@@ -1130,8 +1125,9 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        if self.bucket.service != Service::AwsDirectory {
-            return Err(InvalidPlan::Option.into());
+        match self.bucket.service {
+            Service::AwsDirectory => {}
+            Service::Aws | Service::Compatible => return Err(InvalidPlan::Option.into()),
         }
         let signed = Signed {
             method: Method::Get,
@@ -1382,11 +1378,15 @@ impl<'a> Objects<'a> {
         head: ResponseHead<'h>,
     ) -> Result<GetHeadOutcome<'h>> {
         let ranged = shape.range != RequestedRange::Whole;
+        // AWS states the length of every response that it serves.
+        let states_length = match self.bucket.service {
+            Service::Aws | Service::AwsDirectory => true,
+            Service::Compatible => false,
+        };
         match head.status {
             206 if !ranged => Err(ResponseFault::Range.into()),
             200 if ranged => Err(ResponseFault::Range.into()),
-            // AWS states the length of every response that it serves.
-            200 | 206 if self.bucket.service.is_aws() && head.content_length.is_none() => {
+            200 | 206 if states_length && head.content_length.is_none() => {
                 Err(ResponseFault::Head.into())
             }
             200 | 206 => accept_success(shape, head),
@@ -1513,10 +1513,14 @@ impl<'a> Objects<'a> {
         shape: DeleteShape,
         head: ResponseHead<'h>,
     ) -> Result<DeleteHeadOutcome<'h>> {
+        // Some services that implement the S3 API answer 200.
+        let accepts_200 = match self.bucket.service {
+            Service::Compatible => true,
+            Service::Aws | Service::AwsDirectory => false,
+        };
         match head.status {
             204 => Ok(DeleteHeadOutcome::Accepted),
-            // Some services that implement the S3 API answer 200.
-            200 if self.bucket.service == Service::Compatible => Ok(DeleteHeadOutcome::Accepted),
+            200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
             412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
             412 => Ok(DeleteHeadOutcome::PreconditionFailed),
             200..=203 | 205..=299 => Err(ResponseFault::Status.into()),
@@ -1988,9 +1992,11 @@ fn validate_put(
     validate_condition(put.condition, put.condition_value)?;
     // AWS writes on `If-None-Match` only if no object holds the key, and takes
     // no value but `*`.
-    if service.is_aws()
-        && put.condition == ConditionKind::IfNoneMatch
-        && put.condition_value != Some(b"*")
+    let only_star = match service {
+        Service::Aws | Service::AwsDirectory => true,
+        Service::Compatible => false,
+    };
+    if only_star && put.condition == ConditionKind::IfNoneMatch && put.condition_value != Some(b"*")
     {
         return Err(InvalidPlan::Condition.into());
     }
@@ -2002,7 +2008,12 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     if delete.kind != DeleteKind::Object {
         return Err(InvalidPlan::Option.into());
     }
-    if service.is_aws() && delete.condition == ConditionKind::IfNoneMatch {
+    // AWS removes on `If-Match` alone.
+    let if_match_only = match service {
+        Service::Aws | Service::AwsDirectory => true,
+        Service::Compatible => false,
+    };
+    if if_match_only && delete.condition == ConditionKind::IfNoneMatch {
         return Err(InvalidPlan::Condition.into());
     }
     validate_condition(delete.condition, delete.condition_value)
@@ -2018,12 +2029,16 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
     // A general purpose bucket groups keys at any text. A directory bucket
     // groups them at `/` alone, lists only at a prefix that ends in it, and
     // answers anything else with 400 `InvalidRequest`.
+    let slash_only = match service {
+        Service::AwsDirectory => true,
+        Service::Aws | Service::Compatible => false,
+    };
     if let Some(delimiter) = list.delimiter
-        && (delimiter.is_empty() || (service == Service::AwsDirectory && delimiter != "/"))
+        && (delimiter.is_empty() || (slash_only && delimiter != "/"))
     {
         return Err(InvalidPlan::Delimiter.into());
     }
-    if service == Service::AwsDirectory && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
+    if slash_only && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
         return Err(InvalidPlan::Prefix.into());
     }
     if list.include.contains(ListInclude::METADATA) {
@@ -2047,7 +2062,7 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         // either end, and a token that reads as an encoded word is decoded. A
         // directory bucket stores an encoded word as it is sent, so
         // `encodes` sends each of these values as one.
-        if service != Service::AwsDirectory && general_purpose_changes(pair.value) {
+        if !stores_encoded_words(service) && general_purpose_changes(pair.value) {
             return Err(InvalidPlan::MetadataValue.into());
         }
         if metadata[..index]
@@ -2061,7 +2076,11 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
         len.saturating_add(pair.name.len())
             .saturating_add(pair.value.len())
     });
-    if service.is_aws() && len > MAX_METADATA_LEN {
+    let limited = match service {
+        Service::Aws | Service::AwsDirectory => true,
+        Service::Compatible => false,
+    };
+    if limited && len > MAX_METADATA_LEN {
         return Err(InvalidPlan::MetadataTooLarge.into());
     }
     Ok(())
@@ -2078,7 +2097,16 @@ fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<
 fn encodes(value: &str, service: Service) -> bool {
     !value.is_ascii()
         || value.bytes().any(|byte| byte.is_ascii_control())
-        || (service == Service::AwsDirectory && general_purpose_changes(value))
+        || (stores_encoded_words(service) && general_purpose_changes(value))
+}
+
+// Whether the service stores an RFC 2047 encoded word as it is sent, rather
+// than decoding it.
+const fn stores_encoded_words(service: Service) -> bool {
+    match service {
+        Service::AwsDirectory => true,
+        Service::Aws | Service::Compatible => false,
+    }
 }
 
 // Whether a general purpose bucket would store `value` other than as it is
