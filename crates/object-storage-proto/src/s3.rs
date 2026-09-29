@@ -189,7 +189,7 @@
 //!    `x-amz-s3session-token`.
 //!
 //! AWS ends a session five minutes after it creates it, so create the next
-//! one before [`Session::expiration`].
+//! one before [`Session::expires_at`].
 //!
 //! Beside the rules of [`Service::Aws`], the client follows those that AWS
 //! documents for a directory bucket:
@@ -734,11 +734,12 @@ impl<'x, 'b> PropertyValues<'x, 'b> {
     }
 }
 
-/// The temporary credentials of a session with a
+/// The credentials of a session with one
 /// [directory bucket](self#directory-buckets).
 ///
-/// Its [`Debug`](core::fmt::Debug) output shows the key ID and hides the
-/// secret and the token.
+/// Only [`Objects::with_session`] takes them. Its
+/// [`Debug`](core::fmt::Debug) output shows the key ID and hides the secret
+/// and the token.
 #[derive(Clone, Copy)]
 pub struct Session<'a> {
     /// The access key ID.
@@ -747,10 +748,9 @@ pub struct Session<'a> {
     pub secret: &'a str,
     /// The token of the session.
     pub token: &'a str,
-    /// When the credentials expire, such as `2026-09-29T10:05:00Z`, if the
-    /// answer says. Read it with
-    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
-    pub expiration: Option<&'a str>,
+    /// When the credentials expire, in seconds since the Unix epoch, if the
+    /// answer says.
+    pub expires_at: Option<u64>,
 }
 
 impl core::fmt::Debug for Session<'_> {
@@ -759,7 +759,7 @@ impl core::fmt::Debug for Session<'_> {
             .field("key_id", &self.key_id)
             .field("secret", &"<redacted>")
             .field("token", &"<redacted>")
-            .field("expiration", &self.expiration)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -1194,19 +1194,20 @@ impl<'a> Objects<'a> {
 
     /// Reads the credentials out of the response body of a CreateSession.
     ///
-    /// The body is decoded in place, and the [`Session`] borrows it.
+    /// The body is decoded in place, and the credentials borrow it.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
     /// not a `CreateSessionResult` that holds an access key ID, a secret
-    /// access key and a session token.
+    /// access key and a session token, or if its expiration is not an
+    /// ISO 8601 time in UTC.
     pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
         crate::xml::s3::read_session(body)
     }
 
-    /// Returns a client that signs its requests with the credentials of
-    /// `session`, which [`Self::read_session`] read.
+    /// Returns a client that signs its requests with the credentials of a
+    /// session, which [`Self::read_session`] read.
     ///
     /// The client wipes its copy of the secret with the function of this
     /// client's credentials. It has no signing key yet: call

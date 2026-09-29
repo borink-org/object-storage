@@ -18,6 +18,7 @@ use super::page::{
     open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use super::scan::{Child, Scan, Span, fault, trim};
+use crate::layered::iso8601_ms;
 use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
 use crate::{EntryKind, ListEntry, Listing, Result};
@@ -405,8 +406,11 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
         key_id: text(&chunk[key_id.0..key_id.1])?,
         secret: text(&chunk[secret.0..secret.1])?,
         token: text(&chunk[token.0..token.1])?,
-        expiration: match expiration {
-            Some((start, end)) => Some(text(&chunk[start..end])?),
+        expires_at: match expiration {
+            Some((start, end)) => match iso8601_ms(text(&chunk[start..end])?) {
+                Some(millis) => Some(millis / 1000),
+                None => return fault(),
+            },
             None => None,
         },
     })

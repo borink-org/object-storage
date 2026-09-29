@@ -609,7 +609,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 key_id,
                 secret,
                 token,
-                expiration: None,
+                expires_at: None,
             }))
         }
         _ => objects,

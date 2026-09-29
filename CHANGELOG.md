@@ -9,7 +9,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - S3 directory buckets, as in S3 Express One Zone:
   - New variant `s3::Service::AwsDirectory`. Its requests are signed for `s3express` and go to virtual-hosted URLs.
   - New methods `Objects::encode_create_session`, `Objects::accept_create_session_head`, `Objects::accept_create_session_error_body` and `Objects::read_session`, which create a session.
-  - New struct `s3::Session` and enum `s3::SessionHeadOutcome`.
+  - New struct `s3::Session`, the credentials of a session, which `read_session` returns with the expiration in seconds since the Unix epoch, and enum `s3::SessionHeadOutcome`.
   - New method `Objects::with_session`, which returns a client that signs with the credentials of a session and sends its token in `x-amz-s3session-token`.
   - New function `layered::s3::create_session_requirements`.
 - New variant `InvalidPlan::Delimiter`, for an empty listing delimiter, and for one other than `/` on a hierarchical-namespace Azure account or a directory bucket. `InvalidPlan::azure_rejection` names Azure's `DelimiterIsInvalidForHNS` for it.
