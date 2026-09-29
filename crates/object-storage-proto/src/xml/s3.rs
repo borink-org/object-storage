@@ -398,20 +398,16 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
     for (span, field) in spans.iter_mut().zip(fields) {
         *span = decode_value_in_place(chunk, field)?;
     }
-    let chunk: &[u8] = chunk;
-    let value = |span: Option<Span>| {
-        span.map(|(start, end)| text(&chunk[start..end]))
-            .transpose()
-    };
-    let (Some(key_id), Some(secret), Some(token)) =
-        (value(spans[0])?, value(spans[1])?, value(spans[2])?)
-    else {
+    let [Some(key_id), Some(secret), Some(token), expiration] = spans else {
         return fault();
     };
     Ok(Session {
-        key_id,
-        secret,
-        token,
-        expiration: value(spans[3])?,
+        key_id: text(&chunk[key_id.0..key_id.1])?,
+        secret: text(&chunk[secret.0..secret.1])?,
+        token: text(&chunk[token.0..token.1])?,
+        expiration: match expiration {
+            Some((start, end)) => Some(text(&chunk[start..end])?),
+            None => None,
+        },
     })
 }
