@@ -1,6 +1,6 @@
 // Reads the answers of an S3 upload in parts: the upload ID that
 // CreateMultipartUpload returns, the entity tag of a committed object, and a
-// page of ListParts. `azure_blocks.rs` reads Azure's block list the same way.
+// page of ListParts.
 
 use super::page::{
     check_body, check_room, decode_value_in_place, open_root_element, read_size, set_once, text,

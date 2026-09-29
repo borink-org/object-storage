@@ -7,8 +7,7 @@
 //!    crate has providers, and the function that [`Credentials::new`] takes
 //!    to wipe its copy of the secret.
 //! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`], a
-//!    [`PhysicalDelete`] or a [`PhysicalList`], the same plans that an Azure
-//!    client takes.
+//!    [`PhysicalDelete`] or a [`PhysicalList`].
 //! 3. Call [`Objects::encode_get`], [`Objects::encode_put`],
 //!    [`Objects::encode_delete`] or [`Objects::encode_list`] to write the
 //!    signed request head into your buffer, and send the [`WireRequest`]
@@ -183,8 +182,8 @@
 //!    [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged) carries
 //!    for each. On AWS, every part but the last holds at least
 //!    [`MIN_PART_LEN`] bytes.
-//! 3. Commit the parts with [`Objects::encode_commit_parts`], which takes the
-//!    [`PhysicalCommit`](crate::PhysicalCommit) that an Azure commit takes.
+//! 3. Commit the parts with [`Objects::encode_commit_parts`], which takes a
+//!    [`PhysicalCommit`](crate::PhysicalCommit).
 //!    S3 answers with status 200 before it has finished, and writes the
 //!    result into the body, which may still be an error. Read it with
 //!    [`Objects::accept_commit_parts_body`].
@@ -1056,8 +1055,8 @@ impl<'a> Objects<'a> {
 
     /// Writes the signed request head for `get` into `buf`.
     ///
-    /// A [`GetKind::Head`] plan becomes a HEAD request. Unlike Azure, S3
-    /// serves a [`RequestedRange::Suffix`].
+    /// A [`GetKind::Head`] plan becomes a HEAD request. S3 serves every
+    /// [`RequestedRange`], including a [`RequestedRange::Suffix`].
     ///
     /// # Errors
     ///
@@ -1567,8 +1566,7 @@ impl<'a> Objects<'a> {
     /// then final with the error unnamed.
     ///
     /// S3 reports a failed condition in the head, so this method reads no
-    /// part of `shape`. It takes the same arguments as
-    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+    /// part of `shape`.
     pub fn accept_get_error_body<'h>(
         &self,
         shape: GetShape,
@@ -1791,9 +1789,8 @@ impl<'a> Objects<'a> {
 
     /// Reads a page out of the response body of a listing.
     ///
-    /// This is [`Blobs::fill_listing`](crate::Blobs::fill_listing) for S3,
-    /// with the same rules: reading is destructive, and your array must hold
-    /// the whole page. An array of 1,000 entries holds any page from AWS.
+    /// Reading is destructive, and your array must hold the whole page. An
+    /// array of 1,000 entries holds any page from AWS.
     ///
     /// AWS writes all objects of a page before its groups of keys. An
     /// object's entity tag keeps its quotes. Read its date with
@@ -1824,9 +1821,7 @@ impl<'a> Objects<'a> {
     /// Reads a page the way [`Self::fill_listing`] does, and hands you the
     /// values of the properties in `wanted` as it goes.
     ///
-    /// This is [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with)
-    /// for S3. What `build` returns for each entry is written into your
-    /// array.
+    /// What `build` returns for each entry is written into your array.
     ///
     /// ```
     /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};

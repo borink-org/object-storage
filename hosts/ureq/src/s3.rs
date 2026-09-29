@@ -29,8 +29,9 @@ pub fn get(objects: &Objects<'_>, key: &str) -> Result<Vec<u8>, Box<dyn std::err
     for (name, value) in request.headers() {
         outgoing = outgoing.header(name, value);
     }
-    // As for Azure, this host returns the stored bytes and never decompresses
-    // them. See the `ureq` dependency in Cargo.toml.
+    // This host returns the stored bytes of the object and never decompresses
+    // them: the returned `BodyWindow` counts stored bytes. See the `ureq`
+    // dependency in Cargo.toml, which turns the decoding off.
     let mut incoming = outgoing
         .config()
         .http_status_as_error(false)

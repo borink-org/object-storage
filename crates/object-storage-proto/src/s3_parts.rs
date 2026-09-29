@@ -1,12 +1,10 @@
 // S3 uploads in parts: CreateMultipartUpload, UploadPart,
 // CompleteMultipartUpload, AbortMultipartUpload and ListParts.
 //
-// An upload is S3's form of what Azure calls writing in blocks, and it takes
-// the same plan for the commit, `PhysicalCommit`, and answers with the same
-// outcomes for the stage, the commit and the listing. What differs is how a
-// part is named. Azure names a block by an ID that the caller chooses. S3
-// names a part by its number within an upload that S3 created, and by the
-// entity tag that S3 returned when it staged the part.
+// The commit takes the shared plan `PhysicalCommit`, and the stage, the
+// commit and the listing answer with the shared outcomes. A part is named by
+// its number within an upload that S3 created, and by the entity tag that S3
+// returned when it staged the part.
 
 use crate::common::{
     FailureOutcome, decimal_header, encoded, encoded_with_body, failure, finish_with_body,
@@ -504,11 +502,10 @@ impl<'a> Objects<'a> {
 
     /// [`Self::encode_commit_parts`] over parts that are not in one array.
     ///
-    /// This is
-    /// [`Blobs::encode_commit_blocks_from_iter`](crate::Blobs::encode_commit_blocks_from_iter)
-    /// for S3. `parts` yields each part's number and entity tag. It is
-    /// traversed more than once, and every traversal must yield the same
-    /// items in the same order.
+    /// Use this when the parts are produced rather than stored, such as from
+    /// an array in another language. `parts` yields each part's number and
+    /// entity tag. It is traversed more than once, and every traversal must
+    /// yield the same items in the same order.
     ///
     /// # Errors
     ///
@@ -887,8 +884,7 @@ impl<'a> Objects<'a> {
 
     /// Reads a page of parts out of the response body of a ListParts.
     ///
-    /// This is [`Blobs::fill_blocks`](crate::Blobs::fill_blocks) for S3. The
-    /// parts are read in the order S3 wrote them, which is the order of
+    /// The parts are read in the order S3 wrote them, which is the order of
     /// their numbers. Reading is destructive, and your array must hold the
     /// whole page. An array of `max_parts` entries always does, and so does
     /// one of 1,000 for AWS. Pass a listed part to a commit as a

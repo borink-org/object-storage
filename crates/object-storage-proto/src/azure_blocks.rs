@@ -1,10 +1,9 @@
 // Azure block blobs: Put Block, Put Block List and Get Block List.
 //
 // A block blob is written in blocks: stage each block under an ID that you
-// choose, then commit an ordered list of them. The commit takes the plan that
-// an S3 commit takes, `PhysicalCommit`, and the three operations answer with
-// the outcomes that S3's uploads in parts answer with. `s3_parts.rs` holds
-// S3's side.
+// choose, then commit an ordered list of them. The commit takes the shared
+// plan `PhysicalCommit`, and the three operations answer with the shared
+// outcomes.
 
 #[cfg(doc)]
 use crate::Error;

@@ -651,9 +651,9 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure
-    /// request. [`PhysicalList::start_after`] and
-    /// [`ListInclude::OWNER`] are S3's, and refused with
-    /// [`InvalidPlan::Option`]. This method validates the plan before it
+    /// request. Azure lists from no key and names no owner, so a plan that
+    /// sets [`PhysicalList::start_after`] or [`ListInclude::OWNER`] is refused
+    /// with [`InvalidPlan::Option`]. This method validates the plan before it
     /// writes any byte, so it never reports an invalid plan as a capacity
     /// error.
     ///
