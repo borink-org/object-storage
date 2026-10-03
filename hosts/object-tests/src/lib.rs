@@ -12,9 +12,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
     BodyWindow, ChecksumKind, ConditionKind, ConditionValue, ContentProperties, CopySource,
-    DeleteTarget, Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, PhysicalRestore,
-    RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome, RestorePriority, Revision,
-    ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
+    DeleteTarget, Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, Payload,
+    PhysicalRestore, RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome,
+    RestorePriority, Revision, ServiceErrorKind, Tag, Timestamps, TransactionalChecksum,
+    WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -33,6 +34,98 @@ struct HttpExchange {
     status: u16,
     headers: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
+    /// The length of a successful body read with [`BodyRead::Sink`], which
+    /// leaves `body` empty.
+    sunk_length: Option<u64>,
+}
+
+/// How the adapter reads the body of a successful response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyRead<'a> {
+    /// Holds the body for the crate to read.
+    Hold,
+    /// Copies the body to the grader's socket at this address, for a call
+    /// with `body_sink` that reads more than the adapter holds.
+    Sink(&'a str),
+}
+
+impl<'a> BodyRead<'a> {
+    fn of(call: &'a Value) -> Self {
+        match optional_text(call, "body_sink") {
+            Some(address) => Self::Sink(address),
+            None => Self::Hold,
+        }
+    }
+}
+
+/// The body of a write: bytes that the call holds, or a pattern repeated to
+/// a length, which the adapter generates as it sends the request.
+enum CallBody {
+    Held(Vec<u8>),
+    Generated { pattern: Vec<u8>, length: u64 },
+}
+
+impl CallBody {
+    fn of(call: &Value) -> Result<Self, AdapterError> {
+        let Some(body) = call.get("body") else {
+            return Ok(Self::Held(decode_base64_field(call, "body_base64")?));
+        };
+        if optional_text(body, "encoding") != Some("repeat") {
+            return Err("unknown body encoding".into());
+        }
+        let data = body.get("data").ok_or("missing body data")?;
+        let pattern = decode_base64_field(data, "pattern_base64")?;
+        let length = data
+            .get("length")
+            .and_then(Value::as_u64)
+            .ok_or("missing body length")?;
+        if pattern.is_empty() && length > 0 {
+            return Err("empty body pattern".into());
+        }
+        Ok(Self::Generated { pattern, length })
+    }
+
+    fn payload(&self) -> Payload<'_> {
+        match self {
+            Self::Held(bytes) => Payload::Slice(bytes),
+            Self::Generated { length, .. } => Payload::Streamed { len: *length },
+        }
+    }
+}
+
+/// Reads a pattern repeated to a length, from a block of whole repeats so
+/// that each read copies once.
+struct Repeat {
+    block: Vec<u8>,
+    period: usize,
+    offset: usize,
+    remaining: u64,
+}
+
+impl Repeat {
+    fn new(pattern: &[u8], length: u64) -> Self {
+        let repeats = (64 * 1024) / pattern.len().max(1) + 2;
+        Self {
+            block: pattern.repeat(repeats),
+            period: pattern.len(),
+            offset: 0,
+            remaining: length,
+        }
+    }
+}
+
+impl Read for Repeat {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let window = self.block.len() - self.offset;
+        let count = out
+            .len()
+            .min(window)
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        out[..count].copy_from_slice(&self.block[self.offset..self.offset + count]);
+        self.offset = (self.offset + count) % self.period.max(1);
+        self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 impl HttpExchange {
@@ -373,7 +466,7 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
             .map(|(field, _)| *field)
             .find(|field| call.get(field).is_some())
             .unwrap_or("if_match"),
-        "PayloadTooLarge" => "body_base64",
+        "PayloadTooLarge" => named_field("body", "body_base64"),
         // An Azure call names a part by its block ID, and an S3 call by its
         // part number. A commit names its parts in a list.
         "PartId" if call.get("block_id_base64").is_some() => "block_id_base64",
@@ -521,6 +614,17 @@ fn send_request(
     context: &AdapterContext,
     request: &WireRequest<'_>,
 ) -> Result<HttpExchange, ureq::Error> {
+    send_request_with(context, request, None, BodyRead::Hold)
+}
+
+/// Sends a request whose streamed payload, if any, is `body`, and reads its
+/// response as `read` says.
+fn send_request_with(
+    context: &AdapterContext,
+    request: &WireRequest<'_>,
+    body: Option<&CallBody>,
+    read: BodyRead<'_>,
+) -> Result<HttpExchange, ureq::Error> {
     let url = request.url();
     let mut builder = ureq::http::Request::builder().method(request.method().as_str());
     // See `AdapterContext::for_endpoint`.
@@ -543,9 +647,15 @@ fn send_request(
         builder = builder.header(name, value);
     }
 
-    let mut response = match request.payload().bytes() {
-        Some(payload) => agent.run(builder.body(payload.to_vec())?)?,
-        None => agent.run(builder.body(())?)?,
+    // The request states the length of a streamed payload as its
+    // Content-Length, which ureq keeps.
+    let mut response = match (request.payload(), body) {
+        (Payload::Slice(payload), _) => agent.run(builder.body(payload.to_vec())?)?,
+        (Payload::Streamed { len }, Some(CallBody::Generated { pattern, .. })) => {
+            let mut reader = Repeat::new(pattern, len);
+            agent.run(builder.body(ureq::SendBody::from_reader(&mut reader))?)?
+        }
+        _ => agent.run(builder.body(())?)?,
     };
 
     let status = response.status().as_u16();
@@ -554,6 +664,18 @@ fn send_request(
         .iter()
         .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
         .collect();
+    if let BodyRead::Sink(address) = read
+        && (200..300).contains(&status)
+    {
+        let mut reader = response.body_mut().with_config().limit(u64::MAX).reader();
+        let length = std::io::copy(&mut reader, &mut std::net::TcpStream::connect(address)?)?;
+        return Ok(HttpExchange {
+            status,
+            headers,
+            body: Vec::new(),
+            sunk_length: Some(length),
+        });
+    }
     let body = response
         .body_mut()
         .with_config()
@@ -563,7 +685,22 @@ fn send_request(
         status,
         headers,
         body,
+        sunk_length: None,
     })
+}
+
+/// Reports the body that a read got: its bytes, or only its size when it
+/// went to the grader's body sink.
+fn read_body_fields(value: &mut Value, exchange: &HttpExchange) {
+    match exchange.sunk_length {
+        Some(length) => {
+            value["size"] = json!(length);
+        }
+        None => {
+            value["body_base64"] = json!(STANDARD.encode(&exchange.body));
+            value["size"] = json!(exchange.body.len());
+        }
+    }
 }
 
 fn decode_base64_field(call: &Value, field: &str) -> Result<Vec<u8>, AdapterError> {

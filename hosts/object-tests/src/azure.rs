@@ -9,15 +9,14 @@ use crate::listing::{
     list_page,
 };
 use crate::{
-    AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
-    requested_condition, requested_keys, requested_metadata, requested_properties, requested_range,
-    requested_restore, requested_revision, requested_source, requested_source_range,
-    requested_tags, restore_value, send_request, served_range, successful_result, tags_value,
-    text_of, transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
-    unsupported_by_crate,
+    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, current_timestamps,
+    failed_result, optional_text, read_body_fields, read_meta_fields, request_buffers,
+    requested_checksum, requested_condition, requested_keys, requested_metadata,
+    requested_properties, requested_range, requested_restore, requested_revision, requested_source,
+    requested_source_range, requested_tags, restore_value, send_request, send_request_with,
+    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO};
 use borink_object_storage_proto::azure::{
     self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
@@ -28,10 +27,10 @@ use borink_object_storage_proto::{
     AzureNamespace, Blobs, ChecksumKind, Classification, CommitHeadOutcome, Container,
     CopyHeadOutcome, DeleteHeadOutcome, DeleteKind, DeleteManyHeadOutcome, EntryKind,
     GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome,
-    MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
-    PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet, PutHeadOutcome,
-    RequestedRange, RestoreHeadOutcome, Revision, StageHeadOutcome, Tag, TagsHeadOutcome,
-    TransactionalChecksum, UpdateHeadOutcome, WriteOptions, layered,
+    MetadataPair, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
+    PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet, PutHeadOutcome, RequestedRange,
+    RestoreHeadOutcome, Revision, StageHeadOutcome, Tag, TagsHeadOutcome, TransactionalChecksum,
+    UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -93,7 +92,12 @@ fn read_object(
     ));
     let request =
         crate_step!(blobs.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request_with(
+        context,
+        &request,
+        None,
+        BodyRead::of(call)
+    ));
 
     let head_outcome =
         crate_step!(blobs.accept_get_head(get_plan.shape(), exchange.response_head()));
@@ -121,8 +125,7 @@ fn read_object(
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
             } else {
-                value["body_base64"] = json!(STANDARD.encode(&exchange.body));
-                value["size"] = json!(exchange.body.len());
+                read_body_fields(&mut value, &exchange);
             }
             if let Some(copy_status) = text_of(meta.copy_status) {
                 value["copy_status"] = json!(copy_status);
@@ -171,7 +174,7 @@ fn write_object(
     let metadata_pairs = requested_metadata(call);
 
     let key = optional_text(call, "key").unwrap_or_default();
-    let body = decode_base64_field(call, "body_base64")?;
+    let body = CallBody::of(call)?;
     let tags = requested_tags(call);
     let put_plan = PhysicalPut {
         key,
@@ -186,7 +189,7 @@ fn write_object(
             ..WriteOptions::default()
         },
     };
-    let payload = Payload::Slice(&body);
+    let payload = body.payload();
 
     let now = current_timestamps();
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
@@ -199,7 +202,12 @@ fn write_object(
         payload,
         &now
     ));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request_with(
+        context,
+        &request,
+        Some(&body),
+        BodyRead::Hold
+    ));
 
     let head_outcome =
         crate_step!(blobs.accept_put_head(put_plan.shape(), exchange.response_head()));
@@ -403,13 +411,13 @@ fn stage_block(
 ) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
     let block_id = optional_text(call, "block_id_base64").unwrap_or_default();
-    let body = decode_base64_field(call, "body_base64")?;
+    let body = CallBody::of(call)?;
     let stage_plan = PhysicalStageBlock {
         key,
         id: block_id,
         options: WriteOptions::default(),
     };
-    let payload = Payload::Slice(&body);
+    let payload = body.payload();
 
     let now = current_timestamps();
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
@@ -422,7 +430,12 @@ fn stage_block(
         payload,
         &now
     ));
-    let exchange = transport_step!(send_request(context, &request));
+    let exchange = transport_step!(send_request_with(
+        context,
+        &request,
+        Some(&body),
+        BodyRead::Hold
+    ));
 
     let head_outcome = crate_step!(blobs.accept_stage_block_head(exchange.response_head()));
     let outcome = match head_outcome {
@@ -621,6 +634,7 @@ fn account_namespace(endpoint: &Value) -> AzureNamespace {
 fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
     match operation {
         "get" => &[
+            "body_sink",
             "key",
             "range",
             "if_match",
@@ -642,6 +656,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "put" => &[
             "key",
             "body_base64",
+            "body",
             "if_match",
             "if_none_match",
             "if_modified_since",
@@ -676,7 +691,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "page_size",
             "include",
         ],
-        "azure.stage_block" => &["key", "block_id_base64", "body_base64"],
+        "azure.stage_block" => &["key", "block_id_base64", "body_base64", "body"],
         "azure.commit_blocks" => &[
             "key",
             "blocks",

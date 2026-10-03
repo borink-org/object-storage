@@ -11,13 +11,13 @@ use crate::listing::{
     list_page,
 };
 use crate::{
-    AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
-    requested_condition, requested_keys, requested_metadata, requested_properties, requested_range,
-    requested_restore, requested_revision, requested_source, requested_source_range,
-    requested_tags, restore_value, send_request, served_range, successful_result, tags_value,
-    text_of, transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
-    unsupported_by_crate,
+    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, current_timestamps,
+    decode_base64_field, failed_result, optional_text, read_body_fields, read_meta_fields,
+    request_buffers, requested_checksum, requested_condition, requested_keys, requested_metadata,
+    requested_properties, requested_range, requested_restore, requested_revision, requested_source,
+    requested_source_range, requested_tags, restore_value, send_request, send_request_with,
+    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{
@@ -194,7 +194,12 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
     ));
     let request =
         crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
-    let exchange = transport_step!(send_request(&client.context, &request));
+    let exchange = transport_step!(send_request_with(
+        &client.context,
+        &request,
+        None,
+        BodyRead::of(call)
+    ));
 
     let head_outcome =
         crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
@@ -221,8 +226,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
             } else {
-                value["body_base64"] = json!(STANDARD.encode(&exchange.body));
-                value["size"] = json!(exchange.body.len());
+                read_body_fields(&mut value, &exchange);
             }
             successful_result(value)
         }
@@ -261,7 +265,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let metadata_pairs = requested_metadata(call);
 
     let key = optional_text(call, "key").unwrap_or_default();
-    let body = decode_base64_field(call, "body_base64")?;
+    let body = CallBody::of(call)?;
     let tags = requested_tags(call);
     let put_plan = PhysicalPut {
         key,
@@ -276,29 +280,40 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
             ..WriteOptions::default()
         },
     };
-    let payload = Payload::Slice(&body);
+    let payload = body.payload();
+    // The encoder hashes content that it holds, and a generated body goes
+    // unsigned, as the adapter writes it only as it sends it.
+    let payload_hash = match body {
+        CallBody::Held(_) => PayloadHash::Compute,
+        CallBody::Generated { .. } => PayloadHash::Unsigned,
+    };
 
     let now = current_timestamps();
     crate_step!(layered::s3::put_requirements(
         &client.objects,
         &put_plan,
         payload,
-        PayloadHash::Compute,
+        payload_hash,
         &now
     ));
     let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::put_requirements(objects, &put_plan, payload, PayloadHash::Compute, &now)
+        layered::s3::put_requirements(objects, &put_plan, payload, payload_hash, &now)
     ));
     let request = crate_step!(objects.encode_put(
         &mut request_bytes,
         &mut header_spans,
         &put_plan,
         payload,
-        PayloadHash::Compute,
+        payload_hash,
         &now
     ));
-    let exchange = transport_step!(send_request(&client.context, &request));
+    let exchange = transport_step!(send_request_with(
+        &client.context,
+        &request,
+        Some(&body),
+        BodyRead::Hold
+    ));
 
     let head_outcome =
         crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
@@ -1292,6 +1307,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
 fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
     match operation {
         "get" => &[
+            "body_sink",
             "key",
             "range",
             "if_match",
@@ -1311,6 +1327,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "put" => &[
             "key",
             "body_base64",
+            "body",
             "if_match",
             "if_none_match",
             "if_modified_since",
