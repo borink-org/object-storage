@@ -8,7 +8,7 @@ use crate::xml::page::{
 };
 use crate::xml::s3::read_values;
 use crate::xml::scan::{Child, Scan, Span, fault};
-use crate::{Listing, Result};
+use crate::{ListMarker, Listing, Result};
 
 // Reads an `InitiateMultipartUploadResult`, the answer to a
 // CreateMultipartUpload, and returns the ID of the upload.
@@ -94,8 +94,7 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
     };
     Ok(Listing {
         filled: held,
-        next_marker,
-        next_version_marker: None,
+        next_marker: next_marker.map(ListMarker::Text),
     })
 }
 

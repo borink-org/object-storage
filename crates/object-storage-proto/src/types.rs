@@ -653,9 +653,9 @@ impl ListInclude {
     /// `IsCurrentVersion` in a List Blobs. An S3 client sends a
     /// ListObjectVersions instead of a ListObjectsV2, whose entries carry
     /// `VersionId` and `IsLatest`, and which reports each delete marker as
-    /// an [`EntryKind::DeleteMarker`]. It pages with a key marker and a
-    /// version marker: see [`PhysicalList::version_marker`]. A directory
-    /// bucket keeps no versions, so a client refuses this flag for one.
+    /// an [`EntryKind::DeleteMarker`]. It pages with a key and a version: see
+    /// [`ListMarker::Version`]. A directory bucket keeps no versions, so a
+    /// client refuses this flag for one.
     pub const VERSIONS: Self = Self(1 << 3);
 
     /// Returns `true` if this set holds every flag of `other`.
@@ -1261,6 +1261,40 @@ impl EntryKind {
     }
 }
 
+/// Where a listing continues: what the previous page handed out.
+///
+/// Take it from [`Listing::next_marker`](crate::Listing::next_marker), copy
+/// its text into your own storage before the next page overwrites the body,
+/// and pass it back in the next plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListMarker<'a> {
+    /// The text of a listing that continues from one marker: Azure's
+    /// `NextMarker`, an S3 continuation token, or the part number marker
+    /// of an S3 ListParts.
+    Text(&'a str),
+    /// Where an S3 listing of versions continues: after the key `key`, or
+    /// with `version` after that version of it. S3 hands both out as
+    /// `NextKeyMarker` and `NextVersionIdMarker`.
+    Version {
+        /// The key that the next page starts after, or at.
+        key: &'a str,
+        /// The version of `key` that the next page starts after.
+        version: Option<&'a str>,
+    },
+}
+
+impl<'a> ListMarker<'a> {
+    /// Returns the text of a [`Self::Text`] marker, or [`None`] for a
+    /// [`Self::Version`] one.
+    pub const fn text(self) -> Option<&'a str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Version { .. } => None,
+        }
+    }
+}
+
 /// The part of a listing plan that holds no borrows.
 ///
 /// Store it while the request is in flight, then pass it back to
@@ -1302,18 +1336,14 @@ pub struct PhysicalList<'h> {
     ///
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
     /// previous page reported. The first page carries [`None`]. The text is
-    /// the service's, and means nothing to this crate. On S3 it is the
-    /// continuation token of a ListObjectsV2, or the key marker of a
-    /// ListObjectVersions.
-    pub marker: Option<&'h str>,
-    /// Where in the versions of the marker's key the previous page ended.
-    /// S3 only, in a listing of [`ListInclude::VERSIONS`].
+    /// the service's, and means nothing to this crate.
     ///
-    /// Pass the [`Listing::next_version_marker`](crate::Listing::next_version_marker)
-    /// that the previous page reported, beside its marker. A client refuses
-    /// one without a marker, or on any other listing, with
+    /// A listing continues from the kind of marker that its pages hand out:
+    /// [`ListMarker::Version`] for an S3 listing of
+    /// [`ListInclude::VERSIONS`], and [`ListMarker::Text`] for every other.
+    /// A client refuses the other kind, and an empty text, with
     /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
-    pub version_marker: Option<&'h str>,
+    pub marker: Option<ListMarker<'h>>,
     /// The text after which the listing starts. S3 only.
     ///
     /// The listing reports only the keys and groups of keys that sort after
@@ -1345,7 +1375,6 @@ impl<'h> PhysicalList<'h> {
         Self {
             prefix,
             marker: None,
-            version_marker: None,
             start_after: None,
             delimiter: None,
             max_results: None,
@@ -1357,13 +1386,11 @@ impl<'h> PhysicalList<'h> {
     ///
     /// The plan has no [`Self::start_after`], which a later page does not
     /// need. A delimited shape groups the keys at `/`: set
-    /// [`Self::delimiter`] on the plan for another delimiter. A later page
-    /// of an S3 listing of versions needs [`Self::version_marker`] as well.
-    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
+    /// [`Self::delimiter`] on the plan for another delimiter.
+    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<ListMarker<'h>>) -> Self {
         Self {
             prefix,
             marker,
-            version_marker: None,
             start_after: None,
             delimiter: shape.delimited.then_some("/"),
             max_results: shape.max_results,

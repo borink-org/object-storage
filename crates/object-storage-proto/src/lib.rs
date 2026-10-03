@@ -259,8 +259,8 @@ pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, CommitShape, ConditionKind, ContentProperties, CopyShape, CopySource, DeleteKind,
-    DeleteShape, DeleteTarget, EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape,
-    Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete,
+    DeleteShape, DeleteTarget, EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListMarker,
+    ListShape, Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete,
     PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags,
     Properties, PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange, RestorePriority,
     Revision, Tag, TransactionalChecksum, WriteOptions,

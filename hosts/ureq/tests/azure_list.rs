@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
+use borink_object_storage_proto::{Blobs, Container, ListEntry, ListMarker, PhysicalList};
 use borink_object_storage_ureq::azure;
 
 const PAGE: &str = "<EnumerationResults><Blobs>\
@@ -62,6 +62,6 @@ fn reads_the_page_that_the_generated_request_asked_for() {
     // A delimited listing reports the level below as one group.
     assert_eq!(entries[1].key, "directory/nested/");
     assert_eq!(entries[1].size, None);
-    assert_eq!(page.next_marker, Some("next"));
+    assert_eq!(page.next_marker, Some(ListMarker::Text("next")));
     server.join().unwrap();
 }

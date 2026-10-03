@@ -33,10 +33,10 @@ use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteKind, DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry,
-    ListHeadOutcome, ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit, PhysicalCopy,
-    PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags,
-    PutHeadOutcome, RequestedRange, RestoreHeadOutcome, StageHeadOutcome, Tag, TagsHeadOutcome,
-    Timestamps, UpdateHeadOutcome, WriteOptions, layered,
+    ListHeadOutcome, ListMarker, ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit,
+    PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut,
+    PhysicalSetTags, PutHeadOutcome, RequestedRange, RestoreHeadOutcome, StageHeadOutcome, Tag,
+    TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -803,7 +803,7 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
                 .map(|part| json!({"number": part.number, "size": part.size, "etag": part.e_tag})),
         );
         // A page that names itself as the next one would never end.
-        match page.next_marker {
+        match page.next_marker.and_then(ListMarker::text) {
             Some(next) if marker.as_deref() != Some(next) => marker = Some(next.to_owned()),
             Some(_) => return Err("ListParts named the same page twice".into()),
             None => break,

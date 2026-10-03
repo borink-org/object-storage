@@ -15,7 +15,7 @@ use crate::{
 
 use crate::ptr::SessionValues;
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{Blobs, Container, Error, ResponseHead, WireRequest};
+use borink_object_storage_proto::{Blobs, Container, Error, ListMarker, ResponseHead, WireRequest};
 
 // What every call needs before the core crate sees it: a session that was
 // passed, whose three values name a container that can be addressed.
@@ -88,7 +88,12 @@ pub(crate) fn filling(
     into: &mut [ListEntry],
 ) -> proto::Result<Fill> {
     let page = blobs.fill_listing(body, into)?;
-    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
+    Ok(page_fill(
+        page.filled,
+        page.next_marker
+            .and_then(ListMarker::text)
+            .map(str::as_bytes),
+    ))
 }
 
 // The same read, writing each entry's values into its row of `values`. The
@@ -110,7 +115,12 @@ pub(crate) fn filling_with(
         row += 1;
         entry_view(&entry)
     })?;
-    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
+    Ok(page_fill(
+        page.filled,
+        page.next_marker
+            .and_then(ListMarker::text)
+            .map(str::as_bytes),
+    ))
 }
 
 // The head, read where your HTTP library already put it. A name that is not

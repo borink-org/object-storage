@@ -31,7 +31,7 @@ use crate::xml::page::{
     open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, fault, trim};
-use crate::{EntryKind, ListEntry, Listing, Result};
+use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";
 const OBJECT: &[u8] = b"Contents";
@@ -109,6 +109,9 @@ struct Page<'b> {
     token: Option<&'b str>,
     // The version marker of a page of versions.
     version_token: Option<&'b str>,
+    // Whether the page lists versions, and so names its next page by a key
+    // and a version.
+    versions: bool,
 }
 
 fn read_root_children_into<'b>(
@@ -119,7 +122,10 @@ fn read_root_children_into<'b>(
     sink: &mut Sink<'_, 'b>,
 ) -> Result<Listing<'b>> {
     let root = if versions { VERSIONS_ROOT } else { ROOT };
-    let mut page = Page::default();
+    let mut page = Page {
+        versions,
+        ..Page::default()
+    };
     // The spans of the wanted properties of one entry, then their values.
     // Only the first `wanted.len()` slots are used.
     let mut spans = [None; ObjectProperty::COUNT];
@@ -281,10 +287,16 @@ fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
     if page.version_token.is_some() && next_marker.is_none() {
         return fault();
     }
+    let next_marker = next_marker.map(|token| match page.versions {
+        true => ListMarker::Version {
+            key: token,
+            version: page.version_token,
+        },
+        false => ListMarker::Text(token),
+    });
     Ok(Listing {
         filled: page.built,
         next_marker,
-        next_version_marker: page.version_token,
     })
 }
 

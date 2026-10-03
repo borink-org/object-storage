@@ -5,7 +5,7 @@
 
 use crate::{AdapterError, optional_text, successful_result, unsupported_by_adapter};
 use borink_object_storage_proto::{
-    EntryKind, ListEntry, ListInclude, Listing, PhysicalList, layered,
+    EntryKind, ListEntry, ListInclude, ListMarker, Listing, PhysicalList, layered,
 };
 use serde_json::{Value, json};
 
@@ -47,11 +47,20 @@ impl ListedPage {
         Self {
             entries,
             prefixes,
+            // The protocol names a version marker beside the key it continues
+            // after, as S3 does.
             next_marker: listing
                 .next_marker
+                .map(|marker| match marker {
+                    ListMarker::Version { key, .. } => key,
+                    marker => marker.text().unwrap_or_default(),
+                })
                 .filter(|marker| !marker.is_empty())
                 .map(str::to_owned),
-            next_version_marker: listing.next_version_marker.map(str::to_owned),
+            next_version_marker: match listing.next_marker {
+                Some(ListMarker::Version { version, .. }) => version.map(str::to_owned),
+                _ => None,
+            },
         }
     }
 }
@@ -103,10 +112,21 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
         include = include | ListInclude::OWNER;
     }
 
+    // A call that names a version marker, or lists versions, continues
+    // after a key and a version of it. The client refuses either kind of
+    // marker on the listing that does not hand it out.
+    let token = optional_text(call, "continuation_token");
+    let version = optional_text(call, "version_marker");
+    let marker = if version.is_some() || include.contains(ListInclude::VERSIONS) {
+        token
+            .or(version.map(|_| ""))
+            .map(|key| ListMarker::Version { key, version })
+    } else {
+        token.map(ListMarker::Text)
+    };
     let list_plan = PhysicalList {
         prefix: optional_text(call, "prefix").unwrap_or_default(),
-        marker: optional_text(call, "continuation_token"),
-        version_marker: optional_text(call, "version_marker"),
+        marker,
         start_after: optional_text(call, "start_after"),
         delimiter: optional_text(call, "delimiter"),
         max_results: requested_page_size(call),
@@ -135,7 +155,7 @@ pub(crate) fn list_all_keys(call: &Value, source: &impl PageSource) -> Result<Va
     let mut marker: Option<String> = None;
     loop {
         let list_plan = PhysicalList {
-            marker: marker.as_deref(),
+            marker: marker.as_deref().map(ListMarker::Text),
             max_results: requested_page_size(call),
             ..PhysicalList::new(prefix)
         };

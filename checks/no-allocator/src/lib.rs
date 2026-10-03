@@ -6,8 +6,8 @@ use borink_object_storage_proto::s3::{Bucket, Objects, PayloadHash, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     BlobProperty, Blobs, ChecksumKind, Container, GetHeadOutcome, HeaderSpan, ListEntry,
-    ListHeadOutcome, MetadataPair, Payload, PhysicalGet, PhysicalList, PhysicalPut, PropertySet,
-    ResponseHead, Timestamps, TransactionalChecksum, WriteOptions, layered,
+    ListHeadOutcome, ListMarker, MetadataPair, Payload, PhysicalGet, PhysicalList, PhysicalPut,
+    PropertySet, ResponseHead, Timestamps, TransactionalChecksum, WriteOptions, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -196,5 +196,13 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
     };
     let tier = picked[0].1.map_or(0, <[u8]>::len);
 
-    url + key + page.filled + page.next_marker.unwrap_or_default().len() + again.filled + tier
+    url + key
+        + page.filled
+        + page
+            .next_marker
+            .and_then(ListMarker::text)
+            .unwrap_or_default()
+            .len()
+        + again.filled
+        + tier
 }

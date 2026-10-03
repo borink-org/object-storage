@@ -19,8 +19,8 @@ use crate::step::{
 use crate::types::*;
 
 use borink_object_storage_proto::{
-    self as proto, InvalidPlan, Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    Timestamps, layered,
+    self as proto, InvalidPlan, ListMarker, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
+    PhysicalPut, Timestamps, layered,
 };
 
 /// Reports what is wrong with `session`, if anything.
@@ -437,7 +437,7 @@ pub unsafe extern "C" fn borink_encode_list(
                 shape,
                 text(prefix, InvalidPlan::Prefix)?,
                 optional(marker)
-                    .map(|marker| text(marker, InvalidPlan::Marker))
+                    .map(|marker| text(marker, InvalidPlan::Marker).map(ListMarker::Text))
                     .transpose()?,
             );
             blobs.encode_list(buf, headers, &list, &Timestamps::from_unix(unix_seconds))

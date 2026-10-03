@@ -348,7 +348,7 @@ use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, CopySource, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
-    ListHeadOutcome, ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload,
+    ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload,
     PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
     RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
     Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
@@ -1899,19 +1899,25 @@ impl<'a> Objects<'a> {
         validate_list(list, self.bucket.service)?;
         // An empty prefix is no parameter at all.
         let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
+        // Validation matched the kind of marker to the listing.
+        let (key_marker, version_marker) = match list.marker {
+            Some(ListMarker::Version { key, version }) => (Some(key), version),
+            _ => (None, None),
+        };
+        let token = list.marker.and_then(ListMarker::text);
         // SigV4 signs the parameters in the order of their names. With
         // `encoding-type=url`, a key that XML cannot carry still arrives.
         let versions = [
             url::encoded("delimiter", list.delimiter),
             url::literal("encoding-type", "url"),
-            url::encoded("key-marker", list.marker),
+            url::encoded("key-marker", key_marker),
             url::number("max-keys", list.max_results),
             url::encoded("prefix", prefix),
-            url::encoded("version-id-marker", list.version_marker),
+            url::encoded("version-id-marker", version_marker),
             url::literal("versions", ""),
         ];
         let objects = [
-            url::encoded("continuation-token", list.marker),
+            url::encoded("continuation-token", token),
             url::encoded("delimiter", list.delimiter),
             url::literal("encoding-type", "url"),
             url::literal("fetch-owner", "true")
@@ -2537,9 +2543,16 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
 // A prefix is not a key, so `validate_key` does not apply. S3 takes any
 // number of entries, zero included.
 fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
-    // S3 hands out no empty continuation token.
-    if list.marker.is_some_and(str::is_empty) {
-        return Err(InvalidPlan::Marker.into());
+    // A listing continues from the kind of marker that its pages hand out,
+    // and S3 hands out no empty one: a version marker names a key.
+    let versions = list.include.contains(ListInclude::VERSIONS);
+    match list.marker {
+        None => {}
+        Some(ListMarker::Text(token)) if !versions && !token.is_empty() => {}
+        Some(ListMarker::Version { key, version })
+            if versions && !key.is_empty() && version.is_none_or(|version| !version.is_empty()) => {
+        }
+        Some(_) => return Err(InvalidPlan::Marker.into()),
     }
     // A general purpose bucket groups keys at any text. A directory bucket
     // groups them at `/` alone, lists only at a prefix that ends in it, and
@@ -2569,16 +2582,6 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
         if slash_only || list.start_after.is_some_and(|key| !key.is_empty()) {
             return Err(InvalidPlan::Option.into());
         }
-        // S3 takes a version marker only beside a key marker, and hands out
-        // no empty one.
-        if list
-            .version_marker
-            .is_some_and(|marker| marker.is_empty() || list.marker.is_none())
-        {
-            return Err(InvalidPlan::Marker.into());
-        }
-    } else if list.version_marker.is_some() {
-        return Err(InvalidPlan::Marker.into());
     }
     Ok(())
 }

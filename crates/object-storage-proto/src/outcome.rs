@@ -768,13 +768,10 @@ pub struct Listing<'b> {
     /// overwrites the body it borrows.
     ///
     /// A page names a next one whenever more keys follow, even if it reported
-    /// fewer entries than it asked for.
-    pub next_marker: Option<&'b str>,
-    /// Where in the versions of the next marker's key the next page starts,
-    /// in an S3 listing of versions. Pass it as
-    /// [`PhysicalList::version_marker`](crate::PhysicalList::version_marker)
-    /// beside the marker. [`None`] on every other listing.
-    pub next_version_marker: Option<&'b str>,
+    /// fewer entries than it asked for. An S3 listing of versions names it
+    /// as a [`ListMarker::Version`](crate::ListMarker::Version), and every
+    /// other listing as a [`ListMarker::Text`](crate::ListMarker::Text).
+    pub next_marker: Option<crate::ListMarker<'b>>,
 }
 
 /// The result of [`classify_error`](crate::classify_error).

@@ -2,7 +2,7 @@
 
 use std::env;
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry, PhysicalList};
+use borink_object_storage_proto::{Blobs, Container, ListEntry, ListMarker, PhysicalList};
 use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // reads it.
         let mut entries = vec![ListEntry::default(); 1000];
         let plan = PhysicalList {
-            marker: marker.as_deref(),
+            marker: marker.as_deref().map(ListMarker::Text),
             max_results: Some(1000),
             ..PhysicalList::new(&prefix)
         };
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // The next request reads into another body, so the marker is copied
         // out of this one.
-        match page.next_marker {
+        match page.next_marker.and_then(ListMarker::text) {
             Some(next) => marker = Some(next.to_owned()),
             None => return Ok(()),
         }

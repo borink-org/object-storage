@@ -17,8 +17,8 @@ use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
+    ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete,
+    PhysicalGet, PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
     RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
     TransactionalChecksum, WireRequest, WriteOptions,
 };
@@ -835,7 +835,7 @@ impl<'a> Blobs<'a> {
             url::literal("comp", "list"),
             url::encoded("prefix", prefix),
             url::encoded("delimiter", list.delimiter),
-            url::encoded("marker", list.marker),
+            url::encoded("marker", list.marker.and_then(ListMarker::text)),
             url::number("maxresults", list.max_results),
             url::words("include", &words[..word_count]),
         ];
@@ -1392,18 +1392,18 @@ pub(crate) fn validate_options(
 }
 
 fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
-    // Azure continues every listing from one marker.
-    if list.version_marker.is_some() {
-        return Err(InvalidPlan::Marker.into());
-    }
     // No rule of `validate_key` applies to a prefix. It is written into the
     // query, where nothing resolves a `..` and nothing drops a trailing dot,
     // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
     // name: a flat account answered a prefix of 32,657 units, far past the
     // 1,024 it allows a name. What bounds a prefix is the URL, which `build`
     // checks. Measured against the live service.
-    if list.marker.is_some_and(str::is_empty) {
-        return Err(InvalidPlan::Marker.into());
+    // Azure continues every listing from one marker, and hands out no empty
+    // one.
+    match list.marker {
+        None => {}
+        Some(ListMarker::Text(marker)) if !marker.is_empty() => {}
+        Some(_) => return Err(InvalidPlan::Marker.into()),
     }
     if list.max_results == Some(0) {
         return Err(InvalidPlan::MaxResults.into());
