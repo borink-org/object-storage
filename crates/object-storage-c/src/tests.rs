@@ -54,6 +54,7 @@ fn opened(endpoint: &[u8], container: &[u8], token: &[u8]) -> Session {
         endpoint: lent(endpoint),
         container: lent(container),
         token: lent(token),
+        allow_http: false,
     }
 }
 

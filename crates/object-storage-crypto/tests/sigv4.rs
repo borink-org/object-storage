@@ -121,7 +121,7 @@ fn signs_the_get_object_example_of_the_aws_documentation() {
 fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
     const TOKEN: &str = "FwoGZXIvYXdzEJr//////////wEaDH+token==";
     const CONTENT_SHA256: &str = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072";
-    let bucket = Bucket::new(
+    let bucket = Bucket::new_allowing_http(
         "http://127.0.0.1:9000",
         "objects",
         "auto",

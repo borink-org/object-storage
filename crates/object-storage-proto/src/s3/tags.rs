@@ -7,7 +7,7 @@ use crate::common::{
     validate_tags, write_tag_set,
 };
 use crate::encoding;
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, s3_tag_char,
     validate_key, validate_s3_checksum, version_parameter,
@@ -68,8 +68,8 @@ impl<'a> Objects<'a> {
         let mut counted = Writer::new(&mut []);
         write_tagging(&mut counted, plan.tags);
         let length = counted.position();
-        let dry = buf.is_empty();
-        let content_sha256 = if dry {
+        let pass = Pass::of(buf);
+        let content_sha256 = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             let mut sum = self.sha256.start();
@@ -80,7 +80,7 @@ impl<'a> Objects<'a> {
         let signed_checksum = self.signed_checksum(
             checksum,
             |sum| write_tagging(sum, plan.tags),
-            dry,
+            pass,
             &mut text,
         );
         let query = [
@@ -101,7 +101,7 @@ impl<'a> Objects<'a> {
             copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         let md5 = checksum.filter(|_| plan.checksum == Some(ChecksumKind::Md5));
         push_checksum(&mut head, md5, &self.checksums, |sum| {
@@ -180,9 +180,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         crate::common::encoded(head, Method::Get, crate::Payload::Slice(&[]))
     }
 

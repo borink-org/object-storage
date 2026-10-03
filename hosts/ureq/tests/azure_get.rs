@@ -32,7 +32,11 @@ fn executes_the_generated_request() {
             .unwrap();
     });
 
-    let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
+    let blobs = Blobs::new(
+        Container::new_allowing_http(&endpoint, "container").unwrap(),
+        "token",
+    )
+    .unwrap();
     assert_eq!(azure::get(&blobs, "a key").unwrap(), b"body");
     server.join().unwrap();
 }

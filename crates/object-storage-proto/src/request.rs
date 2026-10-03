@@ -310,6 +310,26 @@ pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
 }
 
+// Whether an encoder writes a request, or only measures it. A
+// `*_requirements` function encodes into an empty buffer to learn the room
+// that a request needs, so an empty buffer is a measuring pass, which skips
+// the work that only the bytes need, such as a signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pass {
+    Measure,
+    Write,
+}
+
+impl Pass {
+    pub(crate) fn of(buf: &[u8]) -> Self {
+        if buf.is_empty() {
+            Self::Measure
+        } else {
+            Self::Write
+        }
+    }
+}
+
 // The value of one header, which writes itself into the request head: bytes
 // as they are, a number, or a value that a type of its own assembles in
 // place, so that no value is built anywhere else first.

@@ -11,6 +11,7 @@ use crate::common::{
     text_header, trim_ascii, valid_header, validate_checksum, validate_condition,
     validate_properties, validate_revision, validate_tags,
 };
+use crate::http::PlainHttp;
 use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::url::{self, Parameter};
 use crate::{
@@ -97,17 +98,37 @@ pub struct Container<'a> {
 }
 
 impl<'a> Container<'a> {
-    /// Creates a container reference from an origin and a container name.
+    /// Creates a container reference from an HTTPS origin and a container
+    /// name.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTP
-    /// or HTTPS origin.
+    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTPS
+    /// origin. An `http://` origin is refused: see [`Self::new_allowing_http`].
     ///
     /// Returns [`Error::InvalidContainer`] if `name` is empty, or if it
     /// contains bytes that would change the structure of the request.
     pub fn new(endpoint: &'a str, name: &'a str) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint) {
+        Self::create(endpoint, name, PlainHttp::Refused)
+    }
+
+    /// Creates a container reference as [`Self::new`] does, from an HTTP
+    /// origin as well as an HTTPS one, such as an emulator's
+    /// `http://127.0.0.1:10000`.
+    ///
+    /// Without TLS, every request carries the bearer token in clear. Use
+    /// this for a local emulator or a network you trust, never for an
+    /// account on the internet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], except that an `http://` origin is taken.
+    pub fn new_allowing_http(endpoint: &'a str, name: &'a str) -> Result<Self> {
+        Self::create(endpoint, name, PlainHttp::Allowed)
+    }
+
+    fn create(endpoint: &'a str, name: &'a str, plain: PlainHttp) -> Result<Self> {
+        if !crate::http::valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
         if name.is_empty()

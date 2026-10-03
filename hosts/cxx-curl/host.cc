@@ -9,8 +9,8 @@
 namespace borink::host {
 
 Client Client::open(std::string_view endpoint, std::string_view container, std::string_view token,
-                    Limits limits) {
-    Client client{std::string(endpoint), std::string(container), std::string(token), limits};
+                    Limits limits, PlainHttp plain) {
+    Client client{std::string(endpoint), std::string(container), std::string(token), limits, plain};
     const Session session = client.session();
     const Status status = borink_validate(&session);
     if (status.code != 0) {

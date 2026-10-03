@@ -444,7 +444,8 @@ impl fmt::Display for ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The endpoint is not an ASCII HTTP or HTTPS origin.
+    /// The endpoint is not an ASCII HTTPS origin, or an HTTP one where the
+    /// client was not built to allow it.
     InvalidEndpoint,
     /// The container name is empty, or it contains bytes that would change the
     /// structure of the request.

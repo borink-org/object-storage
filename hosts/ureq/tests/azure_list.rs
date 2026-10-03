@@ -43,7 +43,11 @@ fn reads_the_page_that_the_generated_request_asked_for() {
             .unwrap();
     });
 
-    let blobs = Blobs::new(Container::new(&endpoint, "container").unwrap(), "token").unwrap();
+    let blobs = Blobs::new(
+        Container::new_allowing_http(&endpoint, "container").unwrap(),
+        "token",
+    )
+    .unwrap();
     let plan = PhysicalList {
         delimiter: Some("/"),
         max_results: Some(1000),

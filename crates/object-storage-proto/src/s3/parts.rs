@@ -11,7 +11,7 @@ use crate::common::{
     push_checksum, valid_header,
 };
 use crate::encoding;
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
     Objects, PayloadHash, Service, Signed, Stores, body_kind, is_error_document,
     refuse_error_document, stored_headers, validate_content, validate_key, validate_metadata,
@@ -285,9 +285,9 @@ impl<'a> Objects<'a> {
             tags: plan.options.tags,
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         // A POST states its length even when it has no content.
         head.header("content-length", b"0");
         encoded(head, Method::Post, Payload::Slice(&[]))
@@ -396,8 +396,8 @@ impl<'a> Objects<'a> {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
         validate_content(&plan.options, content, hash, &self.checksums, Stores::Part)?;
-        let dry = buf.is_empty();
-        let content_sha256 = self.content_sha256(hash, content, dry);
+        let pass = Pass::of(buf);
+        let content_sha256 = self.content_sha256(hash, content, pass);
         let query = [
             url::number("partNumber", plan.number),
             url::encoded("uploadId", plan.upload_id),
@@ -416,7 +416,7 @@ impl<'a> Objects<'a> {
             copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         self.push_content(&mut head, content, plan.options.checksum);
         encoded(head, Method::Put, content)
     }
@@ -559,8 +559,8 @@ impl<'a> Objects<'a> {
         let mut counted = Writer::new(&mut []);
         write_part_list(&mut counted, parts.clone());
         let length = counted.position();
-        let dry = buf.is_empty();
-        let content_sha256 = if dry {
+        let pass = Pass::of(buf);
+        let content_sha256 = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             let mut sum = self.sha256.start();
@@ -586,7 +586,7 @@ impl<'a> Objects<'a> {
             copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             write_part_list(sum, parts.clone());
@@ -747,9 +747,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
@@ -845,9 +845,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 

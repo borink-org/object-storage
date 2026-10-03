@@ -14,7 +14,7 @@ use crate::common::{
     decimal_header, encoded, failure, finish_with_body, validate_condition, validate_revision,
     validate_tags,
 };
-use crate::request::HeadWriter;
+use crate::request::{HeadWriter, Pass};
 use crate::s3::{
     Objects, PayloadHash, Service, Signed, SignedCopy, Stores, body_kind, is_error_document,
     s3_tag_char, stored_headers, validate_content, validate_key, validate_metadata,
@@ -168,9 +168,9 @@ impl<'a> Objects<'a> {
                 range: RequestedRange::Whole,
             }),
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
@@ -325,9 +325,9 @@ impl<'a> Objects<'a> {
                 range: plan.range,
             }),
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }

@@ -55,7 +55,8 @@ enum borink_error_code
      */
     BORINK_ERROR_CODE_NONE = 0,
     /**
-     * The endpoint is not an ASCII HTTP or HTTPS origin.
+     * The endpoint is not an ASCII HTTPS origin, or an HTTP one without
+     * `allow_http`.
      */
     BORINK_ERROR_CODE_INVALID_ENDPOINT = 1,
     /**
@@ -722,7 +723,8 @@ typedef struct borink_bytes {
  */
 typedef struct borink_session {
     /**
-     * The HTTP or HTTPS origin of the storage account.
+     * The HTTPS origin of the storage account, or with `allow_http` an
+     * HTTP one.
      */
     struct borink_bytes endpoint;
     /**
@@ -733,6 +735,13 @@ typedef struct borink_session {
      * The Entra ID bearer token, without the `Bearer ` prefix.
      */
     struct borink_bytes token;
+    /**
+     * Whether `endpoint` may be an `http://` origin, such as an emulator's.
+     * Without TLS every request carries the token in clear, so leave this
+     * false, as a zeroed session has it, except for a local emulator or a
+     * network you trust.
+     */
+    bool allow_http;
 } borink_session;
 
 /**

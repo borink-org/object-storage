@@ -83,7 +83,7 @@ fn executes_the_generated_requests() {
         );
     });
 
-    let bucket = Bucket::new(&endpoint, "bucket", "us-east-1", Service::Aws).unwrap();
+    let bucket = Bucket::new_allowing_http(&endpoint, "bucket", "us-east-1", Service::Aws).unwrap();
     let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe).unwrap();
     let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO);
     assert_eq!(s3::get(&objects, "a key").unwrap(), b"body");

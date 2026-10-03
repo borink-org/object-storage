@@ -341,7 +341,8 @@ use crate::common::{
     write_range, write_tags,
 };
 use crate::encoding::{self, rfc2047};
-use crate::request::{ByteSink, HeadWriter, U64Decimal};
+use crate::http::PlainHttp;
+use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::url::{self, Parameter};
 use crate::{
@@ -529,7 +530,7 @@ pub const MAX_METADATA_LEN: usize = 2048;
 /// An S3 endpoint, bucket name and region, all borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct Bucket<'a> {
-    scheme: &'a str,
+    scheme: Scheme,
     authority: &'a str,
     name: &'a str,
     region: &'a str,
@@ -549,8 +550,8 @@ impl<'a> Bucket<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTP
-    /// or HTTPS origin.
+    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTPS
+    /// origin. An `http://` origin is refused: see [`Self::new_allowing_http`].
     ///
     /// Returns [`Error::InvalidContainer`] if `name` is not a bucket name that
     /// `service` takes. [`Service`] states the rules of each.
@@ -564,16 +565,50 @@ impl<'a> Bucket<'a> {
         region: &'a str,
         service: Service,
     ) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint) {
+        Self::create(endpoint, name, region, service, PlainHttp::Refused)
+    }
+
+    /// Creates a bucket reference as [`Self::new`] does, from an HTTP origin
+    /// as well as an HTTPS one, such as a local emulator's
+    /// `http://127.0.0.1:9000`.
+    ///
+    /// Without TLS, every request travels in clear, with any session token
+    /// it carries. SigV4 never sends the secret, but anyone on the path reads
+    /// the requests. Use this for a local emulator or a network you trust,
+    /// never for a service on the internet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], except that an `http://` origin is taken.
+    pub fn new_allowing_http(
+        endpoint: &'a str,
+        name: &'a str,
+        region: &'a str,
+        service: Service,
+    ) -> Result<Self> {
+        Self::create(endpoint, name, region, service, PlainHttp::Allowed)
+    }
+
+    fn create(
+        endpoint: &'a str,
+        name: &'a str,
+        region: &'a str,
+        service: Service,
+        plain: PlainHttp,
+    ) -> Result<Self> {
+        if !crate::http::valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
-        let Some((scheme, authority)) = endpoint.split_once("://") else {
-            return Err(Error::InvalidEndpoint);
+        let (scheme, authority) = match endpoint.split_once("://") {
+            Some(("http", authority)) => (Scheme::Http, authority),
+            Some(("https", authority)) => (Scheme::Https, authority),
+            _ => return Err(Error::InvalidEndpoint),
         };
         // An HTTP client leaves the default port out of the `host` header,
         // and the signature must cover what the client sends.
-        let default_port = if scheme == "https" { ":443" } else { ":80" };
-        let authority = authority.strip_suffix(default_port).unwrap_or(authority);
+        let authority = authority
+            .strip_suffix(scheme.default_port())
+            .unwrap_or(authority);
         if authority.is_empty() {
             return Err(Error::InvalidEndpoint);
         }
@@ -665,6 +700,31 @@ impl<'a> Bucket<'a> {
             for part in url::encode_object_key(key) {
                 out.push(part);
             }
+        }
+    }
+}
+
+// The scheme of an endpoint, which decides its default port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    // The port that a client leaves out of the `host` header, as an
+    // authority writes it.
+    const fn default_port(self) -> &'static str {
+        match self {
+            Self::Http => ":80",
+            Self::Https => ":443",
         }
     }
 }
@@ -1124,9 +1184,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, method, Payload::Slice(&[]))
     }
 
@@ -1179,13 +1239,13 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content, hash, &self.checksums, self.bucket.service)?;
-        let dry = buf.is_empty();
-        let content_sha256 = self.content_sha256(hash, content, dry);
+        let pass = Pass::of(buf);
+        let content_sha256 = self.content_sha256(hash, content, pass);
         let mut checksum = [0; CHECKSUM_TEXT_LEN];
         let checksum = self.signed_checksum(
             put.options.checksum,
             |sum| sum.update(content.bytes().unwrap_or_default()),
-            dry,
+            pass,
             &mut checksum,
         );
         let (stored, count) = stored_headers(&put.options, checksum);
@@ -1203,7 +1263,7 @@ impl<'a> Objects<'a> {
             copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         self.push_content(&mut head, content, put.options.checksum);
         encoded(head, Method::Put, content)
     }
@@ -1253,9 +1313,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
@@ -1295,9 +1355,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -1388,22 +1448,22 @@ impl<'a> Objects<'a> {
         })
     }
 
-    // Writes the URL and every signed header. A dry run writes a signature
+    // Writes the URL and every signed header. A measuring pass writes a signature
     // of zeros, which is as long as a real one.
     pub(crate) fn write_head(
         &self,
         head: &mut HeadWriter<'_>,
         signed: &Signed<'_>,
-        dry: bool,
+        pass: Pass,
         now: &Timestamps,
     ) {
-        let signature = if dry {
+        let signature = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             self.signature(signed, now)
         };
         head.url(|out| {
-            out.push(self.bucket.scheme.as_bytes());
+            out.push(self.bucket.scheme.as_str().as_bytes());
             out.push(b"://");
             self.bucket.write_host(out);
             self.bucket.write_path(out, signed.key);
@@ -1464,19 +1524,19 @@ impl<'a> Objects<'a> {
         self.credentials.token().header()
     }
 
-    // The text of `x-amz-content-sha256` for `content`. A dry run returns no
+    // The text of `x-amz-content-sha256` for `content`. A measuring pass returns no
     // request, so it does not read the content: the digest is the same
     // length whatever it is.
     pub(crate) fn content_sha256(
         &self,
         hash: PayloadHash,
         content: Payload<'_>,
-        dry: bool,
+        pass: Pass,
     ) -> ContentSha256 {
         match hash {
             PayloadHash::Unsigned => ContentSha256::Unsigned,
             PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
-            PayloadHash::Compute if dry => ContentSha256::Hex([b'0'; 64]),
+            PayloadHash::Compute if pass == Pass::Measure => ContentSha256::Hex([b'0'; 64]),
             PayloadHash::Compute => ContentSha256::Hex(encoding::hex(
                 &self.sha256.hash(content.bytes().unwrap_or_default()),
             )),
@@ -1506,13 +1566,13 @@ impl<'a> Objects<'a> {
 
     // The `x-amz-checksum-` header of a write and its value, written into
     // `into`, for a checksum other than an MD5. `content` feeds the content
-    // to a computed checksum. A dry run computes nothing: the text is as
+    // to a computed checksum. A measuring pass computes nothing: the text is as
     // long whatever it is.
     pub(crate) fn signed_checksum<'x>(
         &self,
         checksum: Option<TransactionalChecksum<'x>>,
         content: impl FnOnce(&mut Sum),
-        dry: bool,
+        pass: Pass,
         into: &'x mut [u8; CHECKSUM_TEXT_LEN],
     ) -> Option<(&'static str, &'x [u8])> {
         Some(match checksum? {
@@ -1525,7 +1585,9 @@ impl<'a> Objects<'a> {
             TransactionalChecksum::Compute(kind) => {
                 let len = kind.digest_len();
                 let mut bytes = [0; 32];
-                if !dry && let Some(provider) = &self.checksums[kind.slot()] {
+                if pass == Pass::Write
+                    && let Some(provider) = &self.checksums[kind.slot()]
+                {
                     let mut sum = provider.start();
                     content(&mut sum);
                     bytes[..len].copy_from_slice(sum.finish().as_bytes());
@@ -1880,9 +1942,9 @@ impl<'a> Objects<'a> {
             tags: &[],
             copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 

@@ -810,7 +810,7 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let container_name = optional_text(endpoint, "bucket").ok_or("missing endpoint bucket")?;
     let namespace = account_namespace(endpoint);
     ACCOUNT_NAMESPACE.set(namespace).ok();
-    let container = crate_step!(Container::new(endpoint_url, container_name));
+    let container = crate_step!(Container::new_allowing_http(endpoint_url, container_name));
     let blobs = crate_step!(Blobs::new(container, &token))
         .with_namespace(namespace)
         .with_checksum(CRC64)

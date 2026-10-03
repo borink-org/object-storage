@@ -72,7 +72,8 @@ fn head<'h>(status: u16, headers: &[(&'h str, &'h [u8])]) -> ResponseHead<'h> {
 
 #[test]
 fn the_url_names_the_bucket_where_the_addressing_says() {
-    let path = |endpoint| Bucket::new(endpoint, "bucket", "auto", Service::Aws).unwrap();
+    let path =
+        |endpoint| Bucket::new_allowing_http(endpoint, "bucket", "auto", Service::Aws).unwrap();
     assert_eq!(
         url(path("https://s3.example.com"), "a/b"),
         "https://s3.example.com/bucket/a/b"
