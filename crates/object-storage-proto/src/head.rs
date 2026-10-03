@@ -48,6 +48,14 @@ pub struct ResponseHead<'h> {
     pub last_modified: Option<&'h [u8]>,
     /// The value of the `x-ms-version-id` or `x-amz-version-id` header.
     pub version: Option<&'h [u8]>,
+    /// The value of the `x-ms-snapshot` header, which names the snapshot
+    /// that an Azure Snapshot Blob took.
+    pub snapshot: Option<&'h [u8]>,
+    /// The value of the `x-ms-copy-id` header, which names the last Azure
+    /// copy onto the object.
+    pub copy_id: Option<&'h [u8]>,
+    /// The value of the `x-ms-copy-status` header: the state of that copy.
+    pub copy_status: Option<&'h [u8]>,
     /// The value of the `x-ms-error-code` header.
     ///
     /// Azure names the error here. The methods that read a head return the
@@ -123,6 +131,12 @@ impl<'h> ResponseHead<'h> {
             || name.eq_ignore_ascii_case("x-amz-version-id")
         {
             &mut self.version
+        } else if name.eq_ignore_ascii_case("x-ms-snapshot") {
+            &mut self.snapshot
+        } else if name.eq_ignore_ascii_case("x-ms-copy-id") {
+            &mut self.copy_id
+        } else if name.eq_ignore_ascii_case("x-ms-copy-status") {
+            &mut self.copy_status
         } else if name.eq_ignore_ascii_case("x-ms-error-code") {
             &mut self.error_code
         } else if name.eq_ignore_ascii_case("x-ms-request-id")

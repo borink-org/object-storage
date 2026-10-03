@@ -1,7 +1,9 @@
 // Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, in
 // one pass. `read_session` at the end reads the
 // answer to an S3 Express CreateSession. `parts.rs` reads the answers of
-// an upload in parts, and `batch.rs` the answer of a DeleteObjects.
+// an upload in parts, `copy.rs` those of a copy, and `batch.rs` the answer
+// of a DeleteObjects. `read_values` reads the small documents that the
+// last three answer with.
 //
 // Each object is a `Contents` child of the root, with its properties beside
 // its key. Each group of keys is a `CommonPrefixes` child that holds one
@@ -14,6 +16,7 @@
 // changed a key and the page never named the encoding.
 
 pub(crate) mod batch;
+pub(crate) mod copy;
 pub(crate) mod parts;
 
 use crate::layered::iso8601_ms;
@@ -418,4 +421,41 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
             None => None,
         },
     })
+}
+
+// Reads the values of the children of the root `root` that `names` names,
+// each decoded in place, and skips every other child. A child named twice is
+// a fault. As in `read_session`, nothing is taken off the body until the root
+// is closed, so every span indexes the whole document.
+pub(crate) fn read_values<'b, const N: usize>(
+    body: &'b mut [u8],
+    root: &[u8],
+    names: [&[u8]; N],
+) -> Result<[Option<&'b str>; N]> {
+    check_body(body)?;
+    let mut scan = Scan::new(body);
+    open_root_element(&mut scan, root)?;
+    let mut fields: [Option<(Span, u8)>; N] = [None; N];
+    loop {
+        match scan.child(root)? {
+            Child::Close => break,
+            Child::Open(tag) => match names.iter().position(|name| *name == scan.text(tag.name)) {
+                Some(slot) => set_once(&mut fields[slot], scan.value(tag)?)?,
+                None => scan.skip(tag)?,
+            },
+        }
+    }
+    let chunk = scan.take();
+    let mut spans = [None; N];
+    for (span, field) in spans.iter_mut().zip(fields) {
+        *span = decode_value_in_place(chunk, field)?;
+    }
+    let chunk: &'b [u8] = chunk;
+    let mut values = [None; N];
+    for (value, span) in values.iter_mut().zip(spans) {
+        *value = span
+            .map(|(start, end)| text(&chunk[start..end]))
+            .transpose()?;
+    }
+    Ok(values)
 }

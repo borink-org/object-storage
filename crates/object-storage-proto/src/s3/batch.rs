@@ -119,6 +119,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: &content_sha256,
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);

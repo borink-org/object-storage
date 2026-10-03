@@ -317,6 +317,11 @@
 //!   a general purpose bucket answers with. A directory bucket refuses a
 //!   commit whose part numbers are not consecutive, such as 1 and 3, with
 //!   `InvalidPartOrder`. The client sends such a commit as given.
+//! - A copy, [`Objects::encode_copy`] or [`Objects::encode_stage_part_copy`],
+//!   is authorized by your own credentials, not by a session's: AWS refuses
+//!   the credentials of a session for it. Encode it with the client that
+//!   you asked for the session, which signs it for `s3express` too. A
+//!   client that holds a session refuses it with [`InvalidPlan::Option`].
 //!
 //! # Content that is not signed
 //!
@@ -332,27 +337,29 @@ use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum, check_base64_l
 use crate::common::{
     ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
     failure, finish_with_body, meta_of, parse_content_range, push_checksum, text_header,
-    validate_checksum, validate_condition, validate_properties, validate_tags, write_range,
-    write_tags,
+    validate_checksum, validate_condition, validate_properties, validate_revision, validate_tags,
+    write_range, write_tags,
 };
 use crate::encoding::{self, rfc2047};
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::url::{self, Parameter, QueryValue};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
-    WriteOptions,
+    Classification, ConditionKind, CopySource, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
+    Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
+    ListHeadOutcome, ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload,
+    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
+    Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 mod batch;
+mod copy;
 mod parts;
 mod tags;
 
 pub use batch::{DeleteResult, MAX_DELETE_KEYS};
+pub use copy::PhysicalStagePartCopy;
 pub use parts::{
     CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
     PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
@@ -985,6 +992,16 @@ pub(crate) struct Signed<'p> {
     pub(crate) content_sha256: &'p [u8],
     // The tags of a write, signed as `x-amz-tagging`.
     pub(crate) tags: &'p [Tag<'p>],
+    // The source of a copy, signed with its condition.
+    pub(crate) copy: Option<SignedCopy<'p>>,
+}
+
+// The source of a copy, signed as `x-amz-copy-source`, and the bytes of it
+// that an UploadPartCopy copies, as `x-amz-copy-source-range`.
+#[derive(Clone, Copy)]
+pub(crate) struct SignedCopy<'p> {
+    pub(crate) source: CopySource<'p>,
+    pub(crate) range: RequestedRange,
 }
 
 // Where the value of a signed header comes from.
@@ -995,6 +1012,8 @@ enum HeaderValue<'a> {
     Range,
     Date,
     Tags,
+    CopySource,
+    CopyRange,
 }
 
 #[derive(Clone, Copy)]
@@ -1078,10 +1097,11 @@ impl<'a> Objects<'a> {
             GetKind::Bytes => Method::Get,
             GetKind::Head => Method::Head,
         };
+        let query = [version_parameter(get.revision)];
         let signed = Signed {
             method,
             key: Some(get.key),
-            query: &[],
+            query: &query,
             headers: &[],
             range: get.range,
             condition: get.condition,
@@ -1089,6 +1109,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -1166,6 +1187,7 @@ impl<'a> Objects<'a> {
             metadata: put.metadata,
             content_sha256: content_sha256.as_bytes(),
             tags: put.options.tags,
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
@@ -1204,10 +1226,11 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete, self.bucket.service)?;
+        let query = [version_parameter(delete.revision)];
         let signed = Signed {
             method: Method::Delete,
             key: Some(delete.key),
-            query: &[],
+            query: &query,
             headers: &[],
             range: RequestedRange::Whole,
             condition: delete.condition,
@@ -1215,6 +1238,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -1256,6 +1280,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -1392,6 +1417,8 @@ impl<'a> Objects<'a> {
                     HeaderValue::Range => write_range(out, signed.range),
                     HeaderValue::Date => out.push(now.iso8601().as_bytes()),
                     HeaderValue::Tags => write_tags(out, signed.tags),
+                    HeaderValue::CopySource => self.write_copy_source(out, signed),
+                    HeaderValue::CopyRange => write_copy_range(out, signed),
                     HeaderValue::Host => {}
                 }),
                 Header::Meta(pair) => head.header_parts(
@@ -1405,6 +1432,19 @@ impl<'a> Objects<'a> {
                 ),
             }
         }
+    }
+
+    // The value of `x-amz-copy-source`: the source's bucket, or the client's
+    // own, the key encoded as a path, and the version.
+    fn write_copy_source(&self, out: &mut dyn ByteSink, signed: &Signed<'_>) {
+        let Some(copy) = signed.copy else { return };
+        out.push(b"/");
+        out.push(copy.source.container.unwrap_or(self.bucket.name).as_bytes());
+        out.push(b"/");
+        for part in url::encode_object_key(copy.source.key) {
+            out.push(part);
+        }
+        url::write_query_in_url(out, &[version_parameter(copy.source.revision)]);
     }
 
     // The session token and the header that carries it.
@@ -1553,6 +1593,8 @@ impl<'a> Objects<'a> {
                 Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
                 // The encoded form holds no space, so it is its canonical form.
                 Header::Fixed(_, HeaderValue::Tags) => write_tags(out, signed.tags),
+                Header::Fixed(_, HeaderValue::CopySource) => self.write_copy_source(out, signed),
+                Header::Fixed(_, HeaderValue::CopyRange) => write_copy_range(out, signed),
                 Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
                     write_metadata_value(out, pair.value, self.bucket.service)
                 }
@@ -1816,6 +1858,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -1990,7 +2033,7 @@ fn ordered_headers<'s>(
     signed: &'s Signed<'s>,
     token: Option<(&'static str, &'s str)>,
 ) -> impl Iterator<Item = Header<'s>> {
-    let mut fixed = [Header::Fixed("", HeaderValue::Host); 16];
+    let mut fixed = [Header::Fixed("", HeaderValue::Host); 24];
     let mut count = 0;
     let entries = [
         Some(("host", HeaderValue::Host)),
@@ -2005,6 +2048,23 @@ fn ordered_headers<'s>(
             .zip(signed.condition_value)
             .map(|(name, value)| (name, HeaderValue::Bytes(value))),
         (!signed.tags.is_empty()).then_some(("x-amz-tagging", HeaderValue::Tags)),
+        signed
+            .copy
+            .map(|_| ("x-amz-copy-source", HeaderValue::CopySource)),
+        signed
+            .copy
+            .filter(|copy| copy.range != RequestedRange::Whole)
+            .map(|_| ("x-amz-copy-source-range", HeaderValue::CopyRange)),
+        signed.copy.and_then(|copy| {
+            let name = match copy.source.condition {
+                ConditionKind::None => return None,
+                ConditionKind::IfMatch => "x-amz-copy-source-if-match",
+                ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
+                ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
+                ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
+            };
+            Some((name, HeaderValue::Bytes(copy.source.condition_value?)))
+        }),
     ]
     .into_iter()
     .flatten()
@@ -2196,7 +2256,25 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
         _ if get.kind == GetKind::Head => return Err(InvalidPlan::RangedHead.into()),
         _ => {}
     }
+    validate_revision(get.revision, false)?;
     validate_condition(get.condition, get.condition_value)
+}
+
+// The value of `x-amz-copy-source-range`, which names its last byte as
+// `Range` does.
+fn write_copy_range(out: &mut dyn ByteSink, signed: &Signed<'_>) {
+    if let Some(copy) = signed.copy {
+        write_range(out, copy.range);
+    }
+}
+
+// The query parameter that names a version, or none for the object as it is
+// now. Validation refused a snapshot.
+pub(crate) fn version_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
+    match revision? {
+        Revision::Version(id) => Some(("versionId", QueryValue::Encoded(id.as_bytes()))),
+        Revision::Snapshot(_) => None,
+    }
 }
 
 fn validate_put(
@@ -2357,6 +2435,7 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     if delete.kind != DeleteKind::Object {
         return Err(InvalidPlan::Option.into());
     }
+    validate_revision(delete.revision, false)?;
     // AWS removes on `If-Match` alone.
     let if_match_only = match service {
         Service::Aws | Service::AwsDirectory => true,
@@ -2395,7 +2474,10 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
     if slash_only && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
         return Err(InvalidPlan::Prefix.into());
     }
-    if list.include.contains(ListInclude::METADATA) {
+    // S3 lists versions with ListObjectVersions, which this client does not
+    // send, and keeps no snapshots.
+    let azure_only = ListInclude::METADATA | ListInclude::SNAPSHOTS | ListInclude::VERSIONS;
+    if list.include.intersects(azure_only) {
         return Err(InvalidPlan::Option.into());
     }
     Ok(())

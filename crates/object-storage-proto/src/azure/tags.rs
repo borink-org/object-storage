@@ -79,8 +79,8 @@ impl<'a> Blobs<'a> {
         accept_update(head, &[200, 202])
     }
 
-    /// Finishes an [`UpdateHeadOutcome::NeedErrorBody`] of a Set Blob Tier
-    /// or a Set Blob Tags with the response body.
+    /// Finishes an [`UpdateHeadOutcome::NeedErrorBody`] of a Set Blob Tier,
+    /// a Set Blob Tags or an Abort Copy Blob with the response body.
     pub fn accept_update_error_body<'h>(
         &self,
         failure: Failure<'h>,
@@ -246,7 +246,10 @@ fn write_tags_document(out: &mut dyn crate::request::ByteSink, tags: &[Tag<'_>])
 
 // Reads the head of a request that changes the object and returns nothing.
 // Azure names the error of a failure in its head.
-fn accept_update<'h>(head: ResponseHead<'h>, success: &[u16]) -> Result<UpdateHeadOutcome<'h>> {
+pub(super) fn accept_update<'h>(
+    head: ResponseHead<'h>,
+    success: &[u16],
+) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
         status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated),
         200..=299 => Err(ResponseFault::Status.into()),

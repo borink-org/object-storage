@@ -200,6 +200,24 @@ pub struct GetShape {
     pub condition: ConditionKind,
 }
 
+/// An earlier state of an object, which a read or a removal names instead
+/// of the object as it is now.
+///
+/// Each carries the identifier as the service wrote it, and the request
+/// sends it percent-encoded in the query. A client does not check its form:
+/// the service refuses an identifier it does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Revision<'h> {
+    /// A snapshot, by the timestamp that Azure returned in `x-ms-snapshot`
+    /// when it took the snapshot, sent as `snapshot`. Azure only.
+    Snapshot(&'h str),
+    /// A version, by the identifier that the service returned in
+    /// `x-ms-version-id` or `x-amz-version-id`, sent as `versionid` on
+    /// Azure and `versionId` on S3.
+    Version(&'h str),
+}
+
 /// A complete plan for one read.
 ///
 /// Build this immediately before each call and let it go afterwards. It
@@ -239,6 +257,11 @@ pub struct PhysicalGet<'h> {
     /// This must be present if `condition` is not [`ConditionKind::None`], and
     /// absent if it is.
     pub condition_value: Option<&'h [u8]>,
+    /// The snapshot or version to read, or [`None`] for the object as it
+    /// is now. An empty identifier is refused with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), and so is a
+    /// snapshot on S3.
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalGet<'h> {
@@ -250,6 +273,7 @@ impl<'h> PhysicalGet<'h> {
             range: RequestedRange::default(),
             condition: ConditionKind::default(),
             condition_value: None,
+            revision: None,
         }
     }
 
@@ -263,6 +287,9 @@ impl<'h> PhysicalGet<'h> {
     }
 
     /// Rebuilds a plan from a stored [`GetShape`] and the bytes it needs.
+    ///
+    /// The plan reads the object as it is now. Set [`Self::revision`] on the
+    /// result to read a snapshot or a version.
     pub fn from_shape(shape: GetShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
         Self {
             key,
@@ -270,6 +297,7 @@ impl<'h> PhysicalGet<'h> {
             range: shape.range,
             condition: shape.condition,
             condition_value,
+            revision: None,
         }
     }
 
@@ -577,9 +605,25 @@ impl ListInclude {
     /// [`s3::ObjectProperty::Owner`](crate::s3::ObjectProperty::Owner).
     pub const OWNER: Self = Self(1 << 1);
 
+    /// An entry for each snapshot of an object, beside the object's own,
+    /// each with a `Snapshot` element. Azure only. Read it as
+    /// [`BlobProperty::Snapshot`].
+    pub const SNAPSHOTS: Self = Self(1 << 2);
+
+    /// An entry for each version of an object, each with a `VersionId`
+    /// element, and `IsCurrentVersion` on the current one. Azure only. Read
+    /// them as [`BlobProperty::VersionId`] and
+    /// [`BlobProperty::IsCurrentVersion`].
+    pub const VERSIONS: Self = Self(1 << 3);
+
     /// Returns `true` if this set holds every flag of `other`.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// Returns `true` if this set holds any flag of `other`.
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
     }
 
     /// Returns `true` if this set holds no flag.
@@ -890,6 +934,12 @@ pub struct PhysicalDelete<'h> {
     pub condition: ConditionKind,
     /// The entity tag that `condition` compares against.
     pub condition_value: Option<&'h [u8]>,
+    /// The snapshot or version to remove, or [`None`] for the object as it
+    /// is now. A plan that names one takes [`DeleteKind::Object`], and a
+    /// client refuses any other kind with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), as it does
+    /// an empty identifier and a snapshot on S3.
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalDelete<'h> {
@@ -900,16 +950,21 @@ impl<'h> PhysicalDelete<'h> {
             kind: DeleteKind::Object,
             condition: ConditionKind::None,
             condition_value: None,
+            revision: None,
         }
     }
 
     /// Creates a plan from a stored shape and the bytes that it needs.
+    ///
+    /// The plan removes the object as it is now. Set [`Self::revision`] on
+    /// the result to remove a snapshot or a version.
     pub fn from_shape(shape: DeleteShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
         Self {
             key,
             kind: shape.kind,
             condition: shape.condition,
             condition_value,
+            revision: None,
         }
     }
 
@@ -918,6 +973,110 @@ impl<'h> PhysicalDelete<'h> {
         DeleteShape {
             kind: self.kind,
             condition: self.condition,
+        }
+    }
+}
+
+/// The object that a copy reads, in the same account or service as the
+/// client.
+///
+/// Azure names it by URL in `x-ms-copy-source`, and S3 by bucket and key in
+/// `x-amz-copy-source`. Each encodes the key as a request path does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopySource<'a> {
+    /// The container or bucket that holds the source, or [`None`] for the
+    /// client's own. It may not hold `/`, `?`, `#` or a control character:
+    /// a client refuses it with
+    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
+    pub container: Option<&'a str>,
+    /// The key of the source, under the rules of [`PhysicalGet::key`].
+    pub key: &'a str,
+    /// The snapshot or version to copy, or [`None`] for the object as it is
+    /// now. S3 copies a version, and no snapshot.
+    pub revision: Option<Revision<'a>>,
+    /// The condition on the source. The service copies nothing if it does
+    /// not hold.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionKind`].
+    pub condition_value: Option<&'a [u8]>,
+}
+
+impl<'a> CopySource<'a> {
+    /// Names the object `key` in the client's own container or bucket, as
+    /// it is now, with no condition.
+    pub const fn new(key: &'a str) -> Self {
+        Self {
+            container: None,
+            key,
+            revision: None,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+}
+
+/// The part of a copy plan that holds no borrows.
+///
+/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
+/// the method that reads the response of the copy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyShape {
+    /// The condition on the target.
+    pub condition: ConditionKind,
+    /// The condition on the source.
+    pub source_condition: ConditionKind,
+}
+
+/// One copy of an object onto a key, which the service carries out without
+/// sending the bytes through the client.
+///
+/// The target takes the source's bytes and content properties. Azure copies
+/// the source's metadata, and S3 its metadata and its tags, unless the plan
+/// names new ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalCopy<'a> {
+    /// The key that the copy writes, under the rules of [`PhysicalGet::key`].
+    pub key: &'a str,
+    /// The object that the copy reads.
+    pub source: CopySource<'a>,
+    /// The condition on the target, as a write carries it.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionKind`].
+    pub condition_value: Option<&'a [u8]>,
+    /// The metadata of the target. With no pair, the target has the
+    /// source's metadata; with any, it has these pairs alone. The rules of
+    /// [`PhysicalPut::metadata`] apply.
+    pub metadata: &'a [MetadataPair<'a>],
+    /// The tags, the storage class, and on S3 the content properties of the
+    /// target. A copy carries no checksum and declares no MD5: a client
+    /// refuses either with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    ///
+    /// On S3, new metadata or any content property replaces the source's
+    /// metadata and content properties together, with
+    /// `x-amz-metadata-directive: REPLACE`: name every one you want to keep.
+    /// Tags replace the source's with `x-amz-tagging-directive: REPLACE`.
+    pub options: WriteOptions<'a>,
+}
+
+impl<'a> PhysicalCopy<'a> {
+    /// Creates a plan that copies `source` onto `key` with no condition on
+    /// the target, keeping what the source holds.
+    pub const fn new(key: &'a str, source: CopySource<'a>) -> Self {
+        Self {
+            key,
+            source,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: &[],
+            options: WriteOptions::new(),
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub fn shape(&self) -> CopyShape {
+        CopyShape {
+            condition: self.condition,
+            source_condition: self.source.condition,
         }
     }
 }

@@ -176,6 +176,7 @@ fn encodes_ranges_conditions_and_metadata_plans() {
         range: RequestedRange::Bounded { start: 2, end: 6 },
         condition: ConditionKind::IfNoneMatch,
         condition_value: Some(b"\"etag\""),
+        revision: None,
     };
     let request = blobs
         .encode_get(&mut buf, &mut request_headers, &get, &now())

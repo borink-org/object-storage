@@ -18,6 +18,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 ### Azure Blob Storage, S3 and S3-compatible services
 
 - Object get (GET request)
+  - TODO(you): read a snapshot or a version (Azure snapshots and versions, S3 versions)
   - Conditional (If-Match, If-None-Match, If-Modified-Since, If-Unmodified-Since)
   - Byte ranges: offset, bounded, suffix (S3 only, Azure refuses suffix ranges)
 - Object metadata and information (HEAD request)
@@ -29,22 +30,26 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
   - Conditional (If-Match; If-None-Match and date conditions on Azure only)
   - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
   - Batch delete is also supported
+  - TODO(you): remove a snapshot or a version (Azure snapshots and versions, S3 versions)
 - Object listing (GET request on the container or bucket, one page at a time)
   - Custom delimiters, prefixes
   - Some object properties are always returned, others can be registered to return in a custom entry return type
   - S3: start after a key (not possible on Azure)
   - Azure: include metadata
+  - TODO(you): Azure: include snapshots and versions
 - Metadata (arbitrary key-value pairs attached to objects) reading and writing, as well as tag reading and writing (useful in policies)
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
   - CRC64 and MD5 on both; CRC32, CRC32C, SHA-1 and SHA-256 on S3
 - Object multipart upload
+- TODO(you): server-side copy (Azure Copy Blob, Copy Blob From URL, Put Blob From URL, Put Block From URL, Abort Copy Blob; S3 CopyObject, UploadPartCopy), with conditions on the source, a source version, and new metadata, tags and tier or storage class
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
 
 ### Azure Blob Storage-only
 
 - Setting the access tier (Set Blob Tier)
+- TODO(you): taking a snapshot (Snapshot Blob)
 
 ### S3-only
 
@@ -70,6 +75,7 @@ Roadmap:
 - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility
 - S3 multipart
 - ... potentially various other features: Azure snapshots, versions, more S3 checksum algorithms
+- TODO(you): roadmap, Azure snapshots and versions are done
 - ... support for various AWS and Azure authorization schemes
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - Generic API (so layer over the providers) -> 0.3 release

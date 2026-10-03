@@ -601,7 +601,7 @@ fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
-fn validate_block_id(id: &str) -> Result<()> {
+pub(super) fn validate_block_id(id: &str) -> Result<()> {
     let data = id.trim_end_matches('=');
     // Trimming returns a subslice, so its length cannot exceed id.len().
     let padding = id.len() - data.len();

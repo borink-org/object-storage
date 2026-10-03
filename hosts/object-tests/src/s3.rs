@@ -13,9 +13,10 @@ use crate::listing::{
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
-    requested_condition, requested_keys, requested_properties, requested_range, requested_tags,
-    send_request, served_range, successful_result, tags_value, text_of, transport_failure,
-    two_checksums_refused, unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    requested_condition, requested_keys, requested_metadata, requested_properties, requested_range,
+    requested_revision, requested_source, requested_source_range, requested_tags, send_request,
+    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{
@@ -25,13 +26,13 @@ use borink_object_storage_crypto::{
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
     PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts,
-    PhysicalStagePart, PropertySet, Service, Session, SessionHeadOutcome,
+    PhysicalStagePart, PhysicalStagePartCopy, PropertySet, Service, Session, SessionHeadOutcome,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteKind,
-    DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
-    ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
+    ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
+    DeleteKind, DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
+    ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete,
     PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome,
     RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
     WriteOptions, layered,
@@ -177,6 +178,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
         range,
         condition,
         condition_value,
+        revision: requested_revision(call),
     };
 
     let now = current_timestamps();
@@ -255,16 +257,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         Some(None) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
     };
 
-    let metadata_pairs: Vec<MetadataPair<'_>> = call
-        .get("metadata")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .map(|(name, value)| MetadataPair {
-            name,
-            value: value.as_str().unwrap_or_default(),
-        })
-        .collect();
+    let metadata_pairs = requested_metadata(call);
 
     let key = optional_text(call, "key").unwrap_or_default();
     let body = decode_base64_field(call, "body_base64")?;
@@ -343,6 +336,7 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         kind: DeleteKind::Object,
         condition,
         condition_value,
+        revision: requested_revision(call),
     };
 
     let now = current_timestamps();
@@ -492,6 +486,137 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
             error_result(&exchange, failure.status)
         }
         _ => error_result(&exchange, exchange.status),
+    })
+}
+
+fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(unsupported_by_crate(
+            "PhysicalCopy carries one condition on the target",
+        ));
+    };
+    let Some(source) = requested_source(call, "source_bucket") else {
+        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    };
+    let (metadata, tags) = (requested_metadata(call), requested_tags(call));
+    let plan = PhysicalCopy {
+        condition,
+        condition_value,
+        metadata: &metadata,
+        options: WriteOptions {
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "storage_class"),
+            ..WriteOptions::default()
+        },
+        ..PhysicalCopy::new(optional_text(call, "key").unwrap_or_default(), source)
+    };
+
+    let now = current_timestamps();
+    // AWS authorizes a copy by the caller's own credentials, never those of
+    // a session.
+    let objects = &client.objects;
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::copy_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_copy(&mut request_bytes, &mut header_spans, &plan, &now));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let shape = plan.shape();
+    let (head, body) = exchange.head_and_body();
+    let outcome = match crate_step!(objects.accept_copy_head(shape, head)) {
+        CopyHeadOutcome::NeedResultBody { .. } => {
+            crate_step!(objects.accept_copy_body(shape, head, body))
+        }
+        CopyHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_copy_error_body(shape, failure, body)
+        }
+        outcome => outcome,
+    };
+
+    // S3 can refuse a copy under status 200, which the result reports. The
+    // outcome borrows the body, so the status of a failure is taken first.
+    let copied = match outcome {
+        CopyHeadOutcome::Copied { meta } => {
+            let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
+            if let Some(version) = text_of(meta.version) {
+                value["version"] = json!(version);
+            }
+            Ok(value)
+        }
+        CopyHeadOutcome::PreconditionFailed => Err(Some(412)),
+        CopyHeadOutcome::NotFound { .. } => Err(Some(404)),
+        CopyHeadOutcome::NeedErrorBody(failure) | CopyHeadOutcome::ServiceFailure(failure) => {
+            Err(Some(failure.status))
+        }
+        _ => Err(None),
+    };
+    Ok(match copied {
+        Ok(value) => successful_result(value),
+        Err(status) => error_result(&exchange, status.unwrap_or(exchange.status)),
+    })
+}
+
+fn stage_part_copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some(source) = requested_source(call, "source_bucket") else {
+        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    };
+    let number = call
+        .get("part_number")
+        .and_then(Value::as_u64)
+        .ok_or("part copy without part_number")?;
+    let plan = PhysicalStagePartCopy {
+        range: requested_source_range(call)?,
+        ..PhysicalStagePartCopy::new(
+            optional_text(call, "key").unwrap_or_default(),
+            optional_text(call, "upload_id").unwrap_or_default(),
+            u32::try_from(number).unwrap_or(u32::MAX),
+            source,
+        )
+    };
+
+    let now = current_timestamps();
+    // AWS authorizes a copy by the caller's own credentials, never those of
+    // a session.
+    let objects = &client.objects;
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::stage_part_copy_requirements(objects, &plan, &now)
+    ));
+    let request = crate_step!(objects.encode_stage_part_copy(
+        &mut request_bytes,
+        &mut header_spans,
+        &plan,
+        &now
+    ));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let (head, body) = exchange.head_and_body();
+    let outcome = match crate_step!(objects.accept_stage_part_copy_head(head)) {
+        StageHeadOutcome::NeedResultBody { .. } => {
+            crate_step!(objects.accept_stage_part_copy_body(head, body))
+        }
+        StageHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_stage_part_error_body(failure, body)
+        }
+        outcome => outcome,
+    };
+
+    // The outcome borrows the body, so the status of a failure is taken
+    // first.
+    let staged = match outcome {
+        StageHeadOutcome::Staged { e_tag } => {
+            Ok(json!({"etag": text_of(e_tag).unwrap_or_default()}))
+        }
+        StageHeadOutcome::NotFound { .. } => Err(Some(404)),
+        StageHeadOutcome::NeedErrorBody(failure) | StageHeadOutcome::ServiceFailure(failure) => {
+            Err(Some(failure.status))
+        }
+        _ => Err(None),
+    };
+    Ok(match staged {
+        Ok(value) => successful_result(value),
+        Err(status) => error_result(&exchange, status.unwrap_or(exchange.status)),
     })
 }
 
@@ -1010,6 +1135,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "head" => &[
             "key",
@@ -1017,6 +1143,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "put" => &[
             "key",
@@ -1042,6 +1169,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "list" => &["prefix", "page_size"],
         "list_page" => &[
@@ -1063,6 +1191,41 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "storage_class",
         ],
         "s3.upload_part" => &["key", "upload_id", "part_number", "body_base64"],
+        "copy" => &[
+            "key",
+            "source_key",
+            "source_bucket",
+            "source_version",
+            "source_if_match",
+            "source_if_none_match",
+            "source_if_modified_since",
+            "source_if_unmodified_since",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+            "metadata",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "storage_class",
+        ],
+        "s3.upload_part_copy" => &[
+            "key",
+            "upload_id",
+            "part_number",
+            "source_range",
+            "source_key",
+            "source_bucket",
+            "source_version",
+            "source_if_match",
+            "source_if_none_match",
+            "source_if_modified_since",
+            "source_if_unmodified_since",
+        ],
         "s3.complete_multipart" => &[
             "key",
             "upload_id",
@@ -1084,7 +1247,6 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 /// fields it lacks.
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
-        "version" => Some("an S3 plan selects no version"),
         "expires" => Some("ContentProperties carries no Expires"),
         "tagging" => Some("Tag holds a tag as a key and a value"),
         _ => None,
@@ -1191,6 +1353,8 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "list_page" => list_page(call, &client),
         "s3.create_multipart" => create_upload(&client, call),
         "s3.upload_part" => stage_part(&client, call),
+        "copy" => copy(&client, call),
+        "s3.upload_part_copy" => stage_part_copy(&client, call),
         "s3.complete_multipart" => commit_parts(&client, call),
         "s3.abort_multipart" => abort_upload(&client, call),
         "s3.list_parts" => list_parts(&client, call),

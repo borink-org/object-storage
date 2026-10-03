@@ -250,17 +250,18 @@ pub use checksum::{ChecksumKind, ChecksumProvider, ChecksumState, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteManyHeadOutcome,
-    Failure, FailureClass, GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing,
-    ObjectMeta, PutHeadOutcome, ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome,
-    UpdateHeadOutcome,
+    BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
+    DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
+    ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, ServiceErrorKind, StageHeadOutcome,
+    TagsHeadOutcome, UpdateHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, CommitShape, ConditionKind, ContentProperties, DeleteKind, DeleteShape,
-    EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair,
-    Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
-    PhysicalPut, PhysicalSetTags, Properties, PropertySet, PropertyValues, PutShape, RangeForm,
-    RequestedRange, Tag, TransactionalChecksum, WriteOptions,
+    BlobProperty, CommitShape, ConditionKind, ContentProperties, CopyShape, CopySource, DeleteKind,
+    DeleteShape, EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape, Metadata,
+    MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
+    PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, Properties, PropertySet,
+    PropertyValues, PutShape, RangeForm, RequestedRange, Revision, Tag, TransactionalChecksum,
+    WriteOptions,
 };

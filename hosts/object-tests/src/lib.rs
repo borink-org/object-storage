@@ -11,9 +11,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, Error as CrateError, HeaderSpan,
-    ObjectMeta, RequestSize, RequestedRange, ResponseHead, ServiceErrorKind, Tag, Timestamps,
-    TransactionalChecksum, WireRequest,
+    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, CopySource, Error as CrateError,
+    HeaderSpan, MetadataPair, ObjectMeta, RequestSize, RequestedRange, ResponseHead, Revision,
+    ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -163,6 +163,62 @@ fn requested_properties(call: &Value) -> ContentProperties<'_> {
     }
 }
 
+/// The metadata pairs that a write call names.
+fn requested_metadata(call: &Value) -> Vec<MetadataPair<'_>> {
+    call.get("metadata")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| MetadataPair {
+            name,
+            value: value.as_str().unwrap_or_default(),
+        })
+        .collect()
+}
+
+const SOURCE_CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
+    ("source_if_match", ConditionKind::IfMatch),
+    ("source_if_none_match", ConditionKind::IfNoneMatch),
+    ("source_if_modified_since", ConditionKind::IfModifiedSince),
+    (
+        "source_if_unmodified_since",
+        ConditionKind::IfUnmodifiedSince,
+    ),
+];
+
+/// The object that a copy call reads, with `container_field` naming its
+/// container or bucket, or `None` if the call names more than the one
+/// condition on it that the crate takes.
+fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySource<'c>> {
+    let mut given = SOURCE_CONDITION_FIELDS
+        .iter()
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?.as_bytes())));
+    let (condition, condition_value) = match (given.next(), given.next()) {
+        (None, _) => (ConditionKind::None, None),
+        (Some((kind, value)), None) => (kind, Some(value)),
+        (Some(_), Some(_)) => return None,
+    };
+    Some(CopySource {
+        container: optional_text(call, container_field),
+        key: optional_text(call, "source_key").unwrap_or_default(),
+        revision: optional_text(call, "source_version").map(Revision::Version),
+        condition,
+        condition_value,
+    })
+}
+
+/// The bytes of the source that a stage from a copy names.
+fn requested_source_range(call: &Value) -> Result<RequestedRange, AdapterError> {
+    range_of(call.get("source_range"))
+}
+
+/// The snapshot or version that a read or a removal names.
+fn requested_revision(call: &Value) -> Option<Revision<'_>> {
+    optional_text(call, "snapshot")
+        .map(Revision::Snapshot)
+        .or_else(|| optional_text(call, "version").map(Revision::Version))
+}
+
 /// The tags that a call names: a list of keys and values, which may name a
 /// key twice, or an object of them.
 fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
@@ -261,21 +317,6 @@ fn served_range(body: &BodyWindow) -> Option<String> {
     })
 }
 
-/// Declares the response fields that the crate reads from no head, each
-/// named by its result field and its header.
-fn unsupported_response_fields(fields: &[(&str, &str)], reason: &str) -> Value {
-    fields
-        .iter()
-        .map(|(field, header)| {
-            json!({
-                "at": format!("/value/{field}"),
-                "scope": "sdk",
-                "reason": format!("{reason}: {header}"),
-            })
-        })
-        .collect()
-}
-
 // The call this process was started for, whose fields a refusal names.
 static CURRENT_CALL: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
 
@@ -306,6 +347,10 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "PartId" | "Parts" => named_field("blocks", "parts"),
         "UploadId" => "upload_id",
         "Tag" => "tags",
+        "CopySource" => named_field("source_container", "source_bucket"),
+        "Revision" => ["snapshot", "version", "source_version"]
+            .into_iter()
+            .find(|field| call.get(field).is_some())?,
         // The field of the property that the call names.
         "ContentProperty" => [
             "content_type",
@@ -522,7 +567,11 @@ fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<&[u8]>)> {
 }
 
 fn requested_range(call: &Value) -> Result<RequestedRange, AdapterError> {
-    let Some(range) = call.get("range") else {
+    range_of(call.get("range"))
+}
+
+fn range_of(range: Option<&Value>) -> Result<RequestedRange, AdapterError> {
+    let Some(range) = range else {
         return Ok(RequestedRange::Whole);
     };
 
