@@ -13,15 +13,15 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    AzureNamespace, Blobs, Write, azure_tag_char, body_kind, named, names_failed_condition,
-    push_metadata, push_stored, revision_parameter, validate_key, validate_metadata,
-    validate_options,
+    AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind, named,
+    names_failed_condition, push_metadata, push_stored, revision_parameter, validate_key,
+    validate_metadata, validate_options,
 };
 use crate::common::{
     encoded, failure, finish_with_body, meta_of, missing, push_condition, text_header, trim_ascii,
-    validate_condition, validate_revision, validate_tags, write_range, write_tags,
+    validate_condition, validate_revision, validate_tags,
 };
-use crate::request::{ByteSink, HeadWriter};
+use crate::request::{ByteSink, HeadWriter, HeaderValue};
 use crate::url::{self, QueryValue};
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
@@ -132,7 +132,7 @@ impl<'a> Blobs<'a> {
         self.validate_copy(plan, Write::Copy)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(plan.key), &[], RequestedRange::Whole, now)?;
-        head.header("x-ms-requires-sync", |out| out.push(b"true"));
+        head.header("x-ms-requires-sync", b"true");
         self.push_source_authorization(&mut head);
         self.push_copy(&mut head, plan);
         encoded(head, Method::Put, Payload::Slice(&[]))
@@ -235,7 +235,7 @@ impl<'a> Blobs<'a> {
         self.validate_copy(plan, Write::FromUrl)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(plan.key), &[], RequestedRange::Whole, now)?;
-        head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
+        head.header("x-ms-blob-type", b"BlockBlob");
         self.push_source_authorization(&mut head);
         self.push_copy(&mut head, plan);
         encoded(head, Method::Put, Payload::Slice(&[]))
@@ -352,15 +352,13 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("x-ms-copy-source", |out| {
-            self.write_source(out, &plan.source)
-        });
+        head.header("x-ms-copy-source", self.source_url(&plan.source));
         if plan.range != RequestedRange::Whole {
-            head.header("x-ms-source-range", |out| write_range(out, plan.range));
+            head.header("x-ms-source-range", plan.range);
         }
         self.push_source_authorization(&mut head);
         push_source_condition(&mut head, &plan.source);
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 
@@ -394,8 +392,8 @@ impl<'a> Blobs<'a> {
         ];
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(key), &query, RequestedRange::Whole, now)?;
-        head.header("x-ms-copy-action", |out| out.push(b"abort"));
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("x-ms-copy-action", b"abort");
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 
@@ -440,40 +438,55 @@ impl<'a> Blobs<'a> {
     // The headers that every copy carries beside its own: the source, the
     // conditions on it and on the target, and what the target stores.
     fn push_copy(&self, head: &mut HeadWriter<'_>, plan: &PhysicalCopy<'_>) {
-        head.header("x-ms-copy-source", |out| {
-            self.write_source(out, &plan.source)
-        });
+        head.header("x-ms-copy-source", self.source_url(&plan.source));
         push_source_condition(head, &plan.source);
         push_stored(head, &plan.options);
         if let Some(tags) = plan.tags.filter(|tags| !tags.is_empty()) {
-            head.header("x-ms-tags", |out| write_tags(out, tags));
+            head.header("x-ms-tags", tags);
         }
         push_metadata(head, plan.metadata.unwrap_or(&[]));
         push_condition(head, plan.condition, plan.condition_value);
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
     }
 
-    // The URL of the source: the client's origin, the source's container or
-    // the client's own, the key encoded as a path, and the snapshot or
-    // version.
-    fn write_source(&self, out: &mut dyn ByteSink, source: &CopySource<'_>) {
-        out.push(self.container.endpoint.as_bytes());
-        out.push(b"/");
-        out.push(source.container.unwrap_or(self.container.name).as_bytes());
-        out.push(b"/");
-        for part in url::encode_object_key(source.key) {
-            out.push(part);
+    // The URL of `source`, as `x-ms-copy-source` names it.
+    fn source_url<'c>(&self, source: &'c CopySource<'c>) -> SourceUrl<'c>
+    where
+        'a: 'c,
+    {
+        SourceUrl {
+            container: self.container,
+            source,
         }
-        url::write_query_in_url(out, &[revision_parameter(source.revision)]);
     }
 
     // A From URL operation reads the source as a client would, with the
     // client's token.
     fn push_source_authorization(&self, head: &mut HeadWriter<'_>) {
-        head.header("x-ms-copy-source-authorization", |out| {
-            out.push(b"Bearer ");
-            out.push(self.token.as_bytes());
-        });
+        head.header("x-ms-copy-source-authorization", Bearer(self.token));
+    }
+}
+
+// The URL of a copy's source: the client's origin, the source's container or
+// the client's own, the key encoded as a path, and the snapshot or version.
+struct SourceUrl<'c> {
+    // The client's container, whose origin the URL starts with, and which
+    // holds the source unless the source names a container of its own.
+    container: Container<'c>,
+    source: &'c CopySource<'c>,
+}
+
+impl HeaderValue for SourceUrl<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        let SourceUrl { container, source } = self;
+        out.push(container.endpoint.as_bytes());
+        out.push(b"/");
+        out.push(source.container.unwrap_or(container.name).as_bytes());
+        out.push(b"/");
+        for part in url::encode_object_key(source.key) {
+            out.push(part);
+        }
+        url::write_query_in_url(out, &[revision_parameter(source.revision)]);
     }
 }
 
@@ -508,5 +521,5 @@ fn push_source_condition(head: &mut HeadWriter<'_>, source: &CopySource<'_>) {
         ConditionKind::IfUnmodifiedSince => "x-ms-source-if-unmodified-since",
     };
     let value = source.condition_value.expect("the plan was validated");
-    head.header(name, |out| out.push(value));
+    head.header(name, value);
 }

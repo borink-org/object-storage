@@ -144,9 +144,7 @@ impl<'a> Objects<'a> {
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         let md5 = checksum.filter(|_| plan.checksum == Some(ChecksumKind::Md5));
         push_checksum(&mut head, md5, &self.checksums, |sum| {
             write_delete(sum, plan.objects);

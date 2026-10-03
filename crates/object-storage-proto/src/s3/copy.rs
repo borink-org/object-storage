@@ -171,7 +171,7 @@ impl<'a> Objects<'a> {
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 
@@ -328,7 +328,7 @@ impl<'a> Objects<'a> {
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 

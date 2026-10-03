@@ -2,7 +2,7 @@
 // response head.
 
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
@@ -309,7 +309,15 @@ pub(crate) fn push_condition(
 ) {
     if let Some(name) = condition_header(condition) {
         let value = value.expect("the plan was validated");
-        head.header(name, |out| out.push(value));
+        head.header(name, value);
+    }
+}
+
+// A range is written as `Range` writes it: `bytes=` and its first and last
+// byte.
+impl HeaderValue for RequestedRange {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_range(out, self);
     }
 }
 
@@ -458,12 +466,10 @@ pub(crate) fn push_checksum(
 ) {
     match checksum {
         Some(TransactionalChecksum::Md5(text)) => {
-            head.header(ChecksumKind::Md5.header(), |out| out.push(text.as_bytes()));
+            head.header(ChecksumKind::Md5.header(), text);
         }
         Some(TransactionalChecksum::Crc64(text)) => {
-            head.header(ChecksumKind::Crc64.header(), |out| {
-                out.push(text.as_bytes())
-            });
+            head.header(ChecksumKind::Crc64.header(), text);
         }
         Some(TransactionalChecksum::Compute(kind)) => {
             // Validation refused the plan if this is `None`.
@@ -472,7 +478,7 @@ pub(crate) fn push_checksum(
                 content(&mut sum);
                 let mut into = [0; crate::checksum::BASE64_LEN];
                 let text = sum.finish().base64(&mut into);
-                head.header(kind.header(), |out| out.push(text.as_bytes()));
+                head.header(kind.header(), text);
             }
         }
         // `validate_checksum` refused any other kind.
@@ -550,6 +556,13 @@ pub(crate) fn validate_tags(
         return Err(InvalidPlan::Tag.into());
     }
     Ok(())
+}
+
+// Tags are written as `write_tags` writes them.
+impl HeaderValue for &[Tag<'_>] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_tags(out, self);
+    }
 }
 
 // Writes tags as both services take them in a header: `key=value` pairs

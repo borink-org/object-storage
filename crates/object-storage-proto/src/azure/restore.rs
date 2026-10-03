@@ -69,11 +69,9 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("x-ms-access-tier", |out| out.push(tier.as_bytes()));
-        head.header("x-ms-rehydrate-priority", |out| {
-            out.push(priority.as_bytes())
-        });
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("x-ms-access-tier", tier.as_bytes());
+        head.header("x-ms-rehydrate-priority", priority.as_bytes());
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 

@@ -270,9 +270,7 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(content.len()).as_bytes())
-        });
+        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
         push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
@@ -367,9 +365,7 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes())
-        });
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         // The content of a commit is the block list, so a checksum of the
         // content is a checksum of that text. The object's own MD5 is a
         // property of the blob, `x-ms-blob-content-md5`.
@@ -377,7 +373,7 @@ impl<'a> Blobs<'a> {
             write_block_list(sum, blocks.clone());
         });
         if let Some(md5) = plan.options.declared_md5 {
-            head.header("x-ms-blob-content-md5", |out| out.push(md5.as_bytes()));
+            head.header("x-ms-blob-content-md5", md5.as_bytes());
         }
         push_stored(&mut head, &plan.options);
         push_metadata(&mut head, plan.metadata);

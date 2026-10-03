@@ -1019,7 +1019,7 @@ pub(crate) struct SignedCopy<'p> {
 
 // Where the value of a signed header comes from.
 #[derive(Clone, Copy)]
-enum HeaderValue<'a> {
+enum SignedValue<'a> {
     Bytes(&'a [u8]),
     Host,
     Range,
@@ -1031,7 +1031,7 @@ enum HeaderValue<'a> {
 
 #[derive(Clone, Copy)]
 enum Header<'a> {
-    Fixed(&'a str, HeaderValue<'a>),
+    Fixed(&'a str, SignedValue<'a>),
     Meta(&'a MetadataPair<'a>),
 }
 
@@ -1411,7 +1411,7 @@ impl<'a> Objects<'a> {
             url::write_query_in_url(out, signed.query);
         });
         let token = self.token();
-        head.header("authorization", |out| {
+        head.header_with("authorization", |out| {
             out.push(sigv4::ALGORITHM.as_bytes());
             out.push(b" Credential=");
             out.push(self.credentials.key_id().as_bytes());
@@ -1424,15 +1424,15 @@ impl<'a> Objects<'a> {
         });
         for header in ordered_headers(signed, token) {
             match header {
-                Header::Fixed(_, HeaderValue::Host) => {}
-                Header::Fixed(name, value) => head.header(name, |out| match value {
-                    HeaderValue::Bytes(bytes) => out.push(bytes),
-                    HeaderValue::Range => write_range(out, signed.range),
-                    HeaderValue::Date => out.push(now.iso8601().as_bytes()),
-                    HeaderValue::Tags => write_tags(out, signed.tags),
-                    HeaderValue::CopySource => self.write_copy_source(out, signed),
-                    HeaderValue::CopyRange => write_copy_range(out, signed),
-                    HeaderValue::Host => {}
+                Header::Fixed(_, SignedValue::Host) => {}
+                Header::Fixed(name, value) => head.header_with(name, |out| match value {
+                    SignedValue::Bytes(bytes) => out.push(bytes),
+                    SignedValue::Range => write_range(out, signed.range),
+                    SignedValue::Date => out.push(now.iso8601().as_bytes()),
+                    SignedValue::Tags => write_tags(out, signed.tags),
+                    SignedValue::CopySource => self.write_copy_source(out, signed),
+                    SignedValue::CopyRange => write_copy_range(out, signed),
+                    SignedValue::Host => {}
                 }),
                 Header::Meta(pair) => head.header_parts(
                     |out| {
@@ -1495,9 +1495,7 @@ impl<'a> Objects<'a> {
         content: Payload<'_>,
         checksum: Option<TransactionalChecksum<'_>>,
     ) {
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(content.len()).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
         let md5 = checksum.filter(|checksum| {
             matches!(
                 checksum,
@@ -1600,14 +1598,14 @@ impl<'a> Objects<'a> {
             write_header_name(out, header);
             out.push(b":");
             match header {
-                Header::Fixed(_, HeaderValue::Bytes(bytes)) => write_canonical_value(out, bytes),
-                Header::Fixed(_, HeaderValue::Host) => self.bucket.write_host(out),
-                Header::Fixed(_, HeaderValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
+                Header::Fixed(_, SignedValue::Bytes(bytes)) => write_canonical_value(out, bytes),
+                Header::Fixed(_, SignedValue::Host) => self.bucket.write_host(out),
+                Header::Fixed(_, SignedValue::Range) => write_range(out, signed.range),
+                Header::Fixed(_, SignedValue::Date) => out.push(now.iso8601().as_bytes()),
                 // The encoded form holds no space, so it is its canonical form.
-                Header::Fixed(_, HeaderValue::Tags) => write_tags(out, signed.tags),
-                Header::Fixed(_, HeaderValue::CopySource) => self.write_copy_source(out, signed),
-                Header::Fixed(_, HeaderValue::CopyRange) => write_copy_range(out, signed),
+                Header::Fixed(_, SignedValue::Tags) => write_tags(out, signed.tags),
+                Header::Fixed(_, SignedValue::CopySource) => self.write_copy_source(out, signed),
+                Header::Fixed(_, SignedValue::CopyRange) => write_copy_range(out, signed),
                 Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
                     write_metadata_value(out, pair.value, self.bucket.service)
                 }
@@ -2065,28 +2063,28 @@ fn ordered_headers<'s>(
     signed: &'s Signed<'s>,
     token: Option<(&'static str, &'s str)>,
 ) -> impl Iterator<Item = Header<'s>> {
-    let mut fixed = [Header::Fixed("", HeaderValue::Host); 24];
+    let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
     let mut count = 0;
     let entries = [
-        Some(("host", HeaderValue::Host)),
+        Some(("host", SignedValue::Host)),
         Some((
             "x-amz-content-sha256",
-            HeaderValue::Bytes(signed.content_sha256),
+            SignedValue::Bytes(signed.content_sha256),
         )),
-        Some(("x-amz-date", HeaderValue::Date)),
-        token.map(|(name, token)| (name, HeaderValue::Bytes(token.as_bytes()))),
-        (signed.range != RequestedRange::Whole).then_some(("range", HeaderValue::Range)),
+        Some(("x-amz-date", SignedValue::Date)),
+        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
+        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
         condition_header(signed.condition)
             .zip(signed.condition_value)
-            .map(|(name, value)| (name, HeaderValue::Bytes(value))),
-        (!signed.tags.is_empty()).then_some(("x-amz-tagging", HeaderValue::Tags)),
+            .map(|(name, value)| (name, SignedValue::Bytes(value))),
+        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
         signed
             .copy
-            .map(|_| ("x-amz-copy-source", HeaderValue::CopySource)),
+            .map(|_| ("x-amz-copy-source", SignedValue::CopySource)),
         signed
             .copy
             .filter(|copy| copy.range != RequestedRange::Whole)
-            .map(|_| ("x-amz-copy-source-range", HeaderValue::CopyRange)),
+            .map(|_| ("x-amz-copy-source-range", SignedValue::CopyRange)),
         signed.copy.and_then(|copy| {
             let name = match copy.source.condition {
                 ConditionKind::None => return None,
@@ -2095,7 +2093,7 @@ fn ordered_headers<'s>(
                 ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
                 ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
             };
-            Some((name, HeaderValue::Bytes(copy.source.condition_value?)))
+            Some((name, SignedValue::Bytes(copy.source.condition_value?)))
         }),
     ]
     .into_iter()
@@ -2104,7 +2102,7 @@ fn ordered_headers<'s>(
         signed
             .headers
             .iter()
-            .map(|(name, value)| (*name, HeaderValue::Bytes(value))),
+            .map(|(name, value)| (*name, SignedValue::Bytes(value))),
     );
     for (name, value) in entries {
         let mut at = count;

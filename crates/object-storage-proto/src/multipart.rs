@@ -20,7 +20,7 @@
 //   of the field section ends in CRLF.
 
 use crate::http_message::{field_line, field_lines, next_line, token_byte, trim_whitespace};
-use crate::request::ByteSink;
+use crate::request::{ByteSink, HeaderValue};
 use crate::{ResponseFault, Result};
 
 // The longest boundary that RFC 2046 allows.
@@ -193,6 +193,16 @@ fn read_part(part: &[u8]) -> Result<Part<'_>> {
         }
         field_line(line)?;
         rest = after;
+    }
+}
+
+// The `Content-Type` of a `multipart/mixed` body with this boundary.
+pub(crate) struct MixedContentType<'b>(pub(crate) &'b str);
+
+impl HeaderValue for MixedContentType<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(b"multipart/mixed; boundary=");
+        out.push(self.0.as_bytes());
     }
 }
 

@@ -63,8 +63,8 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("x-ms-access-tier", |out| out.push(tier.as_bytes()));
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("x-ms-access-tier", tier.as_bytes());
+        head.header("content-length", b"0");
         encoded(head, Method::Put, Payload::Slice(&[]))
     }
 
@@ -136,10 +136,8 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("content-type", |out| out.push(b"application/xml"));
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes())
-        });
+        head.header("content-type", b"application/xml");
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         push_checksum(&mut head, checksum, &self.checksums, |sum| {
             write_tags_document(sum, plan.tags);
         });

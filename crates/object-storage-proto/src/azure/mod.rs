@@ -9,9 +9,9 @@ use crate::common::{
     ContentRange, FailureOutcome, accept_success, decimal_header, encoded, failure,
     finish_with_body, meta_of, missing, parse_content_range, push_checksum, push_condition,
     text_header, trim_ascii, valid_header, validate_checksum, validate_condition,
-    validate_properties, validate_revision, validate_tags, write_range, write_tags,
+    validate_properties, validate_revision, validate_tags,
 };
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::url::{self, Parameter, QueryValue};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
@@ -76,6 +76,17 @@ pub const METADATA_PREFIX: &str = "x-ms-meta-";
 pub fn metadata_name(header: &str) -> Option<&str> {
     let (prefix, name) = header.split_at_checked(METADATA_PREFIX.len())?;
     (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
+}
+
+// A bearer token, as `Authorization` and `x-ms-copy-source-authorization`
+// carry it.
+pub(crate) struct Bearer<'t>(pub(crate) &'t str);
+
+impl HeaderValue for Bearer<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(b"Bearer ");
+        out.push(self.0.as_bytes());
+    }
 }
 
 /// An Azure Blob endpoint and container name, both borrowed.
@@ -306,12 +317,10 @@ impl<'a> Blobs<'a> {
         let length = content.len();
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now)?;
-        head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
+        head.header("x-ms-blob-type", b"BlockBlob");
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(length).as_bytes());
         push_checksum(&mut head, put.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
@@ -344,14 +353,11 @@ impl<'a> Blobs<'a> {
             return Err(InvalidPlan::UrlTooLong.into());
         }
         head.url(|out| self.write_url(out, key, query));
-        head.header("authorization", |out| {
-            out.push(b"Bearer ");
-            out.push(self.token.as_bytes());
-        });
-        head.header("x-ms-date", |out| out.push(now.rfc1123().as_bytes()));
-        head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
+        head.header("authorization", Bearer(self.token));
+        head.header("x-ms-date", now.rfc1123().as_bytes());
+        head.header("x-ms-version", VERSION.as_bytes());
         if range != RequestedRange::Whole {
-            head.header("range", |out| write_range(out, range));
+            head.header("range", range);
         }
         Ok(())
     }
@@ -518,7 +524,7 @@ impl<'a> Blobs<'a> {
             now,
         )?;
         if let Some(value) = delete_snapshots(delete.kind) {
-            head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
+            head.header("x-ms-delete-snapshots", value.as_bytes());
         }
         push_condition(&mut head, delete.condition, delete.condition_value);
         encoded(head, Method::Delete, Payload::Slice(&[]))
@@ -623,7 +629,7 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         push_metadata(&mut head, plan.metadata);
         push_condition(&mut head, plan.condition, plan.condition_value);
         encoded(head, Method::Put, Payload::Slice(&[]))
@@ -1244,10 +1250,10 @@ pub(crate) fn push_stored(head: &mut HeadWriter<'_>, options: &WriteOptions<'_>)
         );
     }
     if !options.tags.is_empty() {
-        head.header("x-ms-tags", |out| write_tags(out, options.tags));
+        head.header("x-ms-tags", options.tags);
     }
     if let Some(tier) = options.storage_class {
-        head.header("x-ms-access-tier", |out| out.push(tier.as_bytes()));
+        head.header("x-ms-access-tier", tier.as_bytes());
     }
 }
 

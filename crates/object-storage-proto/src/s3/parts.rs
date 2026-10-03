@@ -289,7 +289,7 @@ impl<'a> Objects<'a> {
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
         // A POST states its length even when it has no content.
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         encoded(head, Method::Post, Payload::Slice(&[]))
     }
 
@@ -590,9 +590,7 @@ impl<'a> Objects<'a> {
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             write_part_list(sum, parts.clone());
         });

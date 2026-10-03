@@ -116,13 +116,8 @@ impl<'a> Blobs<'a> {
             RequestedRange::Whole,
             now,
         )?;
-        head.header("content-type", |out| {
-            out.push(b"multipart/mixed; boundary=");
-            out.push(BOUNDARY.as_bytes());
-        });
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes())
-        });
+        head.header("content-type", multipart::MixedContentType(BOUNDARY));
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         encoded_with_body(head, Method::Post, |out| {
             self.write_batch(out, plan.objects, now)
         })
