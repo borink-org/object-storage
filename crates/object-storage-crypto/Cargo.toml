@@ -1,6 +1,6 @@
 [package]
 name = "borink-object-storage-crypto"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "Implements the checksums and cryptographic primitives that borink-object-storage-proto uses"
@@ -11,7 +11,7 @@ keywords = ["crc64", "checksum", "sha256", "no-std", "object-storage"]
 categories = ["no-std::no-alloc", "algorithms"]
 
 [dependencies]
-borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0.3" }
+borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0.4" }
 # Only the `md5-rustcrypto` feature links this. Its default features are off,
 # because this crate needs the hasher alone: not `std`, `alloc` or the OID
 # tables.
