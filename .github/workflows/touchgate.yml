@@ -1,0 +1,24 @@
+# Prepares releases, checks the changelog and starts releases with
+# touchgate; see docs/RELEASING.md.
+name: touchgate
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to release, such as 0.0.4
+        required: true
+        type: string
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+permissions: {}
+jobs:
+  touchgate:
+    uses: borink-org/touchgate/.github/workflows/touchgate.yml@02fb03cdf19db6860233706d50331e5703a4db4c
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    with:
+      version: ${{ inputs.version }}

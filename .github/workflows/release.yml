@@ -1,0 +1,19 @@
+# The release. The copy on the publish branch is the one that runs and the
+# one crates.io trusts; see docs/RELEASING.md.
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        required: true
+        type: string
+permissions: {}
+jobs:
+  release:
+    uses: borink-org/touchgate/.github/workflows/release.yml@02fb03cdf19db6860233706d50331e5703a4db4c
+    permissions:
+      contents: write
+      id-token: write
+    with:
+      commit: ${{ inputs.commit }}
+      key: sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIPK8VZox0UVPB1gsQowDPXlOj1Z34IIJ3V4I2chFNYONAAAAC3NzaDpzaWduaW5n release key
