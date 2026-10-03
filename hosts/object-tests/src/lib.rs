@@ -11,8 +11,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    ConditionKind, ContentProperties, Error as CrateError, HeaderSpan, ObjectMeta, RequestSize,
-    RequestedRange, ResponseHead, Tag, Timestamps, WireRequest,
+    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, Error as CrateError, HeaderSpan,
+    ObjectMeta, RequestSize, RequestedRange, ResponseHead, ServiceErrorKind, Tag, Timestamps,
+    TransactionalChecksum, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -132,12 +133,18 @@ fn snake_case_name(debug_name: &str) -> String {
 }
 
 /// Returns a failed operation with `status`, and with the error code that
-/// the service named, if it named one.
-fn failed_result(status: u16, code: Option<&str>) -> Value {
+/// the service named, if it named one. `kind` is the error as the crate
+/// classified it: a missing container is reported as such, never as a
+/// missing object.
+fn failed_result(status: u16, code: Option<&str>, kind: Option<ServiceErrorKind>) -> Value {
+    let kind = match kind {
+        Some(ServiceErrorKind::NoSuchContainer) => "container_not_found",
+        _ => error_kind_for_status(status),
+    };
     let mut result = json!({
         "outcome": "error",
         "status": status,
-        "kind": error_kind_for_status(status),
+        "kind": kind,
     });
     if let Some(code) = code {
         result["code"] = json!(code);
@@ -156,17 +163,58 @@ fn requested_properties(call: &Value) -> ContentProperties<'_> {
     }
 }
 
-/// The tags that a call names, as an object of keys and values.
+/// The tags that a call names: a list of keys and values, which may name a
+/// key twice, or an object of them.
 fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
-    call.get("tags")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .map(|(key, value)| Tag {
-            key,
-            value: value.as_str().unwrap_or_default(),
-        })
-        .collect()
+    match call.get("tags") {
+        Some(Value::Array(tags)) => tags
+            .iter()
+            .map(|tag| Tag {
+                key: optional_text(tag, "key").unwrap_or_default(),
+                value: optional_text(tag, "value").unwrap_or_default(),
+            })
+            .collect(),
+        Some(Value::Object(tags)) => tags
+            .iter()
+            .map(|(key, value)| Tag {
+                key,
+                value: value.as_str().unwrap_or_default(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The checksum that a write call names: its value, or the algorithm alone
+/// for the crate to compute. `None` inside is an algorithm this adapter does
+/// not map.
+fn requested_checksum(call: &Value) -> Option<Option<TransactionalChecksum<'_>>> {
+    let algorithm = call
+        .pointer("/checksum/algorithm")
+        .and_then(Value::as_str)?;
+    let value = call
+        .pointer("/checksum/value_base64")
+        .and_then(Value::as_str);
+    let kind = match algorithm {
+        "md5" => ChecksumKind::Md5,
+        "azure_crc64" | "crc64nvme" => ChecksumKind::Crc64,
+        "crc32" => ChecksumKind::Crc32,
+        "crc32c" => ChecksumKind::Crc32c,
+        "sha1" => ChecksumKind::Sha1,
+        "sha256" => ChecksumKind::Sha256,
+        _ => return Some(None),
+    };
+    Some(Some(match value {
+        None => TransactionalChecksum::Compute(kind),
+        Some(text) => match kind {
+            ChecksumKind::Md5 => TransactionalChecksum::Md5(text),
+            ChecksumKind::Crc64 => TransactionalChecksum::Crc64(text),
+            ChecksumKind::Crc32 => TransactionalChecksum::Crc32(text),
+            ChecksumKind::Crc32c => TransactionalChecksum::Crc32c(text),
+            ChecksumKind::Sha1 => TransactionalChecksum::Sha1(text),
+            _ => TransactionalChecksum::Sha256(text),
+        },
+    }))
 }
 
 /// The refusal of a write that names two checksums: a plan holds one, and
@@ -179,8 +227,12 @@ fn two_checksums_refused() -> Value {
     })
 }
 
-/// Adds the fields of a read that the response head states.
-fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>) {
+/// Adds the fields of a read that the response head states. Azure calls the
+/// storage class an access tier, so `storage_class_field` names its field.
+fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>, storage_class_field: &str) {
+    if let Some(text) = text_of(meta.storage_class) {
+        value[storage_class_field] = json!(text);
+    }
     let fields = [
         ("content_type", meta.content_type),
         ("content_encoding", meta.content_encoding),
@@ -188,7 +240,6 @@ fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>) {
         ("content_language", meta.content_language),
         ("content_disposition", meta.content_disposition),
         ("cache_control", meta.cache_control),
-        ("storage_class", meta.storage_class),
         ("version", meta.version),
     ];
     for (field, header) in fields {
@@ -196,6 +247,33 @@ fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>) {
             value[field] = json!(text);
         }
     }
+}
+
+/// The window that a ranged read served, as `Content-Range` writes it:
+/// `bytes 28-29/30`. A service clips a range that runs past the end, so
+/// this can be shorter than the range the call asked for.
+fn served_range(body: &BodyWindow) -> Option<String> {
+    let len = body.expected_len.filter(|len| *len > 0)?;
+    let last = body.object_offset + len - 1;
+    Some(match body.object_size {
+        Some(size) => format!("bytes {}-{last}/{size}", body.object_offset),
+        None => format!("bytes {}-{last}/*", body.object_offset),
+    })
+}
+
+/// Declares the response fields that the crate reads from no head, each
+/// named by its result field and its header.
+fn unsupported_response_fields(fields: &[(&str, &str)], reason: &str) -> Value {
+    fields
+        .iter()
+        .map(|(field, header)| {
+            json!({
+                "at": format!("/value/{field}"),
+                "scope": "sdk",
+                "reason": format!("{reason}: {header}"),
+            })
+        })
+        .collect()
 }
 
 // The call this process was started for, whose fields a refusal names.
@@ -212,6 +290,7 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
     };
     Some(match reason_name {
         "EmptyKey" | "UrlTooLong" | "RequestTooLarge" => "key",
+        "Keys" => "keys",
         reason if reason.starts_with("Key") => "key",
         "Range" | "UnsupportedRange" | "RangedHead" => "range",
         "Condition" => CONDITION_FIELDS
@@ -226,6 +305,19 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "PartId" if call.get("part_number").is_some() => "part_number",
         "PartId" | "Parts" => named_field("blocks", "parts"),
         "UploadId" => "upload_id",
+        "Tag" => "tags",
+        // The field of the property that the call names.
+        "ContentProperty" => [
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "storage_class",
+            "tier",
+        ]
+        .into_iter()
+        .find(|field| call.get(field).is_some())?,
         "Prefix" => "prefix",
         "Delimiter" => "delimiter",
         "Marker" => "continuation_token",

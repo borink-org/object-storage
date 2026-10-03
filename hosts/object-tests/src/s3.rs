@@ -12,13 +12,16 @@ use crate::listing::{
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, read_meta_fields, request_buffers, requested_condition,
-    requested_keys, requested_properties, requested_range, requested_tags, send_request,
-    successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
-    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
+    requested_condition, requested_keys, requested_properties, requested_range, requested_tags,
+    send_request, served_range, successful_result, tags_value, text_of, transport_failure,
+    two_checksums_refused, unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
+use borink_object_storage_crypto::{
+    CRC32, CRC32C, CRC64, MD5_RUSTCRYPTO, SHA1_RUSTCRYPTO, SHA256_CHECKSUM_RUSTCRYPTO,
+    SHA256_RUSTCRYPTO, wipe,
+};
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
     PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts,
@@ -26,12 +29,12 @@ use borink_object_storage_proto::s3::{
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, CommitHeadOutcome, DeleteHeadOutcome, DeleteKind, DeleteManyHeadOutcome,
-    GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListPartsHeadOutcome, Metadata,
-    MetadataPair, Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
-    PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome, RequestedRange, StageHeadOutcome,
-    Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum, UpdateHeadOutcome, WriteOptions,
-    layered,
+    ChecksumKind, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteKind,
+    DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
+    ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
+    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome,
+    RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+    WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -41,7 +44,11 @@ use std::cell::OnceCell;
 const MAX_PAGE_ENTRIES: usize = 1_000;
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
-    failed_result(status, s3::error_code(&exchange.body))
+    let kind = match s3::classify_error(&exchange.body, false) {
+        Classification::Classified(kind) => Some(kind),
+        _ => None,
+    };
+    failed_result(status, s3::error_code(&exchange.body), kind)
 }
 
 fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
@@ -81,10 +88,22 @@ impl<'a> Client<'a> {
         if let Some(objects) = self.session.get() {
             return Ok(Ok(*objects));
         }
-        let session = match open_session(&self.context, &self.objects)? {
+        let mut session = match open_session(&self.context, &self.objects)? {
             Ok(session) => session,
             Err(result) => return Ok(Err(result)),
         };
+        // A session whose expiration has passed signs nothing that S3
+        // takes, so ask for another, once.
+        let now = current_timestamps().unix();
+        if session
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+        {
+            session = match open_session(&self.context, &self.objects)? {
+                Ok(session) => session,
+                Err(result) => return Ok(Err(result)),
+            };
+        }
         let objects = match self.objects.with_session(session) {
             Ok(objects) => objects.with_signing_key(&current_timestamps()),
             Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
@@ -189,7 +208,13 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
                 "etag": text_of(meta.e_tag).unwrap_or_default(),
                 "metadata": metadata_from_headers(&exchange),
             });
-            read_meta_fields(&mut value, &meta);
+            read_meta_fields(&mut value, &meta, "storage_class");
+            if let GetHeadOutcome::Body { body, .. } = outcome
+                && range != RequestedRange::Whole
+                && let Some(served) = served_range(&body)
+            {
+                value["content_range"] = json!(served);
+            }
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
             } else {
@@ -200,6 +225,13 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
         }
         GetHeadOutcome::NotModified { .. } => error_result(&exchange, 304),
         GetHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        // S3 answers a HEAD in a missing bucket with the bare 404 that it
+        // answers for a missing key, so which is missing is not known.
+        GetHeadOutcome::NotFound { kind: None } if kind == GetKind::Head => {
+            let mut result = error_result(&exchange, 404);
+            result["kind"] = json!("missing");
+            result
+        }
         GetHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         GetHeadOutcome::RangeNotSatisfiable { .. } => error_result(&exchange, 416),
         GetHeadOutcome::NeedErrorBody(failure) | GetHeadOutcome::ServiceFailure(failure) => {
@@ -216,20 +248,11 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
     };
-    let checksum_algorithm = call.pointer("/checksum/algorithm").and_then(Value::as_str);
-    let checksum_value = call
-        .pointer("/checksum/value_base64")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let checksum = match checksum_algorithm {
+    // S3 takes every checksum that the crate has, as text or computed.
+    let checksum = match requested_checksum(call) {
         None => None,
-        Some("md5") => Some(TransactionalChecksum::Md5(checksum_value)),
-        Some("crc32") => Some(TransactionalChecksum::Crc32(checksum_value)),
-        Some("crc32c") => Some(TransactionalChecksum::Crc32c(checksum_value)),
-        Some("sha1") => Some(TransactionalChecksum::Sha1(checksum_value)),
-        Some("sha256") => Some(TransactionalChecksum::Sha256(checksum_value)),
-        Some("crc64nvme") => Some(TransactionalChecksum::Crc64(checksum_value)),
-        Some(_) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
+        Some(Some(checksum)) => Some(checksum),
+        Some(None) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
     };
 
     let metadata_pairs: Vec<MetadataPair<'_>> = call
@@ -1110,7 +1133,11 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO)
         .with_signing_key(&now)
         .with_checksum(MD5_RUSTCRYPTO)
-        .with_checksum(CRC64);
+        .with_checksum(CRC64)
+        .with_checksum(CRC32)
+        .with_checksum(CRC32C)
+        .with_checksum(SHA1_RUSTCRYPTO)
+        .with_checksum(SHA256_CHECKSUM_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
     if operation == "s3.create_session" {

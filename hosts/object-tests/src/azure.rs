@@ -10,23 +10,25 @@ use crate::listing::{
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, read_meta_fields, request_buffers, requested_condition,
-    requested_keys, requested_properties, requested_range, requested_tags, send_request,
-    successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
-    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
+    requested_condition, requested_keys, requested_properties, requested_range, requested_tags,
+    send_request, served_range, successful_result, tags_value, text_of, transport_failure,
+    two_checksums_refused, unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    unsupported_response_fields,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO};
 use borink_object_storage_proto::azure::{
     self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
     PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, CommitHeadOutcome, Container, DeleteHeadOutcome, DeleteKind,
-    DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
-    ListInclude, ListPartsHeadOutcome, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
-    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet,
-    PutHeadOutcome, RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, TransactionalChecksum,
-    UpdateHeadOutcome, WriteOptions, layered,
+    AzureNamespace, Blobs, ChecksumKind, Classification, CommitHeadOutcome, Container,
+    DeleteHeadOutcome, DeleteKind, DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind,
+    ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome, MetadataPair, Payload,
+    PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut,
+    PhysicalSetTags, PropertySet, PutHeadOutcome, RequestedRange, StageHeadOutcome, Tag,
+    TagsHeadOutcome, TransactionalChecksum, UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -39,7 +41,11 @@ pub(crate) static ACCOUNT_NAMESPACE: std::sync::OnceLock<AzureNamespace> =
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
     let code = azure::error_code(&exchange.response_head(), &exchange.body);
-    failed_result(status, code.map(String::from_utf8_lossy).as_deref())
+    let kind = match azure::classify_error(&exchange.response_head(), &exchange.body, false) {
+        Classification::Classified(kind) => Some(kind),
+        _ => None,
+    };
+    failed_result(status, code.map(String::from_utf8_lossy).as_deref(), kind)
 }
 
 /// Returns `true` if the call selects a snapshot or a version, which the crate's plans cannot.
@@ -110,7 +116,13 @@ fn read_object(
                 "etag": text_of(meta.e_tag).unwrap_or_default(),
                 "metadata": metadata_from_headers(&exchange),
             });
-            read_meta_fields(&mut value, &meta);
+            read_meta_fields(&mut value, &meta, "access_tier");
+            if let GetHeadOutcome::Body { body, .. } = outcome
+                && range != RequestedRange::Whole
+                && let Some(served) = served_range(&body)
+            {
+                value["content_range"] = json!(served);
+            }
 
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
@@ -118,7 +130,15 @@ fn read_object(
                 value["body_base64"] = json!(STANDARD.encode(&exchange.body));
                 value["size"] = json!(exchange.body.len());
             }
-            successful_result(value)
+            let mut result = successful_result(value);
+            result["unsupported_fields"] = unsupported_response_fields(
+                &[
+                    ("copy_status", "x-ms-copy-status"),
+                    ("copy_id", "x-ms-copy-id"),
+                ],
+                "the crate has no copy, and reads no",
+            );
+            result
         }
         GetHeadOutcome::NotModified { .. } => error_result(&exchange, 304),
         GetHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
@@ -145,15 +165,14 @@ fn write_object(
         return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
     };
 
-    let checksum_algorithm = call.pointer("/checksum/algorithm").and_then(Value::as_str);
-    let checksum_value = call
-        .pointer("/checksum/value_base64")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let checksum = match checksum_algorithm {
+    // Azure takes an MD5 and a CRC64, as text or computed.
+    let checksum = match requested_checksum(call) {
         None => None,
-        Some("md5") => Some(TransactionalChecksum::Md5(checksum_value)),
-        Some("azure_crc64") => Some(TransactionalChecksum::Crc64(checksum_value)),
+        Some(Some(
+            checksum @ (TransactionalChecksum::Md5(_)
+            | TransactionalChecksum::Crc64(_)
+            | TransactionalChecksum::Compute(ChecksumKind::Md5 | ChecksumKind::Crc64)),
+        )) => Some(checksum),
         Some(_) => return Ok(unsupported_by_crate("checksum algorithm")),
     };
 
@@ -743,7 +762,10 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let namespace = account_namespace(endpoint);
     ACCOUNT_NAMESPACE.set(namespace).ok();
     let container = crate_step!(Container::new(endpoint_url, container_name));
-    let blobs = crate_step!(Blobs::new(container, &token)).with_namespace(namespace);
+    let blobs = crate_step!(Blobs::new(container, &token))
+        .with_namespace(namespace)
+        .with_checksum(CRC64)
+        .with_checksum(MD5_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
     let pages = BlobPages {
