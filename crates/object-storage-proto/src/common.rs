@@ -6,8 +6,25 @@ use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Tag, TransactionalChecksum, WireRequest, WriteOptions,
+    ResponseHead, Result, Revision, ServiceErrorKind, Tag, TransactionalChecksum, WireRequest,
+    WriteOptions,
 };
+
+// Checks the snapshot or version that a plan names: an identifier that is
+// not empty, and a snapshot only where the service keeps snapshots.
+pub(crate) fn validate_revision(
+    revision: Option<Revision<'_>>,
+    keeps_snapshots: bool,
+) -> Result<()> {
+    match revision {
+        None => Ok(()),
+        Some(Revision::Snapshot(_)) if !keeps_snapshots => Err(InvalidPlan::Revision.into()),
+        Some(Revision::Snapshot(id) | Revision::Version(id)) if id.is_empty() => {
+            Err(InvalidPlan::Revision.into())
+        }
+        Some(_) => Ok(()),
+    }
+}
 
 // The one record that every failing head becomes, whichever operation asked.
 pub(crate) fn failure<'h>(
@@ -80,6 +97,7 @@ macro_rules! container_failure_outcome {
 pub(crate) use container_failure_outcome;
 
 failure_outcome!(
+    CopyHeadOutcome,
     GetHeadOutcome,
     DeleteHeadOutcome,
     StageHeadOutcome,
@@ -118,6 +136,8 @@ pub(crate) fn meta_of(head: ResponseHead<'_>) -> ObjectMeta<'_> {
         content_disposition: head.content_disposition,
         cache_control: head.cache_control,
         storage_class: head.storage_class,
+        copy_id: head.copy_id,
+        copy_status: head.copy_status,
     }
 }
 

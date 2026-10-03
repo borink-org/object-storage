@@ -283,6 +283,7 @@ impl<'a> Objects<'a> {
             metadata: plan.metadata,
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: plan.options.tags,
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -412,6 +413,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: content_sha256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
@@ -584,6 +586,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: &content_sha256,
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
@@ -750,6 +753,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -849,6 +853,7 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -936,7 +941,7 @@ impl<'a> Objects<'a> {
 
 // Part number 0 is not a part anywhere. AWS numbers parts up to
 // `MAX_PARTS`.
-fn validate_part_number(number: u32, service: Service) -> Result<()> {
+pub(super) fn validate_part_number(number: u32, service: Service) -> Result<()> {
     let limited = match service {
         Service::Aws | Service::AwsDirectory => true,
         Service::Compatible => false,
@@ -947,7 +952,7 @@ fn validate_part_number(number: u32, service: Service) -> Result<()> {
     Ok(())
 }
 
-fn validate_upload_id(upload_id: &str) -> Result<()> {
+pub(super) fn validate_upload_id(upload_id: &str) -> Result<()> {
     if upload_id.is_empty() {
         return Err(InvalidPlan::UploadId.into());
     }

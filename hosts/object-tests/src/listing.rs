@@ -3,7 +3,7 @@
 //! one page with its own client, as a [`PageSource`], and passes that source
 //! to [`list_page`] or [`list_all_keys`].
 
-use crate::{AdapterError, optional_text, successful_result, unsupported_by_crate};
+use crate::{AdapterError, optional_text, successful_result, unsupported_by_adapter};
 use borink_object_storage_proto::{
     EntryKind, ListEntry, ListInclude, Listing, PhysicalList, layered,
 };
@@ -92,7 +92,9 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
     {
         match include_option.as_str() {
             Some("metadata") => include = include | ListInclude::METADATA,
-            _ => return Ok(unsupported_by_crate("ListInclude names metadata only")),
+            Some("snapshots") => include = include | ListInclude::SNAPSHOTS,
+            Some("versions") => include = include | ListInclude::VERSIONS,
+            _ => return Ok(unsupported_by_adapter("include option not mapped")),
         }
     }
     if call.get("fetch_owner").and_then(Value::as_bool) == Some(true) {

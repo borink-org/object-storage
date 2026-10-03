@@ -19,6 +19,17 @@ pub enum StageHeadOutcome<'h> {
         /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
         e_tag: Option<&'h [u8]>,
     },
+    /// S3 took an UploadPartCopy, and says in the body whether it
+    /// succeeded.
+    ///
+    /// This outcome is not final. Read the whole body and pass it with the
+    /// head to
+    /// [`s3::Objects::accept_stage_part_copy_body`](crate::s3::Objects::accept_stage_part_copy_body),
+    /// which returns the final outcome. No other stage returns this.
+    NeedResultBody {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
     /// On S3, the upload does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
@@ -38,7 +49,77 @@ impl fmt::Display for StageHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Staged { .. } => f.write_str("the service holds the part"),
+            Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
             Self::NotFound { kind } => not_found(f, *kind),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+/// The result of reading the response head of a copy: an Azure Copy Blob or
+/// Copy Blob From URL, or an S3 CopyObject.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CopyHeadOutcome<'h> {
+    /// The service wrote the copy.
+    Copied {
+        /// The metadata of the copy: its entity tag, and on Azure its last
+        /// modification, the copy's ID and its status, `success`.
+        meta: ObjectMeta<'h>,
+    },
+    /// Azure started the copy and finishes it later.
+    ///
+    /// `meta.copy_id` names the copy. Read its progress with a HEAD of the
+    /// target, in [`ObjectMeta::copy_status`], or stop it with
+    /// [`Blobs::encode_abort_copy`](crate::Blobs::encode_abort_copy).
+    Pending {
+        /// The metadata of the target, with the copy's ID and its status,
+        /// `pending`.
+        meta: ObjectMeta<'h>,
+    },
+    /// S3 took the copy, and says in the body whether it succeeded.
+    ///
+    /// This outcome is not final. Read the whole body and pass it with the
+    /// head to
+    /// [`s3::Objects::accept_copy_body`](crate::s3::Objects::accept_copy_body),
+    /// which returns the final outcome. Azure never returns this.
+    NeedResultBody {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
+    /// The condition on the target or on the source did not hold, so the
+    /// service copied nothing.
+    PreconditionFailed,
+    /// The source does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the copy, or failed to carry it out.
+    ///
+    /// A copy conditional on `If-None-Match: *` onto an object that exists
+    /// is refused here on Azure, with [`ServiceErrorKind::AlreadyExists`].
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for CopyHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Copied { .. } => f.write_str("the service wrote the copy"),
+            Self::Pending { .. } => f.write_str("the copy is pending"),
+            Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
+            Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
+            Self::NotFound { kind } => f.write_str(kind.map_or(
+                "the source or the container does not exist",
+                ServiceErrorKind::as_str,
+            )),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -302,6 +383,13 @@ pub struct ObjectMeta<'h> {
     pub cache_control: Option<&'h [u8]>,
     /// The storage class on S3, or the access tier on Azure.
     pub storage_class: Option<&'h [u8]>,
+    /// The identifier of the last copy onto the object, from
+    /// `x-ms-copy-id`. Azure only.
+    pub copy_id: Option<&'h [u8]>,
+    /// The state of the last copy onto the object, from
+    /// `x-ms-copy-status`: `pending`, `success`, `aborted` or `failed`.
+    /// Azure only.
+    pub copy_status: Option<&'h [u8]>,
 }
 
 /// Where the bytes of the response body belong in the object.

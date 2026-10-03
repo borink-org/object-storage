@@ -47,8 +47,21 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New constructors `Digest::crc32`, `crc32c`, `sha1` and `sha256`. `checksum::BASE64_LEN` is 44, the base64 of a SHA-256.
   - `borink-object-storage-crypto`: new features `crc32`, `crc32c` and `sha1-rustcrypto`, with the providers `CRC32`, `CRC32C` and `SHA1_RUSTCRYPTO` over `Crc32`, `Crc32c` and `Sha1RustCrypto`. `Sha256RustCrypto` and `Sha256Minimal` implement `Checksum` as well, as the providers `SHA256_CHECKSUM_RUSTCRYPTO` and `SHA256_CHECKSUM_MINIMAL`.
 
+- Snapshots and versions:
+  - New enum `Revision`, a snapshot or a version, and new fields `PhysicalGet::revision` and `PhysicalDelete::revision`, which read or remove one. Azure sends it as `snapshot` or `versionid`, and S3 sends a version as `versionId`. New variant `InvalidPlan::Revision`, for an empty identifier, a snapshot on S3, and a removal of one that also names a `DeleteKind` other than `Object`.
+  - New flags `ListInclude::SNAPSHOTS` and `ListInclude::VERSIONS`, which only Azure lists, and new method `ListInclude::intersects`.
+  - Azure Snapshot Blob: new plan `azure::PhysicalSnapshot`, outcome `azure::SnapshotHeadOutcome`, methods `Blobs::encode_snapshot`, `accept_snapshot_head` and `accept_snapshot_error_body`, and function `layered::snapshot_requirements`.
+  - New field `ResponseHead::snapshot`, from `x-ms-snapshot`.
+- Copies that the service carries out:
+  - New plan `PhysicalCopy`, with its source `CopySource` and shape `CopyShape`, new outcome `CopyHeadOutcome`, and new variant `InvalidPlan::CopySource`.
+  - Azure: new methods `Blobs::encode_copy` (Copy Blob), `encode_copy_from_url` (Copy Blob From URL), `accept_copy_head` and `accept_copy_error_body`; `encode_put_from_url` (Put Blob From URL), `accept_put_from_url_head` and `accept_put_from_url_error_body`; `encode_stage_block_from_url` (Put Block From URL), with the plan `azure::PhysicalStageBlockFromUrl`; and `encode_abort_copy` and `accept_abort_copy_head` (Abort Copy Blob). The From URL operations send the client's token in `x-ms-copy-source-authorization`. New functions `layered::copy_requirements`, `copy_from_url_requirements`, `put_from_url_requirements`, `stage_block_from_url_requirements` and `abort_copy_requirements`.
+  - S3: new methods `Objects::encode_copy` (CopyObject), `accept_copy_head`, `accept_copy_body` and `accept_copy_error_body`, and `encode_stage_part_copy` (UploadPartCopy), `accept_stage_part_copy_head` and `accept_stage_part_copy_body`, with the plan `s3::PhysicalStagePartCopy`. S3 answers both with status 200 and writes the result or an error into the body. A client that holds the credentials of an S3 Express session refuses both, because AWS authorizes them by the caller's own credentials. New functions `layered::s3::copy_requirements` and `stage_part_copy_requirements`.
+  - New variant `StageHeadOutcome::NeedResultBody`, which only an UploadPartCopy returns.
+  - New fields `ResponseHead::copy_id` and `copy_status`, and the same on `ObjectMeta`, from `x-ms-copy-id` and `x-ms-copy-status`.
+  - Azure's `SourceConditionNotMet` is `ServiceErrorKind::Precondition`.
 ### Changed
 
+- `PhysicalGet` and `PhysicalDelete` have the new public field `revision`, so a struct literal that names every field needs it. `from_shape` sets it to `None`.
 - A missing container or bucket is never `NotFound`. Every outcome reports it as `ServiceFailure` with `ServiceErrorKind::NoSuchContainer`, so `NotFound` means only that the object, or on S3 the upload, is missing. A reader that maps `NotFound { .. }` to "absent" no longer reads a mistyped container as empty. One case stays ambiguous: S3 answers a HEAD in a missing bucket with the same bare 404 as a missing key, which is `GetHeadOutcome::NotFound { kind: None }`.
 - The outcomes of requests that name no object lose their `NotFound` variant, because their 404 can only mean the container: `PutHeadOutcome`, `ListHeadOutcome`, `s3::CreateUploadHeadOutcome` and `s3::SessionHeadOutcome`. The C ABI no longer answers a write or a listing with `NotFound`.
 - Both crates declare `rust-version = "1.97"` instead of `1.97.1`, so a toolchain of any 1.97 release builds them.

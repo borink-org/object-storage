@@ -247,6 +247,11 @@ impl<'a> Credentials<'a> {
         self
     }
 
+    // Whether these are the credentials of an S3 Express session.
+    pub(crate) fn is_s3_session(&self) -> bool {
+        self.token_header == "x-amz-s3session-token"
+    }
+
     pub(crate) fn wipe(&self) -> fn(&mut [u8]) {
         self.wipe
     }
