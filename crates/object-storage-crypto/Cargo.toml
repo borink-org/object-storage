@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "Implements the checksums and cryptographic primitives that borink-object-storage-proto uses"
 repository = "https://github.com/borink-org/object-storage"
 readme = "../../README.md"
-rust-version = "1.97.1"
+rust-version = "1.97"
 keywords = ["crc64", "checksum", "sha256", "no-std", "object-storage"]
 categories = ["no-std::no-alloc", "algorithms"]
 

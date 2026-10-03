@@ -158,7 +158,8 @@ impl<'a> Objects<'a> {
     }
 
     /// Finishes a [`DeleteManyHeadOutcome::NeedErrorBody`] with the response
-    /// body. A missing bucket is [`DeleteManyHeadOutcome::NotFound`].
+    /// body. A missing bucket is a [`DeleteManyHeadOutcome::ServiceFailure`]
+    /// with [`ServiceErrorKind::NoSuchContainer`](crate::ServiceErrorKind::NoSuchContainer).
     pub fn accept_delete_many_error_body<'h>(
         &self,
         failure: Failure<'h>,

@@ -19,7 +19,8 @@ pub enum StageHeadOutcome<'h> {
         /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
         e_tag: Option<&'h [u8]>,
     },
-    /// The container does not exist, or on S3 the upload does not.
+    /// On S3, the upload does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The service's reason, if known.
         ///
@@ -55,7 +56,8 @@ impl fmt::Display for StageHeadOutcome<'_> {
 pub enum UpdateHeadOutcome<'h> {
     /// The service made the change.
     Updated,
-    /// The object or the container does not exist.
+    /// The object does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -94,7 +96,8 @@ pub enum TagsHeadOutcome<'h> {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
     },
-    /// The object or the container does not exist.
+    /// The object does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -133,14 +136,10 @@ pub enum DeleteManyHeadOutcome<'h> {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
     },
-    /// The container does not exist.
-    NotFound {
-        /// The service's reason, if known.
-        kind: Option<ServiceErrorKind>,
-    },
     /// Read the error body to finish this response.
     NeedErrorBody(Failure<'h>),
-    /// The service refused the request as a whole.
+    /// The service refused the request as a whole, such as for a container
+    /// that does not exist, with [`ServiceErrorKind::NoSuchContainer`].
     ServiceFailure(Failure<'h>),
 }
 
@@ -148,7 +147,6 @@ impl fmt::Display for DeleteManyHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Results { .. } => f.write_str("the results follow in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -182,7 +180,8 @@ pub enum CommitHeadOutcome<'h> {
     },
     /// The commit's condition failed.
     PreconditionFailed,
-    /// The container does not exist, or on S3 the upload does not.
+    /// On S3, the upload does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -229,7 +228,9 @@ pub enum ListPartsHeadOutcome<'h> {
         /// The result body's byte length.
         expected_len: Option<u64>,
     },
-    /// The object or container does not exist, or on S3 the upload does not.
+    /// The object does not exist, or on S3 the upload does not. A missing
+    /// container is a [`Self::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The service's reason, if known.
         kind: Option<ServiceErrorKind>,
@@ -421,6 +422,12 @@ impl fmt::Display for Failure<'_> {
 #[non_exhaustive]
 pub enum GetHeadOutcome<'h> {
     /// A body follows. Read it and put the bytes at `body`.
+    ///
+    /// A bounded range that runs past the end of the object is served
+    /// clipped to the end, and this outcome reports it as any other body:
+    /// `body.expected_len` is then shorter than the range. Compare the two if
+    /// a short read matters to you, such as when you read at offsets from an
+    /// object size you recorded.
     Body {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,
@@ -434,23 +441,30 @@ pub enum GetHeadOutcome<'h> {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,
     },
-    /// The `If-None-Match` condition held, so the service sent no body.
+    /// The `If-None-Match` or `If-Modified-Since` condition held, so the
+    /// service sent no body.
     NotModified {
         /// The entity tag, if the service repeated it.
         e_tag: Option<&'h [u8]>,
     },
-    /// The `If-Match` condition did not hold, so the service sent no body.
+    /// The `If-Match` or `If-Unmodified-Since` condition did not hold, so
+    /// the service sent no body.
     PreconditionFailed,
-    /// The object does not exist, or the container that holds it does not.
+    /// The object does not exist.
+    ///
+    /// A missing container is not this: it is a [`Self::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`]. One exception is S3's answer
+    /// to a HEAD, which carries no body: S3 answers a missing bucket with the
+    /// same bare 404 as a missing key, so this outcome, with `kind` [`None`],
+    /// can mean either.
     NotFound {
-        /// Which of the two is missing, if the head names the error.
-        ///
-        /// [`ServiceErrorKind::NoSuchContainer`] means that the container is
-        /// missing. If this is [`None`], read the response body with
-        /// [`classify_error`](crate::classify_error).
+        /// The error, if the service named it.
         kind: Option<ServiceErrorKind>,
     },
     /// The service cannot serve the requested range.
+    ///
+    /// An empty object has no byte to serve, so the services answer any range
+    /// of one with this. Read an object that may be empty whole.
     RangeNotSatisfiable {
         /// The size of the object, if `Content-Range: bytes */N` states it.
         object_size: Option<u64>,
@@ -497,11 +511,6 @@ pub enum PutHeadOutcome<'h> {
     /// [`ServiceErrorKind::AlreadyExists`]. The Azure documentation states 412
     /// for that case; this crate follows the service.
     PreconditionFailed,
-    /// The container does not exist, so Azure stored nothing.
-    NotFound {
-        /// The specific error, if the head names one.
-        kind: Option<ServiceErrorKind>,
-    },
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
@@ -512,6 +521,9 @@ pub enum PutHeadOutcome<'h> {
     /// The `kind` of this failure is always [`None`].
     NeedErrorBody(Failure<'h>),
     /// The service refused the write, or it failed to store the object.
+    ///
+    /// A container that does not exist is refused here, with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     ServiceFailure(Failure<'h>),
 }
 
@@ -530,13 +542,14 @@ pub enum DeleteHeadOutcome<'h> {
     /// The object is gone unless the plan asked only for its snapshots: see
     /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).
     Accepted,
-    /// The entity tag in the condition did not match, so Azure removed
-    /// nothing.
+    /// The condition did not hold, so the service removed nothing.
     PreconditionFailed,
     /// The object does not exist, so there was nothing to remove.
     ///
     /// A caller that removes an object it does not need can treat this as
-    /// success. This crate does not decide that for you.
+    /// success. This crate does not decide that for you. A missing container
+    /// is not this: it is a [`Self::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
         /// The specific error, if the head names one.
         kind: Option<ServiceErrorKind>,
@@ -579,11 +592,6 @@ pub enum ListHeadOutcome<'h> {
         /// what you read when it is [`None`].
         expected_len: Option<u64>,
     },
-    /// The container does not exist, so there was nothing to list.
-    NotFound {
-        /// The specific error, if the head names one.
-        kind: Option<ServiceErrorKind>,
-    },
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
@@ -594,6 +602,10 @@ pub enum ListHeadOutcome<'h> {
     /// The `kind` of this failure is always [`None`].
     NeedErrorBody(Failure<'h>),
     /// The service refused the listing, or it failed to serve it.
+    ///
+    /// A container that does not exist is refused here, with
+    /// [`ServiceErrorKind::NoSuchContainer`]: a listing has no object to be
+    /// missing, so a missing container is never an empty page.
     ServiceFailure(Failure<'h>),
 }
 
@@ -726,13 +738,8 @@ impl fmt::Display for GetHeadOutcome<'_> {
             Self::Body { .. } => f.write_str("the object follows in the response body"),
             Self::Complete { .. } => f.write_str("the response carries no body and is complete"),
             Self::NotModified { .. } => f.write_str("the object is not modified"),
-            Self::PreconditionFailed => f.write_str("the If-Match condition did not hold"),
-            Self::NotFound { kind } => match kind {
-                Some(ServiceErrorKind::NoSuchContainer) => {
-                    f.write_str(ServiceErrorKind::NoSuchContainer.as_str())
-                }
-                _ => f.write_str(ServiceErrorKind::NotFound.as_str()),
-            },
+            Self::PreconditionFailed => f.write_str("the condition on the read did not hold"),
+            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NotFound.as_str()),
             Self::RangeNotSatisfiable { object_size } => {
                 f.write_str("the service cannot serve the requested range")?;
                 match object_size {
@@ -752,7 +759,6 @@ impl fmt::Display for PutHeadOutcome<'_> {
         match self {
             Self::Created { .. } => f.write_str("the service stored the object"),
             Self::PreconditionFailed => f.write_str("the condition on the write did not hold"),
-            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 fmt::Display::fmt(failure, f)
             }
@@ -777,7 +783,6 @@ impl fmt::Display for ListHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Page { .. } => f.write_str("the page follows in the response body"),
-            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 fmt::Display::fmt(failure, f)
             }
@@ -831,21 +836,6 @@ mod tests {
         assert_eq!(
             failure.to_string(),
             "the service failed, or it was unavailable (HTTP 500)"
-        );
-    }
-
-    #[test]
-    fn separates_a_missing_object_from_a_missing_container() {
-        assert_eq!(
-            GetHeadOutcome::NotFound { kind: None }.to_string(),
-            "the object does not exist"
-        );
-        assert_eq!(
-            GetHeadOutcome::NotFound {
-                kind: Some(ServiceErrorKind::NoSuchContainer)
-            }
-            .to_string(),
-            "the container does not exist"
         );
     }
 

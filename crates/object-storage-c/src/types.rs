@@ -301,11 +301,13 @@ pub enum OutcomeKind {
     Body = 1,
     /// No body follows and the read is complete.
     Complete = 2,
-    /// The `If-None-Match` condition held, so Azure sent no body.
+    /// The `If-None-Match` or `If-Modified-Since` condition held, so Azure
+    /// sent no body.
     NotModified = 3,
     /// The condition did not hold, so Azure changed nothing.
     PreconditionFailed = 4,
-    /// The object or its container does not exist. Read `failure.kind`.
+    /// The object does not exist. A missing container is `ServiceFailure`
+    /// with `failure.kind` `NoSuchContainer`.
     NotFound = 5,
     /// Azure cannot serve the requested range. Read `body.object_size`.
     RangeNotSatisfiable = 6,

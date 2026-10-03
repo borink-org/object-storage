@@ -373,7 +373,8 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_COMPLETE = 2,
     /**
-     * The `If-None-Match` condition held, so Azure sent no body.
+     * The `If-None-Match` or `If-Modified-Since` condition held, so Azure
+     * sent no body.
      */
     BORINK_OUTCOME_KIND_NOT_MODIFIED = 3,
     /**
@@ -381,7 +382,8 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_PRECONDITION_FAILED = 4,
     /**
-     * The object or its container does not exist. Read `failure.kind`.
+     * The object does not exist. A missing container is `ServiceFailure`
+     * with `failure.kind` `NoSuchContainer`.
      */
     BORINK_OUTCOME_KIND_NOT_FOUND = 5,
     /**

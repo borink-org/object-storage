@@ -49,6 +49,9 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ### Changed
 
+- A missing container or bucket is never `NotFound`. Every outcome reports it as `ServiceFailure` with `ServiceErrorKind::NoSuchContainer`, so `NotFound` means only that the object, or on S3 the upload, is missing. A reader that maps `NotFound { .. }` to "absent" no longer reads a mistyped container as empty. One case stays ambiguous: S3 answers a HEAD in a missing bucket with the same bare 404 as a missing key, which is `GetHeadOutcome::NotFound { kind: None }`.
+- The outcomes of requests that name no object lose their `NotFound` variant, because their 404 can only mean the container: `PutHeadOutcome`, `ListHeadOutcome`, `s3::CreateUploadHeadOutcome` and `s3::SessionHeadOutcome`. The C ABI no longer answers a write or a listing with `NotFound`.
+- Both crates declare `rust-version = "1.97"` instead of `1.97.1`, so a toolchain of any 1.97 release builds them.
 - Listings group keys at any delimiter. The field `PhysicalList::delimited` is now `delimiter`, which holds the delimiter text. `PhysicalList::from_shape` plans `/` for a delimited `ListShape`.
 - An S3 client for a directory bucket refuses a listing prefix that does not end in `/` with `InvalidPlan::Prefix`, and sends a metadata value that a general purpose bucket would not store as given as an RFC 2047 encoded word, instead of refusing it.
 - `s3::Objects::fill_listing`, `fill_listing_with` and `read_session` return `Error::Service` for a body that is an error document, instead of `Error::Response` with `ResponseFault::Body`. So do the new `read_upload_id` and `fill_parts`.

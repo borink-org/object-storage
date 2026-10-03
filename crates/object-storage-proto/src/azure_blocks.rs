@@ -12,8 +12,8 @@ use crate::azure::{
     push_stored, validate_key, validate_metadata, validate_options,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, push_checksum,
-    push_condition, text_header, validate_condition,
+    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, missing,
+    push_checksum, push_condition, text_header, validate_condition,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::url::QueryValue;
@@ -433,7 +433,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(StageHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -497,7 +497,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(CommitHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -557,7 +557,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(ListPartsHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             201..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(
                 failure(status, None, head.request_id),

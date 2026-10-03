@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "Builds Azure Blob Storage and S3 requests and reads their responses, without I/O or allocation"
 repository = "https://github.com/borink-org/object-storage"
 readme = "../../README.md"
-rust-version = "1.97.1"
+rust-version = "1.97"
 keywords = ["azure", "s3", "object-storage", "sans-io", "no-std"]
 categories = ["no-std::no-alloc", "api-bindings", "network-programming"]
 

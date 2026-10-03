@@ -24,30 +24,35 @@ pub(crate) fn failure<'h>(
 }
 
 // The two outcomes that `finish_with_body` produces, for one operation's
-// outcome type.
+// outcome type. An outcome whose request names no object, such as a
+// listing, has no `NotFound`: its 404 can only mean a missing container,
+// so `not_found` returns the failure.
 pub(crate) trait FailureOutcome<'h> {
-    fn not_found(kind: Option<ServiceErrorKind>) -> Self;
+    fn not_found(failure: Failure<'h>) -> Self;
     fn service_failure(failure: Failure<'h>) -> Self;
 }
 
-// Finishes a failure whose head named no error, with the error `kind` that
-// its body named. A 404 is not found, and any other status is a failure of
-// the service.
+// Finishes a failure with the error `kind` that its head or body named. A
+// 404 is not found, unless it names a missing container. That is a failure
+// of the service, as any other status is: a caller must never read a
+// missing container as a missing object.
 pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
     head_failure: Failure<'h>,
     kind: Option<ServiceErrorKind>,
 ) -> O {
-    match head_failure.status {
-        404 => O::not_found(kind),
-        status => O::service_failure(failure(status, kind, head_failure.request_id)),
+    let failure = failure(head_failure.status, kind, head_failure.request_id);
+    if failure.status == 404 && kind != Some(ServiceErrorKind::NoSuchContainer) {
+        O::not_found(failure)
+    } else {
+        O::service_failure(failure)
     }
 }
 
 macro_rules! failure_outcome {
     ($($outcome:ident),*) => {$(
         impl<'h> FailureOutcome<'h> for crate::$outcome<'h> {
-            fn not_found(kind: Option<ServiceErrorKind>) -> Self {
-                Self::NotFound { kind }
+            fn not_found(failure: Failure<'h>) -> Self {
+                Self::NotFound { kind: failure.kind }
             }
 
             fn service_failure(failure: Failure<'h>) -> Self {
@@ -57,18 +62,46 @@ macro_rules! failure_outcome {
     )*};
 }
 
+// The outcomes whose request names no object, which report every 404 as a
+// failure of the service.
+macro_rules! container_failure_outcome {
+    ($($outcome:ty),*) => {$(
+        impl<'h> FailureOutcome<'h> for $outcome {
+            fn not_found(failure: Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+
+            fn service_failure(failure: Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+pub(crate) use container_failure_outcome;
+
 failure_outcome!(
     GetHeadOutcome,
-    PutHeadOutcome,
     DeleteHeadOutcome,
-    ListHeadOutcome,
     StageHeadOutcome,
     CommitHeadOutcome,
     ListPartsHeadOutcome,
     UpdateHeadOutcome,
-    TagsHeadOutcome,
-    DeleteManyHeadOutcome
+    TagsHeadOutcome
 );
+
+container_failure_outcome!(
+    crate::PutHeadOutcome<'h>,
+    crate::ListHeadOutcome<'h>,
+    crate::DeleteManyHeadOutcome<'h>
+);
+
+// The outcome of a 404 whose head names its error, as Azure's does.
+pub(crate) fn missing<'h, O: FailureOutcome<'h>>(
+    head: &ResponseHead<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    finish_with_body(failure(404, None, head.request_id), kind)
+}
 
 // The metadata that a response head states, without its size and with
 // `Last-Modified` unread: `text_header` reads it.

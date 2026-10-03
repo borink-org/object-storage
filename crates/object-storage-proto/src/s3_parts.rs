@@ -211,11 +211,6 @@ pub enum CreateUploadHeadOutcome<'h> {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
     },
-    /// The bucket does not exist.
-    NotFound {
-        /// The specific error, if the body names one.
-        kind: Option<ServiceErrorKind>,
-    },
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
@@ -224,24 +219,18 @@ pub enum CreateUploadHeadOutcome<'h> {
     /// stays unnamed.
     NeedErrorBody(Failure<'h>),
     /// The service refused to create the upload, or it failed to.
+    ///
+    /// A bucket that does not exist is refused here, with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     ServiceFailure(Failure<'h>),
 }
 
-impl<'h> FailureOutcome<'h> for CreateUploadHeadOutcome<'h> {
-    fn not_found(kind: Option<ServiceErrorKind>) -> Self {
-        Self::NotFound { kind }
-    }
-
-    fn service_failure(failure: Failure<'h>) -> Self {
-        Self::ServiceFailure(failure)
-    }
-}
+crate::common::container_failure_outcome!(CreateUploadHeadOutcome<'h>);
 
 impl core::fmt::Display for CreateUploadHeadOutcome<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Created { .. } => f.write_str("the upload ID follows in the response body"),
-            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 core::fmt::Display::fmt(failure, f)
             }
@@ -336,8 +325,9 @@ impl<'a> Objects<'a> {
     /// response body.
     ///
     /// This is [`Self::accept_get_error_body`] for a CreateMultipartUpload,
-    /// and reads the body the same way. A missing bucket is
-    /// [`CreateUploadHeadOutcome::NotFound`].
+    /// and reads the body the same way. A missing bucket is a
+    /// [`CreateUploadHeadOutcome::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     pub fn accept_create_upload_error_body<'h>(
         &self,
         failure: Failure<'h>,

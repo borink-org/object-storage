@@ -72,6 +72,11 @@ pub enum RequestedRange {
     #[default]
     Whole,
     /// A half-open interval that excludes its end.
+    ///
+    /// The end must be after the start. The encoding methods refuse an empty
+    /// or inverted range with
+    /// [`InvalidPlan::Range`](crate::InvalidPlan::Range), so you need no check
+    /// of your own: S3 would answer one with the whole object.
     Bounded {
         /// The first byte that the plan requests.
         start: u64,
@@ -224,7 +229,8 @@ pub struct PhysicalGet<'h> {
     pub key: &'h str,
     /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
-    /// The byte range that the plan requests.
+    /// The byte range that the plan requests. An empty range is refused:
+    /// see [`RequestedRange::Bounded`].
     pub range: RequestedRange,
     /// The precondition that the plan carries.
     pub condition: ConditionKind,

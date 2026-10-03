@@ -8,7 +8,7 @@ use crate::azure::{
     Blobs, azure_tag_char, body_kind, named, validate_azure_checksum, validate_key,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, push_checksum,
+    decimal_header, encoded, encoded_with_body, failure, finish_with_body, missing, push_checksum,
     valid_header, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
@@ -197,9 +197,7 @@ impl<'a> Blobs<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => {
-                Ok(TagsHeadOutcome::NotFound { kind: named(&head) })
-            }
+            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
             status if head.error_code.is_none() => Ok(TagsHeadOutcome::NeedErrorBody(failure(
                 status,
                 None,
@@ -252,7 +250,7 @@ fn accept_update<'h>(head: ResponseHead<'h>, success: &[u16]) -> Result<UpdateHe
     match head.status {
         status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated),
         200..=299 => Err(ResponseFault::Status.into()),
-        404 if head.error_code.is_some() => Ok(UpdateHeadOutcome::NotFound { kind: named(&head) }),
+        404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
         status if head.error_code.is_none() => Ok(UpdateHeadOutcome::NeedErrorBody(failure(
             status,
             None,

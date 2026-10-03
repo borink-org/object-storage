@@ -5,9 +5,9 @@
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
     ContentRange, accept_success, decimal_header, encoded, failure, finish_with_body, meta_of,
-    parse_content_range, push_checksum, push_condition, text_header, trim_ascii, valid_header,
-    validate_checksum, validate_condition, validate_properties, validate_tags, write_range,
-    write_tags,
+    missing, parse_content_range, push_checksum, push_condition, text_header, trim_ascii,
+    valid_header, validate_checksum, validate_condition, validate_properties, validate_tags,
+    write_range, write_tags,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::{self, Parameter, QueryValue};
@@ -423,7 +423,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(GetHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
                 object_size: match head.content_range.map(parse_content_range) {
                     None => None,
@@ -543,7 +543,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(DeleteHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -616,7 +616,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(PutHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -722,7 +722,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(ListHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             201..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
                 status,

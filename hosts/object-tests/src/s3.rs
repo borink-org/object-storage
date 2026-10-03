@@ -121,7 +121,6 @@ fn open_session(
     };
     let failed_status = match outcome {
         SessionHeadOutcome::Session { .. } => None,
-        SessionHeadOutcome::NotFound { .. } => Some(404),
         SessionHeadOutcome::NeedErrorBody(failure)
         | SessionHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
@@ -302,7 +301,6 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
             successful_result(value)
         }
         PutHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
-        PutHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         PutHeadOutcome::NeedErrorBody(failure) | PutHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }
@@ -393,7 +391,6 @@ fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
     };
     let failed_status = match outcome {
         CreateUploadHeadOutcome::Created { .. } => None,
-        CreateUploadHeadOutcome::NotFound { .. } => Some(404),
         CreateUploadHeadOutcome::NeedErrorBody(failure)
         | CreateUploadHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
@@ -688,7 +685,6 @@ impl PageSource for Client<'_> {
         };
         let failed_status = match outcome {
             ListHeadOutcome::Page { .. } => None,
-            ListHeadOutcome::NotFound { .. } => Some(404),
             ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
                 Some(failure.status)
             }
@@ -1255,7 +1251,6 @@ fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     };
     let failed_status = match outcome {
         DeleteManyHeadOutcome::Results { .. } => None,
-        DeleteManyHeadOutcome::NotFound { .. } => Some(404),
         DeleteManyHeadOutcome::NeedErrorBody(failure)
         | DeleteManyHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),

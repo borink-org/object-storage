@@ -6,7 +6,9 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{Blobs, body_kind, named, validate_key};
-use crate::common::{decimal, decimal_header, encoded_with_body, failure, finish_with_body};
+use crate::common::{
+    decimal, decimal_header, encoded_with_body, failure, finish_with_body, missing,
+};
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::QueryValue;
 use crate::{
@@ -135,9 +137,7 @@ impl<'a> Blobs<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             200..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => {
-                Ok(DeleteManyHeadOutcome::NotFound { kind: named(&head) })
-            }
+            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
             status if head.error_code.is_none() => Ok(DeleteManyHeadOutcome::NeedErrorBody(
                 failure(status, None, head.request_id),
             )),

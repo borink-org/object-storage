@@ -337,12 +337,11 @@ fn a_write_to_a_missing_container_reports_the_container() {
     let blobs = blobs();
     let mut head = ResponseHead::new(404);
     head.error_code = Some(b"ContainerNotFound");
-    assert_eq!(
+    assert!(matches!(
         blobs.accept_put_head(PutShape::default(), head),
-        Ok(PutHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        })
-    );
+        Ok(PutHeadOutcome::ServiceFailure(failure))
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 
     // With no code in the head, the body names it instead.
     let unnamed = blobs
@@ -352,20 +351,21 @@ fn a_write_to_a_missing_container_reports_the_container() {
         panic!("unexpected outcome: {unnamed:?}");
     };
     assert_eq!(failure.kind, None);
-    assert_eq!(
+    assert!(matches!(
         blobs.accept_put_error_body(
             PutShape::default(),
             failure,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
-        PutHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
-    assert_eq!(
+        PutHeadOutcome::ServiceFailure(failure)
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
+    // A write names no object that could be missing, so an unnamed 404 is a
+    // failure too.
+    assert!(matches!(
         blobs.accept_put_error_body(PutShape::default(), failure, b""),
-        PutHeadOutcome::NotFound { kind: None }
-    );
+        PutHeadOutcome::ServiceFailure(failure) if failure.status == 404
+    ));
 }
 
 #[test]

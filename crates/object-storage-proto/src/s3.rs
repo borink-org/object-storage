@@ -913,11 +913,6 @@ pub enum SessionHeadOutcome<'h> {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
     },
-    /// The bucket does not exist.
-    NotFound {
-        /// The specific error, if the body names one.
-        kind: Option<ServiceErrorKind>,
-    },
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
@@ -926,24 +921,18 @@ pub enum SessionHeadOutcome<'h> {
     /// stays unnamed.
     NeedErrorBody(Failure<'h>),
     /// The service refused to create the session, or it failed to.
+    ///
+    /// A bucket that does not exist is refused here, with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     ServiceFailure(Failure<'h>),
 }
 
-impl<'h> FailureOutcome<'h> for SessionHeadOutcome<'h> {
-    fn not_found(kind: Option<ServiceErrorKind>) -> Self {
-        Self::NotFound { kind }
-    }
-
-    fn service_failure(failure: Failure<'h>) -> Self {
-        Self::ServiceFailure(failure)
-    }
-}
+crate::common::container_failure_outcome!(SessionHeadOutcome<'h>);
 
 impl core::fmt::Display for SessionHeadOutcome<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Session { .. } => f.write_str("the credentials follow in the response body"),
-            Self::NotFound { .. } => f.write_str(ServiceErrorKind::NoSuchContainer.as_str()),
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 core::fmt::Display::fmt(failure, f)
             }
@@ -1302,8 +1291,9 @@ impl<'a> Objects<'a> {
     /// body.
     ///
     /// This is [`Self::accept_get_error_body`] for a CreateSession, and reads
-    /// the body the same way. A missing bucket is
-    /// [`SessionHeadOutcome::NotFound`].
+    /// the body the same way. A missing bucket is a
+    /// [`SessionHeadOutcome::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     pub fn accept_create_session_error_body<'h>(
         &self,
         failure: Failure<'h>,
@@ -1622,7 +1612,8 @@ impl<'a> Objects<'a> {
                 },
             }),
             200..=299 => Err(ResponseFault::Status.into()),
-            // A HEAD response has no body to name the error.
+            // A HEAD response has no body to name the error, so S3's bare 404
+            // for a missing bucket reads as a missing key here.
             404 if shape.kind == GetKind::Head => Ok(GetHeadOutcome::NotFound { kind: None }),
             status if shape.kind == GetKind::Head => Ok(GetHeadOutcome::ServiceFailure(failure(
                 status,
@@ -1698,7 +1689,9 @@ impl<'a> Objects<'a> {
     /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
     ///
     /// This is [`Self::accept_get_error_body`] for a write, and reads the
-    /// body the same way. A missing bucket is [`PutHeadOutcome::NotFound`].
+    /// body the same way. A missing bucket is a
+    /// [`PutHeadOutcome::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     pub fn accept_put_error_body<'h>(
         &self,
         shape: PutShape,
@@ -1854,7 +1847,9 @@ impl<'a> Objects<'a> {
     /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
     ///
     /// This is [`Self::accept_get_error_body`] for a listing, and reads the
-    /// body the same way. A missing bucket is [`ListHeadOutcome::NotFound`].
+    /// body the same way. A missing bucket is a
+    /// [`ListHeadOutcome::ServiceFailure`] with
+    /// [`ServiceErrorKind::NoSuchContainer`].
     pub fn accept_list_error_body<'h>(
         &self,
         failure: Failure<'h>,

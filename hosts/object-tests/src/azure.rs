@@ -217,7 +217,6 @@ fn write_object(
             successful_result(value)
         }
         PutHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
-        PutHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         PutHeadOutcome::NeedErrorBody(failure) | PutHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }
@@ -357,7 +356,6 @@ impl PageSource for BlobPages<'_> {
         };
         let failed_status = match outcome {
             ListHeadOutcome::Page { .. } => None,
-            ListHeadOutcome::NotFound { .. } => Some(404),
             ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
                 Some(failure.status)
             }
@@ -890,7 +888,6 @@ fn delete_many(
     };
     let failed_status = match outcome {
         DeleteManyHeadOutcome::Results { .. } => None,
-        DeleteManyHeadOutcome::NotFound { .. } => Some(404),
         DeleteManyHeadOutcome::NeedErrorBody(failure)
         | DeleteManyHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
