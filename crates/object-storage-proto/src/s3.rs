@@ -2252,7 +2252,14 @@ pub(crate) fn validate_content(
     validate_s3_checksum(options.checksum, has_bytes, checksums)?;
     match stores {
         Stores::Object(service) => {
-            validate_properties(options)?;
+            // A general purpose bucket returns header bytes as it got
+            // them. A directory bucket refuses a byte outside ASCII with
+            // 400 InvalidRequest.
+            let utf8: &[&str] = match service {
+                Service::Aws | Service::Compatible => &["content-disposition", "content-type"],
+                Service::AwsDirectory => &[],
+            };
+            validate_properties(options, utf8)?;
             let limits = match service {
                 Service::Aws | Service::AwsDirectory => Some((10, 128, 256)),
                 Service::Compatible => None,

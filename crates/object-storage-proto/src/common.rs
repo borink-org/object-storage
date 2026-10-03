@@ -474,16 +474,26 @@ pub(crate) fn encoded_with_body<'r>(
 
 // Checks the content properties and the storage class of a write: each is
 // one header value that the service stores as given, so no space at either
-// end, which HTTP drops.
-pub(crate) fn validate_properties(options: &WriteOptions<'_>) -> Result<()> {
-    let stored_as_given =
-        |value: &str| valid_header(value.as_bytes()) && value.trim_ascii() == value;
+// end, which HTTP drops. A value is ASCII, except that the properties that
+// `utf8` names, by lowercase header name, may hold UTF-8, which the service
+// returns as it got it.
+pub(crate) fn validate_properties(options: &WriteOptions<'_>, utf8: &[&str]) -> Result<()> {
+    let stored_as_given = |value: &str, utf8: bool| {
+        let bytes = value.as_bytes();
+        let valid = if utf8 {
+            !bytes.is_empty() && !bytes.iter().any(u8::is_ascii_control)
+        } else {
+            valid_header(bytes)
+        };
+        valid && value.trim_ascii() == value
+    };
     if options
         .properties
         .iter()
-        .map(|(_, value)| value)
-        .chain(options.storage_class)
-        .all(stored_as_given)
+        .all(|(name, value)| stored_as_given(value, utf8.contains(&name)))
+        && options
+            .storage_class
+            .is_none_or(|value| stored_as_given(value, false))
     {
         Ok(())
     } else {

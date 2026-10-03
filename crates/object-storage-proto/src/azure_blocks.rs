@@ -255,12 +255,7 @@ impl<'a> Blobs<'a> {
         if content.len() > MAX_STAGE_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
-        validate_options(
-            &plan.options,
-            Write::Stage,
-            content.bytes().is_some(),
-            &self.checksums,
-        )?;
+        validate_options(&plan.options, Write::Stage, content.bytes().is_some(), self)?;
         let mut head = HeadWriter::new(buf, headers);
         let query = [
             Some(("comp", QueryValue::Literal("block"))),
@@ -347,7 +342,7 @@ impl<'a> Blobs<'a> {
         validate_block_key(plan.key, self.namespace)?;
         validate_condition(plan.condition, plan.condition_value)?;
         validate_metadata(plan.metadata)?;
-        validate_options(&plan.options, Write::Commit, true, &self.checksums)?;
+        validate_options(&plan.options, Write::Commit, true, self)?;
         // Azure does not check the length of the blocks it commits.
         if plan.size.is_some() {
             return Err(InvalidPlan::Option.into());

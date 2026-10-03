@@ -979,7 +979,7 @@ fn validate_put(put: &PhysicalPut<'_>, content: Payload<'_>, client: &Blobs<'_>)
         &put.options,
         Write::Whole,
         content.bytes().is_some(),
-        &client.checksums,
+        client,
     )?;
     validate_condition(put.condition, put.condition_value)
 }
@@ -1093,9 +1093,9 @@ pub(crate) fn validate_options(
     options: &WriteOptions<'_>,
     write: Write,
     has_bytes: bool,
-    checksums: &[Option<ChecksumProvider>; KINDS],
+    client: &Blobs<'_>,
 ) -> Result<()> {
-    validate_azure_checksum(options.checksum, has_bytes, checksums)?;
+    validate_azure_checksum(options.checksum, has_bytes, &client.checksums)?;
     // A block is not an object, so it stores neither properties nor tags.
     let stored = !options.properties.is_empty()
         || !options.tags.is_empty()
@@ -1103,7 +1103,15 @@ pub(crate) fn validate_options(
     if stored && write == Write::Stage {
         return Err(InvalidPlan::Option.into());
     }
-    validate_properties(options)?;
+    // A flat account returns a Content-Type in UTF-8 as it got it. A
+    // hierarchical one takes it but returns each byte as a character, so
+    // `é` comes back as the byte e9. Both refuse a Content-Disposition
+    // outside ASCII with 400 InvalidMetadata.
+    let utf8: &[&str] = match client.namespace {
+        AzureNamespace::Flat => &["content-type"],
+        AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
+    };
+    validate_properties(options, utf8)?;
     validate_tags(options.tags, azure_tag_char, Some((10, 128, 256)))?;
     if let Some(text) = options.declared_md5 {
         // A whole-object write stores the MD5 that Azure checked, and a block

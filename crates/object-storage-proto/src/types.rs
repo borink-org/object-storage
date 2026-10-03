@@ -371,7 +371,12 @@ pub enum TransactionalChecksum<'h> {
 ///
 /// Each is one HTTP header value: ASCII, with no control character and no
 /// space at either end. A write refuses any other value with
-/// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty).
+/// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty),
+/// except where the service returns UTF-8 as it got it: a `Content-Type` on
+/// an Azure account of [`AzureNamespace::Flat`](crate::AzureNamespace::Flat),
+/// and a `Content-Type` and a `Content-Disposition` on an S3 general purpose
+/// bucket. For a file name outside ASCII elsewhere, write the RFC 6266 form
+/// `attachment; filename*=UTF-8''%C3%A9.txt`, which is ASCII.
 /// Azure takes them as `x-ms-blob-content-type`, `x-ms-blob-cache-control`
 /// and so on, and S3 as the headers that name them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

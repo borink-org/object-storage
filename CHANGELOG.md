@@ -30,7 +30,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - Date conditions: new variants `ConditionKind::IfModifiedSince` and `ConditionKind::IfUnmodifiedSince`, whose `condition_value` is an HTTP date. A read that fails the first is `GetHeadOutcome::NotModified`. An S3 client for AWS refuses them on a write or a removal with `InvalidPlan::Condition`. The C ABI has `BORINK_CONDITION_IF_MODIFIED_SINCE` and `BORINK_CONDITION_IF_UNMODIFIED_SINCE`.
 - New fields `ResponseHead::content_md5`, `content_language`, `content_disposition`, `cache_control` and `storage_class`, and the same fields on `ObjectMeta`, which every read and write outcome fills. `storage_class` holds `x-amz-storage-class` on S3 and `x-ms-access-tier` on Azure.
 - Content properties, tags and storage classes on writes:
-  - New struct `ContentProperties`, with `Content-Type`, `Content-Encoding`, `Content-Language`, `Content-Disposition` and `Cache-Control`, and new struct `Tag`.
+  - New struct `ContentProperties`, with `Content-Type`, `Content-Encoding`, `Content-Language`, `Content-Disposition` and `Cache-Control`, and new struct `Tag`. A property is ASCII, except a `Content-Type` on a flat Azure account and a `Content-Type` or `Content-Disposition` on an S3 general purpose bucket, which may be UTF-8.
   - New fields `WriteOptions::properties`, `tags` and `storage_class`, which a write of a whole object, an Azure commit and an S3 CreateMultipartUpload send. A stage, and an S3 commit, refuse them with `InvalidPlan::Option`.
   - New field `s3::PhysicalCreateUpload::options`.
   - New variants `InvalidPlan::ContentProperty` and `InvalidPlan::Tag`.
