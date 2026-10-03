@@ -6,9 +6,9 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    ChecksumKind, ConditionKind, Error, FailureClass, InvalidPlan, MetadataPair, Payload,
-    PhysicalPut, PutHeadOutcome, ResponseFault, ResponseHead, Timestamps, TransactionalChecksum,
-    WriteOptions, layered,
+    ChecksumKind, Condition, Error, FailureClass, InvalidPlan, MetadataPair, Payload, PhysicalPut,
+    PutHeadOutcome, ResponseFault, ResponseHead, Timestamps, TransactionalChecksum, WriteOptions,
+    layered,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -72,11 +72,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     let cases = [
         // S3 writes on `If-None-Match` only when no object holds the key.
         (
-            PhysicalPut {
-                condition: ConditionKind::IfNoneMatch,
-                condition_value: Some(b"\"etag\""),
-                ..PhysicalPut::new("k")
-            },
+            PhysicalPut::new("k").with_condition(Condition::IfNoneMatch(b"\"etag\"")),
             slice,
             PayloadHash::Compute,
             InvalidPlan::Condition,
@@ -190,12 +186,9 @@ fn a_write_reports_what_s3_stored() {
         Err(ResponseFault::Status.into())
     );
 
-    let create = PhysicalPut {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"*"),
-        ..PhysicalPut::new("k")
-    }
-    .shape();
+    let create = PhysicalPut::new("k")
+        .with_condition(Condition::IfNoneMatch(b"*"))
+        .shape();
     assert_eq!(
         objects.accept_put_head(create, head(412, &[])),
         Ok(PutHeadOutcome::PreconditionFailed)

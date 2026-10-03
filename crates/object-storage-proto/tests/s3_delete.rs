@@ -5,8 +5,8 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    ConditionKind, DeleteHeadOutcome, DeleteKind, Error, InvalidPlan, PhysicalDelete,
-    ResponseFault, ResponseHead, Timestamps, layered,
+    Condition, DeleteHeadOutcome, DeleteKind, Error, InvalidPlan, PhysicalDelete, ResponseFault,
+    ResponseHead, Timestamps, layered,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -70,11 +70,7 @@ fn a_removal_that_s3_cannot_take_is_refused() {
         InvalidPlan::Option
     );
     assert_eq!(
-        delete(PhysicalDelete {
-            condition: ConditionKind::IfNoneMatch,
-            condition_value: Some(b"*"),
-            ..PhysicalDelete::new("k")
-        }),
+        delete(PhysicalDelete::new("k").with_condition(Condition::IfNoneMatch(b"*"))),
         InvalidPlan::Condition
     );
 }
@@ -97,12 +93,9 @@ fn a_removal_is_accepted_whether_or_not_the_key_held_an_object() {
         objects.accept_delete_head(unconditional, head(412, &[])),
         Err(ResponseFault::Status.into())
     );
-    let conditional = PhysicalDelete {
-        condition: ConditionKind::IfMatch,
-        condition_value: Some(b"\"etag\""),
-        ..PhysicalDelete::new("k")
-    }
-    .shape();
+    let conditional = PhysicalDelete::new("k")
+        .with_condition(Condition::IfMatch(b"\"etag\""))
+        .shape();
     assert_eq!(
         objects.accept_delete_head(conditional, head(412, &[])),
         Ok(DeleteHeadOutcome::PreconditionFailed)

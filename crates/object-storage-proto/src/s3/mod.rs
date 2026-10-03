@@ -342,14 +342,14 @@ use crate::common::{
 };
 use crate::encoding::{self, rfc2047};
 use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal};
+use crate::request::{ByteSink, HeadWriter, HeaderValue, Pass, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
 use crate::url::{self, Parameter};
 use crate::{
-    Classification, ConditionKind, CopySource, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
-    Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
-    ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
+    Classification, ConditionKind, ConditionValue, CopySource, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
     RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
     Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
@@ -1058,7 +1058,7 @@ pub(crate) struct Signed<'p> {
     pub(crate) query: &'p [Parameter<'p>],
     pub(crate) range: RequestedRange,
     pub(crate) condition: ConditionKind,
-    pub(crate) condition_value: Option<&'p [u8]>,
+    pub(crate) condition_value: Option<ConditionValue<'p>>,
     // Further signed headers, with lowercase names.
     pub(crate) headers: &'p [(&'p str, &'p [u8])],
     pub(crate) metadata: &'p [MetadataPair<'p>],
@@ -1087,6 +1087,7 @@ enum SignedValue<'a> {
     Tags,
     CopySource,
     CopyRange,
+    Condition(ConditionValue<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -1486,6 +1487,7 @@ impl<'a> Objects<'a> {
                 Header::Fixed(_, SignedValue::Host) => {}
                 Header::Fixed(name, value) => head.header_with(name, |out| match value {
                     SignedValue::Bytes(bytes) => out.push(bytes),
+                    SignedValue::Condition(value) => value.write_to(out),
                     SignedValue::Range => write_range(out, signed.range),
                     SignedValue::Date => out.push(now.iso8601().as_bytes()),
                     SignedValue::Tags => write_tags(out, signed.tags),
@@ -1658,6 +1660,11 @@ impl<'a> Objects<'a> {
             out.push(b":");
             match header {
                 Header::Fixed(_, SignedValue::Bytes(bytes)) => write_canonical_value(out, bytes),
+                Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(tag))) => {
+                    write_canonical_value(out, tag);
+                }
+                // An HTTP date has no space at either end, nor a run of them.
+                Header::Fixed(_, SignedValue::Condition(value)) => value.write_to(out),
                 Header::Fixed(_, SignedValue::Host) => self.bucket.write_host(out),
                 Header::Fixed(_, SignedValue::Range) => write_range(out, signed.range),
                 Header::Fixed(_, SignedValue::Date) => out.push(now.iso8601().as_bytes()),
@@ -2134,7 +2141,7 @@ fn ordered_headers<'s>(
         (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
         condition_header(signed.condition)
             .zip(signed.condition_value)
-            .map(|(name, value)| (name, SignedValue::Bytes(value))),
+            .map(|(name, value)| (name, SignedValue::Condition(value))),
         (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
         signed
             .copy
@@ -2151,7 +2158,7 @@ fn ordered_headers<'s>(
                 ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
                 ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
             };
-            Some((name, SignedValue::Bytes(copy.source.condition_value?)))
+            Some((name, SignedValue::Condition(copy.source.condition_value?)))
         }),
     ]
     .into_iter()
@@ -2500,7 +2507,7 @@ pub(crate) fn stored_headers<'a>(
 // Checks the condition of a write: a whole object, or a commit of parts.
 pub(crate) fn validate_write_condition(
     condition: ConditionKind,
-    value: Option<&[u8]>,
+    value: Option<ConditionValue<'_>>,
     service: Service,
 ) -> Result<()> {
     validate_condition(condition, value)?;
@@ -2511,7 +2518,9 @@ pub(crate) fn validate_write_condition(
         Service::Compatible => false,
     };
     if aws
-        && (condition.is_date() || (condition == ConditionKind::IfNoneMatch && value != Some(b"*")))
+        && (condition.is_date()
+            || (condition == ConditionKind::IfNoneMatch
+                && value != Some(ConditionValue::ETag(b"*"))))
     {
         return Err(InvalidPlan::Condition.into());
     }

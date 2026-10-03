@@ -127,9 +127,9 @@ impl RequestedRange {
 /// The precondition that a plan carries.
 ///
 /// The plan's `condition_value` holds what the precondition compares
-/// against: an entity tag, or `*`, for the first two, and an HTTP date for
-/// the last two, as [`Timestamps::rfc1123`](crate::Timestamps::rfc1123)
-/// writes it.
+/// against: a [`ConditionValue::ETag`] for the first two, and a
+/// [`ConditionValue::Time`] for the last two. Set both with the plan's
+/// `with_condition`, which takes a [`Condition`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -152,6 +152,63 @@ pub enum ConditionKind {
     /// A request that fails it is answered `412 Precondition Failed`. S3
     /// takes it on a read alone.
     IfUnmodifiedSince = 5,
+}
+
+/// What a precondition compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConditionValue<'h> {
+    /// An entity tag, or `*` for any, as `If-Match` and `If-None-Match`
+    /// carry it. A client refuses an empty one, and one that is not ASCII
+    /// or holds a control character, with
+    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    ETag(&'h [u8]),
+    /// An instant, in seconds since the Unix epoch, which the request writes
+    /// as an HTTP date. HTTP dates count whole seconds and end at the year
+    /// 9999: a client refuses a later instant with
+    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    ///
+    /// To compare against a `Last-Modified` that the service sent, read it
+    /// with [`layered::http_date_ms`](crate::layered::http_date_ms) and
+    /// divide by 1000.
+    Time(u64),
+}
+
+/// A precondition and what it compares against, which a plan's
+/// `with_condition` stores as its `condition` and `condition_value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Condition<'h> {
+    /// The request succeeds only if the current entity tag is this one, or
+    /// if any object exists for `*`.
+    IfMatch(&'h [u8]),
+    /// The request succeeds only if the current entity tag is not this one,
+    /// or if no object exists for `*`.
+    IfNoneMatch(&'h [u8]),
+    /// The request succeeds only if the object changed after this instant,
+    /// in seconds since the Unix epoch.
+    IfModifiedSince(u64),
+    /// The request succeeds only if the object has not changed since this
+    /// instant, in seconds since the Unix epoch.
+    IfUnmodifiedSince(u64),
+}
+
+impl<'h> Condition<'h> {
+    // The kind and the value that a plan stores apart.
+    pub(crate) const fn split(self) -> (ConditionKind, Option<ConditionValue<'h>>) {
+        match self {
+            Self::IfMatch(tag) => (ConditionKind::IfMatch, Some(ConditionValue::ETag(tag))),
+            Self::IfNoneMatch(tag) => (ConditionKind::IfNoneMatch, Some(ConditionValue::ETag(tag))),
+            Self::IfModifiedSince(seconds) => (
+                ConditionKind::IfModifiedSince,
+                Some(ConditionValue::Time(seconds)),
+            ),
+            Self::IfUnmodifiedSince(seconds) => (
+                ConditionKind::IfUnmodifiedSince,
+                Some(ConditionValue::Time(seconds)),
+            ),
+        }
+    }
 }
 
 impl ConditionKind {
@@ -256,7 +313,7 @@ pub struct PhysicalGet<'h> {
     ///
     /// This must be present if `condition` is not [`ConditionKind::None`], and
     /// absent if it is.
-    pub condition_value: Option<&'h [u8]>,
+    pub condition_value: Option<ConditionValue<'h>>,
     /// The snapshot or version to read, or [`None`] for the object as it
     /// is now. An empty identifier is refused with
     /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), and so is a
@@ -265,6 +322,15 @@ pub struct PhysicalGet<'h> {
 }
 
 impl<'h> PhysicalGet<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that reads every byte of `key` with no precondition.
     pub fn new(key: &'h str) -> Self {
         Self {
@@ -290,7 +356,11 @@ impl<'h> PhysicalGet<'h> {
     ///
     /// The plan reads the object as it is now. Set [`Self::revision`] on the
     /// result to read a snapshot or a version.
-    pub fn from_shape(shape: GetShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    pub fn from_shape(
+        shape: GetShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             key,
             kind: shape.kind,
@@ -701,8 +771,9 @@ pub struct PutShape {
 ///
 /// # Writing only if the object is absent
 ///
-/// Set `condition` to [`ConditionKind::IfNoneMatch`] and `condition_value` to
-/// `*`. Azure then refuses a write that would replace an object.
+/// Give the plan [`Condition::IfNoneMatch`] with `*`, through
+/// [`PhysicalPut::with_condition`]. Azure then refuses a write that would
+/// replace an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalPut<'h> {
     /// The object key, within the container.
@@ -719,8 +790,8 @@ pub struct PhysicalPut<'h> {
     pub key: &'h str,
     /// The condition that the write carries.
     pub condition: ConditionKind,
-    /// The entity tag that `condition` compares against, or `*`.
-    pub condition_value: Option<&'h [u8]>,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'h>>,
     /// The metadata pairs to store with the object.
     ///
     /// The object then holds these pairs and no others: a write replaces the
@@ -733,6 +804,15 @@ pub struct PhysicalPut<'h> {
 }
 
 impl<'h> PhysicalPut<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that writes this object with no condition, no metadata
     /// and no options.
     pub fn new(key: &'h str) -> Self {
@@ -750,7 +830,11 @@ impl<'h> PhysicalPut<'h> {
     /// The plan has no metadata and no options, because a shape holds no
     /// borrows and both of those borrow. Set those two fields after this
     /// call if the write needs them.
-    pub fn from_shape(shape: PutShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    pub fn from_shape(
+        shape: PutShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             condition: shape.condition,
             condition_value,
@@ -800,8 +884,8 @@ pub struct PhysicalCommit<'a> {
     /// object that the key holds before. [`ConditionKind::IfNoneMatch`] with
     /// `*` publishes it only if the key holds none.
     pub condition: ConditionKind,
-    /// The entity tag that `condition` compares against, or `*`.
-    pub condition_value: Option<&'a [u8]>,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'a>>,
     /// The metadata pairs to store with the object.
     ///
     /// A commit replaces the whole set, as [`PhysicalPut::metadata`] does.
@@ -832,6 +916,15 @@ pub struct PhysicalCommit<'a> {
 }
 
 impl<'a> PhysicalCommit<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that commits parts to `key` with no condition, no
     /// metadata, no options and no size.
     pub const fn new(key: &'a str) -> Self {
@@ -975,7 +1068,7 @@ pub struct PhysicalDelete<'h> {
     /// The condition that the removal carries.
     pub condition: ConditionKind,
     /// The entity tag that `condition` compares against.
-    pub condition_value: Option<&'h [u8]>,
+    pub condition_value: Option<ConditionValue<'h>>,
     /// The snapshot or version to remove, or [`None`] for the object as it
     /// is now. A plan that names one takes [`DeleteKind::Object`], and a
     /// client refuses any other kind with
@@ -985,6 +1078,15 @@ pub struct PhysicalDelete<'h> {
 }
 
 impl<'h> PhysicalDelete<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that removes this object alone, with no condition.
     pub fn new(key: &'h str) -> Self {
         Self {
@@ -1000,7 +1102,11 @@ impl<'h> PhysicalDelete<'h> {
     ///
     /// The plan removes the object as it is now. Set [`Self::revision`] on
     /// the result to remove a snapshot or a version.
-    pub fn from_shape(shape: DeleteShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    pub fn from_shape(
+        shape: DeleteShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             key,
             kind: shape.kind,
@@ -1040,10 +1146,19 @@ pub struct CopySource<'a> {
     /// not hold.
     pub condition: ConditionKind,
     /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<&'a [u8]>,
+    pub condition_value: Option<ConditionValue<'a>>,
 }
 
 impl<'a> CopySource<'a> {
+    /// Returns this source with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Names the object `key` in the client's own container or bucket, as
     /// it is now, with no condition.
     pub const fn new(key: &'a str) -> Self {
@@ -1084,7 +1199,7 @@ pub struct PhysicalCopy<'a> {
     /// The condition on the target, as a write carries it.
     pub condition: ConditionKind,
     /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<&'a [u8]>,
+    pub condition_value: Option<ConditionValue<'a>>,
     /// The metadata of the target: [`None`] for the source's, or these pairs
     /// alone. The rules of [`PhysicalPut::metadata`] apply.
     ///
@@ -1116,6 +1231,15 @@ pub struct PhysicalCopy<'a> {
 }
 
 impl<'a> PhysicalCopy<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that copies `source` onto `key` with no condition on
     /// the target, keeping what the source holds.
     pub const fn new(key: &'a str, source: CopySource<'a>) -> Self {

@@ -11,10 +11,10 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, CopySource, DeleteTarget,
-    Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, PhysicalRestore, RequestSize,
-    RequestedRange, ResponseHead, RestoreHeadOutcome, RestorePriority, Revision, ServiceErrorKind,
-    Tag, Timestamps, TransactionalChecksum, WireRequest,
+    BodyWindow, ChecksumKind, ConditionKind, ConditionValue, ContentProperties, CopySource,
+    DeleteTarget, Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, PhysicalRestore,
+    RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome, RestorePriority, Revision,
+    ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -224,10 +224,10 @@ const SOURCE_CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
 fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySource<'c>> {
     let mut given = SOURCE_CONDITION_FIELDS
         .iter()
-        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?.as_bytes())));
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?)));
     let (condition, condition_value) = match (given.next(), given.next()) {
         (None, _) => (ConditionKind::None, None),
-        (Some((kind, value)), None) => (kind, Some(value)),
+        (Some((kind, text)), None) => (kind, Some(condition_value(kind, text))),
         (Some(_), Some(_)) => return None,
     };
     Some(CopySource {
@@ -590,14 +590,29 @@ const CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
 ];
 
 /// The crate takes one precondition per request.
-fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<&[u8]>)> {
+fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<ConditionValue<'_>>)> {
     let mut given = CONDITION_FIELDS
         .iter()
-        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?.as_bytes())));
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?)));
     match (given.next(), given.next()) {
         (None, _) => Some((ConditionKind::None, None)),
-        (Some((kind, value)), None) => Some((kind, Some(value))),
+        (Some((kind, text)), None) => Some((kind, Some(condition_value(kind, text)))),
         (Some(_), Some(_)) => None,
+    }
+}
+
+/// What a condition field compares against: an entity tag as the call names
+/// it, or the instant that an HTTP date names. A date this adapter cannot
+/// read becomes an instant past the last one an HTTP date writes, which the
+/// crate refuses as an invalid condition, as it refused the text when it took
+/// one.
+fn condition_value(kind: ConditionKind, text: &str) -> ConditionValue<'_> {
+    match kind {
+        ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince => ConditionValue::Time(
+            borink_object_storage_proto::layered::http_date_ms(text)
+                .map_or(u64::MAX, |millis| millis / 1000),
+        ),
+        _ => ConditionValue::ETag(text.as_bytes()),
     }
 }
 

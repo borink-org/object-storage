@@ -1,9 +1,9 @@
 //! Azure removal encoding and response interpretation.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    FailureClass, HeaderSpan, InvalidPlan, Method, PhysicalDelete, ResponseFault, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+    Blobs, ConditionKind, ConditionValue, Container, DeleteHeadOutcome, DeleteKind, DeleteShape,
+    Error, Failure, FailureClass, HeaderSpan, InvalidPlan, Method, PhysicalDelete, ResponseFault,
+    ResponseHead, ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -66,7 +66,7 @@ fn a_conditional_removal_sends_the_condition_header() {
     let delete = PhysicalDelete::from_shape(
         conditional(ConditionKind::IfMatch),
         "object.bin",
-        Some(b"\"etag\""),
+        Some(ConditionValue::ETag(b"\"etag\"")),
     );
     let mut buf = vec![
         0;

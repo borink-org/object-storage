@@ -2,9 +2,9 @@
 
 use borink_object_storage_proto::azure::metadata_name;
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, BodyWindow, ConditionKind, Container, Error, GetHeadOutcome, GetKind,
-    HeaderSpan, InvalidPlan, Method, ObjectMeta, PhysicalGet, RequestedRange, ResponseHead,
-    Timestamps, VERSION, layered,
+    AzureNamespace, Blobs, BodyWindow, Condition, ConditionKind, ConditionValue, Container, Error,
+    GetHeadOutcome, GetKind, HeaderSpan, InvalidPlan, Method, ObjectMeta, PhysicalGet,
+    RequestedRange, ResponseHead, Timestamps, VERSION, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -113,10 +113,9 @@ fn the_head_borrows_nothing_the_caller_passed_in() {
             &mut request_headers,
             &PhysicalGet {
                 key: &String::from("object"),
-                condition: ConditionKind::IfMatch,
-                condition_value: Some(String::from("\"etag\"").as_bytes()),
                 ..PhysicalGet::new("")
-            },
+            }
+            .with_condition(Condition::IfMatch(String::from("\"etag\"").as_bytes())),
             &Timestamps::from_unix(1_787_400_000),
         )
         .unwrap();
@@ -171,13 +170,10 @@ fn encodes_ranges_conditions_and_metadata_plans() {
     let blobs = blobs();
     let mut buf = [0; 256];
     let get = PhysicalGet {
-        key: "object",
-        kind: GetKind::Bytes,
         range: RequestedRange::Bounded { start: 2, end: 6 },
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"\"etag\""),
-        revision: None,
-    };
+        ..PhysicalGet::new("object")
+    }
+    .with_condition(Condition::IfNoneMatch(b"\"etag\""));
     let request = blobs
         .encode_get(&mut buf, &mut request_headers, &get, &now())
         .unwrap();
@@ -295,11 +291,14 @@ fn refuses_invalid_plans_before_writing_anything() {
             InvalidPlan::Condition,
         ),
         (
-            condition(ConditionKind::None, Some(b"\"etag\"")),
+            condition(ConditionKind::None, Some(ConditionValue::ETag(b"\"etag\""))),
             InvalidPlan::Condition,
         ),
         (
-            condition(ConditionKind::IfMatch, Some(b"etag\r\nheader")),
+            condition(
+                ConditionKind::IfMatch,
+                Some(ConditionValue::ETag(b"etag\r\nheader")),
+            ),
             InvalidPlan::Condition,
         ),
     ];

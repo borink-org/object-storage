@@ -15,12 +15,12 @@ use crate::http::PlainHttp;
 use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::url::{self, Parameter};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
-    TransactionalChecksum, WireRequest, WriteOptions,
+    Classification, Condition, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PropertySet, PropertyValues,
+    PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
+    ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 mod batch;
@@ -983,10 +983,19 @@ pub struct PhysicalSnapshot<'a> {
     /// The condition on the object, as a read carries it.
     pub condition: ConditionKind,
     /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<&'a [u8]>,
+    pub condition_value: Option<ConditionValue<'a>>,
 }
 
 impl<'a> PhysicalSnapshot<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that takes a snapshot of `key`, with the object's
     /// metadata and no condition.
     pub const fn new(key: &'a str) -> Self {

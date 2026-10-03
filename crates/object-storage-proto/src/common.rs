@@ -4,10 +4,10 @@
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
 use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::{
-    BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
-    HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
-    ResponseHead, Result, Revision, ServiceErrorKind, Tag, TransactionalChecksum, WireRequest,
-    WriteOptions,
+    BodyWindow, ConditionKind, ConditionValue, Error, Failure, FailureClass, GetHeadOutcome,
+    GetKind, GetShape, HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange,
+    ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag, Timestamps,
+    TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 // Checks the snapshot or version that a plan names: an identifier that is
@@ -305,7 +305,7 @@ pub(crate) fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> Fail
 pub(crate) fn push_condition(
     head: &mut HeadWriter<'_>,
     condition: ConditionKind,
-    value: Option<&[u8]>,
+    value: Option<ConditionValue<'_>>,
 ) {
     if let Some(name) = condition_header(condition) {
         let value = value.expect("the plan was validated");
@@ -402,26 +402,35 @@ pub(crate) fn condition_header(kind: ConditionKind) -> Option<&'static str> {
 }
 
 // The kind and the value must agree in both directions: a kind without a value
-// cannot be encoded, and a value without a kind would be dropped. A date must
-// be one that the services read, as `Timestamps::rfc1123` writes it.
-pub(crate) fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<()> {
+// cannot be encoded, and a value without a kind would be dropped. An entity
+// tag goes with the first two kinds and an instant with the dates, which must
+// be one that an HTTP date can write.
+pub(crate) fn validate_condition(
+    condition: ConditionKind,
+    value: Option<ConditionValue<'_>>,
+) -> Result<()> {
     match (condition, value) {
         (ConditionKind::None, None) => Ok(()),
-        (kind, Some(value)) if kind.is_date() => {
-            match core::str::from_utf8(value)
-                .ok()
-                .and_then(crate::layered::http_date_ms)
-            {
-                Some(_) => Ok(()),
-                None => Err(InvalidPlan::Condition.into()),
-            }
-        }
-        (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
-            if valid_header(value) =>
+        (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(ConditionValue::ETag(tag)))
+            if valid_header(tag) =>
         {
             Ok(())
         }
+        (
+            ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince,
+            Some(ConditionValue::Time(seconds)),
+        ) if seconds <= crate::time::MAX_UNIX_SECONDS => Ok(()),
         _ => Err(InvalidPlan::Condition.into()),
+    }
+}
+
+// An entity tag is written as it is, and an instant as an HTTP date.
+impl HeaderValue for ConditionValue<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        match self {
+            Self::ETag(tag) => out.push(tag),
+            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123().as_bytes()),
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use borink_object_storage_proto::azure::{
     PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
-    Blobs, CommitHeadOutcome, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
+    Blobs, CommitHeadOutcome, Condition, ConditionKind, Container, Error, HeaderSpan, InvalidPlan,
     ListPartsHeadOutcome, MetadataPair, Method, Payload, PhysicalCommit, ResponseHead,
     StageHeadOutcome, Timestamps, WriteOptions, layered,
 };
@@ -233,11 +233,7 @@ fn a_commit_refuses_more_blocks_than_the_service_takes() {
 
 #[test]
 fn a_conditional_commit_sends_the_condition_and_keeps_it_in_the_shape() {
-    let plan = PhysicalCommit {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"*"),
-        ..PhysicalCommit::new("object")
-    };
+    let plan = PhysicalCommit::new("object").with_condition(Condition::IfNoneMatch(b"*"));
     let mut buf = [0; 1024];
     let mut headers = [HeaderSpan::default(); 8];
     let request = blobs()
@@ -283,12 +279,9 @@ fn a_lease_refusal_is_not_a_failed_condition() {
         CommitHeadOutcome::ServiceFailure(failure) => assert_eq!(failure.status, 412),
         other => panic!("{other:?}"),
     }
-    let conditional = PhysicalCommit {
-        condition: ConditionKind::IfMatch,
-        condition_value: Some(b"\"tag\""),
-        ..PhysicalCommit::new("object")
-    }
-    .shape();
+    let conditional = PhysicalCommit::new("object")
+        .with_condition(Condition::IfMatch(b"\"tag\""))
+        .shape();
     match blobs()
         .accept_commit_blocks_head(conditional, lease)
         .unwrap()

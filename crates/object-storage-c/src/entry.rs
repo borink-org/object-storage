@@ -107,7 +107,7 @@ pub unsafe extern "C" fn borink_encode_get(
         let get = PhysicalGet::from_shape(
             shape,
             text(key, InvalidPlan::KeyNotUtf8)?,
-            optional(condition_value),
+            condition(shape.condition, optional(condition_value))?,
         );
         blobs.encode_get(buf, headers, &get, &Timestamps::from_unix(unix_seconds))
     }))
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn borink_encode_put(
         let put = PhysicalPut::from_shape(
             shape,
             text(key, InvalidPlan::KeyNotUtf8)?,
-            optional(condition_value),
+            condition(shape.condition, optional(condition_value))?,
         );
         // The content stays in your program. Only its length reaches the
         // head, so the request borrows no content and you send the bytes
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn borink_encode_delete(
             let delete = PhysicalDelete::from_shape(
                 shape,
                 text(key, InvalidPlan::KeyNotUtf8)?,
-                optional(condition_value),
+                condition(shape.condition, optional(condition_value))?,
             );
             blobs.encode_delete(buf, headers, &delete, &Timestamps::from_unix(unix_seconds))
         }),
@@ -848,4 +848,27 @@ pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut
 pub unsafe extern "C" fn borink_describe_status(status: Status, into: BytesMut) -> usize {
     // SAFETY: the caller states the contract of this function.
     describe_status(status, unsafe { ptr::slice_mut(into) })
+}
+
+// A condition crosses as its kind and its text, and becomes the value that the
+// kind compares against: an entity tag as it is, and an HTTP date as the
+// instant it names. A date that cannot be read is an invalid condition, as
+// one that cannot be written is.
+fn condition(
+    kind: proto::ConditionKind,
+    value: Option<&[u8]>,
+) -> proto::Result<Option<proto::ConditionValue<'_>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match kind {
+        proto::ConditionKind::IfModifiedSince | proto::ConditionKind::IfUnmodifiedSince => {
+            core::str::from_utf8(value)
+                .ok()
+                .and_then(layered::http_date_ms)
+                .map(|millis| Some(proto::ConditionValue::Time(millis / 1000)))
+                .ok_or_else(|| InvalidPlan::Condition.into())
+        }
+        _ => Ok(Some(proto::ConditionValue::ETag(value))),
+    }
 }
