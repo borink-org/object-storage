@@ -10,10 +10,11 @@ on:
 permissions: {}
 jobs:
   release:
-    uses: borink-org/touchgate/.github/workflows/release.yml@c879b94f814a31c62fbb69f66847f83b50aed859
+    uses: borink-org/touchgate/.github/workflows/release.yml@d7c0c14743fd542ea6b6c3cd0b7eadc1063b241c
     permissions:
       contents: write
       id-token: write
+      checks: read
     with:
       commit: ${{ inputs.commit }}
       key: sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIPK8VZox0UVPB1gsQowDPXlOj1Z34IIJ3V4I2chFNYONAAAAC3NzaDpzaWduaW5n release key
