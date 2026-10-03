@@ -18,40 +18,33 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 ### Azure Blob Storage, S3 and S3-compatible services
 
 - Object get (GET request)
-  - Conditional (If-Match, If-None-Match)
-  - TODO(you): get conditions, now with If-Modified-Since and If-Unmodified-Since
+  - Conditional (If-Match, If-None-Match, If-Modified-Since, If-Unmodified-Since)
   - Byte ranges: offset, bounded, suffix (S3 only, Azure refuses suffix ranges)
 - Object metadata and information (HEAD request)
-  - TODO(you): HEAD, now with content properties, stored MD5, storage class or access tier
 - Object put (PUT request, whole object)
-  - Conditional (If-Match, If-None-Match)
-  - TODO(you): put conditions, date conditions on Azure only
-  - TODO(you): put content properties (UTF-8 where the service returns it as sent), tags, storage class or access tier
+  - Conditional (If-Match, If-None-Match; date conditions on Azure)
   - Content is borrowed or streamed: the head states its length, so a write can come from a file or a socket without holding the object in memory
   - S3: signs the SHA-256 of the content, or leave it unsigned or provide the hash yourself
 - Object delete (DELETE request)
-  - Conditional (If-Match; If-None-Match on Azure only)
-  - TODO(you): delete conditions, If-None-Match and date conditions on Azure only
+  - Conditional (If-Match; If-None-Match and date conditions on Azure only)
   - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
+  - Batch delete is also supported
 - Object listing (GET request on the container or bucket, one page at a time)
   - Custom delimiters, prefixes
   - Some object properties are always returned, others can be registered to return in a custom entry return type
   - S3: start after a key (not possible on Azure)
-- TODO(you): batch delete (Azure Blob Batch, S3 DeleteObjects)
-- TODO(you): object tags, read and replace
-- Metadata (arbitrary key-value pairs attached to objects) reading and writing
+  - Azure: include metadata
+- Metadata (arbitrary key-value pairs attached to objects) reading and writing, as well as tag reading and writing (useful in policies)
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
-  - CRC64 on Azure only, MD5 on both
-  - TODO(you): checksums, MD5 and CRC64 on both, CRC32, CRC32C, SHA-1 and SHA-256 on S3
+  - CRC64 and MD5 on both; CRC32, CRC32C, SHA-1 and SHA-256 on S3
 - Object multipart upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
 
 ### Azure Blob Storage-only
 
-- Object listing: listing metadata (S3 does not list it)
-- TODO(you): setting the access tier
+- Setting the access tier (Set Blob Tier)
 
 ### S3-only
 
@@ -74,12 +67,11 @@ The goal is a full-featured object storage library that supports both Azure Blob
 The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. We have initial support for S3 and Azure. Until 0.1, do expect some significant churn. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
 
 Roadmap:
-- S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
-- S3 multipart -> 0.0.5 release
+- S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility
+- S3 multipart
 - ... potentially various other features: Azure snapshots, versions, more S3 checksum algorithms
-- TODO(you): roadmap, more S3 checksum algorithms are done
+- ... support for various AWS and Azure authorization schemes
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
-- ... support for various AWS and Azure authorization schemes -> 0.2 release
 - Generic API (so layer over the providers) -> 0.3 release
 - Convenience API that allocates -> 0.4 release
 - C/C++ bindings for the provider-specific, generic and convenience APIs, will remain unstable and versioned separately
