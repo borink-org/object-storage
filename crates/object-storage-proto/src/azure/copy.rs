@@ -22,7 +22,7 @@ use crate::common::{
     validate_condition, validate_revision, validate_tags,
 };
 use crate::request::{ByteSink, HeadWriter, HeaderValue};
-use crate::url::{self, QueryValue};
+use crate::url;
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
     Method, ObjectMeta, Payload, PhysicalCopy, PutHeadOutcome, RequestedRange, ResponseFault,
@@ -341,8 +341,8 @@ impl<'a> Blobs<'a> {
             _ => return Err(InvalidPlan::UnsupportedRange.into()),
         }
         let query = [
-            Some(("comp", QueryValue::Literal("block"))),
-            Some(("blockid", QueryValue::Encoded(plan.id.as_bytes()))),
+            url::literal("comp", "block"),
+            url::encoded("blockid", plan.id),
         ];
         let mut head = HeadWriter::new(buf, headers);
         self.build(
@@ -387,8 +387,8 @@ impl<'a> Blobs<'a> {
             return Err(InvalidPlan::Option.into());
         }
         let query = [
-            Some(("comp", QueryValue::Literal("copy"))),
-            Some(("copyid", QueryValue::Encoded(copy_id.as_bytes()))),
+            url::literal("comp", "copy"),
+            url::encoded("copyid", copy_id),
         ];
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(key), &query, RequestedRange::Whole, now)?;

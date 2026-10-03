@@ -15,7 +15,7 @@ use crate::common::{
     valid_header, validate_revision, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalSetTags, RequestedRange,
     ResponseFault, ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps,
@@ -59,7 +59,7 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(key),
-            &[Some(("comp", QueryValue::Literal("tier")))],
+            &[url::literal("comp", "tier")],
             RequestedRange::Whole,
             now,
         )?;
@@ -130,7 +130,7 @@ impl<'a> Blobs<'a> {
             &mut head,
             Some(plan.key),
             &[
-                Some(("comp", QueryValue::Literal("tags"))),
+                url::literal("comp", "tags"),
                 revision_parameter(plan.revision),
             ],
             RequestedRange::Whole,
@@ -185,10 +185,7 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(key),
-            &[
-                Some(("comp", QueryValue::Literal("tags"))),
-                revision_parameter(revision),
-            ],
+            &[url::literal("comp", "tags"), revision_parameter(revision)],
             RequestedRange::Whole,
             now,
         )?;

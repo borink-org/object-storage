@@ -10,7 +10,7 @@ use crate::Error;
 use crate::azure::{Blobs, body_kind, named, revision_parameter, validate_key};
 use crate::common::{encoded, failure, finish_with_body, missing, valid_header, validate_revision};
 use crate::request::HeadWriter;
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalRestore, RequestedRange,
     ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result, Timestamps,
@@ -58,7 +58,7 @@ impl<'a> Blobs<'a> {
             return Err(InvalidPlan::ContentProperty.into());
         }
         let query = [
-            Some(("comp", QueryValue::Literal("tier"))),
+            url::literal("comp", "tier"),
             revision_parameter(plan.revision),
         ];
         let mut head = HeadWriter::new(buf, headers);

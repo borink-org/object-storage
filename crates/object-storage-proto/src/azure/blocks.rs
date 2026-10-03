@@ -18,7 +18,7 @@ use crate::common::{
     push_checksum, push_condition, text_header, validate_condition,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, Failure, HeaderSpan, InvalidPlan,
     ListPartsHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalCommit, RequestedRange,
@@ -219,12 +219,10 @@ impl<'a> Blobs<'a> {
             &mut head,
             Some(plan.key),
             &[
-                Some(("comp", QueryValue::Literal("blocklist"))),
-                Some(("blocklisttype", QueryValue::Literal(kind))),
-                plan.snapshot
-                    .map(|value| ("snapshot", QueryValue::Encoded(value.as_bytes()))),
-                plan.version
-                    .map(|value| ("versionid", QueryValue::Encoded(value.as_bytes()))),
+                url::literal("comp", "blocklist"),
+                url::literal("blocklisttype", kind),
+                url::encoded("snapshot", plan.snapshot),
+                url::encoded("versionid", plan.version),
             ],
             RequestedRange::Whole,
             now,
@@ -260,8 +258,8 @@ impl<'a> Blobs<'a> {
         validate_options(&plan.options, Write::Stage, content.bytes().is_some(), self)?;
         let mut head = HeadWriter::new(buf, headers);
         let query = [
-            Some(("comp", QueryValue::Literal("block"))),
-            Some(("blockid", QueryValue::Encoded(plan.id.as_bytes()))),
+            url::literal("comp", "block"),
+            url::encoded("blockid", plan.id),
         ];
         self.build(
             &mut head,
@@ -361,7 +359,7 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(plan.key),
-            &[Some(("comp", QueryValue::Literal("blocklist")))],
+            &[url::literal("comp", "blocklist")],
             RequestedRange::Whole,
             now,
         )?;

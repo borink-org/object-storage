@@ -12,7 +12,7 @@ use crate::common::{
     validate_properties, validate_revision, validate_tags,
 };
 use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
-use crate::url::{self, Parameter, QueryValue};
+use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
@@ -625,7 +625,7 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(plan.key),
-            &[Some(("comp", QueryValue::Literal("snapshot")))],
+            &[url::literal("comp", "snapshot")],
             RequestedRange::Whole,
             now,
         )?;
@@ -807,18 +807,16 @@ impl<'a> Blobs<'a> {
         }
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
+        // An empty prefix is no parameter at all.
+        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
         let query = [
-            Some(("restype", QueryValue::Literal("container"))),
-            Some(("comp", QueryValue::Literal("list"))),
-            (!list.prefix.is_empty())
-                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.delimiter
-                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
-            list.marker
-                .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
-            list.max_results
-                .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
-            (word_count != 0).then(|| ("include", QueryValue::Words(&words[..word_count]))),
+            url::literal("restype", "container"),
+            url::literal("comp", "list"),
+            url::encoded("prefix", prefix),
+            url::encoded("delimiter", list.delimiter),
+            url::encoded("marker", list.marker),
+            url::number("maxresults", list.max_results),
+            url::words("include", &words[..word_count]),
         ];
 
         let mut head = HeadWriter::new(buf, headers);
@@ -1052,8 +1050,8 @@ const INCLUDE_WORDS: [(ListInclude, &str); 3] = [
 // object as it is now.
 pub(crate) fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
     match revision? {
-        Revision::Snapshot(id) => Some(("snapshot", QueryValue::Encoded(id.as_bytes()))),
-        Revision::Version(id) => Some(("versionid", QueryValue::Encoded(id.as_bytes()))),
+        Revision::Snapshot(id) => url::encoded("snapshot", id),
+        Revision::Version(id) => url::encoded("versionid", id),
     }
 }
 

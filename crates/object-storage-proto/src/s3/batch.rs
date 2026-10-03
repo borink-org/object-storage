@@ -11,7 +11,7 @@ use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, validate_key,
     validate_s3_checksum,
 };
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan, Method,
     PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Revision, Timestamps,
@@ -132,7 +132,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Post,
             key: None,
-            query: &[Some(("delete", QueryValue::Literal("")))],
+            query: &[url::literal("delete", "")],
             headers: signed_checksum.as_slice(),
             range: RequestedRange::Whole,
             condition: ConditionKind::None,

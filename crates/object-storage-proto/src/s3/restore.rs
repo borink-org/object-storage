@@ -16,7 +16,7 @@ use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, validate_key, validate_s3_checksum,
     version_parameter,
 };
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     ConditionKind, Failure, HeaderSpan, InvalidPlan, Method, PhysicalRestore, RequestedRange,
     ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result, Timestamps,
@@ -82,7 +82,7 @@ impl<'a> Objects<'a> {
         let signed_checksum =
             self.signed_checksum(checksum, |sum| write_restore(sum, plan), dry, &mut text);
         let query = [
-            Some(("restore", QueryValue::Literal(""))),
+            url::literal("restore", ""),
             version_parameter(plan.revision),
         ];
         let signed = Signed {

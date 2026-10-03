@@ -22,7 +22,7 @@ use crate::common::{
 use crate::http_message::Response;
 use crate::multipart::{self, Part};
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
-use crate::url::{self, QueryValue};
+use crate::url;
 use crate::{
     DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, HeaderSpan,
     InvalidPlan, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
@@ -110,8 +110,8 @@ impl<'a> Blobs<'a> {
             &mut head,
             None,
             &[
-                Some(("restype", QueryValue::Literal("container"))),
-                Some(("comp", QueryValue::Literal("batch"))),
+                url::literal("restype", "container"),
+                url::literal("comp", "batch"),
             ],
             RequestedRange::Whole,
             now,

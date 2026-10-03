@@ -343,7 +343,7 @@ use crate::common::{
 use crate::encoding::{self, rfc2047};
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
-use crate::url::{self, Parameter, QueryValue};
+use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, CopySource, DeleteHeadOutcome, DeleteKind, DeleteShape, Error,
     Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry,
@@ -1285,7 +1285,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Get,
             key: None,
-            query: &[Some(("session", QueryValue::Literal("")))],
+            query: &[url::literal("session", "")],
             headers: &[],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -1838,39 +1838,32 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list, self.bucket.service)?;
+        // An empty prefix is no parameter at all.
+        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
         // SigV4 signs the parameters in the order of their names. With
         // `encoding-type=url`, a key that XML cannot carry still arrives.
         let versions = [
-            list.delimiter
-                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
-            Some(("encoding-type", QueryValue::Literal("url"))),
-            list.marker
-                .map(|marker| ("key-marker", QueryValue::Encoded(marker.as_bytes()))),
-            list.max_results
-                .map(|max| ("max-keys", QueryValue::Number(max))),
-            (!list.prefix.is_empty())
-                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.version_marker
-                .map(|marker| ("version-id-marker", QueryValue::Encoded(marker.as_bytes()))),
-            Some(("versions", QueryValue::Literal(""))),
+            url::encoded("delimiter", list.delimiter),
+            url::literal("encoding-type", "url"),
+            url::encoded("key-marker", list.marker),
+            url::number("max-keys", list.max_results),
+            url::encoded("prefix", prefix),
+            url::encoded("version-id-marker", list.version_marker),
+            url::literal("versions", ""),
         ];
         let objects = [
-            list.marker
-                .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
-            list.delimiter
-                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
-            Some(("encoding-type", QueryValue::Literal("url"))),
-            list.include
-                .contains(ListInclude::OWNER)
-                .then_some(("fetch-owner", QueryValue::Literal("true"))),
-            Some(("list-type", QueryValue::Literal("2"))),
-            list.max_results
-                .map(|max| ("max-keys", QueryValue::Number(max))),
-            (!list.prefix.is_empty())
-                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.start_after
-                .filter(|key| !key.is_empty())
-                .map(|key| ("start-after", QueryValue::Encoded(key.as_bytes()))),
+            url::encoded("continuation-token", list.marker),
+            url::encoded("delimiter", list.delimiter),
+            url::literal("encoding-type", "url"),
+            url::literal("fetch-owner", "true")
+                .filter(|_| list.include.contains(ListInclude::OWNER)),
+            url::literal("list-type", "2"),
+            url::number("max-keys", list.max_results),
+            url::encoded("prefix", prefix),
+            url::encoded(
+                "start-after",
+                list.start_after.filter(|key| !key.is_empty()),
+            ),
         ];
         let query: &[Parameter<'_>] = if list.include.contains(ListInclude::VERSIONS) {
             &versions
@@ -2302,7 +2295,7 @@ fn write_copy_range(out: &mut dyn ByteSink, signed: &Signed<'_>) {
 // now. Validation refused a snapshot.
 pub(crate) fn version_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
     match revision? {
-        Revision::Version(id) => Some(("versionId", QueryValue::Encoded(id.as_bytes()))),
+        Revision::Version(id) => url::encoded("versionId", id),
         Revision::Snapshot(_) => None,
     }
 }

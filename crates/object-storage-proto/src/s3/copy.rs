@@ -21,7 +21,7 @@ use crate::s3::{
     validate_write_condition,
 };
 use crate::sigv4::EMPTY_SHA256;
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
     Method, ObjectMeta, Payload, PhysicalCopy, RequestedRange, ResponseFault, ResponseHead, Result,
@@ -306,8 +306,8 @@ impl<'a> Objects<'a> {
             _ => return Err(InvalidPlan::UnsupportedRange.into()),
         }
         let query = [
-            Some(("partNumber", QueryValue::Number(plan.number))),
-            Some(("uploadId", QueryValue::Encoded(plan.upload_id.as_bytes()))),
+            url::number("partNumber", plan.number),
+            url::encoded("uploadId", plan.upload_id),
         ];
         let signed = Signed {
             method: Method::Put,

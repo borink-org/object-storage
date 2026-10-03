@@ -12,7 +12,7 @@ use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, s3_tag_char,
     validate_key, validate_s3_checksum, version_parameter,
 };
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     ConditionKind, Failure, HeaderSpan, Method, PhysicalSetTags, RequestedRange, ResponseFault,
     ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum,
@@ -84,7 +84,7 @@ impl<'a> Objects<'a> {
             &mut text,
         );
         let query = [
-            Some(("tagging", QueryValue::Literal(""))),
+            url::literal("tagging", ""),
             version_parameter(plan.revision),
         ];
         let signed = Signed {
@@ -166,10 +166,7 @@ impl<'a> Objects<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_key(key)?;
         validate_revision(revision, false)?;
-        let query = [
-            Some(("tagging", QueryValue::Literal(""))),
-            version_parameter(revision),
-        ];
+        let query = [url::literal("tagging", ""), version_parameter(revision)];
         let signed = Signed {
             method: Method::Get,
             key: Some(key),

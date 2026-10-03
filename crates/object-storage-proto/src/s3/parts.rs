@@ -18,7 +18,7 @@ use crate::s3::{
     validate_write_condition,
 };
 use crate::sigv4::EMPTY_SHA256;
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, HeaderSpan,
     InvalidPlan, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta, Payload,
@@ -275,7 +275,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Post,
             key: Some(plan.key),
-            query: &[Some(("uploads", QueryValue::Literal("")))],
+            query: &[url::literal("uploads", "")],
             headers: &stored[..count],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -399,8 +399,8 @@ impl<'a> Objects<'a> {
         let dry = buf.is_empty();
         let content_sha256 = self.content_sha256(hash, content, dry);
         let query = [
-            Some(("partNumber", QueryValue::Number(plan.number))),
-            Some(("uploadId", QueryValue::Encoded(plan.upload_id.as_bytes()))),
+            url::number("partNumber", plan.number),
+            url::encoded("uploadId", plan.upload_id),
         ];
         let signed = Signed {
             method: Method::Put,
@@ -567,10 +567,7 @@ impl<'a> Objects<'a> {
             write_part_list(&mut sum, parts.clone());
             encoding::hex(&sum.finish())
         };
-        let query = [Some((
-            "uploadId",
-            QueryValue::Encoded(upload_id.as_bytes()),
-        ))];
+        let query = [url::encoded("uploadId", upload_id)];
         let size = plan.size.map(U64Decimal::new);
         let size_header = size
             .as_ref()
@@ -736,10 +733,7 @@ impl<'a> Objects<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_key(plan.key)?;
         validate_upload_id(plan.upload_id)?;
-        let query = [Some((
-            "uploadId",
-            QueryValue::Encoded(plan.upload_id.as_bytes()),
-        ))];
+        let query = [url::encoded("uploadId", plan.upload_id)];
         let signed = Signed {
             method: Method::Delete,
             key: Some(plan.key),
@@ -834,11 +828,9 @@ impl<'a> Objects<'a> {
         }
         // SigV4 signs the parameters in the order of their names.
         let query = [
-            plan.max_parts
-                .map(|max| ("max-parts", QueryValue::Number(max))),
-            plan.marker
-                .map(|marker| ("part-number-marker", QueryValue::Encoded(marker.as_bytes()))),
-            Some(("uploadId", QueryValue::Encoded(plan.upload_id.as_bytes()))),
+            url::number("max-parts", plan.max_parts),
+            url::encoded("part-number-marker", plan.marker),
+            url::encoded("uploadId", plan.upload_id),
         ];
         let signed = Signed {
             method: Method::Get,
