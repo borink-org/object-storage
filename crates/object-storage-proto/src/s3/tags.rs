@@ -3,8 +3,8 @@
 
 use crate::checksum::ChecksumKind;
 use crate::common::{
-    decimal_header, encoded_with_body, failure, finish_with_body, push_checksum, validate_revision,
-    validate_tags, write_tag_set,
+    decimal_header, encoded_with_body, failure, finish_with_body, meta_of, push_checksum,
+    validate_revision, validate_tags, write_tag_set,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
@@ -123,7 +123,9 @@ impl<'a> Objects<'a> {
         head: ResponseHead<'h>,
     ) -> Result<UpdateHeadOutcome<'h>> {
         match head.status {
-            200 => Ok(UpdateHeadOutcome::Updated),
+            200 => Ok(UpdateHeadOutcome::Updated {
+                meta: meta_of(head),
+            }),
             201..=299 => Err(ResponseFault::Status.into()),
             status => Ok(UpdateHeadOutcome::NeedErrorBody(failure(
                 status,

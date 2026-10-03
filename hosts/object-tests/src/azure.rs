@@ -21,7 +21,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO};
 use borink_object_storage_proto::azure::{
     self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
-    PhysicalSnapshot, PhysicalStageBlock, PhysicalStageBlockFromUrl, SnapshotHeadOutcome,
+    PhysicalSetMetadata, PhysicalSetProperties, PhysicalSnapshot, PhysicalStageBlock,
+    PhysicalStageBlockFromUrl, SnapshotHeadOutcome,
 };
 use borink_object_storage_proto::{
     AzureNamespace, Blobs, ChecksumKind, Classification, CommitHeadOutcome, Container,
@@ -695,9 +696,30 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "azure.list_blocks" => &["key", "kind"],
         "azure.set_tier" => &["key", "tier"],
         "azure.snapshot" => &["key"],
+        "azure.set_metadata" => &[
+            "key",
+            "metadata",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+        ],
+        "azure.set_properties" => &[
+            "key",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+        ],
         "copy" => &[
             "key",
             "source_key",
+            "source_account_url",
             "source_container",
             "source_version",
             "source_if_match",
@@ -721,6 +743,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "azure.put_from_url" => &[
             "key",
             "source_key",
+            "source_account_url",
             "source_container",
             "source_version",
             "source_if_match",
@@ -745,6 +768,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "block_id_base64",
             "source_range",
             "source_key",
+            "source_account_url",
             "source_container",
             "source_version",
             "source_if_match",
@@ -834,6 +858,8 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "azure.list_blocks" => list_blocks(&context, &blobs, call),
         "azure.set_tier" => set_tier(&context, &blobs, call),
         "azure.snapshot" => snapshot(&context, &blobs, call),
+        "azure.set_metadata" => set_metadata(&context, &blobs, call),
+        "azure.set_properties" => set_properties(&context, &blobs, call),
         "restore" => restore(&context, &blobs, call),
         "copy" => copy(&context, &blobs, call),
         "azure.put_from_url" => put_from_url(&context, &blobs, call),
@@ -859,7 +885,11 @@ fn update_result(
         outcome => outcome,
     };
     match outcome {
-        UpdateHeadOutcome::Updated => successful_result(json!({})),
+        UpdateHeadOutcome::Updated { meta } => match text_of(meta.e_tag) {
+            Some(e_tag) => successful_result(json!({"etag": e_tag})),
+            None => successful_result(json!({})),
+        },
+        UpdateHeadOutcome::PreconditionFailed => error_result(exchange, 412),
         UpdateHeadOutcome::NotFound { .. } => error_result(exchange, 404),
         UpdateHeadOutcome::NeedErrorBody(failure) | UpdateHeadOutcome::ServiceFailure(failure) => {
             error_result(exchange, failure.status)
@@ -1143,6 +1173,68 @@ fn restore(
         ) => error_result(&exchange, failure.status),
         _ => error_result(&exchange, exchange.status),
     })
+}
+
+fn set_metadata(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(unsupported_by_crate(
+            "PhysicalSetMetadata carries one precondition",
+        ));
+    };
+    let metadata = requested_metadata(call);
+    let plan = PhysicalSetMetadata {
+        condition,
+        condition_value,
+        ..PhysicalSetMetadata::new(optional_text(call, "key").unwrap_or_default(), &metadata)
+    };
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::set_metadata_requirements(blobs, &plan, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_set_metadata(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome =
+        crate_step!(blobs.accept_set_metadata_head(plan.condition, exchange.response_head()));
+    Ok(update_result(blobs, &exchange, outcome))
+}
+
+fn set_properties(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(unsupported_by_crate(
+            "PhysicalSetProperties carries one precondition",
+        ));
+    };
+    let plan = PhysicalSetProperties {
+        condition,
+        condition_value,
+        ..PhysicalSetProperties::new(
+            optional_text(call, "key").unwrap_or_default(),
+            requested_properties(call),
+        )
+    };
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::set_properties_requirements(blobs, &plan, &now)
+    ));
+    let request = crate_step!(blobs.encode_set_properties(
+        &mut request_bytes,
+        &mut header_spans,
+        &plan,
+        &now
+    ));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome =
+        crate_step!(blobs.accept_set_properties_head(plan.condition, exchange.response_head()));
+    Ok(update_result(blobs, &exchange, outcome))
 }
 
 fn set_tags(

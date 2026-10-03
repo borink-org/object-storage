@@ -170,8 +170,8 @@ impl fmt::Display for RestoreHeadOutcome<'_> {
 }
 
 /// The result of reading the response head of a request that changes what
-/// the service stores about an object, and returns nothing: setting its tags
-/// or, on Azure, its access tier.
+/// the service stores about an object, and returns no body: setting its tags
+/// or, on Azure, its access tier, its metadata or its content properties.
 ///
 /// A head that reports a failure is one of these too. The methods that read
 /// it return an [`Err`] only for a head they cannot read.
@@ -179,7 +179,14 @@ impl fmt::Display for RestoreHeadOutcome<'_> {
 #[non_exhaustive]
 pub enum UpdateHeadOutcome<'h> {
     /// The service made the change.
-    Updated,
+    Updated {
+        /// The metadata that the head states, such as the object's new
+        /// entity tag and last modification after Azure set its metadata or
+        /// its properties. A change of tags or of the tier states none.
+        meta: ObjectMeta<'h>,
+    },
+    /// The condition did not hold, so the service changed nothing.
+    PreconditionFailed,
     /// The object does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
     NotFound {
@@ -195,7 +202,8 @@ pub enum UpdateHeadOutcome<'h> {
 impl fmt::Display for UpdateHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Updated => f.write_str("the service made the change"),
+            Self::Updated { .. } => f.write_str("the service made the change"),
+            Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
             Self::NotFound { kind } => not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),

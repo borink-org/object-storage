@@ -35,6 +35,7 @@ pub use blocks::{
     PhysicalListBlocks, PhysicalStageBlock,
 };
 pub use copy::PhysicalStageBlockFromUrl;
+pub use tags::{PhysicalSetMetadata, PhysicalSetProperties};
 
 /// The most recent Azure Storage version that every region supports.
 ///
@@ -1339,6 +1340,14 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
     Ok(())
 }
 
+// The content properties that an account returns in UTF-8 as it got them.
+pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static str] {
+    match namespace {
+        AzureNamespace::Flat => &["content-type"],
+        AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
+    }
+}
+
 // The writes that take options. `validate_options` refuses an option on a
 // write that does not take it. `Copy` is a Copy Blob or a Copy Blob From
 // URL, which take the source's content properties, and `FromUrl` a Put
@@ -1383,11 +1392,7 @@ pub(crate) fn validate_options(
     // hierarchical one takes it but returns each byte as a character, so
     // `é` comes back as the byte e9. Both refuse a Content-Disposition
     // outside ASCII with 400 InvalidMetadata.
-    let utf8: &[&str] = match client.namespace {
-        AzureNamespace::Flat => &["content-type"],
-        AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
-    };
-    validate_properties(options, utf8)?;
+    validate_properties(options, utf8_properties(client.namespace))?;
     validate_tags(options.tags, azure_tag_char, Some((10, 128, 256)))?;
     if let Some(text) = options.declared_md5 {
         // A whole-object write stores the MD5 that Azure checked, and a block

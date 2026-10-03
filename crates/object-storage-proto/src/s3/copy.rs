@@ -421,6 +421,10 @@ fn carries_condition(shape: CopyShape) -> bool {
 // would change the header's structure. S3 copies a version, and keeps no
 // snapshots.
 fn validate_source(source: &CopySource<'_>) -> Result<()> {
+    // A bucket of any account is named by its name alone.
+    if source.endpoint.is_some() {
+        return Err(InvalidPlan::CopySource.into());
+    }
     if let Some(bucket) = source.container
         && (bucket.is_empty()
             || bucket

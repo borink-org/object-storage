@@ -1,26 +1,106 @@
-// Azure blob tags and access tiers: Set Blob Tags, Get Blob Tags and Set
-// Blob Tier. A write stores tags and a tier with the blob as well, through
-// `WriteOptions`.
+// The Azure requests that change what Azure stores about a blob without
+// writing its content: Set Blob Tags and Get Blob Tags, Set Blob Tier, Set
+// Blob Metadata and Set Blob Properties. A write stores each of these with
+// the blob as well, through its plan and its `WriteOptions`.
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    Blobs, azure_tag_char, body_kind, named, revision_parameter, validate_azure_checksum,
-    validate_key,
+    Blobs, azure_tag_char, body_kind, named, push_metadata, push_stored, revision_parameter,
+    utf8_properties, validate_azure_checksum, validate_key, validate_metadata,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, missing, push_checksum,
-    valid_header, validate_revision, validate_tags, write_tag_set,
+    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, missing,
+    push_checksum, push_condition, text_header, valid_header, validate_condition,
+    validate_properties, validate_revision, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::url;
 use crate::{
-    Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalSetTags, RequestedRange,
-    ResponseFault, ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps,
-    TransactionalChecksum, UpdateHeadOutcome, WireRequest,
+    Condition, ConditionKind, ConditionValue, ContentProperties, Failure, HeaderSpan, InvalidPlan,
+    MetadataPair, Method, ObjectMeta, Payload, PhysicalSetTags, RequestedRange, ResponseFault,
+    ResponseHead, Result, Revision, ServiceErrorKind, Tag, TagsHeadOutcome, Timestamps,
+    TransactionalChecksum, UpdateHeadOutcome, WireRequest, WriteOptions,
 };
+
+/// A Set Blob Metadata: the metadata pairs that an object then holds, and no
+/// others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalSetMetadata<'a> {
+    /// The object key, under the rules of
+    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    pub key: &'a str,
+    /// The metadata pairs, under the rules of
+    /// [`PhysicalPut::metadata`](crate::PhysicalPut::metadata). None removes
+    /// every pair.
+    pub metadata: &'a [MetadataPair<'a>],
+    /// The condition on the object, as a write carries it.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'a>>,
+}
+
+impl<'a> PhysicalSetMetadata<'a> {
+    /// Creates a plan that gives `key` these metadata pairs, with no
+    /// condition.
+    pub const fn new(key: &'a str, metadata: &'a [MetadataPair<'a>]) -> Self {
+        Self {
+            key,
+            metadata,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+}
+
+/// A Set Blob Properties: the content properties that an object then holds,
+/// and no others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalSetProperties<'a> {
+    /// The object key, under the rules of
+    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    pub key: &'a str,
+    /// The content properties, under the rules of [`ContentProperties`].
+    /// Azure clears every one that this leaves out.
+    pub properties: ContentProperties<'a>,
+    /// The condition on the object, as a write carries it.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'a>>,
+}
+
+impl<'a> PhysicalSetProperties<'a> {
+    /// Creates a plan that gives `key` these content properties, with no
+    /// condition.
+    pub const fn new(key: &'a str, properties: ContentProperties<'a>) -> Self {
+        Self {
+            key,
+            properties,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+}
 
 // The document that Set Blob Tags sends and Get Blob Tags answers with.
 const TAGS_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><Tags>";
@@ -79,11 +159,120 @@ impl<'a> Blobs<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<UpdateHeadOutcome<'h>> {
-        accept_update(head, &[200, 202])
+        accept_update(head, &[200, 202], ConditionKind::None)
+    }
+
+    /// Writes the request head of a Set Blob Metadata into `buf`. The object
+    /// then holds these metadata pairs and no others: a plan with none
+    /// removes them all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] for a key, a metadata pair or a
+    /// condition that [`Self::encode_put`] refuses.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots, or call
+    /// [`layered::set_metadata_requirements`](crate::layered::set_metadata_requirements)
+    /// first.
+    pub fn encode_set_metadata<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        plan: &PhysicalSetMetadata<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_key(plan.key, self.namespace)?;
+        validate_metadata(plan.metadata)?;
+        validate_condition(plan.condition, plan.condition_value)?;
+        let mut head = HeadWriter::new(buf, headers);
+        self.build(
+            &mut head,
+            Some(plan.key),
+            &[url::literal("comp", "metadata")],
+            RequestedRange::Whole,
+            now,
+        )?;
+        push_metadata(&mut head, plan.metadata);
+        push_condition(&mut head, plan.condition, plan.condition_value);
+        head.header("content-length", b"0");
+        encoded(head, Method::Put, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a Set Blob Metadata and reports what Azure
+    /// did. A success carries the object's new entity tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`].
+    pub fn accept_set_metadata_head<'h>(
+        &self,
+        condition: ConditionKind,
+        head: ResponseHead<'h>,
+    ) -> Result<UpdateHeadOutcome<'h>> {
+        accept_update(head, &[200], condition)
+    }
+
+    /// Writes the request head of a Set Blob Properties into `buf`. The
+    /// object then holds these content properties and no others: Azure clears
+    /// every one the plan leaves out, its stored `Content-MD5` as well.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] for a key, a content property or a
+    /// condition that [`Self::encode_put`] refuses.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots, or call
+    /// [`layered::set_properties_requirements`](crate::layered::set_properties_requirements)
+    /// first.
+    pub fn encode_set_properties<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        plan: &PhysicalSetProperties<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_key(plan.key, self.namespace)?;
+        let options = WriteOptions {
+            properties: plan.properties,
+            ..WriteOptions::new()
+        };
+        validate_properties(&options, utf8_properties(self.namespace))?;
+        validate_condition(plan.condition, plan.condition_value)?;
+        let mut head = HeadWriter::new(buf, headers);
+        self.build(
+            &mut head,
+            Some(plan.key),
+            &[url::literal("comp", "properties")],
+            RequestedRange::Whole,
+            now,
+        )?;
+        push_stored(&mut head, &options);
+        push_condition(&mut head, plan.condition, plan.condition_value);
+        head.header("content-length", b"0");
+        encoded(head, Method::Put, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a Set Blob Properties and reports what
+    /// Azure did. A success carries the object's new entity tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 200 is [`ResponseFault::Status`].
+    pub fn accept_set_properties_head<'h>(
+        &self,
+        condition: ConditionKind,
+        head: ResponseHead<'h>,
+    ) -> Result<UpdateHeadOutcome<'h>> {
+        accept_update(head, &[200], condition)
     }
 
     /// Finishes an [`UpdateHeadOutcome::NeedErrorBody`] of a Set Blob Tier,
-    /// a Set Blob Tags or an Abort Copy Blob with the response body.
+    /// a Set Blob Tags, a Set Blob Metadata, a Set Blob Properties or an
+    /// Abort Copy Blob with the response body.
     pub fn accept_update_error_body<'h>(
         &self,
         failure: Failure<'h>,
@@ -156,7 +345,7 @@ impl<'a> Blobs<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<UpdateHeadOutcome<'h>> {
-        accept_update(head, &[204])
+        accept_update(head, &[204], ConditionKind::None)
     }
 
     /// Writes the request head of a Get Blob Tags into `buf`, which reads the
@@ -252,14 +441,26 @@ fn write_tags_document(out: &mut dyn crate::request::ByteSink, tags: &[Tag<'_>])
     out.push(TAGS_CLOSE);
 }
 
-// Reads the head of a request that changes the object and returns nothing.
-// Azure names the error of a failure in its head.
+// Reads the head of a request that changes the object and returns no body.
+// Azure names the error of a failure in its head. A 412 is the plan's failed
+// `condition` only if it carried one and Azure names a failed condition.
 pub(super) fn accept_update<'h>(
     head: ResponseHead<'h>,
     success: &[u16],
+    condition: ConditionKind,
 ) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
-        status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated),
+        status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated {
+            meta: ObjectMeta {
+                last_modified: text_header(head.last_modified)?,
+                ..meta_of(head)
+            },
+        }),
+        412 if condition != ConditionKind::None
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(UpdateHeadOutcome::PreconditionFailed)
+        }
         200..=299 => Err(ResponseFault::Status.into()),
         404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
         status if head.error_code.is_none() => Ok(UpdateHeadOutcome::NeedErrorBody(failure(

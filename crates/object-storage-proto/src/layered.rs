@@ -7,7 +7,8 @@
 //! and read the capacities from the refusal. They allocate nothing.
 
 use crate::azure::{
-    BlockRef, PhysicalListBlocks, PhysicalSnapshot, PhysicalStageBlock, PhysicalStageBlockFromUrl,
+    BlockRef, PhysicalListBlocks, PhysicalSetMetadata, PhysicalSetProperties, PhysicalSnapshot,
+    PhysicalStageBlock, PhysicalStageBlockFromUrl,
 };
 use crate::{
     Blobs, Error, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
@@ -267,6 +268,44 @@ pub fn restore_requirements(
     now: &Timestamps,
 ) -> Result<RequestSize> {
     required(blobs.encode_restore(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_metadata`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_set_metadata`], which reports it again.
+pub fn set_metadata_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSetMetadata<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_set_metadata(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_properties`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_set_properties`], which reports it again.
+pub fn set_properties_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSetProperties<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_set_properties(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
 }
 
 /// Returns the byte and header-slot capacities that

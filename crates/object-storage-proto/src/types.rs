@@ -1132,6 +1132,17 @@ impl<'h> PhysicalDelete<'h> {
 /// `x-amz-copy-source`. Each encodes the key as a request path does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopySource<'a> {
+    /// The HTTPS origin of the storage account that holds the source, such
+    /// as `https://other.blob.core.windows.net`, or [`None`] for the
+    /// client's own. Azure only: an S3 client refuses one with
+    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource), and so
+    /// does an Azure client for one that is not an HTTPS origin.
+    ///
+    /// Azure reads a source in another account by Entra ID in a Copy Blob
+    /// From URL, a Put Blob From URL and a Put Block From URL. It refuses an
+    /// asynchronous Copy Blob from one with 401 `CannotVerifyCopySource`,
+    /// because it reads such a source only by a shared access signature.
+    pub endpoint: Option<&'a str>,
     /// The container or bucket that holds the source, or [`None`] for the
     /// client's own. It may not hold `/`, `?`, `#` or a control character:
     /// a client refuses it with
@@ -1163,6 +1174,7 @@ impl<'a> CopySource<'a> {
     /// it is now, with no condition.
     pub const fn new(key: &'a str) -> Self {
         Self {
+            endpoint: None,
             container: None,
             key,
             revision: None,

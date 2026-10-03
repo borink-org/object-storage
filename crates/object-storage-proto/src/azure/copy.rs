@@ -21,6 +21,7 @@ use crate::common::{
     encoded, failure, finish_with_body, meta_of, missing, push_condition, text_header, trim_ascii,
     validate_condition, validate_revision, validate_tags,
 };
+use crate::http::PlainHttp;
 use crate::request::{ByteSink, HeadWriter, HeaderValue};
 use crate::url;
 use crate::{
@@ -413,7 +414,7 @@ impl<'a> Blobs<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<UpdateHeadOutcome<'h>> {
-        super::tags::accept_update(head, &[204])
+        super::tags::accept_update(head, &[204], ConditionKind::None)
     }
 
     // Checks a copy plan. A Copy Blob takes the source's content properties,
@@ -479,7 +480,7 @@ struct SourceUrl<'c> {
 impl HeaderValue for SourceUrl<'_> {
     fn write_to(self, out: &mut dyn ByteSink) {
         let SourceUrl { container, source } = self;
-        out.push(container.endpoint.as_bytes());
+        out.push(source.endpoint.unwrap_or(container.endpoint).as_bytes());
         out.push(b"/");
         out.push(source.container.unwrap_or(container.name).as_bytes());
         out.push(b"/");
@@ -499,6 +500,14 @@ fn carries_condition(shape: CopyShape) -> bool {
 // would change the URL's structure, as `Container::new` requires of the
 // client's own.
 fn validate_source(source: &CopySource<'_>, namespace: AzureNamespace) -> Result<()> {
+    // Another account's origin goes into the URL as it is, and Azure reads
+    // it as a client would, so it is an origin of TLS.
+    if source
+        .endpoint
+        .is_some_and(|endpoint| !crate::http::valid_http_origin(endpoint, PlainHttp::Refused))
+    {
+        return Err(InvalidPlan::CopySource.into());
+    }
     if let Some(container) = source.container
         && (container.is_empty()
             || container

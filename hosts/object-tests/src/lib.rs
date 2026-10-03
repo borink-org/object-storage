@@ -231,6 +231,7 @@ fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySo
         (Some(_), Some(_)) => return None,
     };
     Some(CopySource {
+        endpoint: optional_text(call, "source_account_url"),
         container: optional_text(call, container_field),
         key: optional_text(call, "source_key").unwrap_or_default(),
         revision: optional_text(call, "source_version").map(Revision::Version),
