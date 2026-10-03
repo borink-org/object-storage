@@ -87,33 +87,42 @@ impl ChecksumKind {
         }
     }
 
-    // The length of the base64 of a digest of this kind, as the characters
-    // from the alphabet and the `=` padding after them. Sixteen bytes are 22
-    // and 2; eight bytes are 11 and 1.
     const fn base64_shape(self) -> (usize, usize) {
-        let len = self.digest_len();
-        let (groups, rest) = (len / 3, len % 3);
-        if rest == 0 {
-            (groups * 4, 0)
-        } else {
-            (groups * 4 + rest + 1, 3 - rest)
-        }
+        base64_shape(self.digest_len())
     }
 
     // Checks that `text` is the base64 of a digest of this kind: the right
     // number of characters from the alphabet, then the right number of `=`.
     // Azure refuses any other text with 400 `InvalidHeaderValue`.
     pub(crate) fn check_base64(self, text: &str) -> Result<()> {
-        let (chars, padding) = self.base64_shape();
-        let bytes = text.as_bytes();
-        let alphabet = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/';
-        if bytes.len() != chars + padding
-            || !bytes[..chars].iter().all(alphabet)
-            || !bytes[chars..].iter().all(|byte| *byte == b'=')
-        {
-            return Err(InvalidPlan::Checksum.into());
-        }
-        Ok(())
+        check_base64_len(text, self.digest_len())
+    }
+}
+
+// Checks that `text` is the base64 of `len` bytes: the right number of
+// characters from the alphabet, then the right number of `=`.
+pub(crate) fn check_base64_len(text: &str, len: usize) -> Result<()> {
+    let (chars, padding) = base64_shape(len);
+    let bytes = text.as_bytes();
+    let alphabet = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/';
+    if bytes.len() != chars + padding
+        || !bytes[..chars].iter().all(alphabet)
+        || !bytes[chars..].iter().all(|byte| *byte == b'=')
+    {
+        return Err(InvalidPlan::Checksum.into());
+    }
+    Ok(())
+}
+
+// The length of the base64 of `len` bytes, as the characters from the
+// alphabet and the `=` padding after them. Sixteen bytes are 22 and 2;
+// eight bytes are 11 and 1.
+const fn base64_shape(len: usize) -> (usize, usize) {
+    let (groups, rest) = (len / 3, len % 3);
+    if rest == 0 {
+        (groups * 4, 0)
+    } else {
+        (groups * 4 + rest + 1, 3 - rest)
     }
 }
 

@@ -6,7 +6,7 @@ use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::{
     BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
     HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, TransactionalChecksum, WireRequest,
+    ResponseHead, Result, ServiceErrorKind, Tag, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 // The one record that every failing head becomes, whichever operation asked.
@@ -64,8 +64,29 @@ failure_outcome!(
     ListHeadOutcome,
     StageHeadOutcome,
     CommitHeadOutcome,
-    ListPartsHeadOutcome
+    ListPartsHeadOutcome,
+    UpdateHeadOutcome,
+    TagsHeadOutcome,
+    DeleteManyHeadOutcome
 );
+
+// The metadata that a response head states, without its size and with
+// `Last-Modified` unread: `text_header` reads it.
+pub(crate) fn meta_of(head: ResponseHead<'_>) -> ObjectMeta<'_> {
+    ObjectMeta {
+        size: None,
+        e_tag: head.e_tag,
+        last_modified: None,
+        version: head.version,
+        content_encoding: head.content_encoding,
+        content_type: head.content_type,
+        content_md5: head.content_md5,
+        content_language: head.content_language,
+        content_disposition: head.content_disposition,
+        cache_control: head.cache_control,
+        storage_class: head.storage_class,
+    }
+}
 
 pub(crate) fn accept_success<'h>(
     shape: GetShape,
@@ -75,11 +96,8 @@ pub(crate) fn accept_success<'h>(
     let last_modified = text_header(head.last_modified)?;
     let meta = |size| ObjectMeta {
         size,
-        e_tag: head.e_tag,
         last_modified,
-        version: head.version,
-        content_encoding: head.content_encoding,
-        content_type: head.content_type,
+        ..meta_of(head)
     };
     if head.status == 200 {
         // An unranged plan reads from byte zero, and the service states the whole
@@ -315,14 +333,26 @@ pub(crate) fn condition_header(kind: ConditionKind) -> Option<&'static str> {
         ConditionKind::None => None,
         ConditionKind::IfMatch => Some("if-match"),
         ConditionKind::IfNoneMatch => Some("if-none-match"),
+        ConditionKind::IfModifiedSince => Some("if-modified-since"),
+        ConditionKind::IfUnmodifiedSince => Some("if-unmodified-since"),
     }
 }
 
 // The kind and the value must agree in both directions: a kind without a value
-// cannot be encoded, and a value without a kind would be dropped.
+// cannot be encoded, and a value without a kind would be dropped. A date must
+// be one that the services read, as `Timestamps::rfc1123` writes it.
 pub(crate) fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<()> {
     match (condition, value) {
         (ConditionKind::None, None) => Ok(()),
+        (kind, Some(value)) if kind.is_date() => {
+            match core::str::from_utf8(value)
+                .ok()
+                .and_then(crate::layered::http_date_ms)
+            {
+                Some(_) => Ok(()),
+                None => Err(InvalidPlan::Condition.into()),
+            }
+        }
         (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
             if valid_header(value) =>
         {
@@ -354,6 +384,8 @@ pub(crate) fn validate_checksum(
             Err(InvalidPlan::Option.into())
         }
         Some(TransactionalChecksum::Compute(_)) | None => Ok(()),
+        // The checksums that only S3 takes, which its client checks.
+        Some(_) => Err(InvalidPlan::Option.into()),
     }
 }
 
@@ -388,7 +420,8 @@ pub(crate) fn push_checksum(
                 head.header(kind.header(), |out| out.push(text.as_bytes()));
             }
         }
-        None => {}
+        // `validate_checksum` refused any other kind.
+        _ => {}
     }
 }
 
@@ -404,4 +437,83 @@ pub(crate) fn encoded_with_body<'r>(
     let capacity = head.capacity();
     head.finish_with_body(method, Payload::Slice(&[]), Some(body))
         .ok_or_else(|| capacity_error(capacity))
+}
+
+// Checks the content properties and the storage class of a write: each is
+// one header value that the service stores as given, so no space at either
+// end, which HTTP drops.
+pub(crate) fn validate_properties(options: &WriteOptions<'_>) -> Result<()> {
+    let stored_as_given =
+        |value: &str| valid_header(value.as_bytes()) && value.trim_ascii() == value;
+    if options
+        .properties
+        .iter()
+        .map(|(_, value)| value)
+        .chain(options.storage_class)
+        .all(stored_as_given)
+    {
+        Ok(())
+    } else {
+        Err(InvalidPlan::ContentProperty.into())
+    }
+}
+
+// Checks the tags of a write against the rules that `allowed` states for one
+// character of a key or a value, and refuses two tags with the same key.
+// `limits` is the most tags, and the most characters in a key and in a
+// value, if the service has limits.
+pub(crate) fn validate_tags(
+    tags: &[Tag<'_>],
+    allowed: impl Fn(char) -> bool,
+    limits: Option<(usize, usize, usize)>,
+) -> Result<()> {
+    let within = |text: &str, most: usize| text.chars().count() <= most;
+    for (index, tag) in tags.iter().enumerate() {
+        let shaped = match limits {
+            Some((_, key_len, value_len)) => {
+                within(tag.key, key_len)
+                    && within(tag.value, value_len)
+                    && tag.key.chars().chain(tag.value.chars()).all(&allowed)
+            }
+            None => true,
+        };
+        if tag.key.is_empty() || !shaped || tags[..index].iter().any(|t| t.key == tag.key) {
+            return Err(InvalidPlan::Tag.into());
+        }
+    }
+    if limits.is_some_and(|(count, _, _)| tags.len() > count) {
+        return Err(InvalidPlan::Tag.into());
+    }
+    Ok(())
+}
+
+// Writes tags as both services take them in a header: `key=value` pairs
+// joined by `&`, each part percent-encoded.
+pub(crate) fn write_tags(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    for (index, tag) in tags.iter().enumerate() {
+        if index != 0 {
+            out.push(b"&");
+        }
+        for part in crate::url::encode_query_value(tag.key.as_bytes()) {
+            out.push(part);
+        }
+        out.push(b"=");
+        for part in crate::url::encode_query_value(tag.value.as_bytes()) {
+            out.push(part);
+        }
+    }
+}
+
+// Writes tags as both services take them in a body: a `TagSet` that holds a
+// `Tag` of a `Key` and a `Value` for each.
+pub(crate) fn write_tag_set(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    out.push(b"<TagSet>");
+    for tag in tags {
+        out.push(b"<Tag><Key>");
+        crate::encoding::write_xml_text(out, tag.key.as_bytes());
+        out.push(b"</Key><Value>");
+        crate::encoding::write_xml_text(out, tag.value.as_bytes());
+        out.push(b"</Value></Tag>");
+    }
+    out.push(b"</TagSet>");
 }

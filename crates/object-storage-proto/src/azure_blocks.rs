@@ -9,10 +9,10 @@
 use crate::Error;
 use crate::azure::{
     AzureNamespace, Blobs, Write, body_kind, named, names_failed_condition, push_metadata,
-    validate_key, validate_metadata, validate_options,
+    push_stored, validate_key, validate_metadata, validate_options,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, push_checksum,
+    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, push_checksum,
     push_condition, text_header, validate_condition,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
@@ -382,6 +382,7 @@ impl<'a> Blobs<'a> {
         if let Some(md5) = plan.options.declared_md5 {
             head.header("x-ms-blob-content-md5", |out| out.push(md5.as_bytes()));
         }
+        push_stored(&mut head, &plan.options);
         push_metadata(&mut head, plan.metadata);
         push_condition(&mut head, plan.condition, plan.condition_value);
         encoded_with_body(head, Method::Put, |out| write_block_list(out, blocks))
@@ -594,12 +595,8 @@ const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
 fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
     Ok(ObjectMeta {
-        size: None,
-        e_tag: head.e_tag,
         last_modified: text_header(head.last_modified)?,
-        version: head.version,
-        content_encoding: head.content_encoding,
-        content_type: head.content_type,
+        ..meta_of(head)
     })
 }
 

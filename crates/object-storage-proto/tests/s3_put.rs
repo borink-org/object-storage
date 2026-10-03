@@ -97,12 +97,6 @@ fn a_write_that_s3_cannot_take_is_refused() {
             InvalidPlan::PayloadTooLarge,
         ),
         (
-            checksum(TransactionalChecksum::Crc64("AAAAAAAAAAA=")),
-            slice,
-            PayloadHash::Compute,
-            InvalidPlan::Option,
-        ),
-        (
             checksum(TransactionalChecksum::Md5("not base64")),
             slice,
             PayloadHash::Compute,

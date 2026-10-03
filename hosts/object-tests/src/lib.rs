@@ -11,8 +11,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    ConditionKind, Error as CrateError, HeaderSpan, RequestSize, RequestedRange, ResponseHead,
-    Timestamps, WireRequest,
+    ConditionKind, ContentProperties, Error as CrateError, HeaderSpan, ObjectMeta, RequestSize,
+    RequestedRange, ResponseHead, Tag, Timestamps, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -145,19 +145,57 @@ fn failed_result(status: u16, code: Option<&str>) -> Value {
     result
 }
 
-/// Declares the response fields that the crate reads from no head, each
-/// named by its result field and its header.
-fn unsupported_response_fields(fields: &[(&str, &str)]) -> Value {
-    fields
-        .iter()
-        .map(|(field, header)| {
-            json!({
-                "at": format!("/value/{field}"),
-                "scope": "sdk",
-                "reason": format!("ResponseHead and ObjectMeta carry no {header}"),
-            })
+/// The content properties that a write call names.
+fn requested_properties(call: &Value) -> ContentProperties<'_> {
+    ContentProperties {
+        content_type: optional_text(call, "content_type"),
+        content_encoding: optional_text(call, "content_encoding"),
+        content_language: optional_text(call, "content_language"),
+        content_disposition: optional_text(call, "content_disposition"),
+        cache_control: optional_text(call, "cache_control"),
+    }
+}
+
+/// The tags that a call names, as an object of keys and values.
+fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
+    call.get("tags")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| Tag {
+            key,
+            value: value.as_str().unwrap_or_default(),
         })
         .collect()
+}
+
+/// The refusal of a write that names two checksums: a plan holds one, and
+/// the services refuse a write with two as well.
+fn two_checksums_refused() -> Value {
+    json!({
+        "outcome": "refused",
+        "kind": "one_transactional_checksum",
+        "parameter": "checksums",
+    })
+}
+
+/// Adds the fields of a read that the response head states.
+fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>) {
+    let fields = [
+        ("content_type", meta.content_type),
+        ("content_encoding", meta.content_encoding),
+        ("content_md5_base64", meta.content_md5),
+        ("content_language", meta.content_language),
+        ("content_disposition", meta.content_disposition),
+        ("cache_control", meta.cache_control),
+        ("storage_class", meta.storage_class),
+        ("version", meta.version),
+    ];
+    for (field, header) in fields {
+        if let Some(text) = text_of(header) {
+            value[field] = json!(text);
+        }
+    }
 }
 
 // The call this process was started for, whose fields a refusal names.
@@ -176,7 +214,11 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "EmptyKey" | "UrlTooLong" | "RequestTooLarge" => "key",
         reason if reason.starts_with("Key") => "key",
         "Range" | "UnsupportedRange" | "RangedHead" => "range",
-        "Condition" => named_field("if_match", "if_none_match"),
+        "Condition" => CONDITION_FIELDS
+            .iter()
+            .map(|(field, _)| *field)
+            .find(|field| call.get(field).is_some())
+            .unwrap_or("if_match"),
         "PayloadTooLarge" => "body_base64",
         // An Azure call names a part by its block ID, and an S3 call by its
         // part number. A commit names its parts in a list.
@@ -367,15 +409,22 @@ fn text_of(bytes: Option<&[u8]>) -> Option<String> {
     bytes.map(|bytes| String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// The call fields that carry a precondition, and the kind of each.
+const CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
+    ("if_match", ConditionKind::IfMatch),
+    ("if_none_match", ConditionKind::IfNoneMatch),
+    ("if_modified_since", ConditionKind::IfModifiedSince),
+    ("if_unmodified_since", ConditionKind::IfUnmodifiedSince),
+];
+
 /// The crate takes one precondition per request.
 fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<&[u8]>)> {
-    match (
-        optional_text(call, "if_match"),
-        optional_text(call, "if_none_match"),
-    ) {
-        (None, None) => Some((ConditionKind::None, None)),
-        (Some(tag), None) => Some((ConditionKind::IfMatch, Some(tag.as_bytes()))),
-        (None, Some(tag)) => Some((ConditionKind::IfNoneMatch, Some(tag.as_bytes()))),
+    let mut given = CONDITION_FIELDS
+        .iter()
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?.as_bytes())));
+    match (given.next(), given.next()) {
+        (None, _) => Some((ConditionKind::None, None)),
+        (Some((kind, value)), None) => Some((kind, Some(value))),
         (Some(_), Some(_)) => None,
     }
 }
@@ -490,4 +539,23 @@ pub fn run() {
             std::process::exit(2);
         }
     }
+}
+
+/// Tags as the result reports them: an object of keys and values.
+fn tags_value(tags: &[Tag<'_>]) -> Value {
+    Value::Object(
+        tags.iter()
+            .map(|tag| (tag.key.to_owned(), json!(tag.value)))
+            .collect(),
+    )
+}
+
+/// The keys that a call names.
+fn requested_keys(call: &Value) -> Vec<&str> {
+    call.get("keys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
 }

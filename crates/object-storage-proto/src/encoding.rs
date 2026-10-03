@@ -1,6 +1,9 @@
 // The byte-to-text encodings that requests and responses carry: hexadecimal,
-// base64, and the RFC 2047 encoded words of S3 metadata. None allocates. Each
-// writes into a buffer or a callback that the caller passes.
+// base64, the RFC 2047 encoded words of S3 metadata, and the text of an XML
+// element. None allocates. Each writes into a buffer or a callback that the
+// caller passes.
+
+use crate::request::ByteSink;
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -161,4 +164,22 @@ pub(crate) mod rfc2047 {
         }
         Some(len)
     }
+}
+
+// Writes `text` as the text of an XML element, with the bytes that XML
+// text cannot hold as they are written as references.
+pub(crate) fn write_xml_text(out: &mut dyn ByteSink, text: &[u8]) {
+    let mut start = 0;
+    for (at, byte) in text.iter().enumerate() {
+        let reference: &[u8] = match byte {
+            b'&' => b"&amp;",
+            b'<' => b"&lt;",
+            b'>' => b"&gt;",
+            _ => continue,
+        };
+        out.push(&text[start..at]);
+        out.push(reference);
+        start = at + 1;
+    }
+    out.push(&text[start..]);
 }

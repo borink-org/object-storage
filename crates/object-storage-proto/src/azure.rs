@@ -4,9 +4,10 @@
 
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, decimal_header, encoded, failure, finish_with_body,
+    ContentRange, accept_success, decimal_header, encoded, failure, finish_with_body, meta_of,
     parse_content_range, push_checksum, push_condition, text_header, trim_ascii, valid_header,
-    validate_checksum, validate_condition, write_range,
+    validate_checksum, validate_condition, validate_properties, validate_tags, write_range,
+    write_tags,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::{self, Parameter, QueryValue};
@@ -19,6 +20,7 @@ use crate::{
     WriteOptions,
 };
 
+pub use crate::azure_batch::{BatchResult, MAX_BATCH_KEYS};
 pub use crate::azure_blocks::{
     Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, MAX_STAGE_LEN,
     PhysicalListBlocks, PhysicalStageBlock,
@@ -110,7 +112,7 @@ impl<'a> Container<'a> {
 #[derive(Clone, Copy)]
 pub struct Blobs<'a> {
     container: Container<'a>,
-    token: &'a str,
+    pub(crate) token: &'a str,
     pub(crate) namespace: AzureNamespace,
     pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
 }
@@ -301,6 +303,7 @@ impl<'a> Blobs<'a> {
         push_checksum(&mut head, put.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
+        push_stored(&mut head, &put.options);
         push_metadata(&mut head, put.metadata);
         push_condition(&mut head, put.condition, put.condition_value);
         encoded(head, Method::Put, content)
@@ -343,6 +346,12 @@ impl<'a> Blobs<'a> {
 
     fn write_url(&self, out: &mut dyn ByteSink, key: Option<&str>, query: &[Parameter<'_>]) {
         out.push(self.container.endpoint.as_bytes());
+        self.write_path(out, key);
+        url::write_query_in_url(out, query);
+    }
+
+    // The path of the URL: the container, and the object if `key` names one.
+    pub(crate) fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
         out.push(b"/");
         out.push(self.container.name.as_bytes());
         if let Some(key) = key {
@@ -351,7 +360,6 @@ impl<'a> Blobs<'a> {
                 out.push(part);
             }
         }
-        url::write_query_in_url(out, query);
     }
 
     /// Reads a response head and reports what to do next.
@@ -394,14 +402,13 @@ impl<'a> Blobs<'a> {
             200 | 206 => accept_success(shape, head),
             // A conditional status the plan did not ask for is a contradiction,
             // not an outcome: nothing in the plan explains it.
-            304 if shape.condition != ConditionKind::IfNoneMatch => {
-                Err(ResponseFault::Status.into())
-            }
+            304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
             304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
             // A 412 is the plan's failed condition only if the plan carried
             // one and Azure names it. Azure also answers 412 for other
             // reasons, which reach the caller as the service failure they are.
-            412 if shape.condition == ConditionKind::IfMatch
+            412 if shape.condition != ConditionKind::None
+                && !shape.condition.fails_as_not_modified()
                 && named(&head) == Some(ServiceErrorKind::Precondition) =>
             {
                 Ok(GetHeadOutcome::PreconditionFailed)
@@ -454,11 +461,11 @@ impl<'a> Blobs<'a> {
         body: &[u8],
     ) -> GetHeadOutcome<'h> {
         let kind = body_kind(body);
-        // A read fails `If-None-Match` with 304, so only `If-Match` fails
-        // with 412.
+        // A read fails `If-None-Match` and `If-Modified-Since` with 304, so
+        // only `If-Match` and `If-Unmodified-Since` fail with 412.
         if names_failed_condition(
             failure.status,
-            shape.condition == ConditionKind::IfMatch,
+            shape.condition != ConditionKind::None && !shape.condition.fails_as_not_modified(),
             kind,
         ) {
             return GetHeadOutcome::PreconditionFailed;
@@ -593,12 +600,8 @@ impl<'a> Blobs<'a> {
         match head.status {
             201 => Ok(PutHeadOutcome::Created {
                 meta: ObjectMeta {
-                    size: None,
-                    e_tag: head.e_tag,
                     last_modified: text_header(head.last_modified)?,
-                    version: head.version,
-                    content_encoding: head.content_encoding,
-                    content_type: head.content_type,
+                    ..meta_of(head)
                 },
             }),
             412 if shape.condition != ConditionKind::None
@@ -979,6 +982,31 @@ fn validate_put(put: &PhysicalPut<'_>, content: Payload<'_>, client: &Blobs<'_>)
     validate_condition(put.condition, put.condition_value)
 }
 
+// The characters that Azure takes in the key and the value of a tag.
+pub(crate) fn azure_tag_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || " +-./:=_".contains(character)
+}
+
+// The content properties, tags and access tier that a write stores with the
+// object, which `validate_options` checked.
+pub(crate) fn push_stored(head: &mut HeadWriter<'_>, options: &WriteOptions<'_>) {
+    for (name, value) in options.properties.iter() {
+        head.header_parts(
+            |out| {
+                out.push(b"x-ms-blob-");
+                out.push(name.as_bytes());
+            },
+            |out| out.push(value.as_bytes()),
+        );
+    }
+    if !options.tags.is_empty() {
+        head.header("x-ms-tags", |out| write_tags(out, options.tags));
+    }
+    if let Some(tier) = options.storage_class {
+        head.header("x-ms-access-tier", |out| out.push(tier.as_bytes()));
+    }
+}
+
 // One header per pair, named with the prefix and the pair's own name. The
 // plan was validated, so each name and each value is usable in a header.
 pub(crate) fn push_metadata(head: &mut HeadWriter<'_>, metadata: &[MetadataPair<'_>]) {
@@ -1051,6 +1079,15 @@ pub(crate) fn validate_options(
     checksums: &[Option<ChecksumProvider>; KINDS],
 ) -> Result<()> {
     validate_checksum(options.checksum, has_bytes, checksums)?;
+    // A block is not an object, so it stores neither properties nor tags.
+    let stored = !options.properties.is_empty()
+        || !options.tags.is_empty()
+        || options.storage_class.is_some();
+    if stored && write == Write::Stage {
+        return Err(InvalidPlan::Option.into());
+    }
+    validate_properties(options)?;
+    validate_tags(options.tags, azure_tag_char, Some((10, 128, 256)))?;
     if let Some(text) = options.declared_md5 {
         // A whole-object write stores the MD5 that Azure checked, and a block
         // is not an object. Only a commit declares one.

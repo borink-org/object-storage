@@ -26,8 +26,10 @@ pub(crate) mod azure_blocks;
 pub(crate) mod decode;
 mod page;
 pub(crate) mod s3;
+pub(crate) mod s3_batch;
 pub(crate) mod s3_parts;
 pub(crate) mod scan;
+pub(crate) mod tags;
 
 pub(crate) use decode::decode_text;
 

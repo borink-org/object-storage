@@ -58,6 +58,7 @@ fn accepts_a_whole_object_read() {
             // surfaced rather than rejected.
             content_encoding: Some(b"gzip"),
             content_type: Some(b"text/plain; charset=utf-8"),
+            ..ObjectMeta::default()
         }
     );
     assert_eq!(

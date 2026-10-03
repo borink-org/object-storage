@@ -44,6 +44,117 @@ impl fmt::Display for StageHeadOutcome<'_> {
     }
 }
 
+/// The result of reading the response head of a request that changes what
+/// the service stores about an object, and returns nothing: setting its tags
+/// or, on Azure, its access tier.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UpdateHeadOutcome<'h> {
+    /// The service made the change.
+    Updated,
+    /// The object or the container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for UpdateHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Updated => f.write_str("the service made the change"),
+            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+/// The result of reading the response head of a read of an object's tags:
+/// an Azure Get Blob Tags, or an S3 GetObjectTagging.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TagsHeadOutcome<'h> {
+    /// The tags follow in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Blobs::fill_tags`](crate::Blobs::fill_tags) or
+    /// [`s3::Objects::fill_tags`](crate::s3::Objects::fill_tags).
+    Tags {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
+    /// The object or the container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for TagsHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tags { .. } => f.write_str("the tags follow in the response body"),
+            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+/// The result of reading the response head of a removal of several objects
+/// in one request: an Azure Blob Batch, or an S3 DeleteObjects.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeleteManyHeadOutcome<'h> {
+    /// The result of each removal follows in the response body.
+    ///
+    /// Read the whole body into one buffer and pass it to
+    /// [`Blobs::fill_delete_results`](crate::Blobs::fill_delete_results) or
+    /// [`s3::Objects::fill_delete_results`](crate::s3::Objects::fill_delete_results).
+    Results {
+        /// The exact length of the response body, if the head states it.
+        expected_len: Option<u64>,
+    },
+    /// The container does not exist.
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request as a whole.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for DeleteManyHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Results { .. } => f.write_str("the results follow in the response body"),
+            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
 /// The result of reading the response head of a commit: an Azure Put Block
 /// List, or an S3 CompleteMultipartUpload.
 ///
@@ -179,6 +290,17 @@ pub struct ObjectMeta<'h> {
     pub content_encoding: Option<&'h [u8]>,
     /// The value of the `Content-Type` header, without an inferred default.
     pub content_type: Option<&'h [u8]>,
+    /// The base64 of the MD5 that the service stores for the object, from
+    /// the `Content-MD5` header.
+    pub content_md5: Option<&'h [u8]>,
+    /// The value of the `Content-Language` header.
+    pub content_language: Option<&'h [u8]>,
+    /// The value of the `Content-Disposition` header.
+    pub content_disposition: Option<&'h [u8]>,
+    /// The value of the `Cache-Control` header.
+    pub cache_control: Option<&'h [u8]>,
+    /// The storage class on S3, or the access tier on Azure.
+    pub storage_class: Option<&'h [u8]>,
 }
 
 /// Where the bytes of the response body belong in the object.

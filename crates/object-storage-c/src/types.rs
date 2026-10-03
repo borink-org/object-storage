@@ -195,10 +195,11 @@ pub enum RangeForm {
     Suffix = 4,
 }
 
-/// The ETag precondition that a request carries.
+/// The precondition that a request carries.
 ///
-/// A request that carries one passes the entity tag as `condition_value`. A
-/// request that carries none passes an empty `condition_value`.
+/// A request that carries one passes the entity tag or the HTTP date as
+/// `condition_value`. A request that carries none passes an empty
+/// `condition_value`.
 #[repr(u16)]
 #[derive(Clone, Copy)]
 pub enum Condition {
@@ -208,6 +209,12 @@ pub enum Condition {
     IfMatch = 2,
     /// The request succeeds only if the current ETag differs.
     IfNoneMatch = 3,
+    /// The request succeeds only if the object changed after the HTTP date
+    /// in `condition_value`.
+    IfModifiedSince = 4,
+    /// The request succeeds only if the object has not changed since the
+    /// HTTP date in `condition_value`.
+    IfUnmodifiedSince = 5,
 }
 
 /// What a removal takes with it.

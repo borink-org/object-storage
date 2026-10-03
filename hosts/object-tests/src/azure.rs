@@ -10,21 +10,23 @@ use crate::listing::{
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, request_buffers, requested_condition, requested_range,
-    send_request, successful_result, text_of, transport_failure, unmapped_call_field,
-    unsupported_by_adapter, unsupported_by_crate, unsupported_response_fields,
+    failed_result, optional_text, read_meta_fields, request_buffers, requested_condition,
+    requested_keys, requested_properties, requested_range, requested_tags, send_request,
+    successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_proto::azure::{
-    self, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
+    self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
     PhysicalStageBlock,
 };
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, CommitHeadOutcome, Container, DeleteHeadOutcome, DeleteKind, EntryKind,
-    GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome,
-    MetadataPair, Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    PropertySet, PutHeadOutcome, RequestedRange, StageHeadOutcome, TransactionalChecksum,
-    WriteOptions, layered,
+    AzureNamespace, Blobs, CommitHeadOutcome, Container, DeleteHeadOutcome, DeleteKind,
+    DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
+    ListInclude, ListPartsHeadOutcome, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
+    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet,
+    PutHeadOutcome, RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, TransactionalChecksum,
+    UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -104,26 +106,11 @@ fn read_object(
 
     Ok(match outcome {
         GetHeadOutcome::Body { meta, .. } | GetHeadOutcome::Complete { meta } => {
-            // The crate reads these response headers from no head.
-            let unsupported_fields = unsupported_response_fields(&[
-                ("content_md5_base64", "Content-MD5"),
-                ("content_language", "Content-Language"),
-                ("content_disposition", "Content-Disposition"),
-                ("cache_control", "Cache-Control"),
-            ]);
             let mut value = json!({
                 "etag": text_of(meta.e_tag).unwrap_or_default(),
                 "metadata": metadata_from_headers(&exchange),
             });
-            if let Some(content_type) = text_of(meta.content_type) {
-                value["content_type"] = json!(content_type);
-            }
-            if let Some(content_encoding) = text_of(meta.content_encoding) {
-                value["content_encoding"] = json!(content_encoding);
-            }
-            if let Some(version) = text_of(meta.version) {
-                value["version"] = json!(version);
-            }
+            read_meta_fields(&mut value, &meta);
 
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
@@ -131,9 +118,7 @@ fn read_object(
                 value["body_base64"] = json!(STANDARD.encode(&exchange.body));
                 value["size"] = json!(exchange.body.len());
             }
-            let mut result = successful_result(value);
-            result["unsupported_fields"] = unsupported_fields;
-            result
+            successful_result(value)
         }
         GetHeadOutcome::NotModified { .. } => error_result(&exchange, 304),
         GetHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
@@ -154,11 +139,7 @@ fn write_object(
     // A plan holds one transactional checksum, so the crate cannot send a write
     // that names two. Azure refuses such a write too.
     if call.get("checksums").is_some() {
-        return Ok(json!({
-            "outcome": "refused",
-            "kind": "one_transactional_checksum",
-            "parameter": "checksums",
-        }));
+        return Ok(two_checksums_refused());
     }
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
@@ -189,6 +170,7 @@ fn write_object(
 
     let key = optional_text(call, "key").unwrap_or_default();
     let body = decode_base64_field(call, "body_base64")?;
+    let tags = requested_tags(call);
     let put_plan = PhysicalPut {
         key,
         condition,
@@ -196,6 +178,9 @@ fn write_object(
         metadata: &metadata_pairs,
         options: WriteOptions {
             checksum,
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "tier"),
             ..WriteOptions::default()
         },
     };
@@ -640,23 +625,44 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "range",
             "if_match",
             "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
             "version",
             "snapshot",
         ],
-        "head" => &["key", "if_match", "if_none_match", "version", "snapshot"],
+        "head" => &[
+            "key",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+            "version",
+            "snapshot",
+        ],
         "put" => &[
             "key",
             "body_base64",
             "if_match",
             "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
             "metadata",
             "checksum",
             "checksums",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "tier",
         ],
         "delete" => &[
             "key",
             "if_match",
             "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
             "snapshots",
             "snapshot",
             "version",
@@ -676,8 +682,14 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "content_md5_base64",
             "if_match",
             "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
         ],
         "azure.list_blocks" => &["key", "kind"],
+        "azure.set_tier" => &["key", "tier"],
+        "azure.set_tags" => &["key", "tags"],
+        "azure.get_tags" => &["key"],
+        "delete_many" => &["keys"],
         _ => &[],
     }
 }
@@ -685,13 +697,6 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 /// Returns the reason the crate cannot express a call field, for the fields it lacks.
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
-        "if_modified_since" | "if_unmodified_since" => Some("ConditionKind has no date conditions"),
-        "content_type"
-        | "content_encoding"
-        | "content_language"
-        | "content_disposition"
-        | "cache_control" => Some("PhysicalPut sets no content properties"),
-        "tier" | "tags" => Some("PhysicalPut sets no access tier or tags"),
         "lease_id" => Some("the crate's plans carry no lease ID"),
         _ => None,
     }
@@ -758,6 +763,154 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "azure.stage_block" => stage_block(&context, &blobs, call),
         "azure.commit_blocks" => commit_blocks(&context, &blobs, call),
         "azure.list_blocks" => list_blocks(&context, &blobs, call),
+        "azure.set_tier" => set_tier(&context, &blobs, call),
+        "azure.set_tags" => set_tags(&context, &blobs, call),
+        "azure.get_tags" => get_tags(&context, &blobs, call),
+        "delete_many" => delete_many(&context, &blobs, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
+}
+
+/// The result of a request that changes the object and returns nothing.
+fn update_result(
+    blobs: &Blobs<'_>,
+    exchange: &HttpExchange,
+    outcome: UpdateHeadOutcome<'_>,
+) -> Value {
+    let outcome = match outcome {
+        UpdateHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_update_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        UpdateHeadOutcome::Updated => successful_result(json!({})),
+        UpdateHeadOutcome::NotFound { .. } => error_result(exchange, 404),
+        UpdateHeadOutcome::NeedErrorBody(failure) | UpdateHeadOutcome::ServiceFailure(failure) => {
+            error_result(exchange, failure.status)
+        }
+        _ => error_result(exchange, exchange.status),
+    }
+}
+
+fn set_tier(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let tier = optional_text(call, "tier").unwrap_or_default();
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::set_tier_requirements(blobs, key, tier, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_set_tier(&mut request_bytes, &mut header_spans, key, tier, &now));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome = crate_step!(blobs.accept_set_tier_head(exchange.response_head()));
+    Ok(update_result(blobs, &exchange, outcome))
+}
+
+fn set_tags(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let tags = requested_tags(call);
+    let plan = PhysicalSetTags::new(key, &tags);
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::set_tags_requirements(blobs, &plan, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_set_tags(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome = crate_step!(blobs.accept_set_tags_head(exchange.response_head()));
+    Ok(update_result(blobs, &exchange, outcome))
+}
+
+fn get_tags(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::get_tags_requirements(blobs, key, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_get_tags(&mut request_bytes, &mut header_spans, key, &now));
+    let mut exchange = transport_step!(send_request(context, &request));
+    let outcome = match crate_step!(blobs.accept_get_tags_head(exchange.response_head())) {
+        TagsHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_get_tags_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        TagsHeadOutcome::Tags { .. } => None,
+        TagsHeadOutcome::NotFound { .. } => Some(404),
+        TagsHeadOutcome::NeedErrorBody(failure) | TagsHeadOutcome::ServiceFailure(failure) => {
+            Some(failure.status)
+        }
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(error_result(&exchange, status));
+    }
+    // An object holds at most ten tags.
+    let mut tags = [Tag::default(); 10];
+    let count = crate_step!(blobs.fill_tags(&mut exchange.body, &mut tags));
+    Ok(successful_result(
+        json!({"tags": tags_value(&tags[..count])}),
+    ))
+}
+
+fn delete_many(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let keys = requested_keys(call);
+    let plan = PhysicalDeleteMany::new(&keys);
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::delete_many_requirements(blobs, &plan, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_delete_many(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome = match crate_step!(blobs.accept_delete_many_head(exchange.response_head())) {
+        DeleteManyHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_delete_many_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        DeleteManyHeadOutcome::Results { .. } => None,
+        DeleteManyHeadOutcome::NotFound { .. } => Some(404),
+        DeleteManyHeadOutcome::NeedErrorBody(failure)
+        | DeleteManyHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(error_result(&exchange, status));
+    }
+    let mut results = vec![BatchResult::default(); keys.len()];
+    let count = crate_step!(blobs.fill_delete_results(&exchange.body, &mut results));
+    let mut deleted = Vec::new();
+    let mut errors = Vec::new();
+    for result in &results[..count] {
+        let key = keys.get(result.index).copied().unwrap_or_default();
+        if result.status == 202 {
+            deleted.push(json!(key));
+        } else {
+            errors.push(json!({"key": key, "status": result.status, "code": result.code}));
+        }
+    }
+    Ok(successful_result(
+        json!({"deleted": deleted, "errors": errors}),
+    ))
 }

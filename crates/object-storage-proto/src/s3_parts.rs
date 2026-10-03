@@ -13,8 +13,9 @@ use crate::common::{
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::s3::{
-    Objects, PayloadHash, Service, Signed, body_kind, is_error_document, refuse_error_document,
-    validate_content, validate_key, validate_metadata, validate_write_condition,
+    Objects, PayloadHash, Service, Signed, Stores, body_kind, is_error_document,
+    refuse_error_document, stored_headers, validate_content, validate_key, validate_metadata,
+    validate_write_condition,
 };
 use crate::sigv4::EMPTY_SHA256;
 use crate::url::QueryValue;
@@ -60,12 +61,22 @@ pub struct PhysicalCreateUpload<'a> {
     /// The rules of [`PhysicalPut::metadata`](crate::PhysicalPut::metadata)
     /// apply. An S3 commit takes no metadata of its own.
     pub metadata: &'a [MetadataPair<'a>],
+    /// The content properties, the tags and the storage class of the object
+    /// that the upload commits, under the rules of
+    /// [`PhysicalPut::options`](crate::PhysicalPut::options). The upload
+    /// takes no checksum here: each part carries its own.
+    pub options: WriteOptions<'a>,
 }
 
 impl<'a> PhysicalCreateUpload<'a> {
-    /// Creates a plan that starts an upload to `key`, with no metadata.
+    /// Creates a plan that starts an upload to `key`, with no metadata and
+    /// no options.
     pub const fn new(key: &'a str) -> Self {
-        Self { key, metadata: &[] }
+        Self {
+            key,
+            metadata: &[],
+            options: WriteOptions::new(),
+        }
     }
 }
 
@@ -244,8 +255,9 @@ impl<'a> Objects<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
-    /// cannot become an S3 request, for the reasons of the key and the
-    /// metadata that [`Self::encode_put`] states.
+    /// cannot become an S3 request, for the reasons of the key, the metadata
+    /// and the options that [`Self::encode_put`] states. A plan whose options
+    /// carry a checksum is refused with [`InvalidPlan::Option`].
     ///
     /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` or
     /// `headers` is too small, with the required bytes and header slots, or
@@ -260,16 +272,28 @@ impl<'a> Objects<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_key(plan.key)?;
         validate_metadata(plan.metadata, self.bucket.service)?;
+        if plan.options.checksum.is_some() {
+            return Err(InvalidPlan::Option.into());
+        }
+        validate_content(
+            &plan.options,
+            Payload::Slice(&[]),
+            PayloadHash::Compute,
+            &self.checksums,
+            Stores::Object(self.bucket.service),
+        )?;
+        let (stored, count) = stored_headers(&plan.options, None);
         let signed = Signed {
             method: Method::Post,
             key: Some(plan.key),
             query: &[Some(("uploads", QueryValue::Literal("")))],
-            headers: &[],
+            headers: &stored[..count],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
             condition_value: None,
             metadata: plan.metadata,
             content_sha256: EMPTY_SHA256.as_bytes(),
+            tags: plan.options.tags,
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -380,7 +404,7 @@ impl<'a> Objects<'a> {
         if content.len() > MAX_PART_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
-        validate_content(&plan.options, content, hash, &self.checksums)?;
+        validate_content(&plan.options, content, hash, &self.checksums, Stores::Part)?;
         let dry = buf.is_empty();
         let content_sha256 = self.content_sha256(hash, content, dry);
         let query = [
@@ -397,6 +421,7 @@ impl<'a> Objects<'a> {
             condition_value: None,
             metadata: &[],
             content_sha256: content_sha256.as_bytes(),
+            tags: &[],
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
@@ -531,6 +556,7 @@ impl<'a> Objects<'a> {
             Payload::Slice(&[]),
             PayloadHash::Compute,
             &self.checksums,
+            Stores::Part,
         )?;
         if !plan.metadata.is_empty() {
             return Err(InvalidPlan::Option.into());
@@ -567,6 +593,7 @@ impl<'a> Objects<'a> {
             condition_value: plan.condition_value,
             metadata: &[],
             content_sha256: &content_sha256,
+            tags: &[],
         };
         let mut head = HeadWriter::new(buf, headers);
         self.write_head(&mut head, &signed, dry, now);
@@ -732,6 +759,7 @@ impl<'a> Objects<'a> {
             condition_value: None,
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
+            tags: &[],
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -830,6 +858,7 @@ impl<'a> Objects<'a> {
             condition_value: None,
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
+            tags: &[],
         };
         let dry = buf.is_empty();
         let mut head = HeadWriter::new(buf, headers);
@@ -980,27 +1009,9 @@ fn write_part_list<E: AsRef<[u8]>>(out: &mut dyn ByteSink, parts: impl Iterator<
         out.push(b"<Part><PartNumber>");
         out.push(U64Decimal::new(number.into()).as_bytes());
         out.push(b"</PartNumber><ETag>");
-        write_xml_text(out, e_tag.as_ref());
+        // The quotes around an entity tag are text as they are.
+        encoding::write_xml_text(out, e_tag.as_ref());
         out.push(b"</ETag></Part>");
     }
     out.push(COMMIT_CLOSE);
-}
-
-// Writes `text` as the text of an XML element. An entity tag is one header
-// value, which may hold the bytes that XML text writes as references. The
-// quotes around an entity tag are text as they are.
-fn write_xml_text(out: &mut dyn ByteSink, text: &[u8]) {
-    let mut start = 0;
-    for (at, byte) in text.iter().enumerate() {
-        let reference: &[u8] = match byte {
-            b'&' => b"&amp;",
-            b'<' => b"&lt;",
-            b'>' => b"&gt;",
-            _ => continue,
-        };
-        out.push(&text[start..at]);
-        out.push(reference);
-        start = at + 1;
-    }
-    out.push(&text[start..]);
 }

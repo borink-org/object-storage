@@ -18,24 +18,27 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 ### Azure Blob Storage, S3 and S3-compatible services
 
 - Object get (GET request)
-  - Conditional (If-Match, If-None-Match)
+  - Conditional (If-Match, If-None-Match, If-Modified-Since, If-Unmodified-Since)
   - Byte ranges: offset, bounded, suffix (S3 only, Azure refuses suffix ranges)
-- Object metadata and information (HEAD request)
+- Object metadata and information (HEAD request), including the content properties, the stored MD5 and the storage class or access tier
 - Object put (PUT request, whole object)
-  - Conditional (If-Match, If-None-Match)
+  - Conditional (If-Match, If-None-Match; If-Modified-Since and If-Unmodified-Since on Azure only)
+  - Content properties (Content-Type, Content-Encoding, Content-Language, Content-Disposition, Cache-Control), tags, and the storage class or access tier
   - Content is borrowed or streamed: the head states its length, so a write can come from a file or a socket without holding the object in memory
   - S3: signs the SHA-256 of the content, or leave it unsigned or provide the hash yourself
 - Object delete (DELETE request)
-  - Conditional (If-Match; If-None-Match on Azure only)
+  - Conditional (If-Match; If-None-Match and the date conditions on Azure only)
   - Takes the object alone, the object and its snapshots, or the snapshots alone (Azure only)
 - Object listing (GET request on the container or bucket, one page at a time)
   - Custom delimiters, prefixes
   - Some object properties are always returned, others can be registered to return in a custom entry return type
   - S3: start after a key (not possible on Azure)
+- Deleting several objects in one request (Azure Blob Batch, S3 DeleteObjects)
+- Object tags: reading and replacing them
 - Metadata (arbitrary key-value pairs attached to objects) reading and writing
   - Correctly encodes (even where e.g. the AWS C++ SDK doesn't) and rejects values that don't roundtrip, or (correctly) rejects non-ASCII in the case of Azure
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
-  - CRC64 on Azure only, MD5 on both
+  - MD5 and CRC64 on both; CRC32, CRC32C, SHA-1 and SHA-256 on S3, as text
 - Object multipart upload
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
@@ -43,6 +46,7 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 ### Azure Blob Storage-only
 
 - Object listing: listing metadata (S3 does not list it)
+- Setting the access tier of an object
 
 ### S3-only
 
@@ -67,7 +71,7 @@ The core library functionality is not expected to change a lot from now on, but 
 Roadmap:
 - S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility -> 0.0.4 release
 - S3 multipart -> 0.0.5 release
-- ... potentially various other features: Azure snapshots, versions, more S3 checksum algorithms
+- ... potentially various other features: Azure snapshots, versions, computing more S3 checksum algorithms
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - ... support for various AWS and Azure authorization schemes -> 0.2 release
 - Generic API (so layer over the providers) -> 0.3 release

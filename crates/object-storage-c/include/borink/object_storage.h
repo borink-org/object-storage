@@ -180,10 +180,11 @@ typedef uint16_t borink_range_form;
 #endif // __cplusplus
 
 /**
- * The ETag precondition that a request carries.
+ * The precondition that a request carries.
  *
- * A request that carries one passes the entity tag as `condition_value`. A
- * request that carries none passes an empty `condition_value`.
+ * A request that carries one passes the entity tag or the HTTP date as
+ * `condition_value`. A request that carries none passes an empty
+ * `condition_value`.
  */
 enum borink_condition
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -202,6 +203,16 @@ enum borink_condition
      * The request succeeds only if the current ETag differs.
      */
     BORINK_CONDITION_IF_NONE_MATCH = 3,
+    /**
+     * The request succeeds only if the object changed after the HTTP date
+     * in `condition_value`.
+     */
+    BORINK_CONDITION_IF_MODIFIED_SINCE = 4,
+    /**
+     * The request succeeds only if the object has not changed since the
+     * HTTP date in `condition_value`.
+     */
+    BORINK_CONDITION_IF_UNMODIFIED_SINCE = 5,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L

@@ -27,6 +27,22 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - New variant `InvalidPlan::UploadId`, for an empty upload ID.
 - New variant `Method::Post`.
 - New variant `Error::Service`, for an error document that S3 sends as the body of a success, with the error it names. New variant `ErrorCode::Service` and new method `Error::class`, which says whether a retry can help.
+- Date conditions: new variants `ConditionKind::IfModifiedSince` and `ConditionKind::IfUnmodifiedSince`, whose `condition_value` is an HTTP date. A read that fails the first is `GetHeadOutcome::NotModified`. An S3 client for AWS refuses them on a write or a removal with `InvalidPlan::Condition`. The C ABI has `BORINK_CONDITION_IF_MODIFIED_SINCE` and `BORINK_CONDITION_IF_UNMODIFIED_SINCE`.
+- New fields `ResponseHead::content_md5`, `content_language`, `content_disposition`, `cache_control` and `storage_class`, and the same fields on `ObjectMeta`, which every read and write outcome fills. `storage_class` holds `x-amz-storage-class` on S3 and `x-ms-access-tier` on Azure.
+- Content properties, tags and storage classes on writes:
+  - New struct `ContentProperties`, with `Content-Type`, `Content-Encoding`, `Content-Language`, `Content-Disposition` and `Cache-Control`, and new struct `Tag`.
+  - New fields `WriteOptions::properties`, `tags` and `storage_class`, which a write of a whole object, an Azure commit and an S3 CreateMultipartUpload send. A stage, and an S3 commit, refuse them with `InvalidPlan::Option`.
+  - New field `s3::PhysicalCreateUpload::options`.
+  - New variants `InvalidPlan::ContentProperty` and `InvalidPlan::Tag`.
+- Tags and access tiers:
+  - New plan `PhysicalSetTags`, and new outcomes `UpdateHeadOutcome` and `TagsHeadOutcome`.
+  - Azure: new methods `Blobs::encode_set_tier`, `accept_set_tier_head`, `encode_set_tags`, `accept_set_tags_head`, `accept_update_error_body`, `encode_get_tags`, `accept_get_tags_head`, `accept_get_tags_error_body` and `fill_tags`, and functions `layered::set_tier_requirements`, `set_tags_requirements` and `get_tags_requirements`.
+  - S3: new methods `Objects::encode_put_tagging`, `accept_put_tagging_head`, `accept_update_error_body`, `encode_get_tagging`, `accept_get_tagging_head`, `accept_get_tagging_error_body` and `fill_tags`, and functions `layered::s3::put_tagging_requirements` and `get_tagging_requirements`.
+- Removals of several objects in one request:
+  - New plan `PhysicalDeleteMany`, new outcome `DeleteManyHeadOutcome`, and new variant `InvalidPlan::Keys`.
+  - Azure Blob Batch: new methods `Blobs::encode_delete_many`, `accept_delete_many_head`, `accept_delete_many_error_body` and `fill_delete_results`, new struct `azure::BatchResult`, constant `azure::MAX_BATCH_KEYS` and function `layered::delete_many_requirements`.
+  - S3 DeleteObjects: the same methods on `s3::Objects`, new struct `s3::DeleteResult`, constant `s3::MAX_DELETE_KEYS` and function `layered::s3::delete_many_requirements`.
+- S3 checksums other than an MD5: new variants `TransactionalChecksum::Crc32`, `Crc32c`, `Sha1` and `Sha256`, which only S3 takes, as text. An S3 write sends `TransactionalChecksum::Crc64`, as text or computed, as `x-amz-checksum-crc64nvme`. Each is a signed header.
 
 ### Changed
 
