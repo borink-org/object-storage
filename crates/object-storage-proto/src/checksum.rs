@@ -1,18 +1,21 @@
 //! Checksums of the content of a write.
 //!
-//! Azure compares a checksum in the request head against the bytes it
-//! receives, and refuses the write if the two differ. To send one:
+//! The service compares a checksum in the request head against the bytes it
+//! receives, and refuses the write if the two differ. Azure takes an MD5 or
+//! a CRC-64/NVME. S3 takes those, a CRC-32, a CRC-32C, a SHA-1 or a SHA-256:
+//! see [`ChecksumKind`]. To send one:
 //!
-//! 1. Compute the MD5 or the CRC-64/NVME of the content.
+//! 1. Compute the checksum of the content.
 //! 2. Write its base64. [`Digest::base64`] does this for a [`Digest`].
 //! 3. Put the text in [`WriteOptions::checksum`](crate::WriteOptions::checksum)
-//!    as [`TransactionalChecksum::Md5`](crate::TransactionalChecksum::Md5) or
-//!    [`TransactionalChecksum::Crc64`](crate::TransactionalChecksum::Crc64).
+//!    as the [`TransactionalChecksum`](crate::TransactionalChecksum) of its
+//!    kind.
 //!
 //! To have the encoder compute it instead:
 //!
 //! 1. Register a [`ChecksumProvider`] of that kind with
-//!    [`Blobs::with_checksum`](crate::Blobs::with_checksum).
+//!    [`Blobs::with_checksum`](crate::Blobs::with_checksum) or
+//!    [`s3::Objects::with_checksum`](crate::s3::Objects::with_checksum).
 //! 2. Put [`TransactionalChecksum::Compute`](crate::TransactionalChecksum::Compute)
 //!    of that kind in `WriteOptions::checksum`.
 //!
@@ -27,12 +30,12 @@
 //! This crate computes no checksum. A provider is three function pointers,
 //! `start`, `update` and `finish`, which keep their state in a
 //! [`ChecksumState`]. The `borink-object-storage-crypto` crate has a
-//! CRC-64/NVME, an adapter for RustCrypto's `md-5`, and a trait that turns
-//! any implementation into a provider. Register one of those, or build your
-//! own with [`ChecksumProvider::new`].
+//! provider of each kind, and a trait that turns any implementation into a
+//! provider. Register one of those, or build your own with
+//! [`ChecksumProvider::new`].
 //!
-//! Neither checksum is cryptography. Both detect corruption in transit and
-//! nothing else.
+//! A checksum here detects corruption in transit and nothing else, a SHA-1 or
+//! a SHA-256 included.
 
 use core::mem::MaybeUninit;
 
@@ -47,8 +50,19 @@ use crate::{InvalidPlan, Result};
 pub enum ChecksumKind {
     /// MD5, sixteen bytes, sent as `Content-MD5`.
     Md5 = 1,
-    /// CRC-64/NVME, eight bytes, sent as `x-ms-content-crc64`.
+    /// CRC-64/NVME, eight bytes, sent as `x-ms-content-crc64` to Azure and
+    /// as `x-amz-checksum-crc64nvme` to S3.
     Crc64 = 2,
+    /// CRC-32, as in ISO-HDLC and zlib, four bytes, sent as
+    /// `x-amz-checksum-crc32`. S3 only.
+    Crc32 = 3,
+    /// CRC-32C, the Castagnoli polynomial, four bytes, sent as
+    /// `x-amz-checksum-crc32c`. S3 only.
+    Crc32c = 4,
+    /// SHA-1, twenty bytes, sent as `x-amz-checksum-sha1`. S3 only.
+    Sha1 = 5,
+    /// SHA-256, 32 bytes, sent as `x-amz-checksum-sha256`. S3 only.
+    Sha256 = 6,
 }
 
 impl ChecksumKind {
@@ -59,6 +73,10 @@ impl ChecksumKind {
         Some(match value {
             1 => Self::Md5,
             2 => Self::Crc64,
+            3 => Self::Crc32,
+            4 => Self::Crc32c,
+            5 => Self::Sha1,
+            6 => Self::Sha256,
             _ => return None,
         })
     }
@@ -68,15 +86,28 @@ impl ChecksumKind {
         match self {
             Self::Md5 => 16,
             Self::Crc64 => 8,
+            Self::Crc32 | Self::Crc32c => 4,
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
         }
     }
 
-    // The request header that carries a checksum of this kind.
+    // The request header that carries a checksum of this kind to Azure, or
+    // an MD5 to S3.
     pub(crate) const fn header(self) -> &'static str {
         match self {
             Self::Md5 => "content-md5",
             Self::Crc64 => "x-ms-content-crc64",
+            Self::Crc32 => "x-amz-checksum-crc32",
+            Self::Crc32c => "x-amz-checksum-crc32c",
+            Self::Sha1 => "x-amz-checksum-sha1",
+            Self::Sha256 => "x-amz-checksum-sha256",
         }
+    }
+
+    // Whether Azure takes a checksum of this kind.
+    pub(crate) const fn azure_takes(self) -> bool {
+        matches!(self, Self::Md5 | Self::Crc64)
     }
 
     // Where a provider of this kind sits in a client's table.
@@ -84,6 +115,10 @@ impl ChecksumKind {
         match self {
             Self::Md5 => 0,
             Self::Crc64 => 1,
+            Self::Crc32 => 2,
+            Self::Crc32c => 3,
+            Self::Sha1 => 4,
+            Self::Sha256 => 5,
         }
     }
 
@@ -127,44 +162,65 @@ const fn base64_shape(len: usize) -> (usize, usize) {
 }
 
 /// The number of kinds. A client holds one provider slot per kind.
-pub(crate) const KINDS: usize = 2;
+pub(crate) const KINDS: usize = 6;
 
 /// The length of the longest text that [`Digest::base64`] writes, which is
-/// the 24 characters of an MD5.
-pub const BASE64_LEN: usize = 24;
+/// the 44 characters of a SHA-256.
+pub const BASE64_LEN: usize = 44;
 
 /// The bytes of a finished checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Digest {
-    bytes: [u8; 16],
+    bytes: [u8; 32],
     kind: ChecksumKind,
 }
 
 impl Digest {
+    // A digest of `kind` whose bytes are `digest`, as long as the kind's.
+    const fn of(kind: ChecksumKind, digest: &[u8]) -> Self {
+        let mut bytes = [0; 32];
+        let mut index = 0;
+        while index < digest.len() {
+            bytes[index] = digest[index];
+            index += 1;
+        }
+        Self { bytes, kind }
+    }
+
     /// Creates the digest of an MD5 from its sixteen bytes.
     pub const fn md5(bytes: [u8; 16]) -> Self {
-        Self {
-            bytes,
-            kind: ChecksumKind::Md5,
-        }
+        Self::of(ChecksumKind::Md5, &bytes)
     }
 
     /// Creates the digest of a CRC64 from its value.
     ///
     /// The digest holds the eight little-endian bytes of `value`, which is
-    /// the order that Azure reads.
+    /// the order that Azure reads. An S3 client sends them in big-endian
+    /// order.
     pub const fn crc64(value: u64) -> Self {
-        let le = value.to_le_bytes();
-        let mut bytes = [0; 16];
-        let mut index = 0;
-        while index < 8 {
-            bytes[index] = le[index];
-            index += 1;
-        }
-        Self {
-            bytes,
-            kind: ChecksumKind::Crc64,
-        }
+        Self::of(ChecksumKind::Crc64, &value.to_le_bytes())
+    }
+
+    /// Creates the digest of a CRC-32 from its value, held as its four
+    /// big-endian bytes, the order that S3 reads.
+    pub const fn crc32(value: u32) -> Self {
+        Self::of(ChecksumKind::Crc32, &value.to_be_bytes())
+    }
+
+    /// Creates the digest of a CRC-32C from its value, held as its four
+    /// big-endian bytes, the order that S3 reads.
+    pub const fn crc32c(value: u32) -> Self {
+        Self::of(ChecksumKind::Crc32c, &value.to_be_bytes())
+    }
+
+    /// Creates the digest of a SHA-1 from its twenty bytes.
+    pub const fn sha1(bytes: [u8; 20]) -> Self {
+        Self::of(ChecksumKind::Sha1, &bytes)
+    }
+
+    /// Creates the digest of a SHA-256 from its 32 bytes.
+    pub const fn sha256(bytes: [u8; 32]) -> Self {
+        Self::of(ChecksumKind::Sha256, &bytes)
     }
 
     /// Returns which checksum this is.
@@ -172,16 +228,17 @@ impl Digest {
         self.kind
     }
 
-    /// Returns the bytes of the digest: sixteen for an MD5, eight for a CRC64.
+    /// Returns the bytes of the digest, as many as
+    /// [`ChecksumKind::digest_len`] states for its kind.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.kind.digest_len()]
     }
 
     /// Writes the base64 of the digest into `into` and returns it as text.
     ///
-    /// The text is 24 characters for an MD5 and 12 for a CRC64. Pass it as
-    /// [`TransactionalChecksum::Md5`](crate::TransactionalChecksum::Md5) or
-    /// [`TransactionalChecksum::Crc64`](crate::TransactionalChecksum::Crc64).
+    /// The text is 24 characters for an MD5 and 12 for a CRC64, for example.
+    /// Pass it as the [`TransactionalChecksum`](crate::TransactionalChecksum)
+    /// of its kind.
     pub fn base64<'a>(&self, into: &'a mut [u8; BASE64_LEN]) -> &'a str {
         let (chars, padding) = self.kind.base64_shape();
         crate::encoding::base64_into(self.as_bytes(), &mut into[..chars + padding])

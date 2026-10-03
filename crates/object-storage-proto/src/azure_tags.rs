@@ -4,10 +4,12 @@
 
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::{Blobs, azure_tag_char, body_kind, named, validate_key};
+use crate::azure::{
+    Blobs, azure_tag_char, body_kind, named, validate_azure_checksum, validate_key,
+};
 use crate::common::{
     decimal_header, encoded, encoded_with_body, failure, finish_with_body, push_checksum,
-    valid_header, validate_checksum, validate_tags, write_tag_set,
+    valid_header, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::url::QueryValue;
@@ -115,7 +117,7 @@ impl<'a> Blobs<'a> {
         validate_key(plan.key, self.namespace)?;
         validate_tags(plan.tags, azure_tag_char, Some((10, 128, 256)))?;
         let checksum = plan.checksum.map(TransactionalChecksum::Compute);
-        validate_checksum(checksum, true, &self.checksums)?;
+        validate_azure_checksum(checksum, true, &self.checksums)?;
         let mut counted = Writer::new(&mut []);
         write_tags_document(&mut counted, plan.tags);
         let length = counted.position();

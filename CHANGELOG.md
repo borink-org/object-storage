@@ -42,7 +42,10 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New plan `PhysicalDeleteMany`, new outcome `DeleteManyHeadOutcome`, and new variant `InvalidPlan::Keys`.
   - Azure Blob Batch: new methods `Blobs::encode_delete_many`, `accept_delete_many_head`, `accept_delete_many_error_body` and `fill_delete_results`, new struct `azure::BatchResult`, constant `azure::MAX_BATCH_KEYS` and function `layered::delete_many_requirements`.
   - S3 DeleteObjects: the same methods on `s3::Objects`, new struct `s3::DeleteResult`, constant `s3::MAX_DELETE_KEYS` and function `layered::s3::delete_many_requirements`.
-- S3 checksums other than an MD5: new variants `TransactionalChecksum::Crc32`, `Crc32c`, `Sha1` and `Sha256`, which only S3 takes, as text. An S3 write sends `TransactionalChecksum::Crc64`, as text or computed, as `x-amz-checksum-crc64nvme`. Each is a signed header.
+- S3 checksums other than an MD5:
+  - New variants `TransactionalChecksum::Crc32`, `Crc32c`, `Sha1` and `Sha256`, and `ChecksumKind::Crc32`, `Crc32c`, `Sha1` and `Sha256`, which only S3 takes, as text or computed. An S3 write sends a CRC64 as `x-amz-checksum-crc64nvme`, big-endian, and each of these as its `x-amz-checksum-` header, signed. A part and a commit still take an MD5 alone, and Azure refuses the new kinds with `InvalidPlan::Option`.
+  - New constructors `Digest::crc32`, `crc32c`, `sha1` and `sha256`. `checksum::BASE64_LEN` is 44, the base64 of a SHA-256.
+  - `borink-object-storage-crypto`: new features `crc32`, `crc32c` and `sha1-rustcrypto`, with the providers `CRC32`, `CRC32C` and `SHA1_RUSTCRYPTO` over `Crc32`, `Crc32c` and `Sha1RustCrypto`. `Sha256RustCrypto` and `Sha256Minimal` implement `Checksum` as well, as the providers `SHA256_CHECKSUM_RUSTCRYPTO` and `SHA256_CHECKSUM_MINIMAL`.
 
 ### Changed
 

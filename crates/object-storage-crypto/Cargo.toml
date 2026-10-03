@@ -25,6 +25,9 @@ sha2 = { version = "0.11", optional = true, default-features = false }
 hmac = { version = "0.13", optional = true, default-features = false }
 # One crate with no dependencies, in portable code.
 hmac-sha256 = { version = "1.1.14", optional = true, default-features = false }
+# Only the `sha1-rustcrypto` feature links this, with its default features
+# off, as `md-5`.
+sha1 = { version = "0.11", optional = true, default-features = false }
 # Only the `zeroize` feature links this, for `wipe`.
 zeroize = { version = "1", optional = true, default-features = false }
 
@@ -33,6 +36,12 @@ zeroize = { version = "1", optional = true, default-features = false }
 default = []
 # The software CRC-64/NVME of `crc64`.
 crc64 = []
+# The software CRC-32 of `crc32`, which S3 checks.
+crc32 = []
+# The software CRC-32C of `crc32`, which S3 checks.
+crc32c = []
+# The `Sha1RustCrypto` adapter over RustCrypto's `sha1`, which S3 checks.
+sha1-rustcrypto = ["dep:sha1"]
 # The `Md5RustCrypto` adapter over RustCrypto's `md-5`.
 md5-rustcrypto = ["dep:md-5"]
 # `Sha256RustCrypto`, over RustCrypto's `sha2` and `hmac`.

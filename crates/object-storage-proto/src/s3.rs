@@ -1479,17 +1479,27 @@ impl<'a> Objects<'a> {
             TransactionalChecksum::Crc32c(text) => ("x-amz-checksum-crc32c", text.as_bytes()),
             TransactionalChecksum::Sha1(text) => ("x-amz-checksum-sha1", text.as_bytes()),
             TransactionalChecksum::Sha256(text) => ("x-amz-checksum-sha256", text.as_bytes()),
-            TransactionalChecksum::Compute(ChecksumKind::Crc64) => {
-                // S3 reads the eight bytes in big-endian order.
-                let mut bytes = [0; 8];
-                if !dry && let Some(provider) = &self.checksums[ChecksumKind::Crc64.slot()] {
+            TransactionalChecksum::Compute(ChecksumKind::Md5) => return None,
+            TransactionalChecksum::Compute(kind) => {
+                let len = kind.digest_len();
+                let mut bytes = [0; 32];
+                if !dry && let Some(provider) = &self.checksums[kind.slot()] {
                     let mut sum = provider.start();
                     content(&mut sum);
-                    bytes.copy_from_slice(sum.finish().as_bytes());
-                    bytes.reverse();
+                    bytes[..len].copy_from_slice(sum.finish().as_bytes());
                 }
-                let text = encoding::base64_into(&bytes, &mut into[..12]);
-                (CRC64_HEADER, text.as_bytes())
+                // A digest holds a CRC-64 in the little-endian order that
+                // Azure reads, and S3 reads it big-endian.
+                if kind == ChecksumKind::Crc64 {
+                    bytes[..len].reverse();
+                }
+                let text_len = len.div_ceil(3) * 4;
+                let text = encoding::base64_into(&bytes[..len], &mut into[..text_len]);
+                let name = match kind {
+                    ChecksumKind::Crc64 => CRC64_HEADER,
+                    kind => kind.header(),
+                };
+                (name, text.as_bytes())
             }
             _ => return None,
         })

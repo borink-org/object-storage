@@ -159,7 +159,7 @@
 //! in [`WriteOptions::checksum`]. Pass the text, or register a
 //! [`checksum::ChecksumProvider`] with [`Blobs::with_checksum`] and ask for
 //! [`TransactionalChecksum::Compute`], which has the encoder compute it. S3
-//! takes those two too, a CRC32, a CRC32C, a SHA-1 or a SHA-256 as text, and
+//! takes those two too, and a CRC32, a CRC32C, a SHA-1 or a SHA-256, and
 //! [`s3::Objects::with_checksum`] registers its providers. This crate
 //! implements no checksum. The [`checksum`] module says where to get one.
 //!

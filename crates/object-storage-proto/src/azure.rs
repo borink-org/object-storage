@@ -16,8 +16,8 @@ use crate::{
     GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
     ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
     PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, WireRequest,
-    WriteOptions,
+    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
+    TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 pub use crate::azure_batch::{BatchResult, MAX_BATCH_KEYS};
@@ -219,14 +219,16 @@ impl<'a> Blobs<'a> {
     /// Returns this client with `provider` registered for the kind that it
     /// computes.
     ///
-    /// A write that asks for [`TransactionalChecksum::Compute`](crate::TransactionalChecksum::Compute) of that kind
+    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
     /// then has the encoder compute the checksum. Register a provider for
     /// each kind you compute: the encoder refuses `Compute` of a kind with no
     /// provider as [`InvalidPlan::Option`]. Registering a kind twice keeps
     /// the later provider. A checksum that you pass as text needs no
     /// provider.
     ///
-    /// The `borink-object-storage-crypto` crate has providers for both kinds.
+    /// Azure takes an MD5 and a CRC64, and the encoder refuses `Compute` of
+    /// any other kind with [`InvalidPlan::Option`]. The
+    /// `borink-object-storage-crypto` crate has providers for both.
     pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
         self.checksums[provider.kind().slot()] = Some(provider);
         self
@@ -982,6 +984,21 @@ fn validate_put(put: &PhysicalPut<'_>, content: Payload<'_>, client: &Blobs<'_>)
     validate_condition(put.condition, put.condition_value)
 }
 
+// Checks a checksum that Azure takes: an MD5 or a CRC64, as text or
+// computed.
+pub(crate) fn validate_azure_checksum(
+    checksum: Option<TransactionalChecksum<'_>>,
+    has_bytes: bool,
+    checksums: &[Option<ChecksumProvider>; KINDS],
+) -> Result<()> {
+    if let Some(TransactionalChecksum::Compute(kind)) = checksum
+        && !kind.azure_takes()
+    {
+        return Err(InvalidPlan::Option.into());
+    }
+    validate_checksum(checksum, has_bytes, checksums)
+}
+
 // The characters that Azure takes in the key and the value of a tag.
 pub(crate) fn azure_tag_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || " +-./:=_".contains(character)
@@ -1078,7 +1095,7 @@ pub(crate) fn validate_options(
     has_bytes: bool,
     checksums: &[Option<ChecksumProvider>; KINDS],
 ) -> Result<()> {
-    validate_checksum(options.checksum, has_bytes, checksums)?;
+    validate_azure_checksum(options.checksum, has_bytes, checksums)?;
     // A block is not an object, so it stores neither properties nor tags.
     let stored = !options.properties.is_empty()
         || !options.tags.is_empty()
