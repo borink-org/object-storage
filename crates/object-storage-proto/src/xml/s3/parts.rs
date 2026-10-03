@@ -95,6 +95,7 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
     Ok(Listing {
         filled: held,
         next_marker,
+        next_version_marker: None,
     })
 }
 

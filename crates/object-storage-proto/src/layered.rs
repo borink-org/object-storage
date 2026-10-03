@@ -11,7 +11,8 @@ use crate::azure::{
 };
 use crate::{
     Blobs, Error, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
-    PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
+    PhysicalGet, PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result,
+    Revision, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
@@ -254,6 +255,21 @@ pub fn abort_copy_requirements(
 }
 
 /// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_restore`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_restore`], which reports it again.
+pub fn restore_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalRestore<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_restore(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
 /// [`Blobs::encode_snapshot`] needs for this plan.
 ///
 /// # Errors
@@ -312,9 +328,14 @@ pub fn delete_many_requirements(
 pub fn get_tags_requirements(
     blobs: &Blobs<'_>,
     key: &str,
+    revision: Option<Revision<'_>>,
     now: &Timestamps,
 ) -> Result<RequestSize> {
-    required(blobs.encode_get_tags(&mut [], &mut [], key, now).map(drop))
+    required(
+        blobs
+            .encode_get_tags(&mut [], &mut [], key, revision, now)
+            .map(drop),
+    )
 }
 
 /// Returns the byte and header-slot capacities that
@@ -564,8 +585,31 @@ pub mod s3 {
     };
     use crate::{
         Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
-        PhysicalList, PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
+        PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result, Revision,
+        Timestamps,
     };
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_restore`] needs for this plan, the body included.
+    ///
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_restore`], which reports it again.
+    pub fn restore_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalRestore<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_restore(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
 
     /// Returns the byte and header-slot capacities that
     /// [`Objects::encode_copy`] needs for this plan.
@@ -888,11 +932,12 @@ pub mod s3 {
     pub fn get_tagging_requirements(
         objects: &Objects<'_>,
         key: &str,
+        revision: Option<Revision<'_>>,
         now: &Timestamps,
     ) -> Result<RequestSize> {
         required(
             objects
-                .encode_get_tagging(&mut [], &mut [], key, now)
+                .encode_get_tagging(&mut [], &mut [], key, revision, now)
                 .map(drop),
         )
     }

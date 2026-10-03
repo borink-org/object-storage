@@ -6,6 +6,8 @@
 // with the conditions on the source. S3 answers both with status 200 before
 // it has finished, and says in the body whether the copy succeeded.
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 use crate::common::{

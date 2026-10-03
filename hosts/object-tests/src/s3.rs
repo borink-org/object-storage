@@ -14,9 +14,10 @@ use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
     requested_condition, requested_keys, requested_metadata, requested_properties, requested_range,
-    requested_revision, requested_source, requested_source_range, requested_tags, send_request,
-    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
-    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    requested_restore, requested_revision, requested_source, requested_source_range,
+    requested_tags, restore_value, send_request, served_range, successful_result, tags_value,
+    text_of, transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
+    unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{
@@ -31,11 +32,11 @@ use borink_object_storage_proto::s3::{
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
-    DeleteKind, DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
-    ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete,
-    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome,
-    RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
-    WriteOptions, layered,
+    DeleteKind, DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry,
+    ListHeadOutcome, ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit, PhysicalCopy,
+    PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags,
+    PutHeadOutcome, RequestedRange, RestoreHeadOutcome, StageHeadOutcome, Tag, TagsHeadOutcome,
+    Timestamps, UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -900,6 +901,15 @@ fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
         "size": entry.size.unwrap_or(0),
         "etag": entry.e_tag.unwrap_or_default(),
     });
+    // An entry of a listing of versions names its version, and whether it
+    // is the latest or a delete marker.
+    if let Some(version) = entry.version() {
+        value["version"] = json!(decoded_listing_text(version));
+        value["is_current_version"] = json!(entry.is_current_version());
+    }
+    if entry.kind == EntryKind::DeleteMarker {
+        value["delete_marker"] = json!(true);
+    }
     if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
         value["last_modified"] = json!(rfc3339(millis / 1000));
     }
@@ -1175,6 +1185,8 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "list_page" => &[
             "prefix",
             "continuation_token",
+            "version_marker",
+            "include",
             "start_after",
             "delimiter",
             "page_size",
@@ -1236,8 +1248,9 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         ],
         "s3.abort_multipart" => &["key", "upload_id"],
         "s3.list_parts" => &["key", "upload_id"],
-        "s3.put_tagging" => &["key", "tags"],
-        "s3.get_tagging" => &["key"],
+        "s3.put_tagging" => &["key", "tags", "version"],
+        "s3.get_tagging" => &["key", "version"],
+        "restore" => &["key", "version", "priority", "days", "tier"],
         "delete_many" => &["keys"],
         _ => &[],
     }
@@ -1360,9 +1373,45 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "s3.list_parts" => list_parts(&client, call),
         "s3.put_tagging" => put_tagging(&client, call),
         "s3.get_tagging" => get_tagging(&client, call),
+        "restore" => restore(&client, call),
         "delete_many" => delete_many(&client, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
+}
+
+fn restore(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some(plan) = requested_restore(call) else {
+        return Ok(unsupported_by_adapter("priority not mapped"));
+    };
+    let now = current_timestamps();
+    crate_step!(layered::s3::restore_requirements(
+        &client.objects,
+        &plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::restore_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_restore(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(&client.context, &request));
+    let outcome = match crate_step!(objects.accept_restore_head(exchange.response_head())) {
+        RestoreHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_restore_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    Ok(match (restore_value(&outcome), outcome) {
+        (Some(value), _) => successful_result(value),
+        (None, RestoreHeadOutcome::NotFound { .. }) => error_result(&exchange, 404),
+        (
+            None,
+            RestoreHeadOutcome::NeedErrorBody(failure)
+            | RestoreHeadOutcome::ServiceFailure(failure),
+        ) => error_result(&exchange, failure.status),
+        _ => error_result(&exchange, exchange.status),
+    })
 }
 
 fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
@@ -1370,6 +1419,7 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     let tags = requested_tags(call);
     let plan = PhysicalSetTags {
         checksum: Some(ChecksumKind::Crc64),
+        revision: requested_revision(call),
         ..PhysicalSetTags::new(key, &tags)
     };
     let now = current_timestamps();
@@ -1404,17 +1454,24 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
 fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
     let now = current_timestamps();
+    let revision = requested_revision(call);
     crate_step!(layered::s3::get_tagging_requirements(
         &client.objects,
         key,
+        revision,
         &now
     ));
     let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::get_tagging_requirements(objects, key, &now)
+        layered::s3::get_tagging_requirements(objects, key, revision, &now)
     ));
-    let request =
-        crate_step!(objects.encode_get_tagging(&mut request_bytes, &mut header_spans, key, &now));
+    let request = crate_step!(objects.encode_get_tagging(
+        &mut request_bytes,
+        &mut header_spans,
+        key,
+        revision,
+        &now
+    ));
     let mut exchange = transport_step!(send_request(&client.context, &request));
     let outcome = match crate_step!(objects.accept_get_tagging_head(exchange.response_head())) {
         TagsHeadOutcome::NeedErrorBody(failure) => {
@@ -1480,9 +1537,26 @@ fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
     for result in &results[..count] {
+        // A plain key reports as its key, and a removal that names or
+        // writes a version as an object.
+        let versioned = result.version.is_some() || result.delete_marker;
+        let mut value = json!({"key": result.key});
+        if let Some(version) = result.version {
+            value["version"] = json!(version);
+        }
+        if result.delete_marker {
+            value["delete_marker"] = json!(true);
+        }
+        if let Some(version) = result.delete_marker_version {
+            value["delete_marker_version"] = json!(version);
+        }
         match result.code {
+            None if versioned => deleted.push(value),
             None => deleted.push(json!(result.key)),
-            Some(code) => errors.push(json!({"key": result.key, "code": code})),
+            Some(code) => {
+                value["code"] = json!(code);
+                errors.push(value);
+            }
         }
     }
     Ok(successful_result(

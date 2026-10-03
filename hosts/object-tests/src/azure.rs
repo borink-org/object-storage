@@ -12,9 +12,10 @@ use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
     failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
     requested_condition, requested_keys, requested_metadata, requested_properties, requested_range,
-    requested_revision, requested_source, requested_source_range, requested_tags, send_request,
-    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
-    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    requested_restore, requested_revision, requested_source, requested_source_range,
+    requested_tags, restore_value, send_request, served_range, successful_result, tags_value,
+    text_of, transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
+    unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO};
@@ -28,8 +29,8 @@ use borink_object_storage_proto::{
     GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome,
     MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
     PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet, PutHeadOutcome,
-    RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, TransactionalChecksum,
-    UpdateHeadOutcome, WriteOptions, layered,
+    RequestedRange, RestoreHeadOutcome, Revision, StageHeadOutcome, Tag, TagsHeadOutcome,
+    TransactionalChecksum, UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 
@@ -669,6 +670,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         "list_page" => &[
             "prefix",
             "continuation_token",
+            "version_marker",
             "delimiter",
             "page_size",
             "include",
@@ -751,8 +753,9 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "source_if_unmodified_since",
         ],
         "azure.abort_copy" => &["key", "copy_id"],
-        "azure.set_tags" => &["key", "tags"],
-        "azure.get_tags" => &["key"],
+        "azure.set_tags" => &["key", "tags", "version", "snapshot"],
+        "azure.get_tags" => &["key", "version", "snapshot"],
+        "restore" => &["key", "version", "snapshot", "priority", "days", "tier"],
         "delete_many" => &["keys"],
         _ => &[],
     }
@@ -831,6 +834,7 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "azure.list_blocks" => list_blocks(&context, &blobs, call),
         "azure.set_tier" => set_tier(&context, &blobs, call),
         "azure.snapshot" => snapshot(&context, &blobs, call),
+        "restore" => restore(&context, &blobs, call),
         "copy" => copy(&context, &blobs, call),
         "azure.put_from_url" => put_from_url(&context, &blobs, call),
         "azure.stage_block_from_url" => stage_block_from_url(&context, &blobs, call),
@@ -1106,6 +1110,39 @@ fn abort_copy(
     Ok(update_result(blobs, &exchange, outcome))
 }
 
+fn restore(
+    context: &AdapterContext,
+    blobs: &Blobs<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
+    let Some(plan) = requested_restore(call) else {
+        return Ok(unsupported_by_adapter("priority not mapped"));
+    };
+    let now = current_timestamps();
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::restore_requirements(blobs, &plan, &now)
+    ));
+    let request =
+        crate_step!(blobs.encode_restore(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(context, &request));
+    let outcome = match crate_step!(blobs.accept_restore_head(exchange.response_head())) {
+        RestoreHeadOutcome::NeedErrorBody(failure) => {
+            blobs.accept_restore_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    Ok(match (restore_value(&outcome), outcome) {
+        (Some(value), _) => successful_result(value),
+        (None, RestoreHeadOutcome::NotFound { .. }) => error_result(&exchange, 404),
+        (
+            None,
+            RestoreHeadOutcome::NeedErrorBody(failure)
+            | RestoreHeadOutcome::ServiceFailure(failure),
+        ) => error_result(&exchange, failure.status),
+        _ => error_result(&exchange, exchange.status),
+    })
+}
+
 fn set_tags(
     context: &AdapterContext,
     blobs: &Blobs<'_>,
@@ -1113,7 +1150,10 @@ fn set_tags(
 ) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
     let tags = requested_tags(call);
-    let plan = PhysicalSetTags::new(key, &tags);
+    let plan = PhysicalSetTags {
+        revision: requested_revision(call),
+        ..PhysicalSetTags::new(key, &tags)
+    };
     let now = current_timestamps();
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
         layered::set_tags_requirements(blobs, &plan, &now)
@@ -1133,10 +1173,15 @@ fn get_tags(
     let key = optional_text(call, "key").unwrap_or_default();
     let now = current_timestamps();
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::get_tags_requirements(blobs, key, &now)
+        layered::get_tags_requirements(blobs, key, requested_revision(call), &now)
     ));
-    let request =
-        crate_step!(blobs.encode_get_tags(&mut request_bytes, &mut header_spans, key, &now));
+    let request = crate_step!(blobs.encode_get_tags(
+        &mut request_bytes,
+        &mut header_spans,
+        key,
+        requested_revision(call),
+        &now
+    ));
     let mut exchange = transport_step!(send_request(context, &request));
     let outcome = match crate_step!(blobs.accept_get_tags_head(exchange.response_head())) {
         TagsHeadOutcome::NeedErrorBody(failure) => {
@@ -1201,16 +1246,25 @@ fn delete_many(
     ));
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
-    for (key, result) in keys.iter().zip(&results[..count]) {
+    for (object, result) in keys.iter().zip(&results[..count]) {
+        // Each key reports as the call named it: a plain key as its text,
+        // and one with a version or a snapshot as an object.
+        let mut named = json!({"key": object.key});
+        match object.revision {
+            Some(Revision::Version(version)) => named["version"] = json!(version),
+            Some(Revision::Snapshot(snapshot)) => named["snapshot"] = json!(snapshot),
+            _ => {}
+        }
         if result.outcome == DeleteHeadOutcome::Accepted {
-            deleted.push(json!(key));
+            deleted.push(match object.revision {
+                Some(_) => named,
+                None => json!(object.key),
+            });
         } else {
             let code = azure::error_code(&result.head, result.body);
-            errors.push(json!({
-                "key": key,
-                "status": result.head.status,
-                "code": code.map(String::from_utf8_lossy),
-            }));
+            named["status"] = json!(result.head.status);
+            named["code"] = json!(code.map(String::from_utf8_lossy));
+            errors.push(named);
         }
     }
     Ok(successful_result(

@@ -770,6 +770,7 @@ fn read_root_children_into<'b>(
                 return Ok(Listing {
                     filled: entries.built,
                     next_marker,
+                    next_version_marker: None,
                 });
             }
         }

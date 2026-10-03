@@ -56,6 +56,9 @@ pub struct ResponseHead<'h> {
     pub copy_id: Option<&'h [u8]>,
     /// The value of the `x-ms-copy-status` header: the state of that copy.
     pub copy_status: Option<&'h [u8]>,
+    /// The value of the `x-amz-restore` or `x-ms-archive-status` header:
+    /// the state of a restore from an archive.
+    pub restore_status: Option<&'h [u8]>,
     /// The value of the `x-ms-error-code` header.
     ///
     /// Azure names the error here. The methods that read a head return the
@@ -137,6 +140,10 @@ impl<'h> ResponseHead<'h> {
             &mut self.copy_id
         } else if name.eq_ignore_ascii_case("x-ms-copy-status") {
             &mut self.copy_status
+        } else if name.eq_ignore_ascii_case("x-amz-restore")
+            || name.eq_ignore_ascii_case("x-ms-archive-status")
+        {
+            &mut self.restore_status
         } else if name.eq_ignore_ascii_case("x-ms-error-code") {
             &mut self.error_code
         } else if name.eq_ignore_ascii_case("x-ms-request-id")

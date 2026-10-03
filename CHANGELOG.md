@@ -59,6 +59,15 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New variant `StageHeadOutcome::NeedResultBody`, which only an UploadPartCopy returns.
   - New fields `ResponseHead::copy_id` and `copy_status`, and the same on `ObjectMeta`, from `x-ms-copy-id` and `x-ms-copy-status`.
   - Azure's `SourceConditionNotMet` is `ServiceErrorKind::Precondition`.
+- Versions on more operations:
+  - New field `PhysicalSetTags::revision`, and a `revision` argument on `Blobs::encode_get_tags`, `s3::Objects::encode_get_tagging`, `layered::get_tags_requirements` and `layered::s3::get_tagging_requirements`, which read or replace the tags of a version, or on Azure those of a snapshot.
+  - New struct `DeleteTarget`, a key with an optional revision. `PhysicalDeleteMany::keys` is now `objects`, a list of them: an Azure batch names the revision in each subrequest's path, and S3 as each object's `VersionId`. New fields `s3::DeleteResult::version`, `delete_marker` and `delete_marker_version`.
+  - S3 listings of versions: a plan with `ListInclude::VERSIONS` sends a ListObjectVersions, whose page `fill_listing` reads. New field `PhysicalList::version_marker` and `Listing::next_version_marker`, the second half of its continuation, new variant `EntryKind::DeleteMarker`, new methods `ListEntry::version` and `ListEntry::is_current_version`, and new variants `s3::ObjectProperty::VersionId` and `IsLatest`. A directory bucket refuses the flag. The C ABI has `BORINK_ENTRY_KIND_DELETE_MARKER`.
+- Restores from an archive:
+  - New plan `PhysicalRestore`, priority `RestorePriority` and outcome `RestoreHeadOutcome`.
+  - S3 RestoreObject: new methods `Objects::encode_restore`, `accept_restore_head` and `accept_restore_error_body`, and function `layered::s3::restore_requirements`.
+  - Azure rehydration, a Set Blob Tier with `x-ms-rehydrate-priority`: new methods `Blobs::encode_restore`, `accept_restore_head` and `accept_restore_error_body`, and function `layered::restore_requirements`.
+  - New field `ResponseHead::restore_status`, and the same on `ObjectMeta`, from `x-amz-restore` or `x-ms-archive-status`.
 ### Changed
 
 - `PhysicalGet` and `PhysicalDelete` have the new public field `revision`, so a struct literal that names every field needs it. `from_shape` sets it to `None`.

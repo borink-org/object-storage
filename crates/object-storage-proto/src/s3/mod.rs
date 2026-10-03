@@ -356,6 +356,7 @@ use crate::{
 mod batch;
 mod copy;
 mod parts;
+mod restore;
 mod tags;
 
 pub use batch::{DeleteResult, MAX_DELETE_KEYS};
@@ -720,6 +721,12 @@ pub enum ObjectProperty {
     /// between the tags of the `RestoreStatus` element. Read what it holds
     /// with [`Metadata::new`](crate::Metadata::new).
     RestoreStatus,
+    /// The version that an entry of a listing of versions names. Read it
+    /// for any entry with [`ListEntry::version`].
+    VersionId,
+    /// Whether that version is the latest, `true` or `false`. Read it for
+    /// any entry with [`ListEntry::is_current_version`].
+    IsLatest,
 }
 
 impl ObjectProperty {
@@ -730,6 +737,8 @@ impl ObjectProperty {
         Self::ChecksumType,
         Self::Owner,
         Self::RestoreStatus,
+        Self::VersionId,
+        Self::IsLatest,
     ];
 
     /// How many properties there are, which is the most a set can hold.
@@ -743,6 +752,8 @@ impl ObjectProperty {
             Self::ChecksumType => "ChecksumType",
             Self::Owner => "Owner",
             Self::RestoreStatus => "RestoreStatus",
+            Self::VersionId => "VersionId",
+            Self::IsLatest => "IsLatest",
         }
     }
 
@@ -756,6 +767,8 @@ impl ObjectProperty {
             2 => Self::ChecksumType,
             3 => Self::Owner,
             4 => Self::RestoreStatus,
+            5 => Self::VersionId,
+            6 => Self::IsLatest,
             _ => return None,
         })
     }
@@ -1829,7 +1842,21 @@ impl<'a> Objects<'a> {
         validate_list(list, self.bucket.service)?;
         // SigV4 signs the parameters in the order of their names. With
         // `encoding-type=url`, a key that XML cannot carry still arrives.
-        let query = [
+        let versions = [
+            list.delimiter
+                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
+            Some(("encoding-type", QueryValue::Literal("url"))),
+            list.marker
+                .map(|marker| ("key-marker", QueryValue::Encoded(marker.as_bytes()))),
+            list.max_results
+                .map(|max| ("max-keys", QueryValue::Number(max))),
+            (!list.prefix.is_empty())
+                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
+            list.version_marker
+                .map(|marker| ("version-id-marker", QueryValue::Encoded(marker.as_bytes()))),
+            Some(("versions", QueryValue::Literal(""))),
+        ];
+        let objects = [
             list.marker
                 .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
             list.delimiter
@@ -1847,10 +1874,15 @@ impl<'a> Objects<'a> {
                 .filter(|key| !key.is_empty())
                 .map(|key| ("start-after", QueryValue::Encoded(key.as_bytes()))),
         ];
+        let query: &[Parameter<'_>] = if list.include.contains(ListInclude::VERSIONS) {
+            &versions
+        } else {
+            &objects
+        };
         let signed = Signed {
             method: Method::Get,
             key: None,
-            query: &query,
+            query,
             headers: &[],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -2474,11 +2506,29 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
     if slash_only && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
         return Err(InvalidPlan::Prefix.into());
     }
-    // S3 lists versions with ListObjectVersions, which this client does not
-    // send, and keeps no snapshots.
-    let azure_only = ListInclude::METADATA | ListInclude::SNAPSHOTS | ListInclude::VERSIONS;
-    if list.include.intersects(azure_only) {
+    // S3 keeps no snapshots, and lists no metadata.
+    if list
+        .include
+        .intersects(ListInclude::METADATA | ListInclude::SNAPSHOTS)
+    {
         return Err(InvalidPlan::Option.into());
+    }
+    if list.include.contains(ListInclude::VERSIONS) {
+        // A directory bucket keeps no versions, and a ListObjectVersions
+        // starts at its markers alone.
+        if slash_only || list.start_after.is_some_and(|key| !key.is_empty()) {
+            return Err(InvalidPlan::Option.into());
+        }
+        // S3 takes a version marker only beside a key marker, and hands out
+        // no empty one.
+        if list
+            .version_marker
+            .is_some_and(|marker| marker.is_empty() || list.marker.is_none())
+        {
+            return Err(InvalidPlan::Marker.into());
+        }
+    } else if list.version_marker.is_some() {
+        return Err(InvalidPlan::Marker.into());
     }
     Ok(())
 }

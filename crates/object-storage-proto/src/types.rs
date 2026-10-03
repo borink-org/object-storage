@@ -483,6 +483,12 @@ pub struct PhysicalSetTags<'h> {
     /// A checksum of the request body for the encoder to compute and send,
     /// with the provider of that kind that the client registered.
     pub checksum: Option<crate::checksum::ChecksumKind>,
+    /// The version whose tags to replace, or [`None`] for the object as it
+    /// is now. Each version keeps its own tags. Azure also replaces the tags
+    /// of a snapshot, apart from the object's, and S3, which keeps no
+    /// snapshots, refuses one with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalSetTags<'h> {
@@ -492,7 +498,37 @@ impl<'h> PhysicalSetTags<'h> {
             key,
             tags,
             checksum: None,
+            revision: None,
         }
+    }
+}
+
+/// One object of a removal of several: its key, and the snapshot or version
+/// to remove.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteTarget<'h> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'h str,
+    /// The snapshot or version to remove, or [`None`] for the object as it
+    /// is now. Azure sends it in the path of the object's Delete Blob, and
+    /// S3 as the object's `VersionId`. S3 removes no snapshot: a client
+    /// refuses one with [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
+}
+
+impl<'h> DeleteTarget<'h> {
+    /// Names the object `key` as it is now.
+    pub const fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            revision: None,
+        }
+    }
+}
+
+impl<'h> From<&'h str> for DeleteTarget<'h> {
+    fn from(key: &'h str) -> Self {
+        Self::new(key)
     }
 }
 
@@ -503,10 +539,9 @@ impl<'h> PhysicalSetTags<'h> {
 /// each: see [`DeleteManyHeadOutcome`](crate::DeleteManyHeadOutcome).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhysicalDeleteMany<'h> {
-    /// The keys of the objects to remove, each under the rules of
-    /// [`PhysicalGet::key`]. Azure takes at most 256 in one request, and
+    /// The objects to remove. Azure takes at most 256 in one request, and
     /// S3 1,000.
-    pub keys: &'h [&'h str],
+    pub objects: &'h [DeleteTarget<'h>],
     /// A checksum of the request body for the encoder to compute and send,
     /// with the provider of that kind that the client registered. AWS takes
     /// a removal of several objects only with one.
@@ -515,9 +550,9 @@ pub struct PhysicalDeleteMany<'h> {
 
 impl<'h> PhysicalDeleteMany<'h> {
     /// Creates a plan that removes these objects, with no checksum.
-    pub const fn new(keys: &'h [&'h str]) -> Self {
+    pub const fn new(objects: &'h [DeleteTarget<'h>]) -> Self {
         Self {
-            keys,
+            objects,
             checksum: None,
         }
     }
@@ -610,10 +645,17 @@ impl ListInclude {
     /// [`BlobProperty::Snapshot`].
     pub const SNAPSHOTS: Self = Self(1 << 2);
 
-    /// An entry for each version of an object, each with a `VersionId`
-    /// element, and `IsCurrentVersion` on the current one. Azure only. Read
-    /// them as [`BlobProperty::VersionId`] and
-    /// [`BlobProperty::IsCurrentVersion`].
+    /// An entry for each version of an object, with its version ID and
+    /// whether it is the current one: read both with [`ListEntry::version`]
+    /// and [`ListEntry::is_current_version`].
+    ///
+    /// Azure writes `VersionId` and, on the current version,
+    /// `IsCurrentVersion` in a List Blobs. An S3 client sends a
+    /// ListObjectVersions instead of a ListObjectsV2, whose entries carry
+    /// `VersionId` and `IsLatest`, and which reports each delete marker as
+    /// an [`EntryKind::DeleteMarker`]. It pages with a key marker and a
+    /// version marker: see [`PhysicalList::version_marker`]. A directory
+    /// bucket keeps no versions, so a client refuses this flag for one.
     pub const VERSIONS: Self = Self(1 << 3);
 
     /// Returns `true` if this set holds every flag of `other`.
@@ -1081,6 +1123,85 @@ impl<'a> PhysicalCopy<'a> {
     }
 }
 
+/// How soon the service makes an archived object readable again, and at
+/// what cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u16)]
+pub enum RestorePriority {
+    /// The slowest and cheapest: S3's `Bulk`. S3 only.
+    Bulk = 1,
+    /// `Standard` on both services.
+    #[default]
+    Standard = 2,
+    /// The fastest: S3's `Expedited`, and Azure's `High`.
+    High = 3,
+}
+
+impl RestorePriority {
+    /// Returns the priority with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Bulk,
+            2 => Self::Standard,
+            3 => Self::High,
+            _ => return None,
+        })
+    }
+}
+
+/// A request that makes an object in an archive readable again: an S3
+/// RestoreObject, or an Azure Set Blob Tier out of the `Archive` tier.
+///
+/// The two services restore differently. S3 makes a temporary copy readable
+/// for [`Self::days`], and the object stays in its archive storage class.
+/// Azure rehydrates the object into [`Self::tier`] for good. Both take
+/// hours, and answer at once that they started: follow the restore with a
+/// HEAD, in [`ObjectMeta::restore_status`](crate::ObjectMeta::restore_status).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysicalRestore<'h> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'h str,
+    /// The version to restore, or [`None`] for the object as it is now.
+    /// Azure also rehydrates a snapshot, and S3 refuses one with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
+    /// How soon to restore. Azure refuses [`RestorePriority::Bulk`] with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub priority: RestorePriority,
+    /// How many days the restored copy stays readable, at least 1. S3 only.
+    ///
+    /// S3 requires it for an object in Glacier Flexible Retrieval or Deep
+    /// Archive, and refuses it for one in an archive tier of
+    /// Intelligent-Tiering, which it restores into a tier that stays. Azure
+    /// refuses it with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub days: Option<u32>,
+    /// The tier to rehydrate into: `Hot`, `Cool` or `Cold`. Azure requires
+    /// it, and S3 refuses it, each with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub tier: Option<&'h str>,
+    /// A checksum of the request body for the encoder to compute and send,
+    /// with the provider of that kind that the client registered. S3 only:
+    /// an Azure request has no body.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+impl<'h> PhysicalRestore<'h> {
+    /// Creates a plan that restores `key` at the standard priority.
+    pub const fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            revision: None,
+            priority: RestorePriority::Standard,
+            days: None,
+            tier: None,
+            checksum: None,
+        }
+    }
+}
+
 /// How a listing groups the keys it reports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1101,6 +1222,12 @@ pub enum EntryKind {
     /// Only an Azure account with a hierarchical namespace reports these. A
     /// flat account reports a group of keys as [`Self::Prefix`] instead.
     Directory = 3,
+    /// A delete marker: the version that a removal wrote in place of the
+    /// object, which has no bytes.
+    ///
+    /// Only an S3 listing of versions reports these. Azure keeps no marker:
+    /// a removed object's versions remain, with none of them current.
+    DeleteMarker = 4,
 }
 
 impl EntryKind {
@@ -1112,6 +1239,7 @@ impl EntryKind {
             1 => Self::Object,
             2 => Self::Prefix,
             3 => Self::Directory,
+            4 => Self::DeleteMarker,
             _ => return None,
         })
     }
@@ -1159,8 +1287,17 @@ pub struct PhysicalList<'h> {
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
     /// previous page reported. The first page carries [`None`]. The text is
     /// the service's, and means nothing to this crate. On S3 it is the
-    /// continuation token of a ListObjectsV2.
+    /// continuation token of a ListObjectsV2, or the key marker of a
+    /// ListObjectVersions.
     pub marker: Option<&'h str>,
+    /// Where in the versions of the marker's key the previous page ended.
+    /// S3 only, in a listing of [`ListInclude::VERSIONS`].
+    ///
+    /// Pass the [`Listing::next_version_marker`](crate::Listing::next_version_marker)
+    /// that the previous page reported, beside its marker. A client refuses
+    /// one without a marker, or on any other listing, with
+    /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
+    pub version_marker: Option<&'h str>,
     /// The text after which the listing starts. S3 only.
     ///
     /// The listing reports only the keys and groups of keys that sort after
@@ -1192,6 +1329,7 @@ impl<'h> PhysicalList<'h> {
         Self {
             prefix,
             marker: None,
+            version_marker: None,
             start_after: None,
             delimiter: None,
             max_results: None,
@@ -1203,11 +1341,13 @@ impl<'h> PhysicalList<'h> {
     ///
     /// The plan has no [`Self::start_after`], which a later page does not
     /// need. A delimited shape groups the keys at `/`: set
-    /// [`Self::delimiter`] on the plan for another delimiter.
+    /// [`Self::delimiter`] on the plan for another delimiter. A later page
+    /// of an S3 listing of versions needs [`Self::version_marker`] as well.
     pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
         Self {
             prefix,
             marker,
+            version_marker: None,
             start_after: None,
             delimiter: shape.delimited.then_some("/"),
             max_results: shape.max_results,
@@ -1322,6 +1462,28 @@ impl<'b> ListEntry<'b> {
     /// the rest of the page, select [`BlobProperty::Metadata`].
     pub fn metadata(&self) -> Option<Metadata<'b>> {
         self.property("Metadata").map(Metadata::new)
+    }
+
+    /// Returns the version that this entry names, in a listing of
+    /// [`ListInclude::VERSIONS`], from its `VersionId` element.
+    ///
+    /// S3 names an object written before its bucket kept versions `null`.
+    /// This method reads the entry again.
+    pub fn version(&self) -> Option<&'b [u8]> {
+        self.property("VersionId")
+    }
+
+    /// Returns whether this entry is the current version of its object, in a
+    /// listing of [`ListInclude::VERSIONS`]: Azure's `IsCurrentVersion`,
+    /// or S3's `IsLatest`.
+    ///
+    /// Returns `false` for an entry that says neither, as every entry of a
+    /// listing without versions does, and for a delete marker that S3 does
+    /// not mark as the latest. This method reads the entry again.
+    pub fn is_current_version(&self) -> bool {
+        self.properties().any(|(name, value)| {
+            matches!(name, b"IsCurrentVersion" | b"IsLatest") && value.trim_ascii() == b"true"
+        })
     }
 }
 

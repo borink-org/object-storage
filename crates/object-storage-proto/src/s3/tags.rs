@@ -3,22 +3,24 @@
 
 use crate::checksum::ChecksumKind;
 use crate::common::{
-    decimal_header, encoded_with_body, failure, finish_with_body, push_checksum, validate_tags,
-    write_tag_set,
+    decimal_header, encoded_with_body, failure, finish_with_body, push_checksum, validate_revision,
+    validate_tags, write_tag_set,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, s3_tag_char,
-    validate_key, validate_s3_checksum,
+    validate_key, validate_s3_checksum, version_parameter,
 };
 use crate::url::QueryValue;
 use crate::{
     ConditionKind, Failure, HeaderSpan, Method, PhysicalSetTags, RequestedRange, ResponseFault,
-    ResponseHead, Result, Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum,
+    ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum,
     UpdateHeadOutcome, WireRequest,
 };
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::{Error, InvalidPlan};
 
@@ -54,6 +56,7 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_key(plan.key)?;
+        validate_revision(plan.revision, false)?;
         let limits = match self.bucket.service {
             Service::Aws | Service::AwsDirectory => Some((10, 128, 256)),
             Service::Compatible => None,
@@ -80,10 +83,14 @@ impl<'a> Objects<'a> {
             dry,
             &mut text,
         );
+        let query = [
+            Some(("tagging", QueryValue::Literal(""))),
+            version_parameter(plan.revision),
+        ];
         let signed = Signed {
             method: Method::Put,
             key: Some(plan.key),
-            query: &[Some(("tagging", QueryValue::Literal("")))],
+            query: &query,
             headers: signed_checksum.as_slice(),
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -138,12 +145,14 @@ impl<'a> Objects<'a> {
         finish_with_body(failure, body_kind(body))
     }
 
-    /// Writes the signed request head of a GetObjectTagging into `buf`.
+    /// Writes the signed request head of a GetObjectTagging into `buf`,
+    /// which reads the tags of `key`, or of the version that `revision`
+    /// names.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
-    /// refuses.
+    /// Returns [`Error::InvalidPlan`] for a key or a revision that
+    /// [`Self::encode_get`] refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -154,13 +163,19 @@ impl<'a> Objects<'a> {
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         key: &str,
+        revision: Option<Revision<'_>>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_key(key)?;
+        validate_revision(revision, false)?;
+        let query = [
+            Some(("tagging", QueryValue::Literal(""))),
+            version_parameter(revision),
+        ];
         let signed = Signed {
             method: Method::Get,
             key: Some(key),
-            query: &[Some(("tagging", QueryValue::Literal("")))],
+            query: &query,
             headers: &[],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,

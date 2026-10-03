@@ -480,6 +480,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
         proto::EntryKind::Object,
         proto::EntryKind::Prefix,
         proto::EntryKind::Directory,
+        proto::EntryKind::DeleteMarker,
     ] {
         let entry = proto::ListEntry {
             kind,
@@ -528,7 +529,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
         conditions += usize::from(condition_kind(repr).is_ok());
         entries += usize::from(proto::EntryKind::from_discriminant(repr).is_some());
     }
-    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 5, 3));
+    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 5, 4));
 
     // A listing plan carries no enum, and an absent count is not a zero one.
     for max_results in [None, Some(1000)] {

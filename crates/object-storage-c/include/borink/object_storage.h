@@ -458,6 +458,11 @@ enum borink_entry_kind
      * account with a hierarchical namespace reports one.
      */
     BORINK_ENTRY_KIND_DIRECTORY = 3,
+    /**
+     * A delete marker in a listing of versions. Only S3 reports one, so
+     * these bindings, which speak to Azure, never do.
+     */
+    BORINK_ENTRY_KIND_DELETE_MARKER = 4,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L

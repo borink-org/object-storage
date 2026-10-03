@@ -240,6 +240,9 @@ pub enum EntryKind {
     /// A directory that the service keeps as its own entry. Only an Azure
     /// account with a hierarchical namespace reports one.
     Directory = 3,
+    /// A delete marker in a listing of versions. Only S3 reports one, so
+    /// these bindings, which speak to Azure, never do.
+    DeleteMarker = 4,
 }
 
 /// The category of a service failure.

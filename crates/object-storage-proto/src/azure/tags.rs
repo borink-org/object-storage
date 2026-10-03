@@ -2,21 +2,24 @@
 // Blob Tier. A write stores tags and a tier with the blob as well, through
 // `WriteOptions`.
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    Blobs, azure_tag_char, body_kind, named, validate_azure_checksum, validate_key,
+    Blobs, azure_tag_char, body_kind, named, revision_parameter, validate_azure_checksum,
+    validate_key,
 };
 use crate::common::{
     decimal_header, encoded, encoded_with_body, failure, finish_with_body, missing, push_checksum,
-    valid_header, validate_tags, write_tag_set,
+    valid_header, validate_revision, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::url::QueryValue;
 use crate::{
     Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalSetTags, RequestedRange,
-    ResponseFault, ResponseHead, Result, Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum,
-    UpdateHeadOutcome, WireRequest,
+    ResponseFault, ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps,
+    TransactionalChecksum, UpdateHeadOutcome, WireRequest,
 };
 
 // The document that Set Blob Tags sends and Get Blob Tags answers with.
@@ -115,6 +118,7 @@ impl<'a> Blobs<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
+        validate_revision(plan.revision, true)?;
         validate_tags(plan.tags, azure_tag_char, Some((10, 128, 256)))?;
         let checksum = plan.checksum.map(TransactionalChecksum::Compute);
         validate_azure_checksum(checksum, true, &self.checksums)?;
@@ -125,7 +129,10 @@ impl<'a> Blobs<'a> {
         self.build(
             &mut head,
             Some(plan.key),
-            &[Some(("comp", QueryValue::Literal("tags")))],
+            &[
+                Some(("comp", QueryValue::Literal("tags"))),
+                revision_parameter(plan.revision),
+            ],
             RequestedRange::Whole,
             now,
         )?;
@@ -154,12 +161,13 @@ impl<'a> Blobs<'a> {
         accept_update(head, &[204])
     }
 
-    /// Writes the request head of a Get Blob Tags into `buf`.
+    /// Writes the request head of a Get Blob Tags into `buf`, which reads the
+    /// tags of `key`, or of the snapshot or version that `revision` names.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
-    /// refuses.
+    /// Returns [`Error::InvalidPlan`] for a key or a revision that
+    /// [`Self::encode_get`] refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -170,14 +178,19 @@ impl<'a> Blobs<'a> {
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         key: &str,
+        revision: Option<Revision<'_>>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_key(key, self.namespace)?;
+        validate_revision(revision, true)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(
             &mut head,
             Some(key),
-            &[Some(("comp", QueryValue::Literal("tags")))],
+            &[
+                Some(("comp", QueryValue::Literal("tags"))),
+                revision_parameter(revision),
+            ],
             RequestedRange::Whole,
             now,
         )?;

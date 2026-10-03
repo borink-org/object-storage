@@ -11,9 +11,10 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, CopySource, Error as CrateError,
-    HeaderSpan, MetadataPair, ObjectMeta, RequestSize, RequestedRange, ResponseHead, Revision,
-    ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
+    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, CopySource, DeleteTarget,
+    Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, PhysicalRestore, RequestSize,
+    RequestedRange, ResponseHead, RestoreHeadOutcome, RestorePriority, Revision, ServiceErrorKind,
+    Tag, Timestamps, TransactionalChecksum, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -163,6 +164,37 @@ fn requested_properties(call: &Value) -> ContentProperties<'_> {
     }
 }
 
+/// The restore that a `restore` call names, or `None` for a priority this
+/// adapter does not map.
+fn requested_restore(call: &Value) -> Option<PhysicalRestore<'_>> {
+    let priority = match optional_text(call, "priority") {
+        None | Some("standard") => RestorePriority::Standard,
+        Some("high") => RestorePriority::High,
+        Some("bulk") => RestorePriority::Bulk,
+        Some(_) => return None,
+    };
+    Some(PhysicalRestore {
+        revision: requested_revision(call),
+        priority,
+        days: call
+            .get("days")
+            .and_then(Value::as_u64)
+            .map(|days| u32::try_from(days).unwrap_or(u32::MAX)),
+        tier: optional_text(call, "tier"),
+        ..PhysicalRestore::new(optional_text(call, "key").unwrap_or_default())
+    })
+}
+
+/// The result of a restore: whether it started, or the object was readable
+/// already. `None` for an outcome that is a failure.
+fn restore_value(outcome: &RestoreHeadOutcome<'_>) -> Option<Value> {
+    match outcome {
+        RestoreHeadOutcome::Started => Some(json!({"state": "started"})),
+        RestoreHeadOutcome::Readable => Some(json!({"state": "readable"})),
+        _ => None,
+    }
+}
+
 /// The metadata pairs that a write call names.
 fn requested_metadata(call: &Value) -> Vec<MetadataPair<'_>> {
     call.get("metadata")
@@ -297,6 +329,7 @@ fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>, storage_class_fiel
         ("content_disposition", meta.content_disposition),
         ("cache_control", meta.cache_control),
         ("version", meta.version),
+        ("restore_status", meta.restore_status),
     ];
     for (field, header) in fields {
         if let Some(text) = text_of(header) {
@@ -348,6 +381,8 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "UploadId" => "upload_id",
         "Tag" => "tags",
         "CopySource" => named_field("source_container", "source_bucket"),
+        // A listing refuses an option it cannot list with.
+        "Option" if call.get("include").is_some() => "include",
         "Revision" => ["snapshot", "version", "source_version"]
             .into_iter()
             .find(|field| call.get(field).is_some())?,
@@ -692,11 +727,19 @@ fn tags_value(tags: &[Tag<'_>]) -> Value {
 }
 
 /// The keys that a call names.
-fn requested_keys(call: &Value) -> Vec<&str> {
+/// The objects that a removal of several names: each a key, or an object
+/// of a key and the version or snapshot to remove.
+fn requested_keys(call: &Value) -> Vec<DeleteTarget<'_>> {
     call.get("keys")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
+        .filter_map(|object| match object.as_str() {
+            Some(key) => Some(DeleteTarget::new(key)),
+            None => Some(DeleteTarget {
+                key: optional_text(object, "key")?,
+                revision: requested_revision(object),
+            }),
+        })
         .collect()
 }

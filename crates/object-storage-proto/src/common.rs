@@ -98,6 +98,7 @@ pub(crate) use container_failure_outcome;
 
 failure_outcome!(
     CopyHeadOutcome,
+    RestoreHeadOutcome,
     GetHeadOutcome,
     DeleteHeadOutcome,
     StageHeadOutcome,
@@ -138,6 +139,7 @@ pub(crate) fn meta_of(head: ResponseHead<'_>) -> ObjectMeta<'_> {
         storage_class: head.storage_class,
         copy_id: head.copy_id,
         copy_status: head.copy_status,
+        restore_status: head.restore_status,
     }
 }
 

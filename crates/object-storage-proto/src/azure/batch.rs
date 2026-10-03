@@ -10,20 +10,23 @@
 // `Content-ID` of the request it answers, and no other field. Every request
 // is answered once. Anything else is a fault.
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::{Blobs, body_kind, named, validate_key};
+use crate::azure::{Blobs, body_kind, named, revision_parameter, validate_key};
 use crate::common::{
     decimal, decimal_header, encoded_with_body, failure, finish_with_body, missing,
+    validate_revision,
 };
 use crate::http_message::Response;
 use crate::multipart::{self, Part};
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
-use crate::url::QueryValue;
+use crate::url::{self, QueryValue};
 use crate::{
-    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, Failure, HeaderSpan, InvalidPlan,
-    Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Timestamps,
-    WireRequest,
+    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, HeaderSpan,
+    InvalidPlan, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
+    Timestamps, WireRequest,
 };
 
 /// The most blobs that one Blob Batch removes.
@@ -89,17 +92,18 @@ impl<'a> Blobs<'a> {
         plan: &PhysicalDeleteMany<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        if plan.keys.is_empty() || plan.keys.len() > MAX_BATCH_KEYS {
+        if plan.objects.is_empty() || plan.objects.len() > MAX_BATCH_KEYS {
             return Err(InvalidPlan::Keys.into());
         }
         if plan.checksum.is_some() {
             return Err(InvalidPlan::Option.into());
         }
-        for key in plan.keys {
-            validate_key(key, self.namespace)?;
+        for object in plan.objects {
+            validate_key(object.key, self.namespace)?;
+            validate_revision(object.revision, true)?;
         }
         let mut counted = Writer::new(&mut []);
-        self.write_batch(&mut counted, plan.keys, now);
+        self.write_batch(&mut counted, plan.objects, now);
         let length = counted.position();
         let mut head = HeadWriter::new(buf, headers);
         self.build(
@@ -120,7 +124,7 @@ impl<'a> Blobs<'a> {
             out.push(U64Decimal::new(length as u64).as_bytes())
         });
         encoded_with_body(head, Method::Post, |out| {
-            self.write_batch(out, plan.keys, now)
+            self.write_batch(out, plan.objects, now)
         })
     }
 
@@ -128,8 +132,8 @@ impl<'a> Blobs<'a> {
     // that holds a Delete Blob request. The request has no content, so the
     // CRLF of the delimiter after it stands for the empty line that ends its
     // head, as in the example of Azure's documentation.
-    fn write_batch(&self, out: &mut dyn ByteSink, keys: &[&str], now: &Timestamps) {
-        for (index, key) in keys.iter().enumerate() {
+    fn write_batch(&self, out: &mut dyn ByteSink, objects: &[DeleteTarget<'_>], now: &Timestamps) {
+        for (index, object) in objects.iter().enumerate() {
             if index == 0 {
                 multipart::write_first_delimiter(out, BOUNDARY);
             } else {
@@ -139,7 +143,8 @@ impl<'a> Blobs<'a> {
             out.push(b"Content-Transfer-Encoding: binary\r\nContent-ID: ");
             out.push(U64Decimal::new(index as u64).as_bytes());
             out.push(b"\r\n\r\nDELETE ");
-            self.write_path(out, Some(key));
+            self.write_path(out, Some(object.key));
+            url::write_query_in_url(out, &[revision_parameter(object.revision)]);
             out.push(b" HTTP/1.1\r\nx-ms-date: ");
             out.push(now.rfc1123().as_bytes());
             out.push(b"\r\nAuthorization: Bearer ");
@@ -221,7 +226,7 @@ impl<'a> Blobs<'a> {
         body: &'b [u8],
         into: &mut [BatchResult<'b>],
     ) -> Result<usize> {
-        let count = plan.keys.len();
+        let count = plan.objects.len();
         if count == 0 || count > MAX_BATCH_KEYS {
             return Err(InvalidPlan::Keys.into());
         }

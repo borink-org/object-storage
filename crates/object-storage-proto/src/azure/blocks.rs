@@ -5,6 +5,8 @@
 // plan `PhysicalCommit`, and the three operations answer with the shared
 // outcomes.
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{

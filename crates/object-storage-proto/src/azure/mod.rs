@@ -25,6 +25,7 @@ use crate::{
 mod batch;
 mod blocks;
 mod copy;
+mod restore;
 mod tags;
 
 pub use batch::{BatchResult, MAX_BATCH_KEYS};
@@ -978,6 +979,9 @@ impl<'a> PhysicalSnapshot<'a> {
 /// A head that reports a failure is one of these too.
 /// [`Blobs::accept_snapshot_head`] returns an [`Err`] only for a head it
 /// cannot read.
+// The crate allocates nothing and its outcomes are `Copy`, so the variant
+// that carries the metadata cannot be boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SnapshotHeadOutcome<'h> {
@@ -1360,6 +1364,10 @@ pub(crate) fn validate_options(
 }
 
 fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
+    // Azure continues every listing from one marker.
+    if list.version_marker.is_some() {
+        return Err(InvalidPlan::Marker.into());
+    }
     // No rule of `validate_key` applies to a prefix. It is written into the
     // query, where nothing resolves a `..` and nothing drops a trailing dot,
     // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a

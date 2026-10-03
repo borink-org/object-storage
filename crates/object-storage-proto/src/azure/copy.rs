@@ -8,6 +8,8 @@
 // operations read that URL as a client would, so they send the client's
 // token in `x-ms-copy-source-authorization` as well.
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{

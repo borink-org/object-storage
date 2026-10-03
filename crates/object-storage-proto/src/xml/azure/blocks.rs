@@ -135,5 +135,6 @@ pub(crate) fn read<'b>(
     Ok(Listing {
         filled: count,
         next_marker: None,
+        next_version_marker: None,
     })
 }

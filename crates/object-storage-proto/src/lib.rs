@@ -252,16 +252,16 @@ pub use head::ResponseHead;
 pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
-    ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, ServiceErrorKind, StageHeadOutcome,
-    TagsHeadOutcome, UpdateHeadOutcome,
+    ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, RestoreHeadOutcome,
+    ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, CommitShape, ConditionKind, ContentProperties, CopyShape, CopySource, DeleteKind,
-    DeleteShape, EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape, Metadata,
-    MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
-    PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, Properties, PropertySet,
-    PropertyValues, PutShape, RangeForm, RequestedRange, Revision, Tag, TransactionalChecksum,
-    WriteOptions,
+    DeleteShape, DeleteTarget, EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape,
+    Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete,
+    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags,
+    Properties, PropertySet, PropertyValues, PutShape, RangeForm, RequestedRange, RestorePriority,
+    Revision, Tag, TransactionalChecksum, WriteOptions,
 };

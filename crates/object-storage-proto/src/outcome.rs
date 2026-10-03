@@ -126,6 +126,49 @@ impl fmt::Display for CopyHeadOutcome<'_> {
     }
 }
 
+/// The result of reading the response head of a restore: an S3
+/// RestoreObject, or an Azure Set Blob Tier out of the archive.
+///
+/// A head that reports a failure is one of these too. The methods that read
+/// it return an [`Err`] only for a head they cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RestoreHeadOutcome<'h> {
+    /// The service started the restore, which takes hours. Follow it with a
+    /// HEAD, in [`ObjectMeta::restore_status`].
+    Started,
+    /// The object is readable already: S3 holds a restored copy, whose time
+    /// it extended, or Azure moved an object that was not archived at once.
+    Readable,
+    /// The object does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the restore.
+    ///
+    /// S3 refuses a restore that is running with 409
+    /// `RestoreAlreadyInProgress`, and one of an object that is not archived
+    /// with 403 `InvalidObjectState`. Azure refuses a tier change while it
+    /// rehydrates an object with 409.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for RestoreHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Started => f.write_str("the service started the restore"),
+            Self::Readable => f.write_str("the object is readable"),
+            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
 /// The result of reading the response head of a request that changes what
 /// the service stores about an object, and returns nothing: setting its tags
 /// or, on Azure, its access tier.
@@ -294,6 +337,9 @@ impl fmt::Display for CommitHeadOutcome<'_> {
 ///
 /// A head that reports a failure is one of these too. The methods that read
 /// it return an [`Err`] only for a head they cannot read.
+// The crate allocates nothing and its outcomes are `Copy`, so the variant
+// that carries the metadata cannot be boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListPartsHeadOutcome<'h> {
@@ -390,6 +436,13 @@ pub struct ObjectMeta<'h> {
     /// `x-ms-copy-status`: `pending`, `success`, `aborted` or `failed`.
     /// Azure only.
     pub copy_status: Option<&'h [u8]>,
+    /// The state of a restore from an archive, as the service writes it.
+    ///
+    /// S3 writes `x-amz-restore`: `ongoing-request="true"` while it
+    /// restores, then `ongoing-request="false", expiry-date="…"`. Azure
+    /// writes `x-ms-archive-status` while it rehydrates, such as
+    /// `rehydrate-pending-to-hot`, and nothing once it is done.
+    pub restore_status: Option<&'h [u8]>,
 }
 
 /// Where the bytes of the response body belong in the object.
@@ -717,6 +770,11 @@ pub struct Listing<'b> {
     /// A page names a next one whenever more keys follow, even if it reported
     /// fewer entries than it asked for.
     pub next_marker: Option<&'b str>,
+    /// Where in the versions of the next marker's key the next page starts,
+    /// in an S3 listing of versions. Pass it as
+    /// [`PhysicalList::version_marker`](crate::PhysicalList::version_marker)
+    /// beside the marker. [`None`] on every other listing.
+    pub next_version_marker: Option<&'b str>,
 }
 
 /// The result of [`classify_error`](crate::classify_error).

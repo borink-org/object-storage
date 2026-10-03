@@ -14,6 +14,7 @@ pub(crate) struct ListedPage {
     entries: Vec<Value>,
     prefixes: Vec<String>,
     next_marker: Option<String>,
+    next_version_marker: Option<String>,
 }
 
 /// An entry that a provider's fill wrote, with whatever it read beside the
@@ -50,6 +51,7 @@ impl ListedPage {
                 .next_marker
                 .filter(|marker| !marker.is_empty())
                 .map(str::to_owned),
+            next_version_marker: listing.next_version_marker.map(str::to_owned),
         }
     }
 }
@@ -104,17 +106,24 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
     let list_plan = PhysicalList {
         prefix: optional_text(call, "prefix").unwrap_or_default(),
         marker: optional_text(call, "continuation_token"),
+        version_marker: optional_text(call, "version_marker"),
         start_after: optional_text(call, "start_after"),
         delimiter: optional_text(call, "delimiter"),
         max_results: requested_page_size(call),
         include,
     };
     Ok(match source.read_page(&list_plan)? {
-        Ok(page) => successful_result(json!({
-            "entries": page.entries,
-            "prefixes": page.prefixes,
-            "continuation_token": page.next_marker.unwrap_or_default(),
-        })),
+        Ok(page) => {
+            let mut value = json!({
+                "entries": page.entries,
+                "prefixes": page.prefixes,
+                "continuation_token": page.next_marker.unwrap_or_default(),
+            });
+            if let Some(marker) = page.next_version_marker {
+                value["next_version_marker"] = json!(marker);
+            }
+            successful_result(value)
+        }
         Err(result) => result,
     })
 }
