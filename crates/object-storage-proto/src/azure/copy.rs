@@ -13,12 +13,13 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    AzureNamespace, Blobs, Write, body_kind, named, names_failed_condition, push_metadata,
-    push_stored, revision_parameter, validate_key, validate_metadata, validate_options,
+    AzureNamespace, Blobs, Write, azure_tag_char, body_kind, named, names_failed_condition,
+    push_metadata, push_stored, revision_parameter, validate_key, validate_metadata,
+    validate_options,
 };
 use crate::common::{
     encoded, failure, finish_with_body, meta_of, missing, push_condition, text_header, trim_ascii,
-    validate_condition, validate_revision, write_range,
+    validate_condition, validate_revision, validate_tags, write_range, write_tags,
 };
 use crate::request::{ByteSink, HeadWriter};
 use crate::url::{self, QueryValue};
@@ -79,8 +80,11 @@ impl<'a> Blobs<'a> {
     ///
     /// - A key, a metadata pair, a tag or a storage class that
     ///   [`Self::encode_put`] refuses, for the target or the source.
-    /// - [`InvalidPlan::Option`] for a content property, a checksum or a
-    ///   declared MD5. A copy takes the source's content properties.
+    /// - [`InvalidPlan::ContentProperty`] for a content property: a copy
+    ///   takes the source's.
+    /// - [`InvalidPlan::Option`] for an empty list of metadata, which Azure
+    ///   cannot copy with, and for tags, a checksum or a declared MD5 in the
+    ///   options.
     /// - [`InvalidPlan::CopySource`] for a source container that cannot be
     ///   written into a URL, and [`InvalidPlan::Revision`] for an empty
     ///   snapshot or version.
@@ -419,8 +423,17 @@ impl<'a> Blobs<'a> {
     fn validate_copy(&self, plan: &PhysicalCopy<'_>, write: Write) -> Result<()> {
         validate_key(plan.key, self.namespace)?;
         validate_source(&plan.source, self.namespace)?;
-        validate_metadata(plan.metadata)?;
+        match plan.metadata {
+            Some([]) => return Err(InvalidPlan::Option.into()),
+            Some(metadata) => validate_metadata(metadata)?,
+            None => {}
+        }
         validate_options(&plan.options, write, false, self)?;
+        validate_tags(
+            plan.tags.unwrap_or(&[]),
+            azure_tag_char,
+            Some((10, 128, 256)),
+        )?;
         validate_condition(plan.condition, plan.condition_value)
     }
 
@@ -432,7 +445,10 @@ impl<'a> Blobs<'a> {
         });
         push_source_condition(head, &plan.source);
         push_stored(head, &plan.options);
-        push_metadata(head, plan.metadata);
+        if let Some(tags) = plan.tags.filter(|tags| !tags.is_empty()) {
+            head.header("x-ms-tags", |out| write_tags(out, tags));
+        }
+        push_metadata(head, plan.metadata.unwrap_or(&[]));
         push_condition(head, plan.condition, plan.condition_value);
         head.header("content-length", |out| out.push(b"0"));
     }

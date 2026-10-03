@@ -1329,11 +1329,14 @@ pub(crate) fn validate_options(
     validate_azure_checksum(options.checksum, has_bytes, &client.checksums)?;
     // A copy sends no content, so it has nothing to sum, and a Copy Blob
     // takes no content property.
+    // A copy names its tags apart, so that none can differ from the
+    // source's.
     let copy = matches!(write, Write::Copy | Write::FromUrl);
-    if (copy && options.checksum.is_some())
-        || (write == Write::Copy && !options.properties.is_empty())
-    {
+    if copy && (options.checksum.is_some() || !options.tags.is_empty()) {
         return Err(InvalidPlan::Option.into());
+    }
+    if write == Write::Copy && !options.properties.is_empty() {
+        return Err(InvalidPlan::ContentProperty.into());
     }
     // A block is not an object, so it stores neither properties nor tags.
     let stored = !options.properties.is_empty()

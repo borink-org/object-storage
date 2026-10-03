@@ -12,11 +12,13 @@
 use crate::Error;
 use crate::common::{
     decimal_header, encoded, failure, finish_with_body, validate_condition, validate_revision,
+    validate_tags,
 };
 use crate::request::HeadWriter;
 use crate::s3::{
-    Objects, PayloadHash, Signed, SignedCopy, Stores, body_kind, is_error_document, stored_headers,
-    validate_content, validate_key, validate_metadata, validate_write_condition,
+    Objects, PayloadHash, Service, Signed, SignedCopy, Stores, body_kind, is_error_document,
+    s3_tag_char, stored_headers, validate_content, validate_key, validate_metadata,
+    validate_write_condition,
 };
 use crate::sigv4::EMPTY_SHA256;
 use crate::url::QueryValue;
@@ -111,10 +113,17 @@ impl<'a> Objects<'a> {
         self.validate_copy_credentials()?;
         validate_key(plan.key)?;
         validate_source(&plan.source)?;
-        validate_metadata(plan.metadata, self.bucket.service)?;
-        if plan.options.checksum.is_some() {
+        validate_metadata(plan.metadata.unwrap_or(&[]), self.bucket.service)?;
+        // A copy names its tags apart, so that none can differ from the
+        // source's.
+        if plan.options.checksum.is_some() || !plan.options.tags.is_empty() {
             return Err(InvalidPlan::Option.into());
         }
+        let limits = match self.bucket.service {
+            Service::Aws | Service::AwsDirectory => Some((10, 128, 256)),
+            Service::Compatible => None,
+        };
+        validate_tags(plan.tags.unwrap_or(&[]), s3_tag_char, limits)?;
         validate_content(
             &plan.options,
             Payload::Slice(&[]),
@@ -124,18 +133,24 @@ impl<'a> Objects<'a> {
         )?;
         validate_write_condition(plan.condition, plan.condition_value, self.bucket.service)?;
         let (stored, count) = stored_headers(&plan.options, None);
-        let mut copy_headers = [("", &[][..]); 9];
+        let mut copy_headers = [("", &[][..]); 10];
         copy_headers[..count].copy_from_slice(&stored[..count]);
         let mut count = count;
         // S3 keeps the source's metadata and content properties unless told
-        // to replace them, and its tags likewise.
-        if !plan.metadata.is_empty() || !plan.options.properties.is_empty() {
+        // to replace them, and its tags likewise. Replacing the tags with
+        // none sends an empty `x-amz-tagging`.
+        if plan.metadata.is_some() || !plan.options.properties.is_empty() {
             copy_headers[count] = ("x-amz-metadata-directive", b"REPLACE");
             count += 1;
         }
-        if !plan.options.tags.is_empty() {
+        let tags = plan.tags.unwrap_or(&[]);
+        if plan.tags.is_some() {
             copy_headers[count] = ("x-amz-tagging-directive", b"REPLACE");
             count += 1;
+            if tags.is_empty() {
+                copy_headers[count] = ("x-amz-tagging", b"");
+                count += 1;
+            }
         }
         let signed = Signed {
             method: Method::Put,
@@ -145,9 +160,9 @@ impl<'a> Objects<'a> {
             range: RequestedRange::Whole,
             condition: plan.condition,
             condition_value: plan.condition_value,
-            metadata: plan.metadata,
+            metadata: plan.metadata.unwrap_or(&[]),
             content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: plan.options.tags,
+            tags,
             copy: Some(SignedCopy {
                 source: plan.source,
                 range: RequestedRange::Whole,

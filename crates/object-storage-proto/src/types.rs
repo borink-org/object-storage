@@ -1074,7 +1074,7 @@ pub struct CopyShape {
 ///
 /// The target takes the source's bytes and content properties. Azure copies
 /// the source's metadata, and S3 its metadata and its tags, unless the plan
-/// names new ones.
+/// names new ones in [`Self::metadata`] and [`Self::tags`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalCopy<'a> {
     /// The key that the copy writes, under the rules of [`PhysicalGet::key`].
@@ -1085,18 +1085,33 @@ pub struct PhysicalCopy<'a> {
     pub condition: ConditionKind,
     /// What `condition` compares against: see [`ConditionKind`].
     pub condition_value: Option<&'a [u8]>,
-    /// The metadata of the target. With no pair, the target has the
-    /// source's metadata; with any, it has these pairs alone. The rules of
-    /// [`PhysicalPut::metadata`] apply.
-    pub metadata: &'a [MetadataPair<'a>],
-    /// The tags, the storage class, and on S3 the content properties of the
-    /// target. A copy carries no checksum and declares no MD5: a client
-    /// refuses either with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    /// The metadata of the target: [`None`] for the source's, or these pairs
+    /// alone. The rules of [`PhysicalPut::metadata`] apply.
     ///
-    /// On S3, new metadata or any content property replaces the source's
+    /// S3 replaces the source's metadata with `x-amz-metadata-directive:
+    /// REPLACE`, which replaces its content properties too: see
+    /// [`Self::options`]. Azure copies the source's metadata unless the
+    /// request names pairs, so it cannot copy with none: a client refuses an
+    /// empty list with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub metadata: Option<&'a [MetadataPair<'a>]>,
+    /// The tags of the target: [`None`] for what the service gives a copy,
+    /// or these tags alone.
+    ///
+    /// S3 copies the source's tags unless the request replaces them with
+    /// `x-amz-tagging-directive: REPLACE`, which an empty list sends with no
+    /// tag. Azure gives a copy no tags but these.
+    pub tags: Option<&'a [Tag<'a>]>,
+    /// The storage class, and on S3 the content properties, of the target.
+    /// A copy names its tags in [`Self::tags`], carries no checksum and
+    /// declares no MD5: a client refuses any of these here with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    ///
+    /// On S3, a content property or new metadata replaces the source's
     /// metadata and content properties together, with
     /// `x-amz-metadata-directive: REPLACE`: name every one you want to keep.
-    /// Tags replace the source's with `x-amz-tagging-directive: REPLACE`.
+    /// Azure's Copy Blob takes the source's content properties, and refuses
+    /// one here with
+    /// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty).
     pub options: WriteOptions<'a>,
 }
 
@@ -1109,7 +1124,8 @@ impl<'a> PhysicalCopy<'a> {
             source,
             condition: ConditionKind::None,
             condition_value: None,
-            metadata: &[],
+            metadata: None,
+            tags: None,
             options: WriteOptions::new(),
         }
     }

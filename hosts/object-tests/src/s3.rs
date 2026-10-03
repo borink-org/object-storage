@@ -503,10 +503,11 @@ fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let plan = PhysicalCopy {
         condition,
         condition_value,
-        metadata: &metadata,
+        // A call that names no metadata or no tags keeps the source's.
+        metadata: call.get("metadata").map(|_| metadata.as_slice()),
+        tags: call.get("tags").map(|_| tags.as_slice()),
         options: WriteOptions {
             properties: requested_properties(call),
-            tags: &tags,
             storage_class: optional_text(call, "storage_class"),
             ..WriteOptions::default()
         },

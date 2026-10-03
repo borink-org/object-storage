@@ -940,13 +940,15 @@ fn copy_plan<'c>(
     let Some(source) = requested_source(call, "source_container") else {
         return Err(unsupported_by_crate("CopySource carries one condition"));
     };
+    // A call that names no metadata or no tags keeps what the service
+    // gives a copy.
     Ok(PhysicalCopy {
         condition,
         condition_value,
-        metadata,
+        metadata: call.get("metadata").map(|_| metadata),
+        tags: call.get("tags").map(|_| tags),
         options: WriteOptions {
             properties: requested_properties(call),
-            tags,
             storage_class: optional_text(call, "tier"),
             ..WriteOptions::default()
         },
