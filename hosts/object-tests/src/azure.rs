@@ -497,11 +497,15 @@ fn commit_blocks(
     }
 
     let key = optional_text(call, "key").unwrap_or_default();
+    let tags = requested_tags(call);
     let commit_plan = PhysicalCommit {
         condition,
         condition_value,
         options: WriteOptions {
             declared_md5: optional_text(call, "content_md5_base64"),
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "tier"),
             ..WriteOptions::default()
         },
         ..PhysicalCommit::new(key)
@@ -701,6 +705,13 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "tier",
         ],
         "azure.list_blocks" => &["key", "kind"],
         "azure.set_tier" => &["key", "tier"],

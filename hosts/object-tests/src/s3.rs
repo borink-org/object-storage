@@ -385,7 +385,16 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
 
 fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
-    let create_plan = PhysicalCreateUpload::new(key);
+    let tags = requested_tags(call);
+    let create_plan = PhysicalCreateUpload {
+        options: WriteOptions {
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "storage_class"),
+            ..WriteOptions::default()
+        },
+        ..PhysicalCreateUpload::new(key)
+    };
 
     let now = current_timestamps();
     crate_step!(layered::s3::create_upload_requirements(
@@ -514,6 +523,7 @@ fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let commit_plan = PhysicalCommit {
         condition,
         condition_value,
+        size: call.get("object_size").and_then(Value::as_u64),
         ..PhysicalCommit::new(key)
     };
 
@@ -1042,9 +1052,25 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "page_size",
             "fetch_owner",
         ],
-        "s3.create_multipart" => &["key"],
+        "s3.create_multipart" => &[
+            "key",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "storage_class",
+        ],
         "s3.upload_part" => &["key", "upload_id", "part_number", "body_base64"],
-        "s3.complete_multipart" => &["key", "upload_id", "parts", "if_match", "if_none_match"],
+        "s3.complete_multipart" => &[
+            "key",
+            "upload_id",
+            "parts",
+            "if_match",
+            "if_none_match",
+            "object_size",
+        ],
         "s3.abort_multipart" => &["key", "upload_id"],
         "s3.list_parts" => &["key", "upload_id"],
         "s3.put_tagging" => &["key", "tags"],
