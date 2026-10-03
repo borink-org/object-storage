@@ -55,9 +55,9 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 
 ## What makes `borink-object-storage` unique?
 
-- We try to give the caller as much control as possible (this sometimes makes the APIs a bit clunky), in particular over memory and buffers.
-- We aim to very thoroughly test everything and make sure we capture as many of the real service's edge cases as possible (we e.g. measure exactly how many path segments Azure supports). In this process, we developed [borink-object-tests](https://github.com/borink-org/object-tests), which should hopefully help other developers of object storage clients as well.
-- We aim to support Windows and Linux well, with the goal to also support low memory and freestanding targets (not yet validated).
+- We try to give the caller as much control as possible (this sometimes makes the APIs a bit clunky), in particular over where the memory lives. The `proto` crate does zero heap allocations, compiles without `std` and `alloc` features, and does no I/O. 
+- We aim to very thoroughly test everything and make sure we capture as many of the real service's edge cases as possible (we e.g. measure exactly how many path segments Blob supports). In this process, we developed [borink-object-tests](https://github.com/borink-org/object-tests), which should hopefully help other developers of object storage clients as well. The low-level API in particular is designed to basically document the precise API of S3/Blob.
+- We aim to support Windows and Linux well, with the goal to also support low memory and freestanding targets (not yet validated). Small binary size is also a future target.
 - The `proto` crate has no dependencies. Any dependencies of other crates are optional and pluggable (you can provide your own crypto implementation) and use whatever HTTP client you wish. This also helps make our build very fast (cold release build takes <5s on a mid-spec laptop, debug build takes under a second).
 
 ## Development status and roadmap
