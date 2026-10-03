@@ -159,9 +159,13 @@
 //! in [`WriteOptions::checksum`]. Pass the text, or register a
 //! [`checksum::ChecksumProvider`] with [`Blobs::with_checksum`] and ask for
 //! [`TransactionalChecksum::Compute`], which has the encoder compute it. S3
-//! takes an MD5 alone, and [`s3::Objects::with_checksum`] registers its
-//! provider. This crate implements neither checksum. The [`checksum`] module
-//! says where to get one.
+//! takes those two too, and a CRC32, a CRC32C, a SHA-1 or a SHA-256, and
+//! [`s3::Objects::with_checksum`] registers its providers. This crate
+//! implements no checksum. The [`checksum`] module says where to get one.
+//!
+//! A write stores the content properties of an object, its tags and its
+//! storage class from [`WriteOptions`]. A read returns the properties in
+//! [`ObjectMeta`].
 //!
 //! # Sizing the buffer
 //!
@@ -223,18 +227,18 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
-mod azure_blocks;
 pub mod checksum;
 mod common;
 mod encoding;
 mod error;
 mod head;
 mod http;
+mod http_message;
 pub mod layered;
+mod multipart;
 mod outcome;
 mod request;
 pub mod s3;
-mod s3_parts;
 pub mod sigv4;
 mod time;
 mod types;
@@ -246,15 +250,17 @@ pub use checksum::{ChecksumKind, ChecksumProvider, ChecksumState, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use outcome::{
-    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, Failure, FailureClass,
-    GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome,
-    ServiceErrorKind, StageHeadOutcome,
+    BodyWindow, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteManyHeadOutcome,
+    Failure, FailureClass, GetHeadOutcome, ListHeadOutcome, ListPartsHeadOutcome, Listing,
+    ObjectMeta, PutHeadOutcome, ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome,
+    UpdateHeadOutcome,
 };
 pub use request::{HeaderSpan, Method, RequestSize, Span, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, CommitShape, ConditionKind, DeleteKind, DeleteShape, EntryKind, GetKind,
-    GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair, Payload, PhysicalCommit,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, Properties, PropertySet,
-    PropertyValues, PutShape, RangeForm, RequestedRange, TransactionalChecksum, WriteOptions,
+    BlobProperty, CommitShape, ConditionKind, ContentProperties, DeleteKind, DeleteShape,
+    EntryKind, GetKind, GetShape, ListEntry, ListInclude, ListShape, Metadata, MetadataPair,
+    Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
+    PhysicalPut, PhysicalSetTags, Properties, PropertySet, PropertyValues, PutShape, RangeForm,
+    RequestedRange, Tag, TransactionalChecksum, WriteOptions,
 };

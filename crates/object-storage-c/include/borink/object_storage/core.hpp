@@ -95,9 +95,11 @@ inline constexpr RangeForm RangeFormBounded = BORINK_RANGE_FORM_BOUNDED;
 inline constexpr RangeForm RangeFormOffset  = BORINK_RANGE_FORM_OFFSET;
 inline constexpr RangeForm RangeFormSuffix  = BORINK_RANGE_FORM_SUFFIX;
 
-inline constexpr Condition ConditionNone        = BORINK_CONDITION_NONE;
-inline constexpr Condition ConditionIfMatch     = BORINK_CONDITION_IF_MATCH;
-inline constexpr Condition ConditionIfNoneMatch = BORINK_CONDITION_IF_NONE_MATCH;
+inline constexpr Condition ConditionNone              = BORINK_CONDITION_NONE;
+inline constexpr Condition ConditionIfMatch           = BORINK_CONDITION_IF_MATCH;
+inline constexpr Condition ConditionIfNoneMatch       = BORINK_CONDITION_IF_NONE_MATCH;
+inline constexpr Condition ConditionIfModifiedSince   = BORINK_CONDITION_IF_MODIFIED_SINCE;
+inline constexpr Condition ConditionIfUnmodifiedSince = BORINK_CONDITION_IF_UNMODIFIED_SINCE;
 
 inline constexpr DeleteKind DeleteKindObject             = BORINK_DELETE_KIND_OBJECT;
 inline constexpr DeleteKind DeleteKindObjectAndSnapshots = BORINK_DELETE_KIND_OBJECT_AND_SNAPSHOTS;

@@ -4,10 +4,11 @@
 // The reader walks the document structure directly; it does not tokenise.
 // `scan.rs` walks the bytes once, `decode.rs` undoes the escaping in place in
 // the caller's buffer, and `page.rs` holds what reading any page takes. The
-// files named for a service read that service's documents: `azure.rs` and
-// `s3.rs` a listing page, `s3.rs` also a session's credentials,
-// `azure_blocks.rs` a block list, and `s3_parts.rs` the answers of an upload
-// in parts. This file reads the error document, finds the root element, and
+// folders named for a service read that service's documents: `azure/mod.rs`
+// and `s3/mod.rs` a listing page, `s3/mod.rs` also a session's credentials,
+// `azure/blocks.rs` a block list, `s3/parts.rs` the answers of an upload in
+// parts, and `s3/batch.rs` the answer of a DeleteObjects. `tags.rs` reads a
+// tag set of either service. This file reads the error document, finds the root element, and
 // walks the properties of an entry for the caller.
 //
 // An Azure page is read in this order. `page::check_body` checks the body is
@@ -22,12 +23,11 @@
 // the same way.
 
 pub(crate) mod azure;
-pub(crate) mod azure_blocks;
 pub(crate) mod decode;
 mod page;
 pub(crate) mod s3;
-pub(crate) mod s3_parts;
 pub(crate) mod scan;
+pub(crate) mod tags;
 
 pub(crate) use decode::decode_text;
 

@@ -12,23 +12,29 @@ use crate::listing::{
 };
 use crate::{
     AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, request_buffers, requested_condition, requested_range,
-    send_request, successful_result, text_of, transport_failure, unmapped_call_field,
-    unsupported_by_adapter, unsupported_by_crate, unsupported_response_fields,
+    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
+    requested_condition, requested_keys, requested_properties, requested_range, requested_tags,
+    send_request, served_range, successful_result, tags_value, text_of, transport_failure,
+    two_checksums_refused, unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_object_storage_crypto::{MD5_RUSTCRYPTO, SHA256_RUSTCRYPTO, wipe};
+use borink_object_storage_crypto::{
+    CRC32, CRC32C, CRC64, MD5_RUSTCRYPTO, SHA1_RUSTCRYPTO, SHA256_CHECKSUM_RUSTCRYPTO,
+    SHA256_RUSTCRYPTO, wipe,
+};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, CreateUploadHeadOutcome, ObjectProperty, Objects, Part, PartRef,
-    PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
-    PropertySet, Service, Session, SessionHeadOutcome,
+    self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
+    PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts,
+    PhysicalStagePart, PropertySet, Service, Session, SessionHeadOutcome,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    CommitHeadOutcome, DeleteHeadOutcome, DeleteKind, GetHeadOutcome, GetKind, ListEntry,
-    ListHeadOutcome, ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit,
-    PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, RequestedRange,
-    StageHeadOutcome, Timestamps, TransactionalChecksum, WriteOptions, layered,
+    ChecksumKind, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteKind,
+    DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
+    ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
+    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome,
+    RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+    WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -38,7 +44,11 @@ use std::cell::OnceCell;
 const MAX_PAGE_ENTRIES: usize = 1_000;
 
 fn error_result(exchange: &HttpExchange, status: u16) -> Value {
-    failed_result(status, s3::error_code(&exchange.body))
+    let kind = match s3::classify_error(&exchange.body, false) {
+        Classification::Classified(kind) => Some(kind),
+        _ => None,
+    };
+    failed_result(status, s3::error_code(&exchange.body), kind)
 }
 
 fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
@@ -78,10 +88,22 @@ impl<'a> Client<'a> {
         if let Some(objects) = self.session.get() {
             return Ok(Ok(*objects));
         }
-        let session = match open_session(&self.context, &self.objects)? {
+        let mut session = match open_session(&self.context, &self.objects)? {
             Ok(session) => session,
             Err(result) => return Ok(Err(result)),
         };
+        // A session whose expiration has passed signs nothing that S3
+        // takes, so ask for another, once.
+        let now = current_timestamps().unix();
+        if session
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+        {
+            session = match open_session(&self.context, &self.objects)? {
+                Ok(session) => session,
+                Err(result) => return Ok(Err(result)),
+            };
+        }
         let objects = match self.objects.with_session(session) {
             Ok(objects) => objects.with_signing_key(&current_timestamps()),
             Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
@@ -118,7 +140,6 @@ fn open_session(
     };
     let failed_status = match outcome {
         SessionHeadOutcome::Session { .. } => None,
-        SessionHeadOutcome::NotFound { .. } => Some(404),
         SessionHeadOutcome::NeedErrorBody(failure)
         | SessionHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
@@ -183,26 +204,16 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
 
     Ok(match outcome {
         GetHeadOutcome::Body { meta, .. } | GetHeadOutcome::Complete { meta } => {
-            // The crate reads these response headers from no head.
-            let unsupported_fields = unsupported_response_fields(&[
-                ("content_md5_base64", "Content-MD5"),
-                ("content_language", "Content-Language"),
-                ("content_disposition", "Content-Disposition"),
-                ("cache_control", "Cache-Control"),
-                ("storage_class", "x-amz-storage-class"),
-            ]);
             let mut value = json!({
                 "etag": text_of(meta.e_tag).unwrap_or_default(),
                 "metadata": metadata_from_headers(&exchange),
             });
-            if let Some(content_type) = text_of(meta.content_type) {
-                value["content_type"] = json!(content_type);
-            }
-            if let Some(content_encoding) = text_of(meta.content_encoding) {
-                value["content_encoding"] = json!(content_encoding);
-            }
-            if let Some(version) = text_of(meta.version) {
-                value["version"] = json!(version);
+            read_meta_fields(&mut value, &meta, "storage_class");
+            if let GetHeadOutcome::Body { body, .. } = outcome
+                && range != RequestedRange::Whole
+                && let Some(served) = served_range(&body)
+            {
+                value["content_range"] = json!(served);
             }
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
@@ -210,12 +221,17 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
                 value["body_base64"] = json!(STANDARD.encode(&exchange.body));
                 value["size"] = json!(exchange.body.len());
             }
-            let mut result = successful_result(value);
-            result["unsupported_fields"] = unsupported_fields;
-            result
+            successful_result(value)
         }
         GetHeadOutcome::NotModified { .. } => error_result(&exchange, 304),
         GetHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        // S3 answers a HEAD in a missing bucket with the bare 404 that it
+        // answers for a missing key, so which is missing is not known.
+        GetHeadOutcome::NotFound { kind: None } if kind == GetKind::Head => {
+            let mut result = error_result(&exchange, 404);
+            result["kind"] = json!("missing");
+            result
+        }
         GetHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         GetHeadOutcome::RangeNotSatisfiable { .. } => error_result(&exchange, 416),
         GetHeadOutcome::NeedErrorBody(failure) | GetHeadOutcome::ServiceFailure(failure) => {
@@ -226,22 +242,17 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
 }
 
 fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    if call.get("checksums").is_some() {
+        return Ok(two_checksums_refused());
+    }
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
     };
-    let checksum_algorithm = call.pointer("/checksum/algorithm").and_then(Value::as_str);
-    let checksum_value = call
-        .pointer("/checksum/value_base64")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let checksum = match checksum_algorithm {
+    // S3 takes every checksum that the crate has, as text or computed.
+    let checksum = match requested_checksum(call) {
         None => None,
-        Some("md5") => Some(TransactionalChecksum::Md5(checksum_value)),
-        Some(_) => {
-            return Ok(unsupported_by_crate(
-                "an S3 write carries no checksum but Content-MD5",
-            ));
-        }
+        Some(Some(checksum)) => Some(checksum),
+        Some(None) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
     };
 
     let metadata_pairs: Vec<MetadataPair<'_>> = call
@@ -257,6 +268,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
 
     let key = optional_text(call, "key").unwrap_or_default();
     let body = decode_base64_field(call, "body_base64")?;
+    let tags = requested_tags(call);
     let put_plan = PhysicalPut {
         key,
         condition,
@@ -264,6 +276,9 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         metadata: &metadata_pairs,
         options: WriteOptions {
             checksum,
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "storage_class"),
             ..WriteOptions::default()
         },
     };
@@ -309,7 +324,6 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
             successful_result(value)
         }
         PutHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
-        PutHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         PutHeadOutcome::NeedErrorBody(failure) | PutHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }
@@ -371,7 +385,16 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
 
 fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
-    let create_plan = PhysicalCreateUpload::new(key);
+    let tags = requested_tags(call);
+    let create_plan = PhysicalCreateUpload {
+        options: WriteOptions {
+            properties: requested_properties(call),
+            tags: &tags,
+            storage_class: optional_text(call, "storage_class"),
+            ..WriteOptions::default()
+        },
+        ..PhysicalCreateUpload::new(key)
+    };
 
     let now = current_timestamps();
     crate_step!(layered::s3::create_upload_requirements(
@@ -400,7 +423,6 @@ fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
     };
     let failed_status = match outcome {
         CreateUploadHeadOutcome::Created { .. } => None,
-        CreateUploadHeadOutcome::NotFound { .. } => Some(404),
         CreateUploadHeadOutcome::NeedErrorBody(failure)
         | CreateUploadHeadOutcome::ServiceFailure(failure) => Some(failure.status),
         _ => Some(exchange.status),
@@ -501,6 +523,7 @@ fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let commit_plan = PhysicalCommit {
         condition,
         condition_value,
+        size: call.get("object_size").and_then(Value::as_u64),
         ..PhysicalCommit::new(key)
     };
 
@@ -695,7 +718,6 @@ impl PageSource for Client<'_> {
         };
         let failed_status = match outcome {
             ListHeadOutcome::Page { .. } => None,
-            ListHeadOutcome::NotFound { .. } => Some(404),
             ListHeadOutcome::NeedErrorBody(failure) | ListHeadOutcome::ServiceFailure(failure) => {
                 Some(failure.status)
             }
@@ -981,17 +1003,46 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
 // reports any other field as unsupported.
 fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
     match operation {
-        "get" => &["key", "range", "if_match", "if_none_match"],
-        "head" => &["key", "if_match", "if_none_match"],
+        "get" => &[
+            "key",
+            "range",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+        ],
+        "head" => &[
+            "key",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+        ],
         "put" => &[
             "key",
             "body_base64",
             "if_match",
             "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
             "metadata",
             "checksum",
+            "checksums",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "storage_class",
         ],
-        "delete" => &["key", "if_match", "if_none_match"],
+        "delete" => &[
+            "key",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+        ],
         "list" => &["prefix", "page_size"],
         "list_page" => &[
             "prefix",
@@ -1001,11 +1052,30 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "page_size",
             "fetch_owner",
         ],
-        "s3.create_multipart" => &["key"],
+        "s3.create_multipart" => &[
+            "key",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "storage_class",
+        ],
         "s3.upload_part" => &["key", "upload_id", "part_number", "body_base64"],
-        "s3.complete_multipart" => &["key", "upload_id", "parts", "if_match", "if_none_match"],
+        "s3.complete_multipart" => &[
+            "key",
+            "upload_id",
+            "parts",
+            "if_match",
+            "if_none_match",
+            "object_size",
+        ],
         "s3.abort_multipart" => &["key", "upload_id"],
         "s3.list_parts" => &["key", "upload_id"],
+        "s3.put_tagging" => &["key", "tags"],
+        "s3.get_tagging" => &["key"],
+        "delete_many" => &["keys"],
         _ => &[],
     }
 }
@@ -1015,15 +1085,8 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
         "version" => Some("an S3 plan selects no version"),
-        "if_modified_since" | "if_unmodified_since" => Some("ConditionKind has no date conditions"),
-        "checksums" => Some("an S3 write carries no checksum but Content-MD5"),
-        "content_type"
-        | "content_encoding"
-        | "content_language"
-        | "content_disposition"
-        | "cache_control"
-        | "expires" => Some("PhysicalPut sets no content properties"),
-        "tags" | "tagging" | "storage_class" => Some("PhysicalPut sets no storage class or tags"),
+        "expires" => Some("ContentProperties carries no Expires"),
+        "tagging" => Some("Tag holds a tag as a key and a value"),
         _ => None,
     }
 }
@@ -1095,7 +1158,12 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let now = current_timestamps();
     let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO)
         .with_signing_key(&now)
-        .with_checksum(MD5_RUSTCRYPTO);
+        .with_checksum(MD5_RUSTCRYPTO)
+        .with_checksum(CRC64)
+        .with_checksum(CRC32)
+        .with_checksum(CRC32C)
+        .with_checksum(SHA1_RUSTCRYPTO)
+        .with_checksum(SHA256_CHECKSUM_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
     if operation == "s3.create_session" {
@@ -1126,6 +1194,134 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "s3.complete_multipart" => commit_parts(&client, call),
         "s3.abort_multipart" => abort_upload(&client, call),
         "s3.list_parts" => list_parts(&client, call),
+        "s3.put_tagging" => put_tagging(&client, call),
+        "s3.get_tagging" => get_tagging(&client, call),
+        "delete_many" => delete_many(&client, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
+}
+
+fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let tags = requested_tags(call);
+    let plan = PhysicalSetTags {
+        checksum: Some(ChecksumKind::Crc64),
+        ..PhysicalSetTags::new(key, &tags)
+    };
+    let now = current_timestamps();
+    crate_step!(layered::s3::put_tagging_requirements(
+        &client.objects,
+        &plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::put_tagging_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_put_tagging(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(&client.context, &request));
+    let outcome = match crate_step!(objects.accept_put_tagging_head(exchange.response_head())) {
+        UpdateHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_update_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    Ok(match outcome {
+        UpdateHeadOutcome::Updated => successful_result(json!({})),
+        UpdateHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
+        UpdateHeadOutcome::NeedErrorBody(failure) | UpdateHeadOutcome::ServiceFailure(failure) => {
+            error_result(&exchange, failure.status)
+        }
+        _ => error_result(&exchange, exchange.status),
+    })
+}
+
+fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let key = optional_text(call, "key").unwrap_or_default();
+    let now = current_timestamps();
+    crate_step!(layered::s3::get_tagging_requirements(
+        &client.objects,
+        key,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::get_tagging_requirements(objects, key, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_get_tagging(&mut request_bytes, &mut header_spans, key, &now));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+    let outcome = match crate_step!(objects.accept_get_tagging_head(exchange.response_head())) {
+        TagsHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_get_tagging_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        TagsHeadOutcome::Tags { .. } => None,
+        TagsHeadOutcome::NotFound { .. } => Some(404),
+        TagsHeadOutcome::NeedErrorBody(failure) | TagsHeadOutcome::ServiceFailure(failure) => {
+            Some(failure.status)
+        }
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(error_result(&exchange, status));
+    }
+    // AWS holds at most ten tags on an object.
+    let mut tags = [Tag::default(); 10];
+    let count = crate_step!(objects.fill_tags(&mut exchange.body, &mut tags));
+    Ok(successful_result(
+        json!({"tags": tags_value(&tags[..count])}),
+    ))
+}
+
+fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let keys = requested_keys(call);
+    let plan = PhysicalDeleteMany {
+        checksum: Some(ChecksumKind::Crc64),
+        ..PhysicalDeleteMany::new(&keys)
+    };
+    let now = current_timestamps();
+    crate_step!(layered::s3::delete_many_requirements(
+        &client.objects,
+        &plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::delete_many_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_delete_many(&mut request_bytes, &mut header_spans, &plan, &now));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+    let outcome = match crate_step!(objects.accept_delete_many_head(exchange.response_head())) {
+        DeleteManyHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_delete_many_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    let failed_status = match outcome {
+        DeleteManyHeadOutcome::Results { .. } => None,
+        DeleteManyHeadOutcome::NeedErrorBody(failure)
+        | DeleteManyHeadOutcome::ServiceFailure(failure) => Some(failure.status),
+        _ => Some(exchange.status),
+    };
+    if let Some(status) = failed_status {
+        return Ok(error_result(&exchange, status));
+    }
+    let mut results = vec![DeleteResult::default(); keys.len()];
+    let count = crate_step!(objects.fill_delete_results(&mut exchange.body, &mut results));
+    let mut deleted = Vec::new();
+    let mut errors = Vec::new();
+    for result in &results[..count] {
+        match result.code {
+            None => deleted.push(json!(result.key)),
+            Some(code) => errors.push(json!({"key": result.key, "code": code})),
+        }
+    }
+    Ok(successful_result(
+        json!({"deleted": deleted, "errors": errors}),
+    ))
 }

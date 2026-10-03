@@ -184,12 +184,12 @@ fn a_read_names_its_error_from_the_body_unless_it_is_a_head() {
     );
     let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchBucket</Code>\
         <Message>The specified bucket does not exist</Message></Error>";
-    assert_eq!(
+    // A missing bucket is a failure, never a missing object.
+    assert!(matches!(
         objects.accept_get_error_body(get, failure, body),
-        GetHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
+        GetHeadOutcome::ServiceFailure(failure)
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 
     // A redirect names the region in its body, and is reported as one.
     let GetHeadOutcome::NeedErrorBody(failure) =
@@ -199,7 +199,8 @@ fn a_read_names_its_error_from_the_body_unless_it_is_a_head() {
     };
     assert_eq!(failure.class, FailureClass::Redirect);
 
-    // A HEAD response has no body, so its outcome is final.
+    // A HEAD response has no body, so its outcome is final, and a missing
+    // bucket cannot be told from a missing key.
     let head_shape = PhysicalGet::head("k").shape();
     assert_eq!(
         objects.accept_get_head(head_shape, head(404, &[])),

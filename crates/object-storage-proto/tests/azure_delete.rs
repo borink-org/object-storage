@@ -184,23 +184,23 @@ fn removing_an_object_that_is_not_there_is_an_outcome_not_an_error() {
         })
     );
 
-    // With no code in the head, the body names it instead.
+    // With no code in the head, the body names it instead. A missing
+    // container is a failure, not a missing object.
     let unnamed = blobs
         .accept_delete_head(DeleteShape::default(), ResponseHead::new(404))
         .unwrap();
     let DeleteHeadOutcome::NeedErrorBody(failure) = unnamed else {
         panic!("unexpected outcome: {unnamed:?}");
     };
-    assert_eq!(
+    assert!(matches!(
         blobs.accept_delete_error_body(
             DeleteShape::default(),
             failure,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
-        DeleteHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
+        DeleteHeadOutcome::ServiceFailure(failure)
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 }
 
 #[test]

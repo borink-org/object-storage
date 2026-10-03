@@ -54,7 +54,6 @@ pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
             ..only(OutcomeKind::Done)
         },
         PutHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
-        PutHeadOutcome::NotFound { kind } => not_found(kind),
         PutHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         PutHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
         _ => only(OutcomeKind::Unsupported),
@@ -84,7 +83,6 @@ pub(crate) fn list_outcome(outcome: &ListHeadOutcome<'_>) -> Outcome {
             },
             ..only(OutcomeKind::Page)
         },
-        ListHeadOutcome::NotFound { kind } => not_found(kind),
         ListHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         ListHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
         _ => only(OutcomeKind::Unsupported),

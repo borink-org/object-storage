@@ -290,6 +290,8 @@ const _: () = {
     assert!(Condition::None as u16 == proto::ConditionKind::None as u16);
     assert!(Condition::IfMatch as u16 == proto::ConditionKind::IfMatch as u16);
     assert!(Condition::IfNoneMatch as u16 == proto::ConditionKind::IfNoneMatch as u16);
+    assert!(Condition::IfModifiedSince as u16 == proto::ConditionKind::IfModifiedSince as u16);
+    assert!(Condition::IfUnmodifiedSince as u16 == proto::ConditionKind::IfUnmodifiedSince as u16);
 
     assert!(DeleteKind::Object as u16 == proto::DeleteKind::Object as u16);
     assert!(DeleteKind::ObjectAndSnapshots as u16 == proto::DeleteKind::ObjectAndSnapshots as u16);

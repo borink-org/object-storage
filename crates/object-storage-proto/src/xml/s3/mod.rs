@@ -1,7 +1,7 @@
 // Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, in
 // one pass. `read_session` at the end reads the
-// answer to an S3 Express CreateSession. `s3_parts.rs` reads the answers of
-// an upload in parts.
+// answer to an S3 Express CreateSession. `parts.rs` reads the answers of
+// an upload in parts, and `batch.rs` the answer of a DeleteObjects.
 //
 // Each object is a `Contents` child of the root, with its properties beside
 // its key. Each group of keys is a `CommonPrefixes` child that holds one
@@ -13,15 +13,18 @@
 // every key is decoded, and the page is refused at its end if decoding
 // changed a key and the page never named the encoding.
 
-use super::decode::decode;
-use super::page::{
-    ListProperty, ListPropertySet, check_body, check_room, decode_value_in_place, end_decoded_key,
-    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
-};
-use super::scan::{Child, Scan, Span, fault, trim};
+pub(crate) mod batch;
+pub(crate) mod parts;
+
 use crate::layered::iso8601_ms;
 use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
+use crate::xml::decode::decode;
+use crate::xml::page::{
+    ListProperty, ListPropertySet, check_body, check_room, decode_value_in_place, end_decoded_key,
+    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
+};
+use crate::xml::scan::{Child, Scan, Span, fault, trim};
 use crate::{EntryKind, ListEntry, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";

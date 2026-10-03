@@ -271,16 +271,15 @@ fn a_success_announces_the_page_and_a_failure_names_the_error() {
         Ok(ListHeadOutcome::Page { expected_len: None })
     );
 
-    // A missing container is the one thing a listing does not find.
-    assert_eq!(
+    // A missing container is a failure, never an empty page.
+    assert!(matches!(
         blobs.accept_list_head(ResponseHead::from_headers(
             404,
             [("x-ms-error-code", b"ContainerNotFound".as_slice())]
         )),
-        Ok(ListHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        })
-    );
+        Ok(ListHeadOutcome::ServiceFailure(failure))
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 
     // A status that a listing never answers with is a fault, not an outcome.
     assert_eq!(
@@ -305,12 +304,11 @@ fn a_failure_without_a_code_header_is_finished_by_the_body() {
         panic!("a 404 with no code header needs the body");
     };
     assert_eq!(failure.kind, None);
-    assert_eq!(
-        blobs.accept_list_error_body(failure, b"<Error><Code>ContainerNotFound</Code></Error>",),
-        ListHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
+    assert!(matches!(
+        blobs.accept_list_error_body(failure, b"<Error><Code>ContainerNotFound</Code></Error>"),
+        ListHeadOutcome::ServiceFailure(failure)
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 }
 
 #[test]

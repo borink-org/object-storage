@@ -9,11 +9,11 @@
 use crate::Error;
 use crate::azure::{
     AzureNamespace, Blobs, Write, body_kind, named, names_failed_condition, push_metadata,
-    validate_key, validate_metadata, validate_options,
+    push_stored, validate_key, validate_metadata, validate_options,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, push_checksum,
-    push_condition, text_header, validate_condition,
+    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, missing,
+    push_checksum, push_condition, text_header, validate_condition,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::url::QueryValue;
@@ -255,12 +255,7 @@ impl<'a> Blobs<'a> {
         if content.len() > MAX_STAGE_LEN {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
-        validate_options(
-            &plan.options,
-            Write::Stage,
-            content.bytes().is_some(),
-            &self.checksums,
-        )?;
+        validate_options(&plan.options, Write::Stage, content.bytes().is_some(), self)?;
         let mut head = HeadWriter::new(buf, headers);
         let query = [
             Some(("comp", QueryValue::Literal("block"))),
@@ -347,7 +342,7 @@ impl<'a> Blobs<'a> {
         validate_block_key(plan.key, self.namespace)?;
         validate_condition(plan.condition, plan.condition_value)?;
         validate_metadata(plan.metadata)?;
-        validate_options(&plan.options, Write::Commit, true, &self.checksums)?;
+        validate_options(&plan.options, Write::Commit, true, self)?;
         // Azure does not check the length of the blocks it commits.
         if plan.size.is_some() {
             return Err(InvalidPlan::Option.into());
@@ -382,6 +377,7 @@ impl<'a> Blobs<'a> {
         if let Some(md5) = plan.options.declared_md5 {
             head.header("x-ms-blob-content-md5", |out| out.push(md5.as_bytes()));
         }
+        push_stored(&mut head, &plan.options);
         push_metadata(&mut head, plan.metadata);
         push_condition(&mut head, plan.condition, plan.condition_value);
         encoded_with_body(head, Method::Put, |out| write_block_list(out, blocks))
@@ -407,7 +403,7 @@ impl<'a> Blobs<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::azure_blocks::fill_blocks(body, into)
+        crate::xml::azure::blocks::fill_blocks(body, into)
     }
 
     /// Reads the head that answers a stage.
@@ -432,7 +428,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(StageHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -496,7 +492,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(CommitHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
                 status,
@@ -556,7 +552,7 @@ impl<'a> Blobs<'a> {
                 None,
                 head.request_id,
             ))),
-            404 => Ok(ListPartsHeadOutcome::NotFound { kind: named(&head) }),
+            404 => Ok(missing(&head, named(&head))),
             201..=299 => Err(ResponseFault::Status.into()),
             status if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(
                 failure(status, None, head.request_id),
@@ -594,12 +590,8 @@ const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
 fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
     Ok(ObjectMeta {
-        size: None,
-        e_tag: head.e_tag,
         last_modified: text_header(head.last_modified)?,
-        version: head.version,
-        content_encoding: head.content_encoding,
-        content_type: head.content_type,
+        ..meta_of(head)
     })
 }
 

@@ -180,10 +180,11 @@ typedef uint16_t borink_range_form;
 #endif // __cplusplus
 
 /**
- * The ETag precondition that a request carries.
+ * The precondition that a request carries.
  *
- * A request that carries one passes the entity tag as `condition_value`. A
- * request that carries none passes an empty `condition_value`.
+ * A request that carries one passes the entity tag or the HTTP date as
+ * `condition_value`. A request that carries none passes an empty
+ * `condition_value`.
  */
 enum borink_condition
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -202,6 +203,16 @@ enum borink_condition
      * The request succeeds only if the current ETag differs.
      */
     BORINK_CONDITION_IF_NONE_MATCH = 3,
+    /**
+     * The request succeeds only if the object changed after the HTTP date
+     * in `condition_value`.
+     */
+    BORINK_CONDITION_IF_MODIFIED_SINCE = 4,
+    /**
+     * The request succeeds only if the object has not changed since the
+     * HTTP date in `condition_value`.
+     */
+    BORINK_CONDITION_IF_UNMODIFIED_SINCE = 5,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -362,7 +373,8 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_COMPLETE = 2,
     /**
-     * The `If-None-Match` condition held, so Azure sent no body.
+     * The `If-None-Match` or `If-Modified-Since` condition held, so Azure
+     * sent no body.
      */
     BORINK_OUTCOME_KIND_NOT_MODIFIED = 3,
     /**
@@ -370,7 +382,8 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_PRECONDITION_FAILED = 4,
     /**
-     * The object or its container does not exist. Read `failure.kind`.
+     * The object does not exist. A missing container is `ServiceFailure`
+     * with `failure.kind` `NoSuchContainer`.
      */
     BORINK_OUTCOME_KIND_NOT_FOUND = 5,
     /**

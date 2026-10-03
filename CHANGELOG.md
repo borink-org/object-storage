@@ -27,9 +27,31 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - New variant `InvalidPlan::UploadId`, for an empty upload ID.
 - New variant `Method::Post`.
 - New variant `Error::Service`, for an error document that S3 sends as the body of a success, with the error it names. New variant `ErrorCode::Service` and new method `Error::class`, which says whether a retry can help.
+- Date conditions: new variants `ConditionKind::IfModifiedSince` and `ConditionKind::IfUnmodifiedSince`, whose `condition_value` is an HTTP date. A read that fails the first is `GetHeadOutcome::NotModified`. An S3 client for AWS refuses them on a write or a removal with `InvalidPlan::Condition`. The C ABI has `BORINK_CONDITION_IF_MODIFIED_SINCE` and `BORINK_CONDITION_IF_UNMODIFIED_SINCE`.
+- New fields `ResponseHead::content_md5`, `content_language`, `content_disposition`, `cache_control` and `storage_class`, and the same fields on `ObjectMeta`, which every read and write outcome fills. `storage_class` holds `x-amz-storage-class` on S3 and `x-ms-access-tier` on Azure.
+- Content properties, tags and storage classes on writes:
+  - New struct `ContentProperties`, with `Content-Type`, `Content-Encoding`, `Content-Language`, `Content-Disposition` and `Cache-Control`, and new struct `Tag`. A property is ASCII, except a `Content-Type` on a flat Azure account and a `Content-Type` or `Content-Disposition` on an S3 general purpose bucket, which may be UTF-8.
+  - New fields `WriteOptions::properties`, `tags` and `storage_class`, which a write of a whole object, an Azure commit and an S3 CreateMultipartUpload send. A stage, and an S3 commit, refuse them with `InvalidPlan::Option`.
+  - New field `s3::PhysicalCreateUpload::options`.
+  - New variants `InvalidPlan::ContentProperty` and `InvalidPlan::Tag`.
+- Tags and access tiers:
+  - New plan `PhysicalSetTags`, and new outcomes `UpdateHeadOutcome` and `TagsHeadOutcome`.
+  - Azure: new methods `Blobs::encode_set_tier`, `accept_set_tier_head`, `encode_set_tags`, `accept_set_tags_head`, `accept_update_error_body`, `encode_get_tags`, `accept_get_tags_head`, `accept_get_tags_error_body` and `fill_tags`, and functions `layered::set_tier_requirements`, `set_tags_requirements` and `get_tags_requirements`.
+  - S3: new methods `Objects::encode_put_tagging`, `accept_put_tagging_head`, `accept_update_error_body`, `encode_get_tagging`, `accept_get_tagging_head`, `accept_get_tagging_error_body` and `fill_tags`, and functions `layered::s3::put_tagging_requirements` and `get_tagging_requirements`.
+- Removals of several objects in one request:
+  - New plan `PhysicalDeleteMany`, new outcome `DeleteManyHeadOutcome`, and new variant `InvalidPlan::Keys`.
+  - Azure Blob Batch: new methods `Blobs::encode_delete_many`, `accept_delete_many_head`, `accept_delete_many_error_body` and `fill_delete_results`, new struct `azure::BatchResult`, constant `azure::MAX_BATCH_KEYS` and function `layered::delete_many_requirements`. `fill_delete_results` takes the plan and the head, reads the `multipart/mixed` answer strictly, and gives each key the `DeleteHeadOutcome` that a single Delete Blob would have, with the head and the body of its response.
+  - S3 DeleteObjects: the same methods on `s3::Objects`, new struct `s3::DeleteResult`, constant `s3::MAX_DELETE_KEYS` and function `layered::s3::delete_many_requirements`.
+- S3 checksums other than an MD5:
+  - New variants `TransactionalChecksum::Crc32`, `Crc32c`, `Sha1` and `Sha256`, and `ChecksumKind::Crc32`, `Crc32c`, `Sha1` and `Sha256`, which only S3 takes, as text or computed. An S3 write sends a CRC64 as `x-amz-checksum-crc64nvme`, big-endian, and each of these as its `x-amz-checksum-` header, signed. A part and a commit still take an MD5 alone, and Azure refuses the new kinds with `InvalidPlan::Option`.
+  - New constructors `Digest::crc32`, `crc32c`, `sha1` and `sha256`. `checksum::BASE64_LEN` is 44, the base64 of a SHA-256.
+  - `borink-object-storage-crypto`: new features `crc32`, `crc32c` and `sha1-rustcrypto`, with the providers `CRC32`, `CRC32C` and `SHA1_RUSTCRYPTO` over `Crc32`, `Crc32c` and `Sha1RustCrypto`. `Sha256RustCrypto` and `Sha256Minimal` implement `Checksum` as well, as the providers `SHA256_CHECKSUM_RUSTCRYPTO` and `SHA256_CHECKSUM_MINIMAL`.
 
 ### Changed
 
+- A missing container or bucket is never `NotFound`. Every outcome reports it as `ServiceFailure` with `ServiceErrorKind::NoSuchContainer`, so `NotFound` means only that the object, or on S3 the upload, is missing. A reader that maps `NotFound { .. }` to "absent" no longer reads a mistyped container as empty. One case stays ambiguous: S3 answers a HEAD in a missing bucket with the same bare 404 as a missing key, which is `GetHeadOutcome::NotFound { kind: None }`.
+- The outcomes of requests that name no object lose their `NotFound` variant, because their 404 can only mean the container: `PutHeadOutcome`, `ListHeadOutcome`, `s3::CreateUploadHeadOutcome` and `s3::SessionHeadOutcome`. The C ABI no longer answers a write or a listing with `NotFound`.
+- Both crates declare `rust-version = "1.97"` instead of `1.97.1`, so a toolchain of any 1.97 release builds them.
 - Listings group keys at any delimiter. The field `PhysicalList::delimited` is now `delimiter`, which holds the delimiter text. `PhysicalList::from_shape` plans `/` for a delimited `ListShape`.
 - An S3 client for a directory bucket refuses a listing prefix that does not end in `/` with `InvalidPlan::Prefix`, and sends a metadata value that a general purpose bucket would not store as given as an RFC 2047 encoded word, instead of refusing it.
 - `s3::Objects::fill_listing`, `fill_listing_with` and `read_session` return `Error::Service` for a body that is an error document, instead of `Error::Response` with `ResponseFault::Body`. So do the new `read_upload_id` and `fill_parts`.

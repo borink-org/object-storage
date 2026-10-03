@@ -22,17 +22,25 @@
 //! # Ok::<(), borink_object_storage_proto::Error>(())
 //! ```
 //!
-//! [`CRC64`] and [`MD5_RUSTCRYPTO`] are the checksum providers of this
-//! crate. Each is behind a feature, and neither is on by default, so you
-//! link the one you register and nothing else. The `crc64` feature builds
-//! [`Crc64`], this crate's own CRC-64/NVME. The `md5-rustcrypto` feature
-//! builds [`Md5RustCrypto`], an adapter for RustCrypto's `md-5`.
+//! Each checksum provider of this crate is behind a feature, and none is on
+//! by default, so you link the one you register and nothing else:
+//!
+//! - `crc64` builds [`Crc64`], this crate's own CRC-64/NVME, as [`CRC64`].
+//! - `md5-rustcrypto` builds [`Md5RustCrypto`], an adapter for
+//!   RustCrypto's `md-5`, as [`MD5_RUSTCRYPTO`].
+//! - `crc32` and `crc32c` build [`Crc32`] and [`Crc32c`], this crate's own,
+//!   as [`CRC32`] and [`CRC32C`]. Only S3 takes them.
+//! - `sha1-rustcrypto` builds [`Sha1RustCrypto`], an adapter for RustCrypto's
+//!   `sha1`, as [`SHA1_RUSTCRYPTO`]. Only S3 takes it.
+//! - The SHA-256 providers below are checksum providers as well, as
+//!   [`SHA256_CHECKSUM_RUSTCRYPTO`] and [`SHA256_CHECKSUM_MINIMAL`]. Only S3
+//!   takes them.
 //!
 //! To register an implementation of your own, implement [`Checksum`] for it
 //! and pass the type to [`provider`].
 //!
-//! Neither checksum is cryptography. Both detect corruption in transit and
-//! nothing else.
+//! A checksum here detects corruption in transit and nothing else, a SHA-1
+//! or a SHA-256 included.
 //!
 //! # SHA-256
 //!
@@ -84,19 +92,29 @@ use borink_object_storage_proto::checksum::{
 };
 use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
 
+#[cfg(any(feature = "crc32", feature = "crc32c"))]
+mod crc32;
 #[cfg(feature = "crc64")]
 mod crc64;
 #[cfg(feature = "md5-rustcrypto")]
 mod md5_rustcrypto;
+#[cfg(feature = "sha1-rustcrypto")]
+mod sha1_rustcrypto;
 #[cfg(feature = "sha256-minimal")]
 mod sha256_minimal;
 #[cfg(feature = "sha256-rustcrypto")]
 mod sha256_rustcrypto;
 
+#[cfg(feature = "crc32")]
+pub use crc32::Crc32;
+#[cfg(feature = "crc32c")]
+pub use crc32::Crc32c;
 #[cfg(feature = "crc64")]
 pub use crc64::Crc64;
 #[cfg(feature = "md5-rustcrypto")]
 pub use md5_rustcrypto::Md5RustCrypto;
+#[cfg(feature = "sha1-rustcrypto")]
+pub use sha1_rustcrypto::Sha1RustCrypto;
 #[cfg(feature = "sha256-minimal")]
 pub use sha256_minimal::Sha256Minimal;
 #[cfg(feature = "sha256-rustcrypto")]
@@ -109,6 +127,28 @@ pub const CRC64: ChecksumProvider = provider::<Crc64>();
 /// [`Md5RustCrypto`] as a provider.
 #[cfg(feature = "md5-rustcrypto")]
 pub const MD5_RUSTCRYPTO: ChecksumProvider = provider::<Md5RustCrypto>();
+
+/// [`Crc32`] as a provider.
+#[cfg(feature = "crc32")]
+pub const CRC32: ChecksumProvider = provider::<Crc32>();
+
+/// [`Crc32c`] as a provider.
+#[cfg(feature = "crc32c")]
+pub const CRC32C: ChecksumProvider = provider::<Crc32c>();
+
+/// [`Sha1RustCrypto`] as a provider.
+#[cfg(feature = "sha1-rustcrypto")]
+pub const SHA1_RUSTCRYPTO: ChecksumProvider = provider::<Sha1RustCrypto>();
+
+/// [`Sha256RustCrypto`] as a checksum provider, for an S3 write that sends
+/// `x-amz-checksum-sha256`.
+#[cfg(feature = "sha256-rustcrypto")]
+pub const SHA256_CHECKSUM_RUSTCRYPTO: ChecksumProvider = provider::<Sha256RustCrypto>();
+
+/// [`Sha256Minimal`] as a checksum provider, for an S3 write that sends
+/// `x-amz-checksum-sha256`.
+#[cfg(feature = "sha256-minimal")]
+pub const SHA256_CHECKSUM_MINIMAL: ChecksumProvider = provider::<Sha256Minimal>();
 
 /// [`Sha256RustCrypto`] as a provider.
 #[cfg(feature = "sha256-rustcrypto")]

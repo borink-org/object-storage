@@ -8,8 +8,8 @@
 
 use crate::azure::{BlockRef, PhysicalListBlocks, PhysicalStageBlock};
 use crate::{
-    Blobs, Error, Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-    RequestSize, Result, Timestamps,
+    Blobs, Error, Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
+    PhysicalList, PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
@@ -137,6 +137,75 @@ pub fn commit_blocks_requirements(
             .encode_commit_blocks(&mut [], &mut [], plan, blocks, now)
             .map(drop),
     )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_tier`] needs.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the request cannot become an Azure
+/// request, unchanged from [`Blobs::encode_set_tier`], which reports it again.
+pub fn set_tier_requirements(
+    blobs: &Blobs<'_>,
+    key: &str,
+    tier: &str,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_set_tier(&mut [], &mut [], key, tier, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_tags`] needs, the body included.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_set_tags`], which reports it again.
+pub fn set_tags_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSetTags<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_set_tags(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_delete_many`] needs, the body included.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_delete_many`], which reports it again.
+pub fn delete_many_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalDeleteMany<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_delete_many(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_get_tags`] needs.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the request cannot become an Azure
+/// request, unchanged from [`Blobs::encode_get_tags`], which reports it again.
+pub fn get_tags_requirements(
+    blobs: &Blobs<'_>,
+    key: &str,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_get_tags(&mut [], &mut [], key, now).map(drop))
 }
 
 /// Returns the byte and header-slot capacities that
@@ -385,8 +454,8 @@ pub mod s3 {
         PhysicalListParts, PhysicalStagePart,
     };
     use crate::{
-        Payload, PhysicalCommit, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut,
-        RequestSize, Result, Timestamps,
+        Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
+        PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
     };
 
     /// Returns the byte and header-slot capacities that
@@ -613,6 +682,66 @@ pub mod s3 {
         required(
             objects
                 .encode_list_parts(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_put_tagging`] needs, the body included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if the plan
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_put_tagging`], which reports it again.
+    pub fn put_tagging_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalSetTags<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_put_tagging(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_delete_many`] needs, the body included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if the plan
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_delete_many`], which reports it again.
+    pub fn delete_many_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalDeleteMany<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_delete_many(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_get_tagging`] needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if the key
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_get_tagging`], which reports it again.
+    pub fn get_tagging_requirements(
+        objects: &Objects<'_>,
+        key: &str,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_get_tagging(&mut [], &mut [], key, now)
                 .map(drop),
         )
     }

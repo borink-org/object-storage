@@ -155,6 +155,7 @@ fn full_meta() -> CoreObjectMeta<'static> {
         version: Some(&VALUES[35..44]),
         content_encoding: Some(&VALUES[44..]),
         content_type: Some(b"text/plain; charset=utf-8"),
+        ..CoreObjectMeta::default()
     }
 }
 
@@ -290,11 +291,7 @@ fn every_write_and_removal_outcome_crosses_whole() {
         OutcomeKind::Accepted as u16
     );
 
-    for kind in [None, Some(ServiceErrorKind::NoSuchContainer)] {
-        assert_eq!(
-            kind_of(put_outcome(&PutHeadOutcome::NotFound { kind }).failure.kind),
-            kind
-        );
+    for kind in [None, Some(ServiceErrorKind::NotFound)] {
         assert_eq!(
             kind_of(
                 delete_outcome(&DeleteHeadOutcome::NotFound { kind })
@@ -329,15 +326,12 @@ fn every_write_and_removal_outcome_crosses_whole() {
 // operation because one twin answers all three.
 #[test]
 fn every_outcome_kind_says_something_of_its_own() {
-    for kind in [
-        ServiceErrorKind::NotFound,
-        ServiceErrorKind::NoSuchContainer,
-    ] {
-        let outcome = GetHeadOutcome::NotFound { kind: Some(kind) };
-        assert_eq!(text(&get_outcome(&outcome)), outcome.to_string());
-    }
-    // A head that named neither leaves both open, and one twin answers for
-    // three operations, so the sentence says both.
+    let outcome = GetHeadOutcome::NotFound {
+        kind: Some(ServiceErrorKind::NotFound),
+    };
+    assert_eq!(text(&get_outcome(&outcome)), outcome.to_string());
+    // A head that named no error leaves both open: S3 answers a HEAD in a
+    // missing bucket with the same bare 404 as a missing key.
     assert_eq!(
         text(&get_outcome(&GetHeadOutcome::NotFound { kind: None })),
         "the object or its container does not exist"
@@ -534,7 +528,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
         conditions += usize::from(condition_kind(repr).is_ok());
         entries += usize::from(proto::EntryKind::from_discriminant(repr).is_some());
     }
-    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 3, 3));
+    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 5, 3));
 
     // A listing plan carries no enum, and an absent count is not a zero one.
     for max_results in [None, Some(1000)] {
@@ -746,7 +740,7 @@ fn every_error_crosses_as_a_status() {
     }
     // The five codes that carry no inner value, every variant of the three
     // inner enums, and a service error that names no known error.
-    assert_eq!(checked, 5 + 27 + 4 + 11 + 1);
+    assert_eq!(checked, 5 + 30 + 4 + 11 + 1);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)
@@ -1210,7 +1204,7 @@ fn a_body_that_is_not_a_page_is_refused() {
 }
 
 // A listing whose head named no error is finished by the body, exactly as a
-// read is.
+// read is. A listing names no object, so a missing container is a failure.
 #[test]
 fn a_listing_failure_is_finished_by_the_body() {
     let session = session();
@@ -1224,7 +1218,7 @@ fn a_listing_failure_is_finished_by_the_body() {
     let body = b"<Error><Code>ContainerNotFound</Code></Error>";
     // SAFETY: the failure and the body are live for the call.
     let finished = unsafe { borink_finish_list_error_body(&session, &outcome.failure, lent(body)) };
-    assert_eq!(finished.kind, OutcomeKind::NotFound as u16);
+    assert_eq!(finished.kind, OutcomeKind::ServiceFailure as u16);
     assert_eq!(
         kind_of(finished.failure.kind),
         Some(ServiceErrorKind::NoSuchContainer)

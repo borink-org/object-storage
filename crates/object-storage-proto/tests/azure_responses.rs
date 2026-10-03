@@ -58,6 +58,7 @@ fn accepts_a_whole_object_read() {
             // surfaced rather than rejected.
             content_encoding: Some(b"gzip"),
             content_type: Some(b"text/plain; charset=utf-8"),
+            ..ObjectMeta::default()
         }
     );
     assert_eq!(
@@ -241,15 +242,14 @@ fn a_416_carries_the_object_size_when_azure_states_it() {
 
 #[test]
 fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
-    // A 404 that names the container separates it from a missing object.
+    // A 404 that names the container is a failure, never a missing object.
     let mut missing = ResponseHead::new(404);
     missing.error_code = Some(b"ContainerNotFound");
-    assert_eq!(
+    assert!(matches!(
         accept(GetShape::default(), missing),
-        Ok(GetHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        })
-    );
+        Ok(GetHeadOutcome::ServiceFailure(failure))
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
     // A code this crate does not know is still decisive: Azure repeats the
     // header in the body, so there is nothing more to read.
     missing.error_code = Some(b"FutureAzureCode");
@@ -379,16 +379,15 @@ fn a_head_without_a_code_asks_for_the_error_body() {
 fn the_error_body_names_an_error_the_head_left_out() {
     let blobs = blobs();
     let missing = need_error_body(&blobs, 404);
-    assert_eq!(
+    assert!(matches!(
         blobs.accept_get_error_body(
             GetShape::default(),
             missing,
             b"<Error><Code>ContainerNotFound</Code></Error>"
         ),
-        GetHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NoSuchContainer)
-        }
-    );
+        GetHeadOutcome::ServiceFailure(failure)
+            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
+    ));
 
     // A code that arrives in the body refines the category, as a code in the
     // header would have.

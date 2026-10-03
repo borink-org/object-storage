@@ -33,3 +33,18 @@ impl Sha256 for Sha256Minimal {
         hmac_sha256::HMAC::mac(message, key)
     }
 }
+
+// The same SHA-256 as the checksum of a write's content, which S3 checks as
+// `x-amz-checksum-sha256`.
+impl crate::Checksum for Sha256Minimal {
+    const KIND: borink_object_storage_proto::checksum::ChecksumKind =
+        borink_object_storage_proto::checksum::ChecksumKind::Sha256;
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    fn finish(self) -> borink_object_storage_proto::checksum::Digest {
+        borink_object_storage_proto::checksum::Digest::sha256(self.0.finalize())
+    }
+}

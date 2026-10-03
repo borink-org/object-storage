@@ -72,6 +72,11 @@ pub enum RequestedRange {
     #[default]
     Whole,
     /// A half-open interval that excludes its end.
+    ///
+    /// The end must be after the start. The encoding methods refuse an empty
+    /// or inverted range with
+    /// [`InvalidPlan::Range`](crate::InvalidPlan::Range), so you need no check
+    /// of your own: S3 would answer one with the whole object.
     Bounded {
         /// The first byte that the plan requests.
         start: u64,
@@ -119,7 +124,12 @@ impl RequestedRange {
     }
 }
 
-/// The ETag precondition that a plan carries.
+/// The precondition that a plan carries.
+///
+/// The plan's `condition_value` holds what the precondition compares
+/// against: an entity tag, or `*`, for the first two, and an HTTP date for
+/// the last two, as [`Timestamps::rfc1123`](crate::Timestamps::rfc1123)
+/// writes it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -131,6 +141,17 @@ pub enum ConditionKind {
     IfMatch = 2,
     /// The request succeeds only if the current ETag differs.
     IfNoneMatch = 3,
+    /// The request succeeds only if the object changed after the date.
+    ///
+    /// A read that fails it is answered `304 Not Modified`. S3 takes it on a
+    /// read alone.
+    IfModifiedSince = 4,
+    /// The request succeeds only if the object has not changed since the
+    /// date.
+    ///
+    /// A request that fails it is answered `412 Precondition Failed`. S3
+    /// takes it on a read alone.
+    IfUnmodifiedSince = 5,
 }
 
 impl ConditionKind {
@@ -143,8 +164,21 @@ impl ConditionKind {
             1 => Self::None,
             2 => Self::IfMatch,
             3 => Self::IfNoneMatch,
+            4 => Self::IfModifiedSince,
+            5 => Self::IfUnmodifiedSince,
             _ => return None,
         })
+    }
+
+    // Whether a read that fails the condition is answered 304, rather than
+    // 412.
+    pub(crate) const fn fails_as_not_modified(self) -> bool {
+        matches!(self, Self::IfNoneMatch | Self::IfModifiedSince)
+    }
+
+    // Whether the condition compares a date rather than an entity tag.
+    pub(crate) const fn is_date(self) -> bool {
+        matches!(self, Self::IfModifiedSince | Self::IfUnmodifiedSince)
     }
 }
 
@@ -195,11 +229,12 @@ pub struct PhysicalGet<'h> {
     pub key: &'h str,
     /// Whether the plan asks for bytes or for metadata.
     pub kind: GetKind,
-    /// The byte range that the plan requests.
+    /// The byte range that the plan requests. An empty range is refused:
+    /// see [`RequestedRange::Bounded`].
     pub range: RequestedRange,
     /// The precondition that the plan carries.
     pub condition: ConditionKind,
-    /// The ETag that the precondition compares against.
+    /// What the precondition compares against: see [`ConditionKind`].
     ///
     /// This must be present if `condition` is not [`ConditionKind::None`], and
     /// absent if it is.
@@ -298,8 +333,25 @@ pub struct MetadataPair<'h> {
 pub enum TransactionalChecksum<'h> {
     /// The base64 of the MD5 of the content, sent as `Content-MD5`.
     Md5(&'h str),
-    /// The base64 of the CRC64 of the content, sent as `x-ms-content-crc64`.
+    /// The base64 of the CRC-64/NVME of the content.
+    ///
+    /// Azure takes it as `x-ms-content-crc64`, of the eight bytes in
+    /// little-endian order, as [`Digest::crc64`](crate::Digest::crc64) holds
+    /// them. S3 takes it as `x-amz-checksum-crc64nvme`, of the eight bytes
+    /// in big-endian order.
     Crc64(&'h str),
+    /// The base64 of the CRC32 of the content, sent as
+    /// `x-amz-checksum-crc32`. S3 only.
+    Crc32(&'h str),
+    /// The base64 of the CRC32C of the content, sent as
+    /// `x-amz-checksum-crc32c`. S3 only.
+    Crc32c(&'h str),
+    /// The base64 of the SHA-1 of the content, sent as
+    /// `x-amz-checksum-sha1`. S3 only.
+    Sha1(&'h str),
+    /// The base64 of the SHA-256 of the content, sent as
+    /// `x-amz-checksum-sha256`. S3 only.
+    Sha256(&'h str),
     /// A checksum of this kind that the encoder computes and sends.
     ///
     /// The encoder computes it with the provider of that kind that
@@ -314,6 +366,135 @@ pub enum TransactionalChecksum<'h> {
     Compute(crate::checksum::ChecksumKind),
 }
 
+/// The properties that describe an object's content, which a write stores
+/// and a read returns in the response head.
+///
+/// Each is one HTTP header value: ASCII, with no control character and no
+/// space at either end. A write refuses any other value with
+/// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty),
+/// except where the service returns UTF-8 as it got it: a `Content-Type` on
+/// an Azure account of [`AzureNamespace::Flat`](crate::AzureNamespace::Flat),
+/// and a `Content-Type` and a `Content-Disposition` on an S3 general purpose
+/// bucket. For a file name outside ASCII elsewhere, write the RFC 6266 form
+/// `attachment; filename*=UTF-8''%C3%A9.txt`, which is ASCII.
+/// Azure takes them as `x-ms-blob-content-type`, `x-ms-blob-cache-control`
+/// and so on, and S3 as the headers that name them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentProperties<'h> {
+    /// `Content-Type`.
+    pub content_type: Option<&'h str>,
+    /// `Content-Encoding`, such as `gzip`. Neither service encodes the
+    /// content: it stores the bytes as sent.
+    pub content_encoding: Option<&'h str>,
+    /// `Content-Language`.
+    pub content_language: Option<&'h str>,
+    /// `Content-Disposition`.
+    pub content_disposition: Option<&'h str>,
+    /// `Cache-Control`.
+    pub cache_control: Option<&'h str>,
+}
+
+impl<'h> ContentProperties<'h> {
+    /// Creates a set that stores no property.
+    pub const fn new() -> Self {
+        Self {
+            content_type: None,
+            content_encoding: None,
+            content_language: None,
+            content_disposition: None,
+            cache_control: None,
+        }
+    }
+
+    // The properties that the set holds, each with its lowercase header
+    // name, in the order of those names.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'static str, &'h str)> {
+        [
+            ("cache-control", self.cache_control),
+            ("content-disposition", self.content_disposition),
+            ("content-encoding", self.content_encoding),
+            ("content-language", self.content_language),
+            ("content-type", self.content_type),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| Some((name, value?)))
+    }
+
+    // Whether the set holds any property.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+/// One tag of an object: a key and a value, which the service indexes.
+///
+/// Both services take at most ten tags on an object, a key of 1 to 128
+/// characters and a value of at most 256. Azure takes ASCII letters and
+/// digits, space and `+-./:=_` in both. S3 takes any letter or digit, space
+/// and `+-=._:/@`. A write refuses a tag outside those rules, and two tags
+/// with the same key, with [`InvalidPlan::Tag`](crate::InvalidPlan::Tag). A
+/// client of [`s3::Service::Compatible`](crate::s3::Service::Compatible)
+/// refuses only an empty key and a repeated one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tag<'h> {
+    /// The key.
+    pub key: &'h str,
+    /// The value.
+    pub value: &'h str,
+}
+
+/// A request that replaces the tags of an object: an Azure Set Blob Tags, or
+/// an S3 PutObjectTagging.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysicalSetTags<'h> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'h str,
+    /// The tags that the object then holds, and no others. An empty list
+    /// removes every tag.
+    pub tags: &'h [Tag<'h>],
+    /// A checksum of the request body for the encoder to compute and send,
+    /// with the provider of that kind that the client registered.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+impl<'h> PhysicalSetTags<'h> {
+    /// Creates a plan that gives `key` these tags, with no checksum.
+    pub const fn new(key: &'h str, tags: &'h [Tag<'h>]) -> Self {
+        Self {
+            key,
+            tags,
+            checksum: None,
+        }
+    }
+}
+
+/// A removal of several objects in one request: an Azure Blob Batch of
+/// Delete Blob requests, or an S3 DeleteObjects.
+///
+/// The service removes each object on its own, and answers with a result for
+/// each: see [`DeleteManyHeadOutcome`](crate::DeleteManyHeadOutcome).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysicalDeleteMany<'h> {
+    /// The keys of the objects to remove, each under the rules of
+    /// [`PhysicalGet::key`]. Azure takes at most 256 in one request, and
+    /// S3 1,000.
+    pub keys: &'h [&'h str],
+    /// A checksum of the request body for the encoder to compute and send,
+    /// with the provider of that kind that the client registered. AWS takes
+    /// a removal of several objects only with one.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+impl<'h> PhysicalDeleteMany<'h> {
+    /// Creates a plan that removes these objects, with no checksum.
+    pub const fn new(keys: &'h [&'h str]) -> Self {
+        Self {
+            keys,
+            checksum: None,
+        }
+    }
+}
+
 /// The options of a write.
 ///
 /// [`PhysicalPut::options`], [`PhysicalCommit::options`],
@@ -324,7 +505,8 @@ pub enum TransactionalChecksum<'h> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriteOptions<'h> {
     /// A checksum of the content, which the service compares against the
-    /// bytes it receives. S3 takes an MD5 alone.
+    /// bytes it receives. Azure takes an MD5 or a CRC64, and so does a part
+    /// on S3. A whole-object write to S3 takes any of the kinds.
     ///
     /// The content of a commit is its list of parts, so on a commit this is a
     /// checksum of that text.
@@ -339,6 +521,23 @@ pub struct WriteOptions<'h> {
     /// [`InvalidPlan::Option`](crate::InvalidPlan::Option), and so is any S3
     /// write that sets it.
     pub declared_md5: Option<&'h str>,
+    /// The content properties to store with the object.
+    ///
+    /// A write of a whole object takes them, and so does the write that
+    /// names the object of a write in parts: an Azure commit, or an S3
+    /// CreateMultipartUpload. Any other write refuses them with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub properties: ContentProperties<'h>,
+    /// The tags to store with the object, under the rules of [`Tag`]. The
+    /// writes that take [`Self::properties`] take these.
+    pub tags: &'h [Tag<'h>],
+    /// The storage class on S3, such as `STANDARD_IA`, or the access tier on
+    /// Azure, such as `Cool`. The writes that take [`Self::properties`]
+    /// take this.
+    ///
+    /// The client sends any one header value, and the service refuses a name
+    /// it does not have.
+    pub storage_class: Option<&'h str>,
 }
 
 impl<'h> WriteOptions<'h> {
@@ -349,6 +548,9 @@ impl<'h> WriteOptions<'h> {
         Self {
             checksum: None,
             declared_md5: None,
+            properties: ContentProperties::new(),
+            tags: &[],
+            storage_class: None,
         }
     }
 }
@@ -1082,6 +1284,8 @@ mod tests {
             ConditionKind::None,
             ConditionKind::IfMatch,
             ConditionKind::IfNoneMatch,
+            ConditionKind::IfModifiedSince,
+            ConditionKind::IfUnmodifiedSince,
         ] {
             assert_eq!(
                 ConditionKind::from_discriminant(condition as u16),
@@ -1119,7 +1323,7 @@ mod tests {
 /// not listed here with [`ListEntry::properties`].
 ///
 /// The page reader matches each of these by its whole start tag, in
-/// `xml/azure.rs`. A property added here is added to that match too, and a
+/// `xml/azure/mod.rs`. A property added here is added to that match too, and a
 /// test there checks that every one of these is matched.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

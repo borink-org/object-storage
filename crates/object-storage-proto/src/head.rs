@@ -32,6 +32,16 @@ pub struct ResponseHead<'h> {
     pub content_encoding: Option<&'h [u8]>,
     /// The value of the `Content-Type` header, without an inferred default.
     pub content_type: Option<&'h [u8]>,
+    /// The value of the `Content-MD5` header.
+    pub content_md5: Option<&'h [u8]>,
+    /// The value of the `Content-Language` header.
+    pub content_language: Option<&'h [u8]>,
+    /// The value of the `Content-Disposition` header.
+    pub content_disposition: Option<&'h [u8]>,
+    /// The value of the `Cache-Control` header.
+    pub cache_control: Option<&'h [u8]>,
+    /// The value of the `x-amz-storage-class` or `x-ms-access-tier` header.
+    pub storage_class: Option<&'h [u8]>,
     /// The value of the `ETag` header.
     pub e_tag: Option<&'h [u8]>,
     /// The value of the `Last-Modified` header.
@@ -93,6 +103,18 @@ impl<'h> ResponseHead<'h> {
             &mut self.content_encoding
         } else if name.eq_ignore_ascii_case("content-type") {
             &mut self.content_type
+        } else if name.eq_ignore_ascii_case("content-md5") {
+            &mut self.content_md5
+        } else if name.eq_ignore_ascii_case("content-language") {
+            &mut self.content_language
+        } else if name.eq_ignore_ascii_case("content-disposition") {
+            &mut self.content_disposition
+        } else if name.eq_ignore_ascii_case("cache-control") {
+            &mut self.cache_control
+        } else if name.eq_ignore_ascii_case("x-amz-storage-class")
+            || name.eq_ignore_ascii_case("x-ms-access-tier")
+        {
+            &mut self.storage_class
         } else if name.eq_ignore_ascii_case("etag") {
             &mut self.e_tag
         } else if name.eq_ignore_ascii_case("last-modified") {

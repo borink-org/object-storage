@@ -157,6 +157,18 @@ pub enum InvalidPlan {
     /// Pass the ID that [`s3::Objects::read_upload_id`](crate::s3::Objects::read_upload_id)
     /// read, unchanged.
     UploadId = 27,
+    /// A content property or the storage class is not one HTTP header
+    /// value that the service stores as given.
+    ///
+    /// See [`ContentProperties`](crate::ContentProperties).
+    ContentProperty = 28,
+    /// A tag is one that the service refuses, or two tags have the same key.
+    ///
+    /// See [`Tag`](crate::Tag).
+    Tag = 29,
+    /// The list of keys to remove is empty, or longer than the service
+    /// takes in one request.
+    Keys = 30,
 }
 
 impl InvalidPlan {
@@ -193,6 +205,9 @@ impl InvalidPlan {
             Self::MetadataTooLarge => "the metadata is larger than the service accepts",
             Self::Delimiter => "the listing delimiter is invalid",
             Self::UploadId => "the upload ID is empty",
+            Self::ContentProperty => "invalid content property",
+            Self::Tag => "invalid tag",
+            Self::Keys => "invalid list of keys",
         }
     }
 
@@ -228,6 +243,9 @@ impl InvalidPlan {
             25 => Self::MetadataTooLarge,
             26 => Self::Delimiter,
             27 => Self::UploadId,
+            28 => Self::ContentProperty,
+            29 => Self::Tag,
+            30 => Self::Keys,
             _ => return None,
         })
     }
