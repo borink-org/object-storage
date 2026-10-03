@@ -317,6 +317,11 @@
 //!   a general purpose bucket answers with. A directory bucket refuses a
 //!   commit whose part numbers are not consecutive, such as 1 and 3, with
 //!   `InvalidPartOrder`. The client sends such a commit as given.
+//! - A copy, [`Objects::encode_copy`] or [`Objects::encode_stage_part_copy`],
+//!   is authorized by your own credentials, not by a session's: AWS refuses
+//!   the credentials of a session for it. Encode it with the client that
+//!   you asked for the session, which signs it for `s3express` too. A
+//!   client that holds a session refuses it with [`InvalidPlan::Option`].
 //!
 //! # Content that is not signed
 //!
@@ -332,27 +337,31 @@ use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum, check_base64_l
 use crate::common::{
     ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
     failure, finish_with_body, meta_of, parse_content_range, push_checksum, text_header,
-    validate_checksum, validate_condition, validate_properties, validate_tags, write_range,
-    write_tags,
+    validate_checksum, validate_condition, validate_properties, validate_revision, validate_tags,
+    write_range, write_tags,
 };
 use crate::encoding::{self, rfc2047};
-use crate::request::{ByteSink, HeadWriter, U64Decimal};
+use crate::http::PlainHttp;
+use crate::request::{ByteSink, HeadWriter, HeaderValue, Pass, U64Decimal};
 use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
-use crate::url::{self, Parameter, QueryValue};
+use crate::url::{self, Parameter};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalList, PhysicalPut, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Tag, Timestamps, TransactionalChecksum, WireRequest,
-    WriteOptions,
+    Classification, ConditionKind, ConditionValue, CopySource, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
+    Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 mod batch;
+mod copy;
 mod parts;
+mod restore;
 mod tags;
 
 pub use batch::{DeleteResult, MAX_DELETE_KEYS};
+pub use copy::PhysicalStagePartCopy;
 pub use parts::{
     CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
     PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
@@ -521,7 +530,7 @@ pub const MAX_METADATA_LEN: usize = 2048;
 /// An S3 endpoint, bucket name and region, all borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct Bucket<'a> {
-    scheme: &'a str,
+    scheme: Scheme,
     authority: &'a str,
     name: &'a str,
     region: &'a str,
@@ -541,8 +550,8 @@ impl<'a> Bucket<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTP
-    /// or HTTPS origin.
+    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTPS
+    /// origin. An `http://` origin is refused: see [`Self::new_allowing_http`].
     ///
     /// Returns [`Error::InvalidContainer`] if `name` is not a bucket name that
     /// `service` takes. [`Service`] states the rules of each.
@@ -556,16 +565,50 @@ impl<'a> Bucket<'a> {
         region: &'a str,
         service: Service,
     ) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint) {
+        Self::create(endpoint, name, region, service, PlainHttp::Refused)
+    }
+
+    /// Creates a bucket reference as [`Self::new`] does, from an HTTP origin
+    /// as well as an HTTPS one, such as a local emulator's
+    /// `http://127.0.0.1:9000`.
+    ///
+    /// Without TLS, every request travels in clear, with any session token
+    /// it carries. SigV4 never sends the secret, but anyone on the path reads
+    /// the requests. Use this for a local emulator or a network you trust,
+    /// never for a service on the internet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], except that an `http://` origin is taken.
+    pub fn new_allowing_http(
+        endpoint: &'a str,
+        name: &'a str,
+        region: &'a str,
+        service: Service,
+    ) -> Result<Self> {
+        Self::create(endpoint, name, region, service, PlainHttp::Allowed)
+    }
+
+    fn create(
+        endpoint: &'a str,
+        name: &'a str,
+        region: &'a str,
+        service: Service,
+        plain: PlainHttp,
+    ) -> Result<Self> {
+        if !crate::http::valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
-        let Some((scheme, authority)) = endpoint.split_once("://") else {
-            return Err(Error::InvalidEndpoint);
+        let (scheme, authority) = match endpoint.split_once("://") {
+            Some(("http", authority)) => (Scheme::Http, authority),
+            Some(("https", authority)) => (Scheme::Https, authority),
+            _ => return Err(Error::InvalidEndpoint),
         };
         // An HTTP client leaves the default port out of the `host` header,
         // and the signature must cover what the client sends.
-        let default_port = if scheme == "https" { ":443" } else { ":80" };
-        let authority = authority.strip_suffix(default_port).unwrap_or(authority);
+        let authority = authority
+            .strip_suffix(scheme.default_port())
+            .unwrap_or(authority);
         if authority.is_empty() {
             return Err(Error::InvalidEndpoint);
         }
@@ -661,6 +704,31 @@ impl<'a> Bucket<'a> {
     }
 }
 
+// The scheme of an endpoint, which decides its default port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    // The port that a client leaves out of the `host` header, as an
+    // authority writes it.
+    const fn default_port(self) -> &'static str {
+        match self {
+            Self::Http => ":80",
+            Self::Https => ":443",
+        }
+    }
+}
+
 /// The SHA-256 of the content of a write, which the request signs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -713,6 +781,12 @@ pub enum ObjectProperty {
     /// between the tags of the `RestoreStatus` element. Read what it holds
     /// with [`Metadata::new`](crate::Metadata::new).
     RestoreStatus,
+    /// The version that an entry of a listing of versions names. Read it
+    /// for any entry with [`ListEntry::version`].
+    VersionId,
+    /// Whether that version is the latest, `true` or `false`. Read it for
+    /// any entry with [`ListEntry::is_current_version`].
+    IsLatest,
 }
 
 impl ObjectProperty {
@@ -723,6 +797,8 @@ impl ObjectProperty {
         Self::ChecksumType,
         Self::Owner,
         Self::RestoreStatus,
+        Self::VersionId,
+        Self::IsLatest,
     ];
 
     /// How many properties there are, which is the most a set can hold.
@@ -736,6 +812,8 @@ impl ObjectProperty {
             Self::ChecksumType => "ChecksumType",
             Self::Owner => "Owner",
             Self::RestoreStatus => "RestoreStatus",
+            Self::VersionId => "VersionId",
+            Self::IsLatest => "IsLatest",
         }
     }
 
@@ -749,6 +827,8 @@ impl ObjectProperty {
             2 => Self::ChecksumType,
             3 => Self::Owner,
             4 => Self::RestoreStatus,
+            5 => Self::VersionId,
+            6 => Self::IsLatest,
             _ => return None,
         })
     }
@@ -978,28 +1058,41 @@ pub(crate) struct Signed<'p> {
     pub(crate) query: &'p [Parameter<'p>],
     pub(crate) range: RequestedRange,
     pub(crate) condition: ConditionKind,
-    pub(crate) condition_value: Option<&'p [u8]>,
+    pub(crate) condition_value: Option<ConditionValue<'p>>,
     // Further signed headers, with lowercase names.
     pub(crate) headers: &'p [(&'p str, &'p [u8])],
     pub(crate) metadata: &'p [MetadataPair<'p>],
     pub(crate) content_sha256: &'p [u8],
     // The tags of a write, signed as `x-amz-tagging`.
     pub(crate) tags: &'p [Tag<'p>],
+    // The source of a copy, signed with its condition.
+    pub(crate) copy: Option<SignedCopy<'p>>,
+}
+
+// The source of a copy, signed as `x-amz-copy-source`, and the bytes of it
+// that an UploadPartCopy copies, as `x-amz-copy-source-range`.
+#[derive(Clone, Copy)]
+pub(crate) struct SignedCopy<'p> {
+    pub(crate) source: CopySource<'p>,
+    pub(crate) range: RequestedRange,
 }
 
 // Where the value of a signed header comes from.
 #[derive(Clone, Copy)]
-enum HeaderValue<'a> {
+enum SignedValue<'a> {
     Bytes(&'a [u8]),
     Host,
     Range,
     Date,
     Tags,
+    CopySource,
+    CopyRange,
+    Condition(ConditionValue<'a>),
 }
 
 #[derive(Clone, Copy)]
 enum Header<'a> {
-    Fixed(&'a str, HeaderValue<'a>),
+    Fixed(&'a str, SignedValue<'a>),
     Meta(&'a MetadataPair<'a>),
 }
 
@@ -1078,10 +1171,11 @@ impl<'a> Objects<'a> {
             GetKind::Bytes => Method::Get,
             GetKind::Head => Method::Head,
         };
+        let query = [version_parameter(get.revision)];
         let signed = Signed {
             method,
             key: Some(get.key),
-            query: &[],
+            query: &query,
             headers: &[],
             range: get.range,
             condition: get.condition,
@@ -1089,10 +1183,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, method, Payload::Slice(&[]))
     }
 
@@ -1145,13 +1240,13 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_put(put, content, hash, &self.checksums, self.bucket.service)?;
-        let dry = buf.is_empty();
-        let content_sha256 = self.content_sha256(hash, content, dry);
+        let pass = Pass::of(buf);
+        let content_sha256 = self.content_sha256(hash, content, pass);
         let mut checksum = [0; CHECKSUM_TEXT_LEN];
         let checksum = self.signed_checksum(
             put.options.checksum,
             |sum| sum.update(content.bytes().unwrap_or_default()),
-            dry,
+            pass,
             &mut checksum,
         );
         let (stored, count) = stored_headers(&put.options, checksum);
@@ -1166,9 +1261,10 @@ impl<'a> Objects<'a> {
             metadata: put.metadata,
             content_sha256: content_sha256.as_bytes(),
             tags: put.options.tags,
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         self.push_content(&mut head, content, put.options.checksum);
         encoded(head, Method::Put, content)
     }
@@ -1204,10 +1300,11 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete, self.bucket.service)?;
+        let query = [version_parameter(delete.revision)];
         let signed = Signed {
             method: Method::Delete,
             key: Some(delete.key),
-            query: &[],
+            query: &query,
             headers: &[],
             range: RequestedRange::Whole,
             condition: delete.condition,
@@ -1215,10 +1312,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
@@ -1248,7 +1346,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Get,
             key: None,
-            query: &[Some(("session", QueryValue::Literal("")))],
+            query: &[url::literal("session", "")],
             headers: &[],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -1256,10 +1354,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -1342,8 +1441,7 @@ impl<'a> Objects<'a> {
     {
         let credentials =
             Credentials::new(session.key_id, session.secret, self.credentials.wipe())?
-                .with_session_token(session.token)?
-                .for_s3_session();
+                .with_s3_session_token(session.token)?;
         Ok(Objects {
             credentials,
             signing_key: None,
@@ -1351,29 +1449,29 @@ impl<'a> Objects<'a> {
         })
     }
 
-    // Writes the URL and every signed header. A dry run writes a signature
+    // Writes the URL and every signed header. A measuring pass writes a signature
     // of zeros, which is as long as a real one.
     pub(crate) fn write_head(
         &self,
         head: &mut HeadWriter<'_>,
         signed: &Signed<'_>,
-        dry: bool,
+        pass: Pass,
         now: &Timestamps,
     ) {
-        let signature = if dry {
+        let signature = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             self.signature(signed, now)
         };
         head.url(|out| {
-            out.push(self.bucket.scheme.as_bytes());
+            out.push(self.bucket.scheme.as_str().as_bytes());
             out.push(b"://");
             self.bucket.write_host(out);
             self.bucket.write_path(out, signed.key);
             url::write_query_in_url(out, signed.query);
         });
         let token = self.token();
-        head.header("authorization", |out| {
+        head.header_with("authorization", |out| {
             out.push(sigv4::ALGORITHM.as_bytes());
             out.push(b" Credential=");
             out.push(self.credentials.key_id().as_bytes());
@@ -1386,13 +1484,16 @@ impl<'a> Objects<'a> {
         });
         for header in ordered_headers(signed, token) {
             match header {
-                Header::Fixed(_, HeaderValue::Host) => {}
-                Header::Fixed(name, value) => head.header(name, |out| match value {
-                    HeaderValue::Bytes(bytes) => out.push(bytes),
-                    HeaderValue::Range => write_range(out, signed.range),
-                    HeaderValue::Date => out.push(now.iso8601().as_bytes()),
-                    HeaderValue::Tags => write_tags(out, signed.tags),
-                    HeaderValue::Host => {}
+                Header::Fixed(_, SignedValue::Host) => {}
+                Header::Fixed(name, value) => head.header_with(name, |out| match value {
+                    SignedValue::Bytes(bytes) => out.push(bytes),
+                    SignedValue::Condition(value) => value.write_to(out),
+                    SignedValue::Range => write_range(out, signed.range),
+                    SignedValue::Date => out.push(now.iso8601().as_bytes()),
+                    SignedValue::Tags => write_tags(out, signed.tags),
+                    SignedValue::CopySource => self.write_copy_source(out, signed),
+                    SignedValue::CopyRange => write_copy_range(out, signed),
+                    SignedValue::Host => {}
                 }),
                 Header::Meta(pair) => head.header_parts(
                     |out| {
@@ -1407,26 +1508,37 @@ impl<'a> Objects<'a> {
         }
     }
 
-    // The session token and the header that carries it.
-    fn token(&self) -> Option<(&'static str, &'a str)> {
-        self.credentials
-            .session_token()
-            .map(|token| (self.credentials.token_header(), token))
+    // The value of `x-amz-copy-source`: the source's bucket, or the client's
+    // own, the key encoded as a path, and the version.
+    fn write_copy_source(&self, out: &mut dyn ByteSink, signed: &Signed<'_>) {
+        let Some(copy) = signed.copy else { return };
+        out.push(b"/");
+        out.push(copy.source.container.unwrap_or(self.bucket.name).as_bytes());
+        out.push(b"/");
+        for part in url::encode_object_key(copy.source.key) {
+            out.push(part);
+        }
+        url::write_query_in_url(out, &[version_parameter(copy.source.revision)]);
     }
 
-    // The text of `x-amz-content-sha256` for `content`. A dry run returns no
+    // The session token and the header that carries it.
+    fn token(&self) -> Option<(&'static str, &'a str)> {
+        self.credentials.token().header()
+    }
+
+    // The text of `x-amz-content-sha256` for `content`. A measuring pass returns no
     // request, so it does not read the content: the digest is the same
     // length whatever it is.
     pub(crate) fn content_sha256(
         &self,
         hash: PayloadHash,
         content: Payload<'_>,
-        dry: bool,
+        pass: Pass,
     ) -> ContentSha256 {
         match hash {
             PayloadHash::Unsigned => ContentSha256::Unsigned,
             PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
-            PayloadHash::Compute if dry => ContentSha256::Hex([b'0'; 64]),
+            PayloadHash::Compute if pass == Pass::Measure => ContentSha256::Hex([b'0'; 64]),
             PayloadHash::Compute => ContentSha256::Hex(encoding::hex(
                 &self.sha256.hash(content.bytes().unwrap_or_default()),
             )),
@@ -1442,9 +1554,7 @@ impl<'a> Objects<'a> {
         content: Payload<'_>,
         checksum: Option<TransactionalChecksum<'_>>,
     ) {
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(content.len()).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
         let md5 = checksum.filter(|checksum| {
             matches!(
                 checksum,
@@ -1458,13 +1568,13 @@ impl<'a> Objects<'a> {
 
     // The `x-amz-checksum-` header of a write and its value, written into
     // `into`, for a checksum other than an MD5. `content` feeds the content
-    // to a computed checksum. A dry run computes nothing: the text is as
+    // to a computed checksum. A measuring pass computes nothing: the text is as
     // long whatever it is.
     pub(crate) fn signed_checksum<'x>(
         &self,
         checksum: Option<TransactionalChecksum<'x>>,
         content: impl FnOnce(&mut Sum),
-        dry: bool,
+        pass: Pass,
         into: &'x mut [u8; CHECKSUM_TEXT_LEN],
     ) -> Option<(&'static str, &'x [u8])> {
         Some(match checksum? {
@@ -1477,7 +1587,9 @@ impl<'a> Objects<'a> {
             TransactionalChecksum::Compute(kind) => {
                 let len = kind.digest_len();
                 let mut bytes = [0; 32];
-                if !dry && let Some(provider) = &self.checksums[kind.slot()] {
+                if pass == Pass::Write
+                    && let Some(provider) = &self.checksums[kind.slot()]
+                {
                     let mut sum = provider.start();
                     content(&mut sum);
                     bytes[..len].copy_from_slice(sum.finish().as_bytes());
@@ -1547,12 +1659,19 @@ impl<'a> Objects<'a> {
             write_header_name(out, header);
             out.push(b":");
             match header {
-                Header::Fixed(_, HeaderValue::Bytes(bytes)) => write_canonical_value(out, bytes),
-                Header::Fixed(_, HeaderValue::Host) => self.bucket.write_host(out),
-                Header::Fixed(_, HeaderValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, HeaderValue::Date) => out.push(now.iso8601().as_bytes()),
+                Header::Fixed(_, SignedValue::Bytes(bytes)) => write_canonical_value(out, bytes),
+                Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(tag))) => {
+                    write_canonical_value(out, tag);
+                }
+                // An HTTP date has no space at either end, nor a run of them.
+                Header::Fixed(_, SignedValue::Condition(value)) => value.write_to(out),
+                Header::Fixed(_, SignedValue::Host) => self.bucket.write_host(out),
+                Header::Fixed(_, SignedValue::Range) => write_range(out, signed.range),
+                Header::Fixed(_, SignedValue::Date) => out.push(now.iso8601().as_bytes()),
                 // The encoded form holds no space, so it is its canonical form.
-                Header::Fixed(_, HeaderValue::Tags) => write_tags(out, signed.tags),
+                Header::Fixed(_, SignedValue::Tags) => write_tags(out, signed.tags),
+                Header::Fixed(_, SignedValue::CopySource) => self.write_copy_source(out, signed),
+                Header::Fixed(_, SignedValue::CopyRange) => write_copy_range(out, signed),
                 Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
                     write_metadata_value(out, pair.value, self.bucket.service)
                 }
@@ -1785,30 +1904,48 @@ impl<'a> Objects<'a> {
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
         validate_list(list, self.bucket.service)?;
+        // An empty prefix is no parameter at all.
+        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
+        // Validation matched the kind of marker to the listing.
+        let (key_marker, version_marker) = match list.marker {
+            Some(ListMarker::Version { key, version }) => (Some(key), version),
+            _ => (None, None),
+        };
+        let token = list.marker.and_then(ListMarker::text);
         // SigV4 signs the parameters in the order of their names. With
         // `encoding-type=url`, a key that XML cannot carry still arrives.
-        let query = [
-            list.marker
-                .map(|marker| ("continuation-token", QueryValue::Encoded(marker.as_bytes()))),
-            list.delimiter
-                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
-            Some(("encoding-type", QueryValue::Literal("url"))),
-            list.include
-                .contains(ListInclude::OWNER)
-                .then_some(("fetch-owner", QueryValue::Literal("true"))),
-            Some(("list-type", QueryValue::Literal("2"))),
-            list.max_results
-                .map(|max| ("max-keys", QueryValue::Number(max))),
-            (!list.prefix.is_empty())
-                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.start_after
-                .filter(|key| !key.is_empty())
-                .map(|key| ("start-after", QueryValue::Encoded(key.as_bytes()))),
+        let versions = [
+            url::encoded("delimiter", list.delimiter),
+            url::literal("encoding-type", "url"),
+            url::encoded("key-marker", key_marker),
+            url::number("max-keys", list.max_results),
+            url::encoded("prefix", prefix),
+            url::encoded("version-id-marker", version_marker),
+            url::literal("versions", ""),
         ];
+        let objects = [
+            url::encoded("continuation-token", token),
+            url::encoded("delimiter", list.delimiter),
+            url::literal("encoding-type", "url"),
+            url::literal("fetch-owner", "true")
+                .filter(|_| list.include.contains(ListInclude::OWNER)),
+            url::literal("list-type", "2"),
+            url::number("max-keys", list.max_results),
+            url::encoded("prefix", prefix),
+            url::encoded(
+                "start-after",
+                list.start_after.filter(|key| !key.is_empty()),
+            ),
+        ];
+        let query: &[Parameter<'_>] = if list.include.contains(ListInclude::VERSIONS) {
+            &versions
+        } else {
+            &objects
+        };
         let signed = Signed {
             method: Method::Get,
             key: None,
-            query: &query,
+            query,
             headers: &[],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -1816,10 +1953,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -1990,21 +2128,38 @@ fn ordered_headers<'s>(
     signed: &'s Signed<'s>,
     token: Option<(&'static str, &'s str)>,
 ) -> impl Iterator<Item = Header<'s>> {
-    let mut fixed = [Header::Fixed("", HeaderValue::Host); 16];
+    let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
     let mut count = 0;
     let entries = [
-        Some(("host", HeaderValue::Host)),
+        Some(("host", SignedValue::Host)),
         Some((
             "x-amz-content-sha256",
-            HeaderValue::Bytes(signed.content_sha256),
+            SignedValue::Bytes(signed.content_sha256),
         )),
-        Some(("x-amz-date", HeaderValue::Date)),
-        token.map(|(name, token)| (name, HeaderValue::Bytes(token.as_bytes()))),
-        (signed.range != RequestedRange::Whole).then_some(("range", HeaderValue::Range)),
+        Some(("x-amz-date", SignedValue::Date)),
+        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
+        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
         condition_header(signed.condition)
             .zip(signed.condition_value)
-            .map(|(name, value)| (name, HeaderValue::Bytes(value))),
-        (!signed.tags.is_empty()).then_some(("x-amz-tagging", HeaderValue::Tags)),
+            .map(|(name, value)| (name, SignedValue::Condition(value))),
+        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
+        signed
+            .copy
+            .map(|_| ("x-amz-copy-source", SignedValue::CopySource)),
+        signed
+            .copy
+            .filter(|copy| copy.range != RequestedRange::Whole)
+            .map(|_| ("x-amz-copy-source-range", SignedValue::CopyRange)),
+        signed.copy.and_then(|copy| {
+            let name = match copy.source.condition {
+                ConditionKind::None => return None,
+                ConditionKind::IfMatch => "x-amz-copy-source-if-match",
+                ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
+                ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
+                ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
+            };
+            Some((name, SignedValue::Condition(copy.source.condition_value?)))
+        }),
     ]
     .into_iter()
     .flatten()
@@ -2012,7 +2167,7 @@ fn ordered_headers<'s>(
         signed
             .headers
             .iter()
-            .map(|(name, value)| (*name, HeaderValue::Bytes(value))),
+            .map(|(name, value)| (*name, SignedValue::Bytes(value))),
     );
     for (name, value) in entries {
         let mut at = count;
@@ -2196,7 +2351,25 @@ fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
         _ if get.kind == GetKind::Head => return Err(InvalidPlan::RangedHead.into()),
         _ => {}
     }
+    validate_revision(get.revision, false)?;
     validate_condition(get.condition, get.condition_value)
+}
+
+// The value of `x-amz-copy-source-range`, which names its last byte as
+// `Range` does.
+fn write_copy_range(out: &mut dyn ByteSink, signed: &Signed<'_>) {
+    if let Some(copy) = signed.copy {
+        write_range(out, copy.range);
+    }
+}
+
+// The query parameter that names a version, or none for the object as it is
+// now. Validation refused a snapshot.
+pub(crate) fn version_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
+    match revision? {
+        Revision::Version(id) => url::encoded("versionId", id),
+        Revision::Snapshot(_) => None,
+    }
 }
 
 fn validate_put(
@@ -2334,7 +2507,7 @@ pub(crate) fn stored_headers<'a>(
 // Checks the condition of a write: a whole object, or a commit of parts.
 pub(crate) fn validate_write_condition(
     condition: ConditionKind,
-    value: Option<&[u8]>,
+    value: Option<ConditionValue<'_>>,
     service: Service,
 ) -> Result<()> {
     validate_condition(condition, value)?;
@@ -2345,7 +2518,9 @@ pub(crate) fn validate_write_condition(
         Service::Compatible => false,
     };
     if aws
-        && (condition.is_date() || (condition == ConditionKind::IfNoneMatch && value != Some(b"*")))
+        && (condition.is_date()
+            || (condition == ConditionKind::IfNoneMatch
+                && value != Some(ConditionValue::ETag(b"*"))))
     {
         return Err(InvalidPlan::Condition.into());
     }
@@ -2357,6 +2532,7 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
     if delete.kind != DeleteKind::Object {
         return Err(InvalidPlan::Option.into());
     }
+    validate_revision(delete.revision, false)?;
     // AWS removes on `If-Match` alone.
     let if_match_only = match service {
         Service::Aws | Service::AwsDirectory => true,
@@ -2376,9 +2552,16 @@ fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> 
 // A prefix is not a key, so `validate_key` does not apply. S3 takes any
 // number of entries, zero included.
 fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
-    // S3 hands out no empty continuation token.
-    if list.marker.is_some_and(str::is_empty) {
-        return Err(InvalidPlan::Marker.into());
+    // A listing continues from the kind of marker that its pages hand out,
+    // and S3 hands out no empty one: a version marker names a key.
+    let versions = list.include.contains(ListInclude::VERSIONS);
+    match list.marker {
+        None => {}
+        Some(ListMarker::Text(token)) if !versions && !token.is_empty() => {}
+        Some(ListMarker::Version { key, version })
+            if versions && !key.is_empty() && version.is_none_or(|version| !version.is_empty()) => {
+        }
+        Some(_) => return Err(InvalidPlan::Marker.into()),
     }
     // A general purpose bucket groups keys at any text. A directory bucket
     // groups them at `/` alone, lists only at a prefix that ends in it, and
@@ -2395,8 +2578,19 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
     if slash_only && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
         return Err(InvalidPlan::Prefix.into());
     }
-    if list.include.contains(ListInclude::METADATA) {
+    // S3 keeps no snapshots, and lists no metadata.
+    if list
+        .include
+        .intersects(ListInclude::METADATA | ListInclude::SNAPSHOTS)
+    {
         return Err(InvalidPlan::Option.into());
+    }
+    if list.include.contains(ListInclude::VERSIONS) {
+        // A directory bucket keeps no versions, and a ListObjectVersions
+        // starts at its markers alone.
+        if slash_only || list.start_after.is_some_and(|key| !key.is_empty()) {
+            return Err(InvalidPlan::Option.into());
+        }
     }
     Ok(())
 }

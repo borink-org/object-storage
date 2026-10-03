@@ -14,7 +14,7 @@ const WEEKDAYS: [&[u8; 3]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri",
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
-const MAX_UNIX_SECONDS: u64 = 253_402_300_799;
+pub(crate) const MAX_UNIX_SECONDS: u64 = 253_402_300_799;
 
 impl Timestamps {
     /// Creates a timestamp from seconds since the Unix epoch.

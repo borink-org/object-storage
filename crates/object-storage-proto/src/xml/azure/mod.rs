@@ -15,7 +15,9 @@ use crate::xml::page::{
     values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, Tag, fault, trim};
-use crate::{BlobProperty, EntryKind, ListEntry, Listing, PropertySet, PropertyValues, Result};
+use crate::{
+    BlobProperty, EntryKind, ListEntry, ListMarker, Listing, PropertySet, PropertyValues, Result,
+};
 
 const ROOT: &[u8] = b"EnumerationResults";
 
@@ -769,7 +771,7 @@ fn read_root_children_into<'b>(
                 check_room(entries.held, room)?;
                 return Ok(Listing {
                     filled: entries.built,
-                    next_marker,
+                    next_marker: next_marker.map(ListMarker::Text),
                 });
             }
         }

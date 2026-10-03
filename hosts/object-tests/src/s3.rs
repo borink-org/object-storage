@@ -11,11 +11,13 @@ use crate::listing::{
     list_page,
 };
 use crate::{
-    AdapterContext, AdapterError, HttpExchange, current_timestamps, decode_base64_field,
-    failed_result, optional_text, read_meta_fields, request_buffers, requested_checksum,
-    requested_condition, requested_keys, requested_properties, requested_range, requested_tags,
-    send_request, served_range, successful_result, tags_value, text_of, transport_failure,
-    two_checksums_refused, unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, current_timestamps,
+    decode_base64_field, failed_result, optional_text, read_body_fields, read_meta_fields,
+    request_buffers, requested_checksum, requested_condition, requested_keys, requested_metadata,
+    requested_properties, requested_range, requested_restore, requested_revision, requested_source,
+    requested_source_range, requested_tags, restore_value, send_request, send_request_with,
+    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{
@@ -25,16 +27,16 @@ use borink_object_storage_crypto::{
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
     PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts,
-    PhysicalStagePart, PropertySet, Service, Session, SessionHeadOutcome,
+    PhysicalStagePart, PhysicalStagePartCopy, PropertySet, Service, Session, SessionHeadOutcome,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, Classification, CommitHeadOutcome, DeleteHeadOutcome, DeleteKind,
-    DeleteManyHeadOutcome, GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome,
-    ListPartsHeadOutcome, Metadata, MetadataPair, Payload, PhysicalCommit, PhysicalDelete,
-    PhysicalDeleteMany, PhysicalGet, PhysicalList, PhysicalPut, PhysicalSetTags, PutHeadOutcome,
-    RequestedRange, StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
-    WriteOptions, layered,
+    ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
+    DeleteKind, DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry,
+    ListHeadOutcome, ListInclude, ListMarker, ListPartsHeadOutcome, Metadata, Payload,
+    PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
+    PhysicalPut, PhysicalSetTags, PutHeadOutcome, RequestedRange, RestoreHeadOutcome, Revision,
+    StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -177,6 +179,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
         range,
         condition,
         condition_value,
+        revision: requested_revision(call),
     };
 
     let now = current_timestamps();
@@ -191,7 +194,12 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
     ));
     let request =
         crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
-    let exchange = transport_step!(send_request(&client.context, &request));
+    let exchange = transport_step!(send_request_with(
+        &client.context,
+        &request,
+        None,
+        BodyRead::of(call)
+    ));
 
     let head_outcome =
         crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
@@ -218,8 +226,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
             if kind == GetKind::Head {
                 value["size"] = json!(meta.size.unwrap_or(0));
             } else {
-                value["body_base64"] = json!(STANDARD.encode(&exchange.body));
-                value["size"] = json!(exchange.body.len());
+                read_body_fields(&mut value, &exchange);
             }
             successful_result(value)
         }
@@ -255,19 +262,10 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         Some(None) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
     };
 
-    let metadata_pairs: Vec<MetadataPair<'_>> = call
-        .get("metadata")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-        .map(|(name, value)| MetadataPair {
-            name,
-            value: value.as_str().unwrap_or_default(),
-        })
-        .collect();
+    let metadata_pairs = requested_metadata(call);
 
     let key = optional_text(call, "key").unwrap_or_default();
-    let body = decode_base64_field(call, "body_base64")?;
+    let body = CallBody::of(call)?;
     let tags = requested_tags(call);
     let put_plan = PhysicalPut {
         key,
@@ -282,29 +280,40 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
             ..WriteOptions::default()
         },
     };
-    let payload = Payload::Slice(&body);
+    let payload = body.payload();
+    // The encoder hashes content that it holds, and a generated body goes
+    // unsigned, as the adapter writes it only as it sends it.
+    let payload_hash = match body {
+        CallBody::Held(_) => PayloadHash::Compute,
+        CallBody::Generated { .. } => PayloadHash::Unsigned,
+    };
 
     let now = current_timestamps();
     crate_step!(layered::s3::put_requirements(
         &client.objects,
         &put_plan,
         payload,
-        PayloadHash::Compute,
+        payload_hash,
         &now
     ));
     let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::put_requirements(objects, &put_plan, payload, PayloadHash::Compute, &now)
+        layered::s3::put_requirements(objects, &put_plan, payload, payload_hash, &now)
     ));
     let request = crate_step!(objects.encode_put(
         &mut request_bytes,
         &mut header_spans,
         &put_plan,
         payload,
-        PayloadHash::Compute,
+        payload_hash,
         &now
     ));
-    let exchange = transport_step!(send_request(&client.context, &request));
+    let exchange = transport_step!(send_request_with(
+        &client.context,
+        &request,
+        Some(&body),
+        BodyRead::Hold
+    ));
 
     let head_outcome =
         crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
@@ -343,6 +352,7 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         kind: DeleteKind::Object,
         condition,
         condition_value,
+        revision: requested_revision(call),
     };
 
     let now = current_timestamps();
@@ -492,6 +502,138 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
             error_result(&exchange, failure.status)
         }
         _ => error_result(&exchange, exchange.status),
+    })
+}
+
+fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(unsupported_by_crate(
+            "PhysicalCopy carries one condition on the target",
+        ));
+    };
+    let Some(source) = requested_source(call, "source_bucket") else {
+        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    };
+    let (metadata, tags) = (requested_metadata(call), requested_tags(call));
+    let plan = PhysicalCopy {
+        condition,
+        condition_value,
+        // A call that names no metadata or no tags keeps the source's.
+        metadata: call.get("metadata").map(|_| metadata.as_slice()),
+        tags: call.get("tags").map(|_| tags.as_slice()),
+        options: WriteOptions {
+            properties: requested_properties(call),
+            storage_class: optional_text(call, "storage_class"),
+            ..WriteOptions::default()
+        },
+        ..PhysicalCopy::new(optional_text(call, "key").unwrap_or_default(), source)
+    };
+
+    let now = current_timestamps();
+    // AWS authorizes a copy by the caller's own credentials, never those of
+    // a session.
+    let objects = &client.objects;
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::copy_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_copy(&mut request_bytes, &mut header_spans, &plan, &now));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let shape = plan.shape();
+    let (head, body) = exchange.head_and_body();
+    let outcome = match crate_step!(objects.accept_copy_head(shape, head)) {
+        CopyHeadOutcome::NeedResultBody { .. } => {
+            crate_step!(objects.accept_copy_body(shape, head, body))
+        }
+        CopyHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_copy_error_body(shape, failure, body)
+        }
+        outcome => outcome,
+    };
+
+    // S3 can refuse a copy under status 200, which the result reports. The
+    // outcome borrows the body, so the status of a failure is taken first.
+    let copied = match outcome {
+        CopyHeadOutcome::Copied { meta } => {
+            let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
+            if let Some(version) = text_of(meta.version) {
+                value["version"] = json!(version);
+            }
+            Ok(value)
+        }
+        CopyHeadOutcome::PreconditionFailed => Err(Some(412)),
+        CopyHeadOutcome::NotFound { .. } => Err(Some(404)),
+        CopyHeadOutcome::NeedErrorBody(failure) | CopyHeadOutcome::ServiceFailure(failure) => {
+            Err(Some(failure.status))
+        }
+        _ => Err(None),
+    };
+    Ok(match copied {
+        Ok(value) => successful_result(value),
+        Err(status) => error_result(&exchange, status.unwrap_or(exchange.status)),
+    })
+}
+
+fn stage_part_copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some(source) = requested_source(call, "source_bucket") else {
+        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    };
+    let number = call
+        .get("part_number")
+        .and_then(Value::as_u64)
+        .ok_or("part copy without part_number")?;
+    let plan = PhysicalStagePartCopy {
+        range: requested_source_range(call)?,
+        ..PhysicalStagePartCopy::new(
+            optional_text(call, "key").unwrap_or_default(),
+            optional_text(call, "upload_id").unwrap_or_default(),
+            u32::try_from(number).unwrap_or(u32::MAX),
+            source,
+        )
+    };
+
+    let now = current_timestamps();
+    // AWS authorizes a copy by the caller's own credentials, never those of
+    // a session.
+    let objects = &client.objects;
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::stage_part_copy_requirements(objects, &plan, &now)
+    ));
+    let request = crate_step!(objects.encode_stage_part_copy(
+        &mut request_bytes,
+        &mut header_spans,
+        &plan,
+        &now
+    ));
+    let mut exchange = transport_step!(send_request(&client.context, &request));
+
+    let (head, body) = exchange.head_and_body();
+    let outcome = match crate_step!(objects.accept_stage_part_copy_head(head)) {
+        StageHeadOutcome::NeedResultBody { .. } => {
+            crate_step!(objects.accept_stage_part_copy_body(head, body))
+        }
+        StageHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_stage_part_error_body(failure, body)
+        }
+        outcome => outcome,
+    };
+
+    // The outcome borrows the body, so the status of a failure is taken
+    // first.
+    let staged = match outcome {
+        StageHeadOutcome::Staged { e_tag } => {
+            Ok(json!({"etag": text_of(e_tag).unwrap_or_default()}))
+        }
+        StageHeadOutcome::NotFound { .. } => Err(Some(404)),
+        StageHeadOutcome::NeedErrorBody(failure) | StageHeadOutcome::ServiceFailure(failure) => {
+            Err(Some(failure.status))
+        }
+        _ => Err(None),
+    };
+    Ok(match staged {
+        Ok(value) => successful_result(value),
+        Err(status) => error_result(&exchange, status.unwrap_or(exchange.status)),
     })
 }
 
@@ -676,7 +818,7 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
                 .map(|part| json!({"number": part.number, "size": part.size, "etag": part.e_tag})),
         );
         // A page that names itself as the next one would never end.
-        match page.next_marker {
+        match page.next_marker.and_then(ListMarker::text) {
             Some(next) if marker.as_deref() != Some(next) => marker = Some(next.to_owned()),
             Some(_) => return Err("ListParts named the same page twice".into()),
             None => break,
@@ -775,6 +917,15 @@ fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
         "size": entry.size.unwrap_or(0),
         "etag": entry.e_tag.unwrap_or_default(),
     });
+    // An entry of a listing of versions names its version, and whether it
+    // is the latest or a delete marker.
+    if let Some(version) = entry.version() {
+        value["version"] = json!(decoded_listing_text(version));
+        value["is_current_version"] = json!(entry.is_current_version());
+    }
+    if entry.kind == EntryKind::DeleteMarker {
+        value["delete_marker"] = json!(true);
+    }
     if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
         value["last_modified"] = json!(rfc3339(millis / 1000));
     }
@@ -792,6 +943,44 @@ fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
         value["owner_id"] = json!(decoded_listing_text(id));
     }
     value
+}
+
+/// Decodes the `%XX` escapes of a URL's path or query value, or returns
+/// `None` for an escape that is not one or text that is not UTF-8.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(at + 1..at + 3)?).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// The decoded parameters of a URL's query, in the order sent, or `None`
+/// if one is named twice or does not decode.
+fn parsed_query(query: Option<&str>) -> Option<Vec<(String, String)>> {
+    let mut parameters: Vec<(String, String)> = Vec::new();
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let name = percent_decoded(name)?;
+        if parameters.iter().any(|(found, _)| *found == name) {
+            return None;
+        }
+        parameters.push((name, percent_decoded(value)?));
+    }
+    Some(parameters)
 }
 
 /// Writes a time as `2024-01-02T03:04:05Z`, from the basic form that
@@ -868,15 +1057,49 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
     let Some((scheme, rest)) = url.split_once("://") else {
         return Ok(unsupported_by_adapter("url not mapped"));
     };
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, target) = rest.split_once('/').unwrap_or((rest, ""));
     let Some((bucket_name, service_host)) = host.split_once('.') else {
         return Ok(unsupported_by_adapter("url names no virtual-hosted bucket"));
     };
-    // The crate percent-encodes the key itself, so a path it would write
-    // differently is not this key.
-    if path.contains('%') {
-        return Ok(unsupported_by_adapter("percent-encoded path not mapped"));
+    let (raw_path, raw_query) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)));
+    let Some(key) = percent_decoded(raw_path) else {
+        return Ok(unsupported_by_adapter("path not mapped"));
+    };
+    // An HTTP client resolves these segments out of the URL, so the crate
+    // refuses a key that holds one rather than sign a path never sent.
+    if key
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Ok(unsupported_by_crate(
+            "the crate refuses a key with a . or .. segment, which an HTTP client resolves",
+        ));
     }
+    let Some(query) = parsed_query(raw_query) else {
+        return Ok(unsupported_by_crate(
+            "the crate sends no query parameter twice",
+        ));
+    };
+    let param = |name: &str| {
+        query
+            .iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let only = |allowed: &[&str]| {
+        query
+            .iter()
+            .all(|(name, _)| allowed.contains(&name.as_str()))
+    };
+    let hash = match optional_text(call, "payload_hash") {
+        None => PayloadHash::Compute,
+        Some("UNSIGNED-PAYLOAD") => PayloadHash::Unsigned,
+        Some(_) => return Ok(unsupported_by_crate("the crate signs no streaming payload")),
+    };
+    let key = key.as_str();
+    let version = param("versionId").map(Revision::Version);
     let endpoint = format!("{scheme}://{service_host}");
     let region = optional_text(call, "region").ok_or("missing region")?;
     let key_id = call
@@ -911,8 +1134,13 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
         }
     }
 
-    let bucket = crate_step!(Bucket::new(&endpoint, bucket_name, region, service))
-        .with_addressing(Addressing::VirtualHosted);
+    let bucket = crate_step!(Bucket::new_allowing_http(
+        &endpoint,
+        bucket_name,
+        region,
+        service
+    ))
+    .with_addressing(Addressing::VirtualHosted);
     let mut credentials = crate_step!(Credentials::new(key_id, secret, wipe));
     if let Some(token) = session_token
         && service == Service::Aws
@@ -938,6 +1166,68 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
     let method = optional_text(call, "method").unwrap_or("GET");
     let (mut request_bytes, mut header_spans);
     let request = match method {
+        // A GetObjectTagging, of the object or of a version of it.
+        "GET" if param("tagging").is_some() && only(&["tagging", "versionId"]) => {
+            (request_bytes, header_spans) = request_buffers(crate_step!(
+                layered::s3::get_tagging_requirements(&objects, key, version, &now)
+            ));
+            crate_step!(objects.encode_get_tagging(
+                &mut request_bytes,
+                &mut header_spans,
+                key,
+                version,
+                &now
+            ))
+        }
+        // A ListObjectsV2, which asks for URL-encoded keys every time.
+        "GET" if key.is_empty() && param("list-type").is_some() => {
+            let listed = [
+                "list-type",
+                "encoding-type",
+                "prefix",
+                "delimiter",
+                "max-keys",
+                "continuation-token",
+                "start-after",
+                "fetch-owner",
+            ];
+            if !only(&listed) || param("list-type") != Some("2") {
+                return Ok(unsupported_by_adapter("listing query not mapped"));
+            }
+            if param("encoding-type") != Some("url") {
+                return Ok(unsupported_by_crate(
+                    "the crate asks for encoding-type=url on every listing",
+                ));
+            }
+            let Ok(max_results) = param("max-keys").map(str::parse::<u32>).transpose() else {
+                return Ok(unsupported_by_adapter("max-keys not mapped"));
+            };
+            let include = match param("fetch-owner") {
+                None => ListInclude::default(),
+                Some("true") => ListInclude::OWNER,
+                Some(_) => return Ok(unsupported_by_adapter("fetch-owner not mapped")),
+            };
+            let list_plan = PhysicalList {
+                marker: param("continuation-token").map(ListMarker::Text),
+                start_after: param("start-after"),
+                delimiter: param("delimiter"),
+                max_results,
+                include,
+                ..PhysicalList::new(param("prefix").unwrap_or_default())
+            };
+            (request_bytes, header_spans) = request_buffers(crate_step!(
+                layered::s3::list_requirements(&objects, &list_plan, &now)
+            ));
+            crate_step!(objects.encode_list(
+                &mut request_bytes,
+                &mut header_spans,
+                &list_plan,
+                &now
+            ))
+        }
+        _ if !only(&["versionId"]) => {
+            return Ok(unsupported_by_adapter("query not mapped"));
+        }
         "GET" | "HEAD" => {
             let get_plan = PhysicalGet {
                 kind: if method == "GET" {
@@ -946,35 +1236,34 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                     GetKind::Head
                 },
                 range,
-                ..PhysicalGet::new(path)
+                revision: version,
+                ..PhysicalGet::new(key)
             };
             (request_bytes, header_spans) = request_buffers(crate_step!(
                 layered::s3::get_requirements(&objects, &get_plan, &now)
             ));
             crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now))
         }
-        "PUT" if range == RequestedRange::Whole => {
-            let put_plan = PhysicalPut::new(path);
+        "PUT" if range == RequestedRange::Whole && version.is_none() => {
+            let put_plan = PhysicalPut::new(key);
             let payload = Payload::Slice(&body);
-            (request_bytes, header_spans) =
-                request_buffers(crate_step!(layered::s3::put_requirements(
-                    &objects,
-                    &put_plan,
-                    payload,
-                    PayloadHash::Compute,
-                    &now
-                )));
+            (request_bytes, header_spans) = request_buffers(crate_step!(
+                layered::s3::put_requirements(&objects, &put_plan, payload, hash, &now)
+            ));
             crate_step!(objects.encode_put(
                 &mut request_bytes,
                 &mut header_spans,
                 &put_plan,
                 payload,
-                PayloadHash::Compute,
+                hash,
                 &now
             ))
         }
         "DELETE" if range == RequestedRange::Whole => {
-            let delete_plan = PhysicalDelete::new(path);
+            let delete_plan = PhysicalDelete {
+                revision: version,
+                ..PhysicalDelete::new(key)
+            };
             (request_bytes, header_spans) = request_buffers(crate_step!(
                 layered::s3::delete_requirements(&objects, &delete_plan, &now)
             ));
@@ -988,6 +1277,20 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
         _ => return Ok(unsupported_by_adapter("method not mapped")),
     };
 
+    // The crate encodes the key itself. A URL whose path it would write
+    // otherwise names a request that the crate does not send.
+    let written_path = request
+        .url()
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map_or("", |(_, target)| {
+            target.split('?').next().unwrap_or_default()
+        });
+    if written_path != raw_path {
+        return Ok(unsupported_by_crate(
+            "the crate encodes this path otherwise",
+        ));
+    }
     let headers: Map<String, Value> = request
         .headers()
         .map(|(name, value)| (name.to_ascii_lowercase(), json!(value)))
@@ -1004,12 +1307,14 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
 fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
     match operation {
         "get" => &[
+            "body_sink",
             "key",
             "range",
             "if_match",
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "head" => &[
             "key",
@@ -1017,10 +1322,12 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "put" => &[
             "key",
             "body_base64",
+            "body",
             "if_match",
             "if_none_match",
             "if_modified_since",
@@ -1042,11 +1349,14 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "if_none_match",
             "if_modified_since",
             "if_unmodified_since",
+            "version",
         ],
         "list" => &["prefix", "page_size"],
         "list_page" => &[
             "prefix",
             "continuation_token",
+            "version_marker",
+            "include",
             "start_after",
             "delimiter",
             "page_size",
@@ -1063,6 +1373,41 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
             "storage_class",
         ],
         "s3.upload_part" => &["key", "upload_id", "part_number", "body_base64"],
+        "copy" => &[
+            "key",
+            "source_key",
+            "source_bucket",
+            "source_version",
+            "source_if_match",
+            "source_if_none_match",
+            "source_if_modified_since",
+            "source_if_unmodified_since",
+            "if_match",
+            "if_none_match",
+            "if_modified_since",
+            "if_unmodified_since",
+            "metadata",
+            "content_type",
+            "content_encoding",
+            "content_language",
+            "content_disposition",
+            "cache_control",
+            "tags",
+            "storage_class",
+        ],
+        "s3.upload_part_copy" => &[
+            "key",
+            "upload_id",
+            "part_number",
+            "source_range",
+            "source_key",
+            "source_bucket",
+            "source_version",
+            "source_if_match",
+            "source_if_none_match",
+            "source_if_modified_since",
+            "source_if_unmodified_since",
+        ],
         "s3.complete_multipart" => &[
             "key",
             "upload_id",
@@ -1073,8 +1418,9 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
         ],
         "s3.abort_multipart" => &["key", "upload_id"],
         "s3.list_parts" => &["key", "upload_id"],
-        "s3.put_tagging" => &["key", "tags"],
-        "s3.get_tagging" => &["key"],
+        "s3.put_tagging" => &["key", "tags", "version"],
+        "s3.get_tagging" => &["key", "version"],
+        "restore" => &["key", "version", "priority", "days", "tier"],
         "delete_many" => &["keys"],
         _ => &[],
     }
@@ -1084,7 +1430,6 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 /// fields it lacks.
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
-        "version" => Some("an S3 plan selects no version"),
         "expires" => Some("ContentProperties carries no Expires"),
         "tagging" => Some("Tag holds a tag as a key and a value"),
         _ => None,
@@ -1150,7 +1495,12 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let endpoint_url = optional_text(endpoint, "url").ok_or("missing endpoint url")?;
     let bucket_name = optional_text(endpoint, "bucket").ok_or("missing endpoint bucket")?;
     let region = optional_text(endpoint, "region").unwrap_or("us-east-1");
-    let bucket = crate_step!(Bucket::new(endpoint_url, bucket_name, region, service));
+    let bucket = crate_step!(Bucket::new_allowing_http(
+        endpoint_url,
+        bucket_name,
+        region,
+        service
+    ));
     let mut credentials = crate_step!(Credentials::new(&key_id, &secret, wipe));
     if let Some(token) = &session_token {
         credentials = crate_step!(credentials.with_session_token(token));
@@ -1191,14 +1541,52 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
         "list_page" => list_page(call, &client),
         "s3.create_multipart" => create_upload(&client, call),
         "s3.upload_part" => stage_part(&client, call),
+        "copy" => copy(&client, call),
+        "s3.upload_part_copy" => stage_part_copy(&client, call),
         "s3.complete_multipart" => commit_parts(&client, call),
         "s3.abort_multipart" => abort_upload(&client, call),
         "s3.list_parts" => list_parts(&client, call),
         "s3.put_tagging" => put_tagging(&client, call),
         "s3.get_tagging" => get_tagging(&client, call),
+        "restore" => restore(&client, call),
         "delete_many" => delete_many(&client, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
+}
+
+fn restore(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
+    let Some(plan) = requested_restore(call) else {
+        return Ok(unsupported_by_adapter("priority not mapped"));
+    };
+    let now = current_timestamps();
+    crate_step!(layered::s3::restore_requirements(
+        &client.objects,
+        &plan,
+        &now
+    ));
+    let objects = &signer_step!(client);
+    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
+        layered::s3::restore_requirements(objects, &plan, &now)
+    ));
+    let request =
+        crate_step!(objects.encode_restore(&mut request_bytes, &mut header_spans, &plan, &now));
+    let exchange = transport_step!(send_request(&client.context, &request));
+    let outcome = match crate_step!(objects.accept_restore_head(exchange.response_head())) {
+        RestoreHeadOutcome::NeedErrorBody(failure) => {
+            objects.accept_restore_error_body(failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
+    Ok(match (restore_value(&outcome), outcome) {
+        (Some(value), _) => successful_result(value),
+        (None, RestoreHeadOutcome::NotFound { .. }) => error_result(&exchange, 404),
+        (
+            None,
+            RestoreHeadOutcome::NeedErrorBody(failure)
+            | RestoreHeadOutcome::ServiceFailure(failure),
+        ) => error_result(&exchange, failure.status),
+        _ => error_result(&exchange, exchange.status),
+    })
 }
 
 fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
@@ -1206,6 +1594,7 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     let tags = requested_tags(call);
     let plan = PhysicalSetTags {
         checksum: Some(ChecksumKind::Crc64),
+        revision: requested_revision(call),
         ..PhysicalSetTags::new(key, &tags)
     };
     let now = current_timestamps();
@@ -1228,7 +1617,7 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
         outcome => outcome,
     };
     Ok(match outcome {
-        UpdateHeadOutcome::Updated => successful_result(json!({})),
+        UpdateHeadOutcome::Updated { .. } => successful_result(json!({})),
         UpdateHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         UpdateHeadOutcome::NeedErrorBody(failure) | UpdateHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
@@ -1240,17 +1629,24 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
 fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let key = optional_text(call, "key").unwrap_or_default();
     let now = current_timestamps();
+    let revision = requested_revision(call);
     crate_step!(layered::s3::get_tagging_requirements(
         &client.objects,
         key,
+        revision,
         &now
     ));
     let objects = &signer_step!(client);
     let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::get_tagging_requirements(objects, key, &now)
+        layered::s3::get_tagging_requirements(objects, key, revision, &now)
     ));
-    let request =
-        crate_step!(objects.encode_get_tagging(&mut request_bytes, &mut header_spans, key, &now));
+    let request = crate_step!(objects.encode_get_tagging(
+        &mut request_bytes,
+        &mut header_spans,
+        key,
+        revision,
+        &now
+    ));
     let mut exchange = transport_step!(send_request(&client.context, &request));
     let outcome = match crate_step!(objects.accept_get_tagging_head(exchange.response_head())) {
         TagsHeadOutcome::NeedErrorBody(failure) => {
@@ -1316,9 +1712,26 @@ fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
     for result in &results[..count] {
+        // A plain key reports as its key, and a removal that names or
+        // writes a version as an object.
+        let versioned = result.version.is_some() || result.delete_marker;
+        let mut value = json!({"key": result.key});
+        if let Some(version) = result.version {
+            value["version"] = json!(version);
+        }
+        if result.delete_marker {
+            value["delete_marker"] = json!(true);
+        }
+        if let Some(version) = result.delete_marker_version {
+            value["delete_marker_version"] = json!(version);
+        }
         match result.code {
+            None if versioned => deleted.push(value),
             None => deleted.push(json!(result.key)),
-            Some(code) => errors.push(json!({"key": result.key, "code": code})),
+            Some(code) => {
+                value["code"] = json!(code);
+                errors.push(value);
+            }
         }
     }
     Ok(successful_result(

@@ -1,27 +1,32 @@
 //! Azure Blob Storage requests and responses.
 //!
-//! Put Block From URL and structured-body framing are not implemented.
+//! Structured-body framing is not implemented.
+
+use core::fmt;
 
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
-    ContentRange, accept_success, decimal_header, encoded, failure, finish_with_body, meta_of,
-    missing, parse_content_range, push_checksum, push_condition, text_header, trim_ascii,
-    valid_header, validate_checksum, validate_condition, validate_properties, validate_tags,
-    write_range, write_tags,
+    ContentRange, FailureOutcome, accept_success, decimal_header, encoded, failure,
+    finish_with_body, meta_of, missing, parse_content_range, push_checksum, push_condition,
+    text_header, trim_ascii, valid_header, validate_checksum, validate_condition,
+    validate_properties, validate_revision, validate_tags,
 };
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
-use crate::url::{self, Parameter, QueryValue};
+use crate::http::PlainHttp;
+use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
+use crate::url::{self, Parameter};
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan, ListEntry, ListHeadOutcome,
-    ListInclude, Listing, MetadataPair, Method, ObjectMeta, Payload, PhysicalDelete, PhysicalGet,
-    PhysicalList, PhysicalPut, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
-    TransactionalChecksum, WireRequest, WriteOptions,
+    Classification, Condition, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
+    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
+    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PropertySet, PropertyValues,
+    PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
+    ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
 mod batch;
 mod blocks;
+mod copy;
+mod restore;
 mod tags;
 
 pub use batch::{BatchResult, MAX_BATCH_KEYS};
@@ -29,6 +34,8 @@ pub use blocks::{
     Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, MAX_STAGE_LEN,
     PhysicalListBlocks, PhysicalStageBlock,
 };
+pub use copy::PhysicalStageBlockFromUrl;
+pub use tags::{PhysicalSetMetadata, PhysicalSetProperties};
 
 /// The most recent Azure Storage version that every region supports.
 ///
@@ -73,6 +80,17 @@ pub fn metadata_name(header: &str) -> Option<&str> {
     (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
 }
 
+// A bearer token, as `Authorization` and `x-ms-copy-source-authorization`
+// carry it.
+pub(crate) struct Bearer<'t>(pub(crate) &'t str);
+
+impl HeaderValue for Bearer<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(b"Bearer ");
+        out.push(self.0.as_bytes());
+    }
+}
+
 /// An Azure Blob endpoint and container name, both borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct Container<'a> {
@@ -81,17 +99,37 @@ pub struct Container<'a> {
 }
 
 impl<'a> Container<'a> {
-    /// Creates a container reference from an origin and a container name.
+    /// Creates a container reference from an HTTPS origin and a container
+    /// name.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTP
-    /// or HTTPS origin.
+    /// Returns [`Error::InvalidEndpoint`] if `endpoint` is not an ASCII HTTPS
+    /// origin. An `http://` origin is refused: see [`Self::new_allowing_http`].
     ///
     /// Returns [`Error::InvalidContainer`] if `name` is empty, or if it
     /// contains bytes that would change the structure of the request.
     pub fn new(endpoint: &'a str, name: &'a str) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint) {
+        Self::create(endpoint, name, PlainHttp::Refused)
+    }
+
+    /// Creates a container reference as [`Self::new`] does, from an HTTP
+    /// origin as well as an HTTPS one, such as an emulator's
+    /// `http://127.0.0.1:10000`.
+    ///
+    /// Without TLS, every request carries the bearer token in clear. Use
+    /// this for a local emulator or a network you trust, never for an
+    /// account on the internet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], except that an `http://` origin is taken.
+    pub fn new_allowing_http(endpoint: &'a str, name: &'a str) -> Result<Self> {
+        Self::create(endpoint, name, PlainHttp::Allowed)
+    }
+
+    fn create(endpoint: &'a str, name: &'a str, plain: PlainHttp) -> Result<Self> {
+        if !crate::http::valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
         if name.is_empty()
@@ -262,7 +300,8 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_get(get, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(get.key), &[], get.range, now)?;
+        let query = [revision_parameter(get.revision)];
+        self.build(&mut head, Some(get.key), &query, get.range, now)?;
         push_condition(&mut head, get.condition, get.condition_value);
         let method = match get.kind {
             GetKind::Bytes => Method::Get,
@@ -300,12 +339,10 @@ impl<'a> Blobs<'a> {
         let length = content.len();
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now)?;
-        head.header("x-ms-blob-type", |out| out.push(b"BlockBlob"));
+        head.header("x-ms-blob-type", b"BlockBlob");
         // The content length is head bytes like any other, so it is written
         // into the caller's buffer rather than formatted at send time.
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length).as_bytes());
-        });
+        head.header("content-length", U64Decimal::new(length).as_bytes());
         push_checksum(&mut head, put.options.checksum, &self.checksums, |sum| {
             sum.update(content.bytes().unwrap_or(&[]));
         });
@@ -338,14 +375,11 @@ impl<'a> Blobs<'a> {
             return Err(InvalidPlan::UrlTooLong.into());
         }
         head.url(|out| self.write_url(out, key, query));
-        head.header("authorization", |out| {
-            out.push(b"Bearer ");
-            out.push(self.token.as_bytes());
-        });
-        head.header("x-ms-date", |out| out.push(now.rfc1123().as_bytes()));
-        head.header("x-ms-version", |out| out.push(VERSION.as_bytes()));
+        head.header("authorization", Bearer(self.token));
+        head.header("x-ms-date", now.rfc1123().as_bytes());
+        head.header("x-ms-version", VERSION.as_bytes());
         if range != RequestedRange::Whole {
-            head.header("range", |out| write_range(out, range));
+            head.header("range", range);
         }
         Ok(())
     }
@@ -503,9 +537,16 @@ impl<'a> Blobs<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_delete(delete, self.namespace)?;
         let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(delete.key), &[], RequestedRange::Whole, now)?;
+        let query = [revision_parameter(delete.revision)];
+        self.build(
+            &mut head,
+            Some(delete.key),
+            &query,
+            RequestedRange::Whole,
+            now,
+        )?;
         if let Some(value) = delete_snapshots(delete.kind) {
-            head.header("x-ms-delete-snapshots", |out| out.push(value.as_bytes()));
+            head.header("x-ms-delete-snapshots", value.as_bytes());
         }
         push_condition(&mut head, delete.condition, delete.condition_value);
         encoded(head, Method::Delete, Payload::Slice(&[]))
@@ -575,6 +616,106 @@ impl<'a> Blobs<'a> {
         let kind = body_kind(body);
         if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
             return DeleteHeadOutcome::PreconditionFailed;
+        }
+        finish_with_body(failure, kind)
+    }
+
+    /// Writes the request head of a Snapshot Blob into `buf`, which takes a
+    /// read-only snapshot of the object as it is now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
+    /// refuses, a metadata pair that [`Self::encode_put`] refuses, or an
+    /// invalid condition.
+    ///
+    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
+    /// the required bytes and header slots, or call
+    /// [`layered::snapshot_requirements`](crate::layered::snapshot_requirements)
+    /// first.
+    pub fn encode_snapshot<'r>(
+        &self,
+        buf: &'r mut [u8],
+        headers: &'r mut [HeaderSpan],
+        plan: &PhysicalSnapshot<'_>,
+        now: &Timestamps,
+    ) -> Result<WireRequest<'r>> {
+        validate_key(plan.key, self.namespace)?;
+        validate_metadata(plan.metadata)?;
+        validate_condition(plan.condition, plan.condition_value)?;
+        let mut head = HeadWriter::new(buf, headers);
+        self.build(
+            &mut head,
+            Some(plan.key),
+            &[url::literal("comp", "snapshot")],
+            RequestedRange::Whole,
+            now,
+        )?;
+        head.header("content-length", b"0");
+        push_metadata(&mut head, plan.metadata);
+        push_condition(&mut head, plan.condition, plan.condition_value);
+        encoded(head, Method::Put, Payload::Slice(&[]))
+    }
+
+    /// Reads the response head of a Snapshot Blob and reports what Azure
+    /// did.
+    ///
+    /// Pass the condition of the plan. A 412 is
+    /// [`SnapshotHeadOutcome::PreconditionFailed`] only if the plan carried
+    /// one and Azure names a failed condition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Response`] if the head cannot be read. A success
+    /// status other than 201 is [`ResponseFault::Status`], and a 201 without
+    /// `x-ms-snapshot` is [`ResponseFault::Head`].
+    pub fn accept_snapshot_head<'h>(
+        &self,
+        condition: ConditionKind,
+        head: ResponseHead<'h>,
+    ) -> Result<SnapshotHeadOutcome<'h>> {
+        match head.status {
+            201 => Ok(SnapshotHeadOutcome::Created {
+                snapshot: text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
+                meta: ObjectMeta {
+                    last_modified: text_header(head.last_modified)?,
+                    ..meta_of(head)
+                },
+            }),
+            412 if condition != ConditionKind::None
+                && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            {
+                Ok(SnapshotHeadOutcome::PreconditionFailed)
+            }
+            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
+            200..=299 => Err(ResponseFault::Status.into()),
+            status if head.error_code.is_none() => Ok(SnapshotHeadOutcome::NeedErrorBody(failure(
+                status,
+                None,
+                head.request_id,
+            ))),
+            status => Ok(SnapshotHeadOutcome::ServiceFailure(failure(
+                status,
+                named(&head),
+                head.request_id,
+            ))),
+        }
+    }
+
+    /// Finishes a [`SnapshotHeadOutcome::NeedErrorBody`] with the response
+    /// body.
+    ///
+    /// This is [`Self::accept_get_error_body`] for a Snapshot Blob, and reads
+    /// the body the same way.
+    pub fn accept_snapshot_error_body<'h>(
+        &self,
+        condition: ConditionKind,
+        failure: Failure<'h>,
+        body: &[u8],
+    ) -> SnapshotHeadOutcome<'h> {
+        let kind = body_kind(body);
+        if names_failed_condition(failure.status, condition != ConditionKind::None, kind) {
+            return SnapshotHeadOutcome::PreconditionFailed;
         }
         finish_with_body(failure, kind)
     }
@@ -688,18 +829,16 @@ impl<'a> Blobs<'a> {
         }
         // The query is written in this order every time, so a caller can
         // compare the URL byte for byte. Azure signs none of it.
+        // An empty prefix is no parameter at all.
+        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
         let query = [
-            Some(("restype", QueryValue::Literal("container"))),
-            Some(("comp", QueryValue::Literal("list"))),
-            (!list.prefix.is_empty())
-                .then_some(("prefix", QueryValue::Encoded(list.prefix.as_bytes()))),
-            list.delimiter
-                .map(|delimiter| ("delimiter", QueryValue::Encoded(delimiter.as_bytes()))),
-            list.marker
-                .map(|marker| ("marker", QueryValue::Encoded(marker.as_bytes()))),
-            list.max_results
-                .map(|max_results| ("maxresults", QueryValue::Number(max_results))),
-            (word_count != 0).then(|| ("include", QueryValue::Words(&words[..word_count]))),
+            url::literal("restype", "container"),
+            url::literal("comp", "list"),
+            url::encoded("prefix", prefix),
+            url::encoded("delimiter", list.delimiter),
+            url::encoded("marker", list.marker.and_then(ListMarker::text)),
+            url::number("maxresults", list.max_results),
+            url::words("include", &words[..word_count]),
         ];
 
         let mut head = HeadWriter::new(buf, headers);
@@ -827,9 +966,125 @@ impl<'a> Blobs<'a> {
     }
 }
 
+/// One Snapshot Blob: a read-only copy of an object as it is now, which
+/// Azure keeps beside the object until the snapshot is removed.
+///
+/// Read a snapshot with [`Revision::Snapshot`] in [`PhysicalGet::revision`],
+/// and remove it with one in [`PhysicalDelete::revision`]. A hierarchical
+/// account takes no snapshot: Azure refuses with 409
+/// `FeatureNotYetSupportedForHierarchicalNamespaceAccounts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalSnapshot<'a> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'a str,
+    /// The metadata of the snapshot. With no pair, the snapshot has the
+    /// object's metadata; with any, it has these pairs alone. The rules of
+    /// [`PhysicalPut::metadata`] apply.
+    pub metadata: &'a [MetadataPair<'a>],
+    /// The condition on the object, as a read carries it.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionKind`].
+    pub condition_value: Option<ConditionValue<'a>>,
+}
+
+impl<'a> PhysicalSnapshot<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
+    /// Creates a plan that takes a snapshot of `key`, with the object's
+    /// metadata and no condition.
+    pub const fn new(key: &'a str) -> Self {
+        Self {
+            key,
+            metadata: &[],
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+}
+
+/// The result of reading the response head of a Snapshot Blob.
+///
+/// A head that reports a failure is one of these too.
+/// [`Blobs::accept_snapshot_head`] returns an [`Err`] only for a head it
+/// cannot read.
+// The crate allocates nothing and its outcomes are `Copy`, so the variant
+// that carries the metadata cannot be boxed.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SnapshotHeadOutcome<'h> {
+    /// Azure took the snapshot.
+    Created {
+        /// The snapshot, as `x-ms-snapshot` names it. Pass it as
+        /// [`Revision::Snapshot`] to read or remove the snapshot.
+        snapshot: &'h str,
+        /// The metadata that the head states: the entity tag and the last
+        /// modification of the object, and its version on an account that
+        /// keeps versions.
+        meta: ObjectMeta<'h>,
+    },
+    /// The condition did not hold, so Azure took no snapshot.
+    PreconditionFailed,
+    /// The object does not exist. A missing container is a
+    /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
+    NotFound {
+        /// The service's reason, if known.
+        kind: Option<ServiceErrorKind>,
+    },
+    /// Read the error body to finish this response.
+    NeedErrorBody(Failure<'h>),
+    /// The service refused the request.
+    ServiceFailure(Failure<'h>),
+}
+
+impl fmt::Display for SnapshotHeadOutcome<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { .. } => f.write_str("Azure took the snapshot"),
+            Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
+            Self::NotFound { kind } => f.write_str(kind.map_or(
+                "the object or the container does not exist",
+                ServiceErrorKind::as_str,
+            )),
+            Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
+            Self::ServiceFailure(failure) => failure.fmt(f),
+        }
+    }
+}
+
+impl<'h> FailureOutcome<'h> for SnapshotHeadOutcome<'h> {
+    fn not_found(failure: Failure<'h>) -> Self {
+        Self::NotFound { kind: failure.kind }
+    }
+
+    fn service_failure(failure: Failure<'h>) -> Self {
+        Self::ServiceFailure(failure)
+    }
+}
+
 // The word for each include flag. The query writes them in this order,
 // whatever order the set was built in.
-const INCLUDE_WORDS: [(ListInclude, &str); 1] = [(ListInclude::METADATA, "metadata")];
+const INCLUDE_WORDS: [(ListInclude, &str); 3] = [
+    (ListInclude::METADATA, "metadata"),
+    (ListInclude::SNAPSHOTS, "snapshots"),
+    (ListInclude::VERSIONS, "versions"),
+];
+
+// The query parameter that names a snapshot or a version, or none for the
+// object as it is now.
+pub(crate) fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
+    match revision? {
+        Revision::Snapshot(id) => url::encoded("snapshot", id),
+        Revision::Version(id) => url::encoded("versionid", id),
+    }
+}
 
 pub(crate) fn named<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
     kind_for_code(trim_ascii(head.error_code.unwrap_or_default()))
@@ -863,7 +1118,9 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
         b"BlobNotFound" | b"ResourceNotFound" => ServiceErrorKind::NotFound,
         b"ContainerNotFound" => ServiceErrorKind::NoSuchContainer,
         b"BlobAlreadyExists" | b"ContainerAlreadyExists" => ServiceErrorKind::AlreadyExists,
-        b"ConditionNotMet" | b"TargetConditionNotMet" => ServiceErrorKind::Precondition,
+        b"ConditionNotMet" | b"TargetConditionNotMet" | b"SourceConditionNotMet" => {
+            ServiceErrorKind::Precondition
+        }
         b"InvalidRange" => ServiceErrorKind::RangeNotSatisfiable,
         b"ServerBusy" => ServiceErrorKind::Throttled,
         b"OperationTimedOut" => ServiceErrorKind::Timeout,
@@ -963,6 +1220,7 @@ fn validate_get(get: &PhysicalGet<'_>, namespace: AzureNamespace) -> Result<()> 
         }
         _ => {}
     }
+    validate_revision(get.revision, true)?;
     validate_condition(get.condition, get.condition_value)
 }
 
@@ -1021,10 +1279,10 @@ pub(crate) fn push_stored(head: &mut HeadWriter<'_>, options: &WriteOptions<'_>)
         );
     }
     if !options.tags.is_empty() {
-        head.header("x-ms-tags", |out| write_tags(out, options.tags));
+        head.header("x-ms-tags", options.tags);
     }
     if let Some(tier) = options.storage_class {
-        head.header("x-ms-access-tier", |out| out.push(tier.as_bytes()));
+        head.header("x-ms-access-tier", tier.as_bytes());
     }
 }
 
@@ -1082,13 +1340,25 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
     Ok(())
 }
 
-// The three writes that take options. `validate_options` refuses an option
-// on a write that does not take it.
+// The content properties that an account returns in UTF-8 as it got them.
+pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static str] {
+    match namespace {
+        AzureNamespace::Flat => &["content-type"],
+        AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
+    }
+}
+
+// The writes that take options. `validate_options` refuses an option on a
+// write that does not take it. `Copy` is a Copy Blob or a Copy Blob From
+// URL, which take the source's content properties, and `FromUrl` a Put
+// Blob From URL, which takes the plan's.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Write {
     Whole,
     Stage,
     Commit,
+    Copy,
+    FromUrl,
 }
 
 // `has_bytes` says whether the encoder holds the content, which it does not
@@ -1100,6 +1370,17 @@ pub(crate) fn validate_options(
     client: &Blobs<'_>,
 ) -> Result<()> {
     validate_azure_checksum(options.checksum, has_bytes, &client.checksums)?;
+    // A copy sends no content, so it has nothing to sum, and a Copy Blob
+    // takes no content property.
+    // A copy names its tags apart, so that none can differ from the
+    // source's.
+    let copy = matches!(write, Write::Copy | Write::FromUrl);
+    if copy && (options.checksum.is_some() || !options.tags.is_empty()) {
+        return Err(InvalidPlan::Option.into());
+    }
+    if write == Write::Copy && !options.properties.is_empty() {
+        return Err(InvalidPlan::ContentProperty.into());
+    }
     // A block is not an object, so it stores neither properties nor tags.
     let stored = !options.properties.is_empty()
         || !options.tags.is_empty()
@@ -1111,11 +1392,7 @@ pub(crate) fn validate_options(
     // hierarchical one takes it but returns each byte as a character, so
     // `é` comes back as the byte e9. Both refuse a Content-Disposition
     // outside ASCII with 400 InvalidMetadata.
-    let utf8: &[&str] = match client.namespace {
-        AzureNamespace::Flat => &["content-type"],
-        AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
-    };
-    validate_properties(options, utf8)?;
+    validate_properties(options, utf8_properties(client.namespace))?;
     validate_tags(options.tags, azure_tag_char, Some((10, 128, 256)))?;
     if let Some(text) = options.declared_md5 {
         // A whole-object write stores the MD5 that Azure checked, and a block
@@ -1135,8 +1412,12 @@ fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<(
     // name: a flat account answered a prefix of 32,657 units, far past the
     // 1,024 it allows a name. What bounds a prefix is the URL, which `build`
     // checks. Measured against the live service.
-    if list.marker.is_some_and(str::is_empty) {
-        return Err(InvalidPlan::Marker.into());
+    // Azure continues every listing from one marker, and hands out no empty
+    // one.
+    match list.marker {
+        None => {}
+        Some(ListMarker::Text(marker)) if !marker.is_empty() => {}
+        Some(_) => return Err(InvalidPlan::Marker.into()),
     }
     if list.max_results == Some(0) {
         return Err(InvalidPlan::MaxResults.into());
@@ -1158,5 +1439,11 @@ fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<(
 
 fn validate_delete(delete: &PhysicalDelete<'_>, namespace: AzureNamespace) -> Result<()> {
     validate_key(delete.key, namespace)?;
+    validate_revision(delete.revision, true)?;
+    // A snapshot or a version has no snapshots of its own, and Azure refuses
+    // `x-ms-delete-snapshots` beside one.
+    if delete.revision.is_some() && delete.kind != DeleteKind::Object {
+        return Err(InvalidPlan::Revision.into());
+    }
     validate_condition(delete.condition, delete.condition_value)
 }

@@ -264,6 +264,29 @@ pub(crate) enum QueryValue<'q> {
 // One parameter, or `None` for one that the request leaves out.
 pub(crate) type Parameter<'q> = Option<(&'q str, QueryValue<'q>)>;
 
+// Text from the caller or the service, percent-encoded, or no parameter
+// without a value.
+pub(crate) fn encoded<'q>(name: &'q str, value: impl Into<Option<&'q str>>) -> Parameter<'q> {
+    value
+        .into()
+        .map(|value| (name, QueryValue::Encoded(value.as_bytes())))
+}
+
+// A constant of this crate, written as it is.
+pub(crate) fn literal<'q>(name: &'q str, value: &'q str) -> Parameter<'q> {
+    Some((name, QueryValue::Literal(value)))
+}
+
+// A number, or no parameter without one.
+pub(crate) fn number<'q>(name: &'q str, value: impl Into<Option<u32>>) -> Parameter<'q> {
+    value.into().map(|value| (name, QueryValue::Number(value)))
+}
+
+// Constants of this crate joined by commas, or no parameter without any.
+pub(crate) fn words<'q>(name: &'q str, words: &'q [&'q str]) -> Parameter<'q> {
+    (!words.is_empty()).then_some((name, QueryValue::Words(words)))
+}
+
 // Writes the parameters that `query` holds, without the `?` that begins a
 // query in a URL.
 pub(crate) fn write_query(out: &mut dyn ByteSink, query: &[Parameter<'_>]) {

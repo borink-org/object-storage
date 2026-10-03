@@ -3,9 +3,9 @@
 //! one page with its own client, as a [`PageSource`], and passes that source
 //! to [`list_page`] or [`list_all_keys`].
 
-use crate::{AdapterError, optional_text, successful_result, unsupported_by_crate};
+use crate::{AdapterError, optional_text, successful_result, unsupported_by_adapter};
 use borink_object_storage_proto::{
-    EntryKind, ListEntry, ListInclude, Listing, PhysicalList, layered,
+    EntryKind, ListEntry, ListInclude, ListMarker, Listing, PhysicalList, layered,
 };
 use serde_json::{Value, json};
 
@@ -14,6 +14,7 @@ pub(crate) struct ListedPage {
     entries: Vec<Value>,
     prefixes: Vec<String>,
     next_marker: Option<String>,
+    next_version_marker: Option<String>,
 }
 
 /// An entry that a provider's fill wrote, with whatever it read beside the
@@ -46,10 +47,20 @@ impl ListedPage {
         Self {
             entries,
             prefixes,
+            // The protocol names a version marker beside the key it continues
+            // after, as S3 does.
             next_marker: listing
                 .next_marker
+                .map(|marker| match marker {
+                    ListMarker::Version { key, .. } => key,
+                    marker => marker.text().unwrap_or_default(),
+                })
                 .filter(|marker| !marker.is_empty())
                 .map(str::to_owned),
+            next_version_marker: match listing.next_marker {
+                Some(ListMarker::Version { version, .. }) => version.map(str::to_owned),
+                _ => None,
+            },
         }
     }
 }
@@ -92,27 +103,47 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
     {
         match include_option.as_str() {
             Some("metadata") => include = include | ListInclude::METADATA,
-            _ => return Ok(unsupported_by_crate("ListInclude names metadata only")),
+            Some("snapshots") => include = include | ListInclude::SNAPSHOTS,
+            Some("versions") => include = include | ListInclude::VERSIONS,
+            _ => return Ok(unsupported_by_adapter("include option not mapped")),
         }
     }
     if call.get("fetch_owner").and_then(Value::as_bool) == Some(true) {
         include = include | ListInclude::OWNER;
     }
 
+    // A call that names a version marker, or lists versions, continues
+    // after a key and a version of it. The client refuses either kind of
+    // marker on the listing that does not hand it out.
+    let token = optional_text(call, "continuation_token");
+    let version = optional_text(call, "version_marker");
+    let marker = if version.is_some() || include.contains(ListInclude::VERSIONS) {
+        token
+            .or(version.map(|_| ""))
+            .map(|key| ListMarker::Version { key, version })
+    } else {
+        token.map(ListMarker::Text)
+    };
     let list_plan = PhysicalList {
         prefix: optional_text(call, "prefix").unwrap_or_default(),
-        marker: optional_text(call, "continuation_token"),
+        marker,
         start_after: optional_text(call, "start_after"),
         delimiter: optional_text(call, "delimiter"),
         max_results: requested_page_size(call),
         include,
     };
     Ok(match source.read_page(&list_plan)? {
-        Ok(page) => successful_result(json!({
-            "entries": page.entries,
-            "prefixes": page.prefixes,
-            "continuation_token": page.next_marker.unwrap_or_default(),
-        })),
+        Ok(page) => {
+            let mut value = json!({
+                "entries": page.entries,
+                "prefixes": page.prefixes,
+                "continuation_token": page.next_marker.unwrap_or_default(),
+            });
+            if let Some(marker) = page.next_version_marker {
+                value["next_version_marker"] = json!(marker);
+            }
+            successful_result(value)
+        }
         Err(result) => result,
     })
 }
@@ -124,7 +155,7 @@ pub(crate) fn list_all_keys(call: &Value, source: &impl PageSource) -> Result<Va
     let mut marker: Option<String> = None;
     loop {
         let list_plan = PhysicalList {
-            marker: marker.as_deref(),
+            marker: marker.as_deref().map(ListMarker::Text),
             max_results: requested_page_size(call),
             ..PhysicalList::new(prefix)
         };

@@ -2,12 +2,29 @@
 // response head.
 
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::{
-    BodyWindow, ConditionKind, Error, Failure, FailureClass, GetHeadOutcome, GetKind, GetShape,
-    HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Tag, TransactionalChecksum, WireRequest, WriteOptions,
+    BodyWindow, ConditionKind, ConditionValue, Error, Failure, FailureClass, GetHeadOutcome,
+    GetKind, GetShape, HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange,
+    ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag, Timestamps,
+    TransactionalChecksum, WireRequest, WriteOptions,
 };
+
+// Checks the snapshot or version that a plan names: an identifier that is
+// not empty, and a snapshot only where the service keeps snapshots.
+pub(crate) fn validate_revision(
+    revision: Option<Revision<'_>>,
+    keeps_snapshots: bool,
+) -> Result<()> {
+    match revision {
+        None => Ok(()),
+        Some(Revision::Snapshot(_)) if !keeps_snapshots => Err(InvalidPlan::Revision.into()),
+        Some(Revision::Snapshot(id) | Revision::Version(id)) if id.is_empty() => {
+            Err(InvalidPlan::Revision.into())
+        }
+        Some(_) => Ok(()),
+    }
+}
 
 // The one record that every failing head becomes, whichever operation asked.
 pub(crate) fn failure<'h>(
@@ -80,6 +97,8 @@ macro_rules! container_failure_outcome {
 pub(crate) use container_failure_outcome;
 
 failure_outcome!(
+    CopyHeadOutcome,
+    RestoreHeadOutcome,
     GetHeadOutcome,
     DeleteHeadOutcome,
     StageHeadOutcome,
@@ -118,6 +137,9 @@ pub(crate) fn meta_of(head: ResponseHead<'_>) -> ObjectMeta<'_> {
         content_disposition: head.content_disposition,
         cache_control: head.cache_control,
         storage_class: head.storage_class,
+        copy_id: head.copy_id,
+        copy_status: head.copy_status,
+        restore_status: head.restore_status,
     }
 }
 
@@ -283,11 +305,19 @@ pub(crate) fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> Fail
 pub(crate) fn push_condition(
     head: &mut HeadWriter<'_>,
     condition: ConditionKind,
-    value: Option<&[u8]>,
+    value: Option<ConditionValue<'_>>,
 ) {
     if let Some(name) = condition_header(condition) {
         let value = value.expect("the plan was validated");
-        head.header(name, |out| out.push(value));
+        head.header(name, value);
+    }
+}
+
+// A range is written as `Range` writes it: `bytes=` and its first and last
+// byte.
+impl HeaderValue for RequestedRange {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_range(out, self);
     }
 }
 
@@ -372,26 +402,35 @@ pub(crate) fn condition_header(kind: ConditionKind) -> Option<&'static str> {
 }
 
 // The kind and the value must agree in both directions: a kind without a value
-// cannot be encoded, and a value without a kind would be dropped. A date must
-// be one that the services read, as `Timestamps::rfc1123` writes it.
-pub(crate) fn validate_condition(condition: ConditionKind, value: Option<&[u8]>) -> Result<()> {
+// cannot be encoded, and a value without a kind would be dropped. An entity
+// tag goes with the first two kinds and an instant with the dates, which must
+// be one that an HTTP date can write.
+pub(crate) fn validate_condition(
+    condition: ConditionKind,
+    value: Option<ConditionValue<'_>>,
+) -> Result<()> {
     match (condition, value) {
         (ConditionKind::None, None) => Ok(()),
-        (kind, Some(value)) if kind.is_date() => {
-            match core::str::from_utf8(value)
-                .ok()
-                .and_then(crate::layered::http_date_ms)
-            {
-                Some(_) => Ok(()),
-                None => Err(InvalidPlan::Condition.into()),
-            }
-        }
-        (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(value))
-            if valid_header(value) =>
+        (ConditionKind::IfMatch | ConditionKind::IfNoneMatch, Some(ConditionValue::ETag(tag)))
+            if valid_header(tag) =>
         {
             Ok(())
         }
+        (
+            ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince,
+            Some(ConditionValue::Time(seconds)),
+        ) if seconds <= crate::time::MAX_UNIX_SECONDS => Ok(()),
         _ => Err(InvalidPlan::Condition.into()),
+    }
+}
+
+// An entity tag is written as it is, and an instant as an HTTP date.
+impl HeaderValue for ConditionValue<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        match self {
+            Self::ETag(tag) => out.push(tag),
+            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123().as_bytes()),
+        }
     }
 }
 
@@ -436,12 +475,10 @@ pub(crate) fn push_checksum(
 ) {
     match checksum {
         Some(TransactionalChecksum::Md5(text)) => {
-            head.header(ChecksumKind::Md5.header(), |out| out.push(text.as_bytes()));
+            head.header(ChecksumKind::Md5.header(), text);
         }
         Some(TransactionalChecksum::Crc64(text)) => {
-            head.header(ChecksumKind::Crc64.header(), |out| {
-                out.push(text.as_bytes())
-            });
+            head.header(ChecksumKind::Crc64.header(), text);
         }
         Some(TransactionalChecksum::Compute(kind)) => {
             // Validation refused the plan if this is `None`.
@@ -450,7 +487,7 @@ pub(crate) fn push_checksum(
                 content(&mut sum);
                 let mut into = [0; crate::checksum::BASE64_LEN];
                 let text = sum.finish().base64(&mut into);
-                head.header(kind.header(), |out| out.push(text.as_bytes()));
+                head.header(kind.header(), text);
             }
         }
         // `validate_checksum` refused any other kind.
@@ -528,6 +565,13 @@ pub(crate) fn validate_tags(
         return Err(InvalidPlan::Tag.into());
     }
     Ok(())
+}
+
+// Tags are written as `write_tags` writes them.
+impl HeaderValue for &[Tag<'_>] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_tags(out, self);
+    }
 }
 
 // Writes tags as both services take them in a header: `key=value` pairs

@@ -11,9 +11,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    BodyWindow, ChecksumKind, ConditionKind, ContentProperties, Error as CrateError, HeaderSpan,
-    ObjectMeta, RequestSize, RequestedRange, ResponseHead, ServiceErrorKind, Tag, Timestamps,
-    TransactionalChecksum, WireRequest,
+    BodyWindow, ChecksumKind, ConditionKind, ConditionValue, ContentProperties, CopySource,
+    DeleteTarget, Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, Payload,
+    PhysicalRestore, RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome,
+    RestorePriority, Revision, ServiceErrorKind, Tag, Timestamps, TransactionalChecksum,
+    WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -32,6 +34,98 @@ struct HttpExchange {
     status: u16,
     headers: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
+    /// The length of a successful body read with [`BodyRead::Sink`], which
+    /// leaves `body` empty.
+    sunk_length: Option<u64>,
+}
+
+/// How the adapter reads the body of a successful response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyRead<'a> {
+    /// Holds the body for the crate to read.
+    Hold,
+    /// Copies the body to the grader's socket at this address, for a call
+    /// with `body_sink` that reads more than the adapter holds.
+    Sink(&'a str),
+}
+
+impl<'a> BodyRead<'a> {
+    fn of(call: &'a Value) -> Self {
+        match optional_text(call, "body_sink") {
+            Some(address) => Self::Sink(address),
+            None => Self::Hold,
+        }
+    }
+}
+
+/// The body of a write: bytes that the call holds, or a pattern repeated to
+/// a length, which the adapter generates as it sends the request.
+enum CallBody {
+    Held(Vec<u8>),
+    Generated { pattern: Vec<u8>, length: u64 },
+}
+
+impl CallBody {
+    fn of(call: &Value) -> Result<Self, AdapterError> {
+        let Some(body) = call.get("body") else {
+            return Ok(Self::Held(decode_base64_field(call, "body_base64")?));
+        };
+        if optional_text(body, "encoding") != Some("repeat") {
+            return Err("unknown body encoding".into());
+        }
+        let data = body.get("data").ok_or("missing body data")?;
+        let pattern = decode_base64_field(data, "pattern_base64")?;
+        let length = data
+            .get("length")
+            .and_then(Value::as_u64)
+            .ok_or("missing body length")?;
+        if pattern.is_empty() && length > 0 {
+            return Err("empty body pattern".into());
+        }
+        Ok(Self::Generated { pattern, length })
+    }
+
+    fn payload(&self) -> Payload<'_> {
+        match self {
+            Self::Held(bytes) => Payload::Slice(bytes),
+            Self::Generated { length, .. } => Payload::Streamed { len: *length },
+        }
+    }
+}
+
+/// Reads a pattern repeated to a length, from a block of whole repeats so
+/// that each read copies once.
+struct Repeat {
+    block: Vec<u8>,
+    period: usize,
+    offset: usize,
+    remaining: u64,
+}
+
+impl Repeat {
+    fn new(pattern: &[u8], length: u64) -> Self {
+        let repeats = (64 * 1024) / pattern.len().max(1) + 2;
+        Self {
+            block: pattern.repeat(repeats),
+            period: pattern.len(),
+            offset: 0,
+            remaining: length,
+        }
+    }
+}
+
+impl Read for Repeat {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let window = self.block.len() - self.offset;
+        let count = out
+            .len()
+            .min(window)
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        out[..count].copy_from_slice(&self.block[self.offset..self.offset + count]);
+        self.offset = (self.offset + count) % self.period.max(1);
+        self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 impl HttpExchange {
@@ -163,6 +257,94 @@ fn requested_properties(call: &Value) -> ContentProperties<'_> {
     }
 }
 
+/// The restore that a `restore` call names, or `None` for a priority this
+/// adapter does not map.
+fn requested_restore(call: &Value) -> Option<PhysicalRestore<'_>> {
+    let priority = match optional_text(call, "priority") {
+        None | Some("standard") => RestorePriority::Standard,
+        Some("high") => RestorePriority::High,
+        Some("bulk") => RestorePriority::Bulk,
+        Some(_) => return None,
+    };
+    Some(PhysicalRestore {
+        revision: requested_revision(call),
+        priority,
+        days: call
+            .get("days")
+            .and_then(Value::as_u64)
+            .map(|days| u32::try_from(days).unwrap_or(u32::MAX)),
+        tier: optional_text(call, "tier"),
+        ..PhysicalRestore::new(optional_text(call, "key").unwrap_or_default())
+    })
+}
+
+/// The result of a restore: whether it started, or the object was readable
+/// already. `None` for an outcome that is a failure.
+fn restore_value(outcome: &RestoreHeadOutcome<'_>) -> Option<Value> {
+    match outcome {
+        RestoreHeadOutcome::Started => Some(json!({"state": "started"})),
+        RestoreHeadOutcome::Readable => Some(json!({"state": "readable"})),
+        _ => None,
+    }
+}
+
+/// The metadata pairs that a write call names.
+fn requested_metadata(call: &Value) -> Vec<MetadataPair<'_>> {
+    call.get("metadata")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| MetadataPair {
+            name,
+            value: value.as_str().unwrap_or_default(),
+        })
+        .collect()
+}
+
+const SOURCE_CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
+    ("source_if_match", ConditionKind::IfMatch),
+    ("source_if_none_match", ConditionKind::IfNoneMatch),
+    ("source_if_modified_since", ConditionKind::IfModifiedSince),
+    (
+        "source_if_unmodified_since",
+        ConditionKind::IfUnmodifiedSince,
+    ),
+];
+
+/// The object that a copy call reads, with `container_field` naming its
+/// container or bucket, or `None` if the call names more than the one
+/// condition on it that the crate takes.
+fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySource<'c>> {
+    let mut given = SOURCE_CONDITION_FIELDS
+        .iter()
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?)));
+    let (condition, condition_value) = match (given.next(), given.next()) {
+        (None, _) => (ConditionKind::None, None),
+        (Some((kind, text)), None) => (kind, Some(condition_value(kind, text))),
+        (Some(_), Some(_)) => return None,
+    };
+    Some(CopySource {
+        endpoint: optional_text(call, "source_account_url"),
+        container: optional_text(call, container_field),
+        key: optional_text(call, "source_key").unwrap_or_default(),
+        revision: optional_text(call, "source_version").map(Revision::Version),
+        condition,
+        condition_value,
+    })
+}
+
+/// The bytes of the source that a stage from a copy names.
+fn requested_source_range(call: &Value) -> Result<RequestedRange, AdapterError> {
+    range_of(call.get("source_range"))
+}
+
+/// The snapshot or version that a read or a removal names.
+fn requested_revision(call: &Value) -> Option<Revision<'_>> {
+    optional_text(call, "snapshot")
+        .map(Revision::Snapshot)
+        .or_else(|| optional_text(call, "version").map(Revision::Version))
+}
+
 /// The tags that a call names: a list of keys and values, which may name a
 /// key twice, or an object of them.
 fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
@@ -241,6 +423,7 @@ fn read_meta_fields(value: &mut Value, meta: &ObjectMeta<'_>, storage_class_fiel
         ("content_disposition", meta.content_disposition),
         ("cache_control", meta.cache_control),
         ("version", meta.version),
+        ("restore_status", meta.restore_status),
     ];
     for (field, header) in fields {
         if let Some(text) = text_of(header) {
@@ -259,21 +442,6 @@ fn served_range(body: &BodyWindow) -> Option<String> {
         Some(size) => format!("bytes {}-{last}/{size}", body.object_offset),
         None => format!("bytes {}-{last}/*", body.object_offset),
     })
-}
-
-/// Declares the response fields that the crate reads from no head, each
-/// named by its result field and its header.
-fn unsupported_response_fields(fields: &[(&str, &str)], reason: &str) -> Value {
-    fields
-        .iter()
-        .map(|(field, header)| {
-            json!({
-                "at": format!("/value/{field}"),
-                "scope": "sdk",
-                "reason": format!("{reason}: {header}"),
-            })
-        })
-        .collect()
 }
 
 // The call this process was started for, whose fields a refusal names.
@@ -298,7 +466,7 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
             .map(|(field, _)| *field)
             .find(|field| call.get(field).is_some())
             .unwrap_or("if_match"),
-        "PayloadTooLarge" => "body_base64",
+        "PayloadTooLarge" => named_field("body", "body_base64"),
         // An Azure call names a part by its block ID, and an S3 call by its
         // part number. A commit names its parts in a list.
         "PartId" if call.get("block_id_base64").is_some() => "block_id_base64",
@@ -306,6 +474,12 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
         "PartId" | "Parts" => named_field("blocks", "parts"),
         "UploadId" => "upload_id",
         "Tag" => "tags",
+        "CopySource" => named_field("source_container", "source_bucket"),
+        // A listing refuses an option it cannot list with.
+        "Option" if call.get("include").is_some() => "include",
+        "Revision" => ["snapshot", "version", "source_version"]
+            .into_iter()
+            .find(|field| call.get(field).is_some())?,
         // The field of the property that the call names.
         "ContentProperty" => [
             "content_type",
@@ -440,6 +614,17 @@ fn send_request(
     context: &AdapterContext,
     request: &WireRequest<'_>,
 ) -> Result<HttpExchange, ureq::Error> {
+    send_request_with(context, request, None, BodyRead::Hold)
+}
+
+/// Sends a request whose streamed payload, if any, is `body`, and reads its
+/// response as `read` says.
+fn send_request_with(
+    context: &AdapterContext,
+    request: &WireRequest<'_>,
+    body: Option<&CallBody>,
+    read: BodyRead<'_>,
+) -> Result<HttpExchange, ureq::Error> {
     let url = request.url();
     let mut builder = ureq::http::Request::builder().method(request.method().as_str());
     // See `AdapterContext::for_endpoint`.
@@ -462,9 +647,15 @@ fn send_request(
         builder = builder.header(name, value);
     }
 
-    let mut response = match request.payload().bytes() {
-        Some(payload) => agent.run(builder.body(payload.to_vec())?)?,
-        None => agent.run(builder.body(())?)?,
+    // The request states the length of a streamed payload as its
+    // Content-Length, which ureq keeps.
+    let mut response = match (request.payload(), body) {
+        (Payload::Slice(payload), _) => agent.run(builder.body(payload.to_vec())?)?,
+        (Payload::Streamed { len }, Some(CallBody::Generated { pattern, .. })) => {
+            let mut reader = Repeat::new(pattern, len);
+            agent.run(builder.body(ureq::SendBody::from_reader(&mut reader))?)?
+        }
+        _ => agent.run(builder.body(())?)?,
     };
 
     let status = response.status().as_u16();
@@ -473,6 +664,18 @@ fn send_request(
         .iter()
         .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
         .collect();
+    if let BodyRead::Sink(address) = read
+        && (200..300).contains(&status)
+    {
+        let mut reader = response.body_mut().with_config().limit(u64::MAX).reader();
+        let length = std::io::copy(&mut reader, &mut std::net::TcpStream::connect(address)?)?;
+        return Ok(HttpExchange {
+            status,
+            headers,
+            body: Vec::new(),
+            sunk_length: Some(length),
+        });
+    }
     let body = response
         .body_mut()
         .with_config()
@@ -482,7 +685,22 @@ fn send_request(
         status,
         headers,
         body,
+        sunk_length: None,
     })
+}
+
+/// Reports the body that a read got: its bytes, or only its size when it
+/// went to the grader's body sink.
+fn read_body_fields(value: &mut Value, exchange: &HttpExchange) {
+    match exchange.sunk_length {
+        Some(length) => {
+            value["size"] = json!(length);
+        }
+        None => {
+            value["body_base64"] = json!(STANDARD.encode(&exchange.body));
+            value["size"] = json!(exchange.body.len());
+        }
+    }
 }
 
 fn decode_base64_field(call: &Value, field: &str) -> Result<Vec<u8>, AdapterError> {
@@ -510,19 +728,38 @@ const CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
 ];
 
 /// The crate takes one precondition per request.
-fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<&[u8]>)> {
+fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<ConditionValue<'_>>)> {
     let mut given = CONDITION_FIELDS
         .iter()
-        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?.as_bytes())));
+        .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?)));
     match (given.next(), given.next()) {
         (None, _) => Some((ConditionKind::None, None)),
-        (Some((kind, value)), None) => Some((kind, Some(value))),
+        (Some((kind, text)), None) => Some((kind, Some(condition_value(kind, text)))),
         (Some(_), Some(_)) => None,
     }
 }
 
+/// What a condition field compares against: an entity tag as the call names
+/// it, or the instant that an HTTP date names. A date this adapter cannot
+/// read becomes an instant past the last one an HTTP date writes, which the
+/// crate refuses as an invalid condition, as it refused the text when it took
+/// one.
+fn condition_value(kind: ConditionKind, text: &str) -> ConditionValue<'_> {
+    match kind {
+        ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince => ConditionValue::Time(
+            borink_object_storage_proto::layered::http_date_ms(text)
+                .map_or(u64::MAX, |millis| millis / 1000),
+        ),
+        _ => ConditionValue::ETag(text.as_bytes()),
+    }
+}
+
 fn requested_range(call: &Value) -> Result<RequestedRange, AdapterError> {
-    let Some(range) = call.get("range") else {
+    range_of(call.get("range"))
+}
+
+fn range_of(range: Option<&Value>) -> Result<RequestedRange, AdapterError> {
+    let Some(range) = range else {
         return Ok(RequestedRange::Whole);
     };
 
@@ -643,11 +880,19 @@ fn tags_value(tags: &[Tag<'_>]) -> Value {
 }
 
 /// The keys that a call names.
-fn requested_keys(call: &Value) -> Vec<&str> {
+/// The objects that a removal of several names: each a key, or an object
+/// of a key and the version or snapshot to remove.
+fn requested_keys(call: &Value) -> Vec<DeleteTarget<'_>> {
     call.get("keys")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
+        .filter_map(|object| match object.as_str() {
+            Some(key) => Some(DeleteTarget::new(key)),
+            None => Some(DeleteTarget {
+                key: optional_text(object, "key")?,
+                revision: requested_revision(object),
+            }),
+        })
         .collect()
 }

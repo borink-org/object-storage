@@ -54,6 +54,7 @@ fn opened(endpoint: &[u8], container: &[u8], token: &[u8]) -> Session {
         endpoint: lent(endpoint),
         container: lent(container),
         token: lent(token),
+        allow_http: false,
     }
 }
 
@@ -480,6 +481,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
         proto::EntryKind::Object,
         proto::EntryKind::Prefix,
         proto::EntryKind::Directory,
+        proto::EntryKind::DeleteMarker,
     ] {
         let entry = proto::ListEntry {
             kind,
@@ -528,7 +530,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
         conditions += usize::from(condition_kind(repr).is_ok());
         entries += usize::from(proto::EntryKind::from_discriminant(repr).is_some());
     }
-    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 5, 3));
+    assert_eq!((gets, forms, deletes, conditions, entries), (2, 4, 3, 5, 4));
 
     // A listing plan carries no enum, and an absent count is not a zero one.
     for max_results in [None, Some(1000)] {
@@ -740,7 +742,7 @@ fn every_error_crosses_as_a_status() {
     }
     // The five codes that carry no inner value, every variant of the three
     // inner enums, and a service error that names no known error.
-    assert_eq!(checked, 5 + 30 + 4 + 11 + 1);
+    assert_eq!(checked, 5 + 32 + 4 + 11 + 1);
     assert_eq!(
         ResponseFault::from_discriminant(3).map(Error::Response),
         Error::from_parts(proto::ErrorCode::Response, 3)

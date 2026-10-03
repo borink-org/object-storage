@@ -169,6 +169,16 @@ pub enum InvalidPlan {
     /// The list of keys to remove is empty, or longer than the service
     /// takes in one request.
     Keys = 30,
+    /// The snapshot or version that the plan names is empty, or one that the
+    /// service does not keep, or the plan cannot take one.
+    ///
+    /// See [`Revision`](crate::Revision).
+    Revision = 31,
+    /// The source of a copy names a container or bucket that cannot be
+    /// written into a request.
+    ///
+    /// See [`CopySource`](crate::CopySource).
+    CopySource = 32,
 }
 
 impl InvalidPlan {
@@ -208,6 +218,8 @@ impl InvalidPlan {
             Self::ContentProperty => "invalid content property",
             Self::Tag => "invalid tag",
             Self::Keys => "invalid list of keys",
+            Self::Revision => "invalid snapshot or version",
+            Self::CopySource => "invalid copy source",
         }
     }
 
@@ -246,6 +258,8 @@ impl InvalidPlan {
             28 => Self::ContentProperty,
             29 => Self::Tag,
             30 => Self::Keys,
+            31 => Self::Revision,
+            32 => Self::CopySource,
             _ => return None,
         })
     }
@@ -430,7 +444,8 @@ impl fmt::Display for ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The endpoint is not an ASCII HTTP or HTTPS origin.
+    /// The endpoint is not an ASCII HTTPS origin, or an HTTP one where the
+    /// client was not built to allow it.
     InvalidEndpoint,
     /// The container name is empty, or it contains bytes that would change the
     /// structure of the request.

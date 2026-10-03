@@ -13,25 +13,32 @@ use crate::{
     types::*,
 };
 
+use crate::ptr::SessionValues;
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{Blobs, Container, Error, ResponseHead, WireRequest};
+use borink_object_storage_proto::{Blobs, Container, Error, ListMarker, ResponseHead, WireRequest};
 
 // What every call needs before the core crate sees it: a session that was
 // passed, whose three values name a container that can be addressed.
-pub(crate) fn open(session: Option<[&[u8]; 3]>) -> proto::Result<Blobs<'_>> {
-    let [endpoint, container, token] = session.ok_or(UNKNOWN)?;
+pub(crate) fn open(session: Option<SessionValues<'_>>) -> proto::Result<Blobs<'_>> {
+    let session = session.ok_or(UNKNOWN)?;
+    let (endpoint, container, token) = (session.endpoint, session.container, session.token);
     // A value that is not text cannot be the thing it names. It fails as that
     // thing, not as a fourth kind of fault.
     let endpoint = text(endpoint, Error::InvalidEndpoint)?;
     let container = text(container, Error::InvalidContainer)?;
     let token = text(token, Error::InvalidToken)?;
-    Blobs::new(Container::new(endpoint, container)?, token)
+    let container = if session.allow_http {
+        Container::new_allowing_http(endpoint, container)?
+    } else {
+        Container::new(endpoint, container)?
+    };
+    Blobs::new(container, token)
 }
 
 // What every call with a shape needs on top of that: the shape was passed,
 // and it is one that the core crate can read.
 pub(crate) fn ready<'a, V, S>(
-    session: Option<[&'a [u8]; 3]>,
+    session: Option<SessionValues<'a>>,
     shape: Option<&V>,
     convert: impl FnOnce(&V) -> proto::Result<S>,
 ) -> proto::Result<(Blobs<'a>, S)> {
@@ -41,7 +48,7 @@ pub(crate) fn ready<'a, V, S>(
 // What every finishing call needs: the failure was passed, and it is the one
 // the outcome carried.
 pub(crate) fn finishing<'a>(
-    session: Option<[&'a [u8]; 3]>,
+    session: Option<SessionValues<'a>>,
     failure: Option<proto::Failure<'a>>,
 ) -> proto::Result<(Blobs<'a>, proto::Failure<'a>)> {
     Ok((open(session)?, failure.ok_or(UNKNOWN)?))
@@ -50,7 +57,7 @@ pub(crate) fn finishing<'a>(
 // A finishing call whose outcome also depends on the plan: the shape was
 // passed too, and it is one that the core crate can read.
 pub(crate) fn finishing_with<'a, V, S>(
-    session: Option<[&'a [u8]; 3]>,
+    session: Option<SessionValues<'a>>,
     shape: Option<&V>,
     convert: impl FnOnce(&V) -> proto::Result<S>,
     failure: Option<proto::Failure<'a>>,
@@ -81,7 +88,12 @@ pub(crate) fn filling(
     into: &mut [ListEntry],
 ) -> proto::Result<Fill> {
     let page = blobs.fill_listing(body, into)?;
-    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
+    Ok(page_fill(
+        page.filled,
+        page.next_marker
+            .and_then(ListMarker::text)
+            .map(str::as_bytes),
+    ))
 }
 
 // The same read, writing each entry's values into its row of `values`. The
@@ -103,7 +115,12 @@ pub(crate) fn filling_with(
         row += 1;
         entry_view(&entry)
     })?;
-    Ok(page_fill(page.filled, page.next_marker.map(str::as_bytes)))
+    Ok(page_fill(
+        page.filled,
+        page.next_marker
+            .and_then(ListMarker::text)
+            .map(str::as_bytes),
+    ))
 }
 
 // The head, read where your HTTP library already put it. A name that is not

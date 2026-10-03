@@ -161,18 +161,21 @@ struct Page {
 // that this client has made, up to `limits`, and stay that size.
 class Client {
   public:
-    Client(std::string endpoint, std::string container, std::string token, Limits limits)
+    Client(std::string endpoint, std::string container, std::string token, Limits limits,
+           PlainHttp plain = PlainHttp::Refused)
         : endpoint_(std::move(endpoint)), container_(std::move(container)),
-          token_(std::move(token)), limits_(limits) {
+          token_(std::move(token)), limits_(limits), plain_(plain) {
         head_.reserve(limits_.head_bytes);
     }
 
-    // Opens a client against one container.
+    // Opens a client against one container. The endpoint is an HTTPS origin,
+    // or with `PlainHttp::Allowed` an HTTP one: see `borink::PlainHttp`.
     //
     // Throws std::runtime_error if the endpoint, the container or the token
     // cannot be used. The message is the sentence that the core crate wrote.
     static Client open(std::string_view endpoint, std::string_view container,
-                       std::string_view token, Limits limits = {});
+                       std::string_view token, Limits limits = {},
+                       PlainHttp plain = PlainHttp::Refused);
 
     // Reads the object that `read` describes, passing its stored bytes to
     // `sink` as they arrive.
@@ -222,7 +225,7 @@ class Client {
     // than stored: moving this client would move the strings out from under a
     // stored one. Refreshing the token is `token()` returning the new one.
     Session session() const {
-        return borink::session(endpoint_, container_, token_);
+        return borink::session(endpoint_, container_, token_, plain_);
     }
 
     // The head of the response to the last request.
@@ -297,6 +300,7 @@ class Client {
     std::string container_;
     std::string token_;
     Limits limits_;
+    PlainHttp plain_;
     std::vector<std::uint8_t> request_;
     std::vector<RequestHeader> request_headers_;
     RequestHead request_head_{};

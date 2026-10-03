@@ -11,14 +11,14 @@ use crate::common::{
     push_checksum, valid_header,
 };
 use crate::encoding;
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
     Objects, PayloadHash, Service, Signed, Stores, body_kind, is_error_document,
     refuse_error_document, stored_headers, validate_content, validate_key, validate_metadata,
     validate_write_condition,
 };
 use crate::sigv4::EMPTY_SHA256;
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, HeaderSpan,
     InvalidPlan, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta, Payload,
@@ -275,7 +275,7 @@ impl<'a> Objects<'a> {
         let signed = Signed {
             method: Method::Post,
             key: Some(plan.key),
-            query: &[Some(("uploads", QueryValue::Literal("")))],
+            query: &[url::literal("uploads", "")],
             headers: &stored[..count],
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -283,12 +283,13 @@ impl<'a> Objects<'a> {
             metadata: plan.metadata,
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: plan.options.tags,
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         // A POST states its length even when it has no content.
-        head.header("content-length", |out| out.push(b"0"));
+        head.header("content-length", b"0");
         encoded(head, Method::Post, Payload::Slice(&[]))
     }
 
@@ -395,11 +396,11 @@ impl<'a> Objects<'a> {
             return Err(InvalidPlan::PayloadTooLarge.into());
         }
         validate_content(&plan.options, content, hash, &self.checksums, Stores::Part)?;
-        let dry = buf.is_empty();
-        let content_sha256 = self.content_sha256(hash, content, dry);
+        let pass = Pass::of(buf);
+        let content_sha256 = self.content_sha256(hash, content, pass);
         let query = [
-            Some(("partNumber", QueryValue::Number(plan.number))),
-            Some(("uploadId", QueryValue::Encoded(plan.upload_id.as_bytes()))),
+            url::number("partNumber", plan.number),
+            url::encoded("uploadId", plan.upload_id),
         ];
         let signed = Signed {
             method: Method::Put,
@@ -412,9 +413,10 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: content_sha256.as_bytes(),
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         self.push_content(&mut head, content, plan.options.checksum);
         encoded(head, Method::Put, content)
     }
@@ -557,18 +559,15 @@ impl<'a> Objects<'a> {
         let mut counted = Writer::new(&mut []);
         write_part_list(&mut counted, parts.clone());
         let length = counted.position();
-        let dry = buf.is_empty();
-        let content_sha256 = if dry {
+        let pass = Pass::of(buf);
+        let content_sha256 = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             let mut sum = self.sha256.start();
             write_part_list(&mut sum, parts.clone());
             encoding::hex(&sum.finish())
         };
-        let query = [Some((
-            "uploadId",
-            QueryValue::Encoded(upload_id.as_bytes()),
-        ))];
+        let query = [url::encoded("uploadId", upload_id)];
         let size = plan.size.map(U64Decimal::new);
         let size_header = size
             .as_ref()
@@ -584,12 +583,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: &content_sha256,
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes());
-        });
+        self.write_head(&mut head, &signed, pass, now);
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
             write_part_list(sum, parts.clone());
         });
@@ -735,10 +733,7 @@ impl<'a> Objects<'a> {
     ) -> Result<WireRequest<'r>> {
         validate_key(plan.key)?;
         validate_upload_id(plan.upload_id)?;
-        let query = [Some((
-            "uploadId",
-            QueryValue::Encoded(plan.upload_id.as_bytes()),
-        ))];
+        let query = [url::encoded("uploadId", plan.upload_id)];
         let signed = Signed {
             method: Method::Delete,
             key: Some(plan.key),
@@ -750,10 +745,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Delete, Payload::Slice(&[]))
     }
 
@@ -832,11 +828,9 @@ impl<'a> Objects<'a> {
         }
         // SigV4 signs the parameters in the order of their names.
         let query = [
-            plan.max_parts
-                .map(|max| ("max-parts", QueryValue::Number(max))),
-            plan.marker
-                .map(|marker| ("part-number-marker", QueryValue::Encoded(marker.as_bytes()))),
-            Some(("uploadId", QueryValue::Encoded(plan.upload_id.as_bytes()))),
+            url::number("max-parts", plan.max_parts),
+            url::encoded("part-number-marker", plan.marker),
+            url::encoded("uploadId", plan.upload_id),
         ];
         let signed = Signed {
             method: Method::Get,
@@ -849,10 +843,11 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: EMPTY_SHA256.as_bytes(),
             tags: &[],
+            copy: None,
         };
-        let dry = buf.is_empty();
+        let pass = Pass::of(buf);
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
+        self.write_head(&mut head, &signed, pass, now);
         encoded(head, Method::Get, Payload::Slice(&[]))
     }
 
@@ -936,7 +931,7 @@ impl<'a> Objects<'a> {
 
 // Part number 0 is not a part anywhere. AWS numbers parts up to
 // `MAX_PARTS`.
-fn validate_part_number(number: u32, service: Service) -> Result<()> {
+pub(super) fn validate_part_number(number: u32, service: Service) -> Result<()> {
     let limited = match service {
         Service::Aws | Service::AwsDirectory => true,
         Service::Compatible => false,
@@ -947,7 +942,7 @@ fn validate_part_number(number: u32, service: Service) -> Result<()> {
     Ok(())
 }
 
-fn validate_upload_id(upload_id: &str) -> Result<()> {
+pub(super) fn validate_upload_id(upload_id: &str) -> Result<()> {
     if upload_id.is_empty() {
         return Err(InvalidPlan::UploadId.into());
     }

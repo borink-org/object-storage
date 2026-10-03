@@ -142,7 +142,8 @@ pub struct AzureRejection {
 pub enum ErrorCode {
     /// Nothing failed.
     None = 0,
-    /// The endpoint is not an ASCII HTTP or HTTPS origin.
+    /// The endpoint is not an ASCII HTTPS origin, or an HTTP one without
+    /// `allow_http`.
     InvalidEndpoint = 1,
     /// The container name is not usable in a request.
     InvalidContainer = 2,
@@ -240,6 +241,9 @@ pub enum EntryKind {
     /// A directory that the service keeps as its own entry. Only an Azure
     /// account with a hierarchical namespace reports one.
     Directory = 3,
+    /// A delete marker in a listing of versions. Only S3 reports one, so
+    /// these bindings, which speak to Azure, never do.
+    DeleteMarker = 4,
 }
 
 /// The category of a service failure.
@@ -348,12 +352,18 @@ pub enum OutcomeKind {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Session {
-    /// The HTTP or HTTPS origin of the storage account.
+    /// The HTTPS origin of the storage account, or with `allow_http` an
+    /// HTTP one.
     pub endpoint: Bytes,
     /// The container name.
     pub container: Bytes,
     /// The Entra ID bearer token, without the `Bearer ` prefix.
     pub token: Bytes,
+    /// Whether `endpoint` may be an `http://` origin, such as an emulator's.
+    /// Without TLS every request carries the token in clear, so leave this
+    /// false, as a zeroed session has it, except for a local emulator or a
+    /// network you trust.
+    pub allow_http: bool,
 }
 
 /// The byte range that a read requests.

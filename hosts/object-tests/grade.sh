@@ -24,8 +24,10 @@
 set -euo pipefail
 
 # Move this on purpose: a new revision can bring new cases, or a new protocol.
-revision=a8ea8381181908c3592a7ddd7cd31e0be101ccd3
-suites=(operations management vectors)
+revision=5e81b2375f3c4005541476c0af6267974d15a725
+# `large` streams bodies of gigabytes that the grader generates, in seconds
+# over loopback.
+suites=(operations management vectors large)
 
 mode=--expected-unsupported
 case ${1-} in

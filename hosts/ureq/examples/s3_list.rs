@@ -6,7 +6,7 @@ use std::env;
 
 use borink_object_storage_proto::s3::{Bucket, Objects, Service};
 use borink_object_storage_proto::sigv4::Credentials;
-use borink_object_storage_proto::{ListEntry, PhysicalList};
+use borink_object_storage_proto::{ListEntry, ListMarker, PhysicalList};
 use borink_object_storage_ureq::s3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // body, so each round has its own.
         let mut entries = vec![ListEntry::default(); 1000];
         let plan = PhysicalList {
-            marker: marker.as_deref(),
+            marker: marker.as_deref().map(ListMarker::Text),
             max_results: Some(1000),
             ..PhysicalList::new(&prefix)
         };
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", entry.key);
         }
         // The next request overwrites the body, so copy the token out.
-        match page.next_marker {
+        match page.next_marker.and_then(ListMarker::text) {
             Some(next) => marker = Some(next.to_owned()),
             None => return Ok(()),
         }

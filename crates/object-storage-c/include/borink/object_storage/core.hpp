@@ -222,13 +222,20 @@ inline BytesMut into(std::span<std::uint8_t> bytes) {
     return BytesMut{bytes.empty() ? nullptr : bytes.data(), bytes.size()};
 }
 
-// Returns a session for one container, with the token that opens it.
+// Whether a session takes an `http://` endpoint. Without TLS every request
+// carries the token in clear, so allow it only for a local emulator or a
+// network you trust.
+enum class PlainHttp { Refused, Allowed };
+
+// Returns a session for one container, with the token that opens it. The
+// endpoint is an HTTPS origin, or with `PlainHttp::Allowed` an HTTP one.
 //
 // The three values stay where you put them. Keep them for as long as you make
 // requests through this session.
 inline Session session(std::string_view endpoint, std::string_view container,
-                              std::string_view token) {
-    return Session{as_bytes(endpoint), as_bytes(container), as_bytes(token)};
+                       std::string_view token, PlainHttp plain = PlainHttp::Refused) {
+    return Session{as_bytes(endpoint), as_bytes(container), as_bytes(token),
+                   plain == PlainHttp::Allowed};
 }
 
 // The settings of one read.

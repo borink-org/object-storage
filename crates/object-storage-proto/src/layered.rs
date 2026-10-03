@@ -6,10 +6,14 @@
 //! The `*_requirements` functions encode the request into an empty buffer
 //! and read the capacities from the refusal. They allocate nothing.
 
-use crate::azure::{BlockRef, PhysicalListBlocks, PhysicalStageBlock};
+use crate::azure::{
+    BlockRef, PhysicalListBlocks, PhysicalSetMetadata, PhysicalSetProperties, PhysicalSnapshot,
+    PhysicalStageBlock, PhysicalStageBlockFromUrl,
+};
 use crate::{
-    Blobs, Error, Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
-    PhysicalList, PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
+    Blobs, Error, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
+    PhysicalGet, PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result,
+    Revision, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
@@ -160,6 +164,166 @@ pub fn set_tier_requirements(
 }
 
 /// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_copy`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_copy`], which reports it again.
+pub fn copy_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalCopy<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_copy(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_copy_from_url`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_copy_from_url`], which reports it again.
+pub fn copy_from_url_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalCopy<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_copy_from_url(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_put_from_url`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_put_from_url`], which reports it again.
+pub fn put_from_url_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalCopy<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_put_from_url(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_stage_block_from_url`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_stage_block_from_url`], which reports it again.
+pub fn stage_block_from_url_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalStageBlockFromUrl<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_stage_block_from_url(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_abort_copy`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_abort_copy`], which reports it again.
+pub fn abort_copy_requirements(
+    blobs: &Blobs<'_>,
+    key: &str,
+    copy_id: &str,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_abort_copy(&mut [], &mut [], key, copy_id, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_restore`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_restore`], which reports it again.
+pub fn restore_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalRestore<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_restore(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_metadata`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_set_metadata`], which reports it again.
+pub fn set_metadata_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSetMetadata<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_set_metadata(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_set_properties`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_set_properties`], which reports it again.
+pub fn set_properties_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSetProperties<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(
+        blobs
+            .encode_set_properties(&mut [], &mut [], plan, now)
+            .map(drop),
+    )
+}
+
+/// Returns the byte and header-slot capacities that
+/// [`Blobs::encode_snapshot`] needs for this plan.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if the plan cannot become an Azure request,
+/// unchanged from [`Blobs::encode_snapshot`], which reports it again.
+pub fn snapshot_requirements(
+    blobs: &Blobs<'_>,
+    plan: &PhysicalSnapshot<'_>,
+    now: &Timestamps,
+) -> Result<RequestSize> {
+    required(blobs.encode_snapshot(&mut [], &mut [], plan, now).map(drop))
+}
+
+/// Returns the byte and header-slot capacities that
 /// [`Blobs::encode_set_tags`] needs, the body included.
 ///
 /// # Errors
@@ -203,9 +367,14 @@ pub fn delete_many_requirements(
 pub fn get_tags_requirements(
     blobs: &Blobs<'_>,
     key: &str,
+    revision: Option<Revision<'_>>,
     now: &Timestamps,
 ) -> Result<RequestSize> {
-    required(blobs.encode_get_tags(&mut [], &mut [], key, now).map(drop))
+    required(
+        blobs
+            .encode_get_tags(&mut [], &mut [], key, revision, now)
+            .map(drop),
+    )
 }
 
 /// Returns the byte and header-slot capacities that
@@ -451,12 +620,77 @@ pub mod s3 {
     use super::required;
     use crate::s3::{
         Objects, PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload,
-        PhysicalListParts, PhysicalStagePart,
+        PhysicalListParts, PhysicalStagePart, PhysicalStagePartCopy,
     };
     use crate::{
-        Payload, PhysicalCommit, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
-        PhysicalPut, PhysicalSetTags, RequestSize, Result, Timestamps,
+        Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
+        PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result, Revision,
+        Timestamps,
     };
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_restore`] needs for this plan, the body included.
+    ///
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_restore`], which reports it again.
+    pub fn restore_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalRestore<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_restore(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_copy`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from [`Objects::encode_copy`],
+    /// which reports it again.
+    pub fn copy_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalCopy<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(objects.encode_copy(&mut [], &mut [], plan, now).map(drop))
+    }
+
+    /// Returns the byte and header-slot capacities that
+    /// [`Objects::encode_stage_part_copy`] needs for this plan.
+    ///
+    /// Call this to size a buffer before you encode; the answer is exact.
+    /// This function computes no signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
+    /// cannot become an S3 request, unchanged from
+    /// [`Objects::encode_stage_part_copy`], which reports it again.
+    pub fn stage_part_copy_requirements(
+        objects: &Objects<'_>,
+        plan: &PhysicalStagePartCopy<'_>,
+        now: &Timestamps,
+    ) -> Result<RequestSize> {
+        required(
+            objects
+                .encode_stage_part_copy(&mut [], &mut [], plan, now)
+                .map(drop),
+        )
+    }
 
     /// Returns the byte and header-slot capacities that
     /// [`Objects::encode_get`] needs for this plan.
@@ -737,11 +971,12 @@ pub mod s3 {
     pub fn get_tagging_requirements(
         objects: &Objects<'_>,
         key: &str,
+        revision: Option<Revision<'_>>,
         now: &Timestamps,
     ) -> Result<RequestSize> {
         required(
             objects
-                .encode_get_tagging(&mut [], &mut [], key, now)
+                .encode_get_tagging(&mut [], &mut [], key, revision, now)
                 .map(drop),
         )
     }

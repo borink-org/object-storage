@@ -1,7 +1,7 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
 use borink_object_storage_proto::{
-    Blobs, ConditionKind, Container, DeleteKind, GetKind, HeaderSpan, Payload, PhysicalDelete,
+    Blobs, Condition, Container, DeleteKind, GetKind, HeaderSpan, Payload, PhysicalDelete,
     PhysicalGet, PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
 };
 
@@ -62,10 +62,9 @@ fn a_read_names_every_part_of_its_head_by_offset() {
         PhysicalGet::new("directory/a key+é"),
         PhysicalGet {
             range: RequestedRange::Bounded { start: 2, end: 6 },
-            condition: ConditionKind::IfNoneMatch,
-            condition_value: Some(b"\"etag\""),
             ..PhysicalGet::new("object.bin")
-        },
+        }
+        .with_condition(Condition::IfNoneMatch(b"\"etag\"")),
         PhysicalGet {
             range: RequestedRange::Offset(4),
             ..PhysicalGet::new("object.bin")
@@ -97,11 +96,7 @@ fn a_write_names_every_part_of_its_head_by_offset() {
     let content = Payload::Slice(b"contents");
     for put in [
         PhysicalPut::new("object.bin"),
-        PhysicalPut {
-            condition: ConditionKind::IfNoneMatch,
-            condition_value: Some(b"*"),
-            ..PhysicalPut::new("object.bin")
-        },
+        PhysicalPut::new("object.bin").with_condition(Condition::IfNoneMatch(b"*")),
     ] {
         let mut buf = vec![
             0;
@@ -126,10 +121,9 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
         PhysicalDelete::new("object.bin"),
         PhysicalDelete {
             kind: DeleteKind::ObjectAndSnapshots,
-            condition: ConditionKind::IfMatch,
-            condition_value: Some(b"\"etag\""),
             ..PhysicalDelete::new("object.bin")
-        },
+        }
+        .with_condition(Condition::IfMatch(b"\"etag\"")),
     ] {
         let mut buf = vec![
             0;
@@ -152,11 +146,7 @@ fn a_removal_names_every_part_of_its_head_by_offset() {
 fn the_requirement_is_the_end_of_the_last_part() {
     let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
-    let put = PhysicalPut {
-        condition: ConditionKind::IfMatch,
-        condition_value: Some(b"\"etag\""),
-        ..PhysicalPut::new("object.bin")
-    };
+    let put = PhysicalPut::new("object.bin").with_condition(Condition::IfMatch(b"\"etag\""));
     let content = Payload::Streamed { len: 1024 };
     let required = layered::put_requirements(&blobs, &put, content, &now())
         .map(|size| size.bytes)

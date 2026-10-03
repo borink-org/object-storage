@@ -38,7 +38,7 @@ void board_cxx(void);
 // response head, and a sentence. The clock is a constant here.
 void board_main(void) {
     const borink_session session = {as_bytes("https://account.blob.core.windows.net"),
-                                    as_bytes("container"), as_bytes("token")};
+                                    as_bytes("container"), as_bytes("token"), false};
     sink = borink_validate(&session).code;
 
     const borink_get_shape shape = {

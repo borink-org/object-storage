@@ -10,7 +10,7 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    BodyWindow, CapacityError, ConditionKind, DeleteHeadOutcome, Error, GetHeadOutcome, HeaderSpan,
+    BodyWindow, CapacityError, Condition, DeleteHeadOutcome, Error, GetHeadOutcome, HeaderSpan,
     InvalidPlan, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestedRange,
     ResponseFault, ResponseHead, Timestamps, layered,
 };
@@ -246,16 +246,8 @@ fn an_aws_bucket_name_follows_the_rules_that_aws_documents() {
 fn a_compatible_client_sends_what_aws_would_refuse() {
     let now = now();
     let content = Payload::Slice(b"0");
-    let etag_create = PhysicalPut {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"\"etag\""),
-        ..PhysicalPut::new("k")
-    };
-    let delete = PhysicalDelete {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"\"etag\""),
-        ..PhysicalDelete::new("k")
-    };
+    let etag_create = PhysicalPut::new("k").with_condition(Condition::IfNoneMatch(b"\"etag\""));
+    let delete = PhysicalDelete::new("k").with_condition(Condition::IfNoneMatch(b"\"etag\""));
     // AWS counts the name and the value: one byte and the rest.
     let fits = "v".repeat(MAX_METADATA_LEN - 1);
     let fits = [MetadataPair {

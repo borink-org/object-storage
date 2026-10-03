@@ -300,6 +300,7 @@ const _: () = {
     assert!(EntryKind::Object as u16 == proto::EntryKind::Object as u16);
     assert!(EntryKind::Prefix as u16 == proto::EntryKind::Prefix as u16);
     assert!(EntryKind::Directory as u16 == proto::EntryKind::Directory as u16);
+    assert!(EntryKind::DeleteMarker as u16 == proto::EntryKind::DeleteMarker as u16);
 
     // The properties, and that neither list has one the other lacks.
     assert!(proto::BlobProperty::COUNT == BlobProperty::Metadata as usize + 1);

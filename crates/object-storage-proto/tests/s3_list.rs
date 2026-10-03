@@ -5,8 +5,8 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    EntryKind, Error, HeaderSpan, ListEntry, ListInclude, Listing, PhysicalList, ResponseFault,
-    Timestamps, layered,
+    EntryKind, Error, HeaderSpan, ListEntry, ListInclude, ListMarker, Listing, PhysicalList,
+    ResponseFault, Timestamps, layered,
 };
 
 const ZEROS: Sha256Provider =
@@ -44,7 +44,9 @@ fn read(body: &str) -> Result<(Listing<'static>, Vec<ListEntry<'static>>), Error
 #[test]
 fn the_query_is_written_in_its_canonical_form() {
     let list = PhysicalList {
-        marker: Some("1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM="),
+        marker: Some(ListMarker::Text(
+            "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=",
+        )),
         start_after: Some("a b/c"),
         delimiter: Some("/"),
         max_results: Some(2),
@@ -82,7 +84,7 @@ fn keys_are_url_decoded_and_the_rest_is_read_as_aws_writes_it() {
          </ListBucketResult>",
     )
     .unwrap();
-    assert_eq!(page.next_marker, Some("token&more"));
+    assert_eq!(page.next_marker, Some(ListMarker::Text("token&more")));
     let keys: Vec<_> = entries
         .iter()
         .map(|entry| (entry.kind, entry.key))
@@ -141,9 +143,9 @@ fn a_page_that_contradicts_its_token_is_refused() {
     let yes = "<IsTruncated>true</IsTruncated>";
     let no = "<IsTruncated>false</IsTruncated>";
     let token = "<NextContinuationToken>t</NextContinuationToken>";
-    assert_eq!(page(yes, token), Ok(Some("t")));
+    assert_eq!(page(yes, token), Ok(Some(ListMarker::Text("t"))));
     assert_eq!(page(no, ""), Ok(None));
-    assert_eq!(page("", token), Ok(Some("t")));
+    assert_eq!(page("", token), Ok(Some(ListMarker::Text("t"))));
     let fault = Err(Error::Response(ResponseFault::Body));
     assert_eq!(page(yes, ""), fault);
     assert_eq!(page(no, token), fault);

@@ -9,7 +9,7 @@
 use borink_object_storage_proto::s3::{Addressing, Bucket, Objects, PayloadHash, Service};
 use borink_object_storage_proto::sigv4::{Credentials, Sha256Provider};
 use borink_object_storage_proto::{
-    ConditionKind, HeaderSpan, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalPut,
+    Condition, HeaderSpan, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalPut,
     RequestedRange, Timestamps, WireRequest, layered,
 };
 
@@ -121,7 +121,7 @@ fn signs_the_get_object_example_of_the_aws_documentation() {
 fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
     const TOKEN: &str = "FwoGZXIvYXdzEJr//////////wEaDH+token==";
     const CONTENT_SHA256: &str = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072";
-    let bucket = Bucket::new(
+    let bucket = Bucket::new_allowing_http(
         "http://127.0.0.1:9000",
         "objects",
         "auto",
@@ -142,11 +142,10 @@ fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
         },
     ];
     let put = PhysicalPut {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"*"),
         metadata: &metadata,
         ..PhysicalPut::new("dir/a key+é.txt")
-    };
+    }
+    .with_condition(Condition::IfNoneMatch(b"*"));
     let content = Payload::Slice(b"Welcome to Amazon S3.");
     for objects in clients(bucket, credentials, &now) {
         // The digest the encoder computes and the one you pass are signed
@@ -200,11 +199,8 @@ fn signs_a_virtual_hosted_conditional_removal() {
     .unwrap()
     .with_addressing(Addressing::VirtualHosted);
     let now = Timestamps::from_unix(1_787_400_061);
-    let delete = PhysicalDelete {
-        condition: ConditionKind::IfMatch,
-        condition_value: Some(b"\"9b2cf535f27731c974343645a3985328\""),
-        ..PhysicalDelete::new("~tilde/(paren)*")
-    };
+    let delete = PhysicalDelete::new("~tilde/(paren)*")
+        .with_condition(Condition::IfMatch(b"\"9b2cf535f27731c974343645a3985328\""));
     for objects in clients(bucket, credentials(), &now) {
         let size = layered::s3::delete_requirements(&objects, &delete, &now).unwrap();
         let mut buf = vec![0; size.bytes];
@@ -247,10 +243,9 @@ fn signs_a_conditional_read_of_a_suffix() {
     let now = Timestamps::from_unix(1_787_400_061);
     let get = PhysicalGet {
         range: RequestedRange::Suffix(5),
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"\"abc\""),
         ..PhysicalGet::new("photos/2026.jpg")
-    };
+    }
+    .with_condition(Condition::IfNoneMatch(b"\"abc\""));
     for objects in clients(bucket, credentials(), &now) {
         let size = layered::s3::get_requirements(&objects, &get, &now).unwrap();
         let mut buf = vec![0; size.bytes];

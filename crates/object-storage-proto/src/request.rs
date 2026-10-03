@@ -236,7 +236,13 @@ impl<'a> HeadWriter<'a> {
         self.url = self.part(write);
     }
 
-    pub(crate) fn header(&mut self, name: &str, write: impl FnOnce(&mut Writer<'a>)) {
+    pub(crate) fn header(&mut self, name: &str, value: impl HeaderValue) {
+        self.header_parts(|out| out.push(name.as_bytes()), |out| value.write_to(out));
+    }
+
+    // A header whose value `write` writes from state of its own, such as
+    // the signer's.
+    pub(crate) fn header_with(&mut self, name: &str, write: impl FnOnce(&mut Writer<'a>)) {
         self.header_parts(|out| out.push(name.as_bytes()), write);
     }
 
@@ -304,6 +310,57 @@ pub(crate) fn text(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("request construction writes UTF-8")
 }
 
+// Whether an encoder writes a request, or only measures it. A
+// `*_requirements` function encodes into an empty buffer to learn the room
+// that a request needs, so an empty buffer is a measuring pass, which skips
+// the work that only the bytes need, such as a signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pass {
+    Measure,
+    Write,
+}
+
+impl Pass {
+    pub(crate) fn of(buf: &[u8]) -> Self {
+        if buf.is_empty() {
+            Self::Measure
+        } else {
+            Self::Write
+        }
+    }
+}
+
+// The value of one header, which writes itself into the request head: bytes
+// as they are, a number, or a value that a type of its own assembles in
+// place, so that no value is built anywhere else first.
+pub(crate) trait HeaderValue {
+    fn write_to(self, out: &mut dyn ByteSink);
+}
+
+impl HeaderValue for &[u8] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(self);
+    }
+}
+
+impl<const N: usize> HeaderValue for &[u8; N] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(self);
+    }
+}
+
+impl HeaderValue for &str {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(self.as_bytes());
+    }
+}
+
+impl HeaderValue for U64Decimal {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        out.push(self.as_bytes());
+    }
+}
+
 // Unlike the fixed-width date fields in `time`, range offsets need the shortest
 // decimal representation. This buffer owns that representation without allocating.
 pub(crate) struct U64Decimal {
@@ -343,7 +400,7 @@ mod tests {
             let mut headers = [HeaderSpan::default(); 1];
             let mut writer =
                 HeadWriter::new(&mut bytes[..byte_capacity], &mut headers[..header_capacity]);
-            writer.header("name", |out| out.push(b"value"));
+            writer.header("name", b"value");
             let capacity = writer.capacity();
             assert_eq!(capacity.required, 9);
             assert_eq!(capacity.required_headers, 1);
@@ -397,7 +454,7 @@ mod tests {
 
         let mut head = HeadWriter::new(&mut [], &mut []);
         head.count = usize::MAX;
-        head.header("name", |out| out.push(b"value"));
+        head.header("name", b"value");
         assert_eq!(head.capacity().required_headers, usize::MAX);
         assert!(
             head.finish(Method::Get, crate::Payload::Slice(b""))

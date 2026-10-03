@@ -127,9 +127,9 @@ impl RequestedRange {
 /// The precondition that a plan carries.
 ///
 /// The plan's `condition_value` holds what the precondition compares
-/// against: an entity tag, or `*`, for the first two, and an HTTP date for
-/// the last two, as [`Timestamps::rfc1123`](crate::Timestamps::rfc1123)
-/// writes it.
+/// against: a [`ConditionValue::ETag`] for the first two, and a
+/// [`ConditionValue::Time`] for the last two. Set both with the plan's
+/// `with_condition`, which takes a [`Condition`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -152,6 +152,63 @@ pub enum ConditionKind {
     /// A request that fails it is answered `412 Precondition Failed`. S3
     /// takes it on a read alone.
     IfUnmodifiedSince = 5,
+}
+
+/// What a precondition compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConditionValue<'h> {
+    /// An entity tag, or `*` for any, as `If-Match` and `If-None-Match`
+    /// carry it. A client refuses an empty one, and one that is not ASCII
+    /// or holds a control character, with
+    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    ETag(&'h [u8]),
+    /// An instant, in seconds since the Unix epoch, which the request writes
+    /// as an HTTP date. HTTP dates count whole seconds and end at the year
+    /// 9999: a client refuses a later instant with
+    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    ///
+    /// To compare against a `Last-Modified` that the service sent, read it
+    /// with [`layered::http_date_ms`](crate::layered::http_date_ms) and
+    /// divide by 1000.
+    Time(u64),
+}
+
+/// A precondition and what it compares against, which a plan's
+/// `with_condition` stores as its `condition` and `condition_value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Condition<'h> {
+    /// The request succeeds only if the current entity tag is this one, or
+    /// if any object exists for `*`.
+    IfMatch(&'h [u8]),
+    /// The request succeeds only if the current entity tag is not this one,
+    /// or if no object exists for `*`.
+    IfNoneMatch(&'h [u8]),
+    /// The request succeeds only if the object changed after this instant,
+    /// in seconds since the Unix epoch.
+    IfModifiedSince(u64),
+    /// The request succeeds only if the object has not changed since this
+    /// instant, in seconds since the Unix epoch.
+    IfUnmodifiedSince(u64),
+}
+
+impl<'h> Condition<'h> {
+    // The kind and the value that a plan stores apart.
+    pub(crate) const fn split(self) -> (ConditionKind, Option<ConditionValue<'h>>) {
+        match self {
+            Self::IfMatch(tag) => (ConditionKind::IfMatch, Some(ConditionValue::ETag(tag))),
+            Self::IfNoneMatch(tag) => (ConditionKind::IfNoneMatch, Some(ConditionValue::ETag(tag))),
+            Self::IfModifiedSince(seconds) => (
+                ConditionKind::IfModifiedSince,
+                Some(ConditionValue::Time(seconds)),
+            ),
+            Self::IfUnmodifiedSince(seconds) => (
+                ConditionKind::IfUnmodifiedSince,
+                Some(ConditionValue::Time(seconds)),
+            ),
+        }
+    }
 }
 
 impl ConditionKind {
@@ -200,6 +257,24 @@ pub struct GetShape {
     pub condition: ConditionKind,
 }
 
+/// An earlier state of an object, which a read or a removal names instead
+/// of the object as it is now.
+///
+/// Each carries the identifier as the service wrote it, and the request
+/// sends it percent-encoded in the query. A client does not check its form:
+/// the service refuses an identifier it does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Revision<'h> {
+    /// A snapshot, by the timestamp that Azure returned in `x-ms-snapshot`
+    /// when it took the snapshot, sent as `snapshot`. Azure only.
+    Snapshot(&'h str),
+    /// A version, by the identifier that the service returned in
+    /// `x-ms-version-id` or `x-amz-version-id`, sent as `versionid` on
+    /// Azure and `versionId` on S3.
+    Version(&'h str),
+}
+
 /// A complete plan for one read.
 ///
 /// Build this immediately before each call and let it go afterwards. It
@@ -238,10 +313,24 @@ pub struct PhysicalGet<'h> {
     ///
     /// This must be present if `condition` is not [`ConditionKind::None`], and
     /// absent if it is.
-    pub condition_value: Option<&'h [u8]>,
+    pub condition_value: Option<ConditionValue<'h>>,
+    /// The snapshot or version to read, or [`None`] for the object as it
+    /// is now. An empty identifier is refused with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), and so is a
+    /// snapshot on S3.
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalGet<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that reads every byte of `key` with no precondition.
     pub fn new(key: &'h str) -> Self {
         Self {
@@ -250,6 +339,7 @@ impl<'h> PhysicalGet<'h> {
             range: RequestedRange::default(),
             condition: ConditionKind::default(),
             condition_value: None,
+            revision: None,
         }
     }
 
@@ -263,13 +353,21 @@ impl<'h> PhysicalGet<'h> {
     }
 
     /// Rebuilds a plan from a stored [`GetShape`] and the bytes it needs.
-    pub fn from_shape(shape: GetShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    ///
+    /// The plan reads the object as it is now. Set [`Self::revision`] on the
+    /// result to read a snapshot or a version.
+    pub fn from_shape(
+        shape: GetShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             key,
             kind: shape.kind,
             range: shape.range,
             condition: shape.condition,
             condition_value,
+            revision: None,
         }
     }
 
@@ -455,6 +553,12 @@ pub struct PhysicalSetTags<'h> {
     /// A checksum of the request body for the encoder to compute and send,
     /// with the provider of that kind that the client registered.
     pub checksum: Option<crate::checksum::ChecksumKind>,
+    /// The version whose tags to replace, or [`None`] for the object as it
+    /// is now. Each version keeps its own tags. Azure also replaces the tags
+    /// of a snapshot, apart from the object's, and S3, which keeps no
+    /// snapshots, refuses one with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalSetTags<'h> {
@@ -464,7 +568,37 @@ impl<'h> PhysicalSetTags<'h> {
             key,
             tags,
             checksum: None,
+            revision: None,
         }
+    }
+}
+
+/// One object of a removal of several: its key, and the snapshot or version
+/// to remove.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteTarget<'h> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'h str,
+    /// The snapshot or version to remove, or [`None`] for the object as it
+    /// is now. Azure sends it in the path of the object's Delete Blob, and
+    /// S3 as the object's `VersionId`. S3 removes no snapshot: a client
+    /// refuses one with [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
+}
+
+impl<'h> DeleteTarget<'h> {
+    /// Names the object `key` as it is now.
+    pub const fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            revision: None,
+        }
+    }
+}
+
+impl<'h> From<&'h str> for DeleteTarget<'h> {
+    fn from(key: &'h str) -> Self {
+        Self::new(key)
     }
 }
 
@@ -475,10 +609,9 @@ impl<'h> PhysicalSetTags<'h> {
 /// each: see [`DeleteManyHeadOutcome`](crate::DeleteManyHeadOutcome).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhysicalDeleteMany<'h> {
-    /// The keys of the objects to remove, each under the rules of
-    /// [`PhysicalGet::key`]. Azure takes at most 256 in one request, and
+    /// The objects to remove. Azure takes at most 256 in one request, and
     /// S3 1,000.
-    pub keys: &'h [&'h str],
+    pub objects: &'h [DeleteTarget<'h>],
     /// A checksum of the request body for the encoder to compute and send,
     /// with the provider of that kind that the client registered. AWS takes
     /// a removal of several objects only with one.
@@ -487,9 +620,9 @@ pub struct PhysicalDeleteMany<'h> {
 
 impl<'h> PhysicalDeleteMany<'h> {
     /// Creates a plan that removes these objects, with no checksum.
-    pub const fn new(keys: &'h [&'h str]) -> Self {
+    pub const fn new(objects: &'h [DeleteTarget<'h>]) -> Self {
         Self {
-            keys,
+            objects,
             checksum: None,
         }
     }
@@ -577,9 +710,32 @@ impl ListInclude {
     /// [`s3::ObjectProperty::Owner`](crate::s3::ObjectProperty::Owner).
     pub const OWNER: Self = Self(1 << 1);
 
+    /// An entry for each snapshot of an object, beside the object's own,
+    /// each with a `Snapshot` element. Azure only. Read it as
+    /// [`BlobProperty::Snapshot`].
+    pub const SNAPSHOTS: Self = Self(1 << 2);
+
+    /// An entry for each version of an object, with its version ID and
+    /// whether it is the current one: read both with [`ListEntry::version`]
+    /// and [`ListEntry::is_current_version`].
+    ///
+    /// Azure writes `VersionId` and, on the current version,
+    /// `IsCurrentVersion` in a List Blobs. An S3 client sends a
+    /// ListObjectVersions instead of a ListObjectsV2, whose entries carry
+    /// `VersionId` and `IsLatest`, and which reports each delete marker as
+    /// an [`EntryKind::DeleteMarker`]. It pages with a key and a version: see
+    /// [`ListMarker::Version`]. A directory bucket keeps no versions, so a
+    /// client refuses this flag for one.
+    pub const VERSIONS: Self = Self(1 << 3);
+
     /// Returns `true` if this set holds every flag of `other`.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// Returns `true` if this set holds any flag of `other`.
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
     }
 
     /// Returns `true` if this set holds no flag.
@@ -615,8 +771,9 @@ pub struct PutShape {
 ///
 /// # Writing only if the object is absent
 ///
-/// Set `condition` to [`ConditionKind::IfNoneMatch`] and `condition_value` to
-/// `*`. Azure then refuses a write that would replace an object.
+/// Give the plan [`Condition::IfNoneMatch`] with `*`, through
+/// [`PhysicalPut::with_condition`]. Azure then refuses a write that would
+/// replace an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalPut<'h> {
     /// The object key, within the container.
@@ -633,8 +790,8 @@ pub struct PhysicalPut<'h> {
     pub key: &'h str,
     /// The condition that the write carries.
     pub condition: ConditionKind,
-    /// The entity tag that `condition` compares against, or `*`.
-    pub condition_value: Option<&'h [u8]>,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'h>>,
     /// The metadata pairs to store with the object.
     ///
     /// The object then holds these pairs and no others: a write replaces the
@@ -647,6 +804,15 @@ pub struct PhysicalPut<'h> {
 }
 
 impl<'h> PhysicalPut<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that writes this object with no condition, no metadata
     /// and no options.
     pub fn new(key: &'h str) -> Self {
@@ -664,7 +830,11 @@ impl<'h> PhysicalPut<'h> {
     /// The plan has no metadata and no options, because a shape holds no
     /// borrows and both of those borrow. Set those two fields after this
     /// call if the write needs them.
-    pub fn from_shape(shape: PutShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    pub fn from_shape(
+        shape: PutShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             condition: shape.condition,
             condition_value,
@@ -714,8 +884,8 @@ pub struct PhysicalCommit<'a> {
     /// object that the key holds before. [`ConditionKind::IfNoneMatch`] with
     /// `*` publishes it only if the key holds none.
     pub condition: ConditionKind,
-    /// The entity tag that `condition` compares against, or `*`.
-    pub condition_value: Option<&'a [u8]>,
+    /// What `condition` compares against: see [`ConditionValue`].
+    pub condition_value: Option<ConditionValue<'a>>,
     /// The metadata pairs to store with the object.
     ///
     /// A commit replaces the whole set, as [`PhysicalPut::metadata`] does.
@@ -746,6 +916,15 @@ pub struct PhysicalCommit<'a> {
 }
 
 impl<'a> PhysicalCommit<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that commits parts to `key` with no condition, no
     /// metadata, no options and no size.
     pub const fn new(key: &'a str) -> Self {
@@ -889,10 +1068,25 @@ pub struct PhysicalDelete<'h> {
     /// The condition that the removal carries.
     pub condition: ConditionKind,
     /// The entity tag that `condition` compares against.
-    pub condition_value: Option<&'h [u8]>,
+    pub condition_value: Option<ConditionValue<'h>>,
+    /// The snapshot or version to remove, or [`None`] for the object as it
+    /// is now. A plan that names one takes [`DeleteKind::Object`], and a
+    /// client refuses any other kind with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), as it does
+    /// an empty identifier and a snapshot on S3.
+    pub revision: Option<Revision<'h>>,
 }
 
 impl<'h> PhysicalDelete<'h> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
     /// Creates a plan that removes this object alone, with no condition.
     pub fn new(key: &'h str) -> Self {
         Self {
@@ -900,16 +1094,25 @@ impl<'h> PhysicalDelete<'h> {
             kind: DeleteKind::Object,
             condition: ConditionKind::None,
             condition_value: None,
+            revision: None,
         }
     }
 
     /// Creates a plan from a stored shape and the bytes that it needs.
-    pub fn from_shape(shape: DeleteShape, key: &'h str, condition_value: Option<&'h [u8]>) -> Self {
+    ///
+    /// The plan removes the object as it is now. Set [`Self::revision`] on
+    /// the result to remove a snapshot or a version.
+    pub fn from_shape(
+        shape: DeleteShape,
+        key: &'h str,
+        condition_value: Option<ConditionValue<'h>>,
+    ) -> Self {
         Self {
             key,
             kind: shape.kind,
             condition: shape.condition,
             condition_value,
+            revision: None,
         }
     }
 
@@ -918,6 +1121,235 @@ impl<'h> PhysicalDelete<'h> {
         DeleteShape {
             kind: self.kind,
             condition: self.condition,
+        }
+    }
+}
+
+/// The object that a copy reads, in the same account or service as the
+/// client.
+///
+/// Azure names it by URL in `x-ms-copy-source`, and S3 by bucket and key in
+/// `x-amz-copy-source`. Each encodes the key as a request path does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopySource<'a> {
+    /// The HTTPS origin of the storage account that holds the source, such
+    /// as `https://other.blob.core.windows.net`, or [`None`] for the
+    /// client's own. Azure only: an S3 client refuses one with
+    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource), and so
+    /// does an Azure client for one that is not an HTTPS origin.
+    ///
+    /// Azure reads a source in another account by Entra ID in a Copy Blob
+    /// From URL, a Put Blob From URL and a Put Block From URL. It refuses an
+    /// asynchronous Copy Blob from one with 401 `CannotVerifyCopySource`,
+    /// because it reads such a source only by a shared access signature.
+    pub endpoint: Option<&'a str>,
+    /// The container or bucket that holds the source, or [`None`] for the
+    /// client's own. It may not hold `/`, `?`, `#` or a control character:
+    /// a client refuses it with
+    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
+    pub container: Option<&'a str>,
+    /// The key of the source, under the rules of [`PhysicalGet::key`].
+    pub key: &'a str,
+    /// The snapshot or version to copy, or [`None`] for the object as it is
+    /// now. S3 copies a version, and no snapshot.
+    pub revision: Option<Revision<'a>>,
+    /// The condition on the source. The service copies nothing if it does
+    /// not hold.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionKind`].
+    pub condition_value: Option<ConditionValue<'a>>,
+}
+
+impl<'a> CopySource<'a> {
+    /// Returns this source with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
+    /// Names the object `key` in the client's own container or bucket, as
+    /// it is now, with no condition.
+    pub const fn new(key: &'a str) -> Self {
+        Self {
+            endpoint: None,
+            container: None,
+            key,
+            revision: None,
+            condition: ConditionKind::None,
+            condition_value: None,
+        }
+    }
+}
+
+/// The part of a copy plan that holds no borrows.
+///
+/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
+/// the method that reads the response of the copy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyShape {
+    /// The condition on the target.
+    pub condition: ConditionKind,
+    /// The condition on the source.
+    pub source_condition: ConditionKind,
+}
+
+/// One copy of an object onto a key, which the service carries out without
+/// sending the bytes through the client.
+///
+/// The target takes the source's bytes and content properties. Azure copies
+/// the source's metadata, and S3 its metadata and its tags, unless the plan
+/// names new ones in [`Self::metadata`] and [`Self::tags`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalCopy<'a> {
+    /// The key that the copy writes, under the rules of [`PhysicalGet::key`].
+    pub key: &'a str,
+    /// The object that the copy reads.
+    pub source: CopySource<'a>,
+    /// The condition on the target, as a write carries it.
+    pub condition: ConditionKind,
+    /// What `condition` compares against: see [`ConditionKind`].
+    pub condition_value: Option<ConditionValue<'a>>,
+    /// The metadata of the target: [`None`] for the source's, or these pairs
+    /// alone. The rules of [`PhysicalPut::metadata`] apply.
+    ///
+    /// S3 replaces the source's metadata with `x-amz-metadata-directive:
+    /// REPLACE`, which replaces its content properties too: see
+    /// [`Self::options`]. Azure copies the source's metadata unless the
+    /// request names pairs, so it cannot copy with none: a client refuses an
+    /// empty list with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub metadata: Option<&'a [MetadataPair<'a>]>,
+    /// The tags of the target: [`None`] for what the service gives a copy,
+    /// or these tags alone.
+    ///
+    /// S3 copies the source's tags unless the request replaces them with
+    /// `x-amz-tagging-directive: REPLACE`, which an empty list sends with no
+    /// tag. Azure gives a copy no tags but these.
+    pub tags: Option<&'a [Tag<'a>]>,
+    /// The storage class, and on S3 the content properties, of the target.
+    /// A copy names its tags in [`Self::tags`], carries no checksum and
+    /// declares no MD5: a client refuses any of these here with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    ///
+    /// On S3, a content property or new metadata replaces the source's
+    /// metadata and content properties together, with
+    /// `x-amz-metadata-directive: REPLACE`: name every one you want to keep.
+    /// Azure's Copy Blob takes the source's content properties, and refuses
+    /// one here with
+    /// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty).
+    pub options: WriteOptions<'a>,
+}
+
+impl<'a> PhysicalCopy<'a> {
+    /// Returns this plan with `condition`, which sets [`Self::condition`]
+    /// and [`Self::condition_value`] together.
+    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
+        let (kind, value) = condition.split();
+        self.condition = kind;
+        self.condition_value = value;
+        self
+    }
+
+    /// Creates a plan that copies `source` onto `key` with no condition on
+    /// the target, keeping what the source holds.
+    pub const fn new(key: &'a str, source: CopySource<'a>) -> Self {
+        Self {
+            key,
+            source,
+            condition: ConditionKind::None,
+            condition_value: None,
+            metadata: None,
+            tags: None,
+            options: WriteOptions::new(),
+        }
+    }
+
+    /// Returns the part of this plan that holds no borrows.
+    pub fn shape(&self) -> CopyShape {
+        CopyShape {
+            condition: self.condition,
+            source_condition: self.source.condition,
+        }
+    }
+}
+
+/// How soon the service makes an archived object readable again, and at
+/// what cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u16)]
+pub enum RestorePriority {
+    /// The slowest and cheapest: S3's `Bulk`. S3 only.
+    Bulk = 1,
+    /// `Standard` on both services.
+    #[default]
+    Standard = 2,
+    /// The fastest: S3's `Expedited`, and Azure's `High`.
+    High = 3,
+}
+
+impl RestorePriority {
+    /// Returns the priority with this discriminant.
+    ///
+    /// Returns [`None`] for a discriminant that this version does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Bulk,
+            2 => Self::Standard,
+            3 => Self::High,
+            _ => return None,
+        })
+    }
+}
+
+/// A request that makes an object in an archive readable again: an S3
+/// RestoreObject, or an Azure Set Blob Tier out of the `Archive` tier.
+///
+/// The two services restore differently. S3 makes a temporary copy readable
+/// for [`Self::days`], and the object stays in its archive storage class.
+/// Azure rehydrates the object into [`Self::tier`] for good. Both take
+/// hours, and answer at once that they started: follow the restore with a
+/// HEAD, in [`ObjectMeta::restore_status`](crate::ObjectMeta::restore_status).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhysicalRestore<'h> {
+    /// The object key, under the rules of [`PhysicalGet::key`].
+    pub key: &'h str,
+    /// The version to restore, or [`None`] for the object as it is now.
+    /// Azure also rehydrates a snapshot, and S3 refuses one with
+    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    pub revision: Option<Revision<'h>>,
+    /// How soon to restore. Azure refuses [`RestorePriority::Bulk`] with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub priority: RestorePriority,
+    /// How many days the restored copy stays readable, at least 1. S3 only.
+    ///
+    /// S3 requires it for an object in Glacier Flexible Retrieval or Deep
+    /// Archive, and refuses it for one in an archive tier of
+    /// Intelligent-Tiering, which it restores into a tier that stays. Azure
+    /// refuses it with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub days: Option<u32>,
+    /// The tier to rehydrate into: `Hot`, `Cool` or `Cold`. Azure requires
+    /// it, and S3 refuses it, each with
+    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    pub tier: Option<&'h str>,
+    /// A checksum of the request body for the encoder to compute and send,
+    /// with the provider of that kind that the client registered. S3 only:
+    /// an Azure request has no body.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+impl<'h> PhysicalRestore<'h> {
+    /// Creates a plan that restores `key` at the standard priority.
+    pub const fn new(key: &'h str) -> Self {
+        Self {
+            key,
+            revision: None,
+            priority: RestorePriority::Standard,
+            days: None,
+            tier: None,
+            checksum: None,
         }
     }
 }
@@ -942,6 +1374,12 @@ pub enum EntryKind {
     /// Only an Azure account with a hierarchical namespace reports these. A
     /// flat account reports a group of keys as [`Self::Prefix`] instead.
     Directory = 3,
+    /// A delete marker: the version that a removal wrote in place of the
+    /// object, which has no bytes.
+    ///
+    /// Only an S3 listing of versions reports these. Azure keeps no marker:
+    /// a removed object's versions remain, with none of them current.
+    DeleteMarker = 4,
 }
 
 impl EntryKind {
@@ -953,8 +1391,43 @@ impl EntryKind {
             1 => Self::Object,
             2 => Self::Prefix,
             3 => Self::Directory,
+            4 => Self::DeleteMarker,
             _ => return None,
         })
+    }
+}
+
+/// Where a listing continues: what the previous page handed out.
+///
+/// Take it from [`Listing::next_marker`](crate::Listing::next_marker), copy
+/// its text into your own storage before the next page overwrites the body,
+/// and pass it back in the next plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ListMarker<'a> {
+    /// The text of a listing that continues from one marker: Azure's
+    /// `NextMarker`, an S3 continuation token, or the part number marker
+    /// of an S3 ListParts.
+    Text(&'a str),
+    /// Where an S3 listing of versions continues: after the key `key`, or
+    /// with `version` after that version of it. S3 hands both out as
+    /// `NextKeyMarker` and `NextVersionIdMarker`.
+    Version {
+        /// The key that the next page starts after, or at.
+        key: &'a str,
+        /// The version of `key` that the next page starts after.
+        version: Option<&'a str>,
+    },
+}
+
+impl<'a> ListMarker<'a> {
+    /// Returns the text of a [`Self::Text`] marker, or [`None`] for a
+    /// [`Self::Version`] one.
+    pub const fn text(self) -> Option<&'a str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Version { .. } => None,
+        }
     }
 }
 
@@ -999,9 +1472,14 @@ pub struct PhysicalList<'h> {
     ///
     /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
     /// previous page reported. The first page carries [`None`]. The text is
-    /// the service's, and means nothing to this crate. On S3 it is the
-    /// continuation token of a ListObjectsV2.
-    pub marker: Option<&'h str>,
+    /// the service's, and means nothing to this crate.
+    ///
+    /// A listing continues from the kind of marker that its pages hand out:
+    /// [`ListMarker::Version`] for an S3 listing of
+    /// [`ListInclude::VERSIONS`], and [`ListMarker::Text`] for every other.
+    /// A client refuses the other kind, and an empty text, with
+    /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
+    pub marker: Option<ListMarker<'h>>,
     /// The text after which the listing starts. S3 only.
     ///
     /// The listing reports only the keys and groups of keys that sort after
@@ -1045,7 +1523,7 @@ impl<'h> PhysicalList<'h> {
     /// The plan has no [`Self::start_after`], which a later page does not
     /// need. A delimited shape groups the keys at `/`: set
     /// [`Self::delimiter`] on the plan for another delimiter.
-    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<&'h str>) -> Self {
+    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<ListMarker<'h>>) -> Self {
         Self {
             prefix,
             marker,
@@ -1163,6 +1641,28 @@ impl<'b> ListEntry<'b> {
     /// the rest of the page, select [`BlobProperty::Metadata`].
     pub fn metadata(&self) -> Option<Metadata<'b>> {
         self.property("Metadata").map(Metadata::new)
+    }
+
+    /// Returns the version that this entry names, in a listing of
+    /// [`ListInclude::VERSIONS`], from its `VersionId` element.
+    ///
+    /// S3 names an object written before its bucket kept versions `null`.
+    /// This method reads the entry again.
+    pub fn version(&self) -> Option<&'b [u8]> {
+        self.property("VersionId")
+    }
+
+    /// Returns whether this entry is the current version of its object, in a
+    /// listing of [`ListInclude::VERSIONS`]: Azure's `IsCurrentVersion`,
+    /// or S3's `IsLatest`.
+    ///
+    /// Returns `false` for an entry that says neither, as every entry of a
+    /// listing without versions does, and for a delete marker that S3 does
+    /// not mark as the latest. This method reads the entry again.
+    pub fn is_current_version(&self) -> bool {
+        self.properties().any(|(name, value)| {
+            matches!(name, b"IsCurrentVersion" | b"IsLatest") && value.trim_ascii() == b"true"
+        })
     }
 }
 

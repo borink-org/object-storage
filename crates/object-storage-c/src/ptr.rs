@@ -96,23 +96,31 @@ pub(crate) unsafe fn maybe_slice<'a>(value: MaybeBytes) -> Option<&'a [u8]> {
     value.present.then(|| unsafe { slice(value.bytes) })
 }
 
-/// Reads the endpoint, the container and the token of a session, in that
-/// order. A null `session` reads nothing.
+/// The values of a session, as the core crate's client takes them.
+#[derive(Clone, Copy)]
+pub(crate) struct SessionValues<'a> {
+    pub(crate) endpoint: &'a [u8],
+    pub(crate) container: &'a [u8],
+    pub(crate) token: &'a [u8],
+    pub(crate) allow_http: bool,
+}
+
+/// Reads the endpoint, the container, the token and whether plain HTTP is
+/// allowed. A null `session` reads nothing.
 ///
 /// # Safety
 ///
-/// `session` must be null or point at one readable value whose three values
-/// each satisfy `items` for the lifetime `'a`.
-pub(crate) unsafe fn session<'a>(session: *const Session) -> Option<[&'a [u8]; 3]> {
+/// `session` must be null or point at one readable value whose three byte
+/// values each satisfy `items` for the lifetime `'a`.
+pub(crate) unsafe fn session<'a>(session: *const Session) -> Option<SessionValues<'a>> {
     // SAFETY: the caller states that a non-null `session` is readable, and
     // that so are the three values it holds.
     unsafe {
-        session.as_ref().map(|session| {
-            [
-                slice(session.endpoint),
-                slice(session.container),
-                slice(session.token),
-            ]
+        session.as_ref().map(|session| SessionValues {
+            endpoint: slice(session.endpoint),
+            container: slice(session.container),
+            token: slice(session.token),
+            allow_http: session.allow_http,
         })
     }
 }

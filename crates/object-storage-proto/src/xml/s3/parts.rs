@@ -6,8 +6,9 @@ use crate::s3::Part;
 use crate::xml::page::{
     check_body, check_room, decode_value_in_place, open_root_element, read_size, set_once, text,
 };
+use crate::xml::s3::read_values;
 use crate::xml::scan::{Child, Scan, Span, fault};
-use crate::{Listing, Result};
+use crate::{ListMarker, Listing, Result};
 
 // Reads an `InitiateMultipartUploadResult`, the answer to a
 // CreateMultipartUpload, and returns the ID of the upload.
@@ -22,43 +23,6 @@ pub(crate) fn read_upload_id(body: &mut [u8]) -> Result<&str> {
 pub(crate) fn read_committed(body: &mut [u8]) -> Result<&str> {
     let [e_tag] = read_values(body, b"CompleteMultipartUploadResult", [b"ETag"])?;
     e_tag.map_or_else(fault, Ok)
-}
-
-// Reads the values of the children of the root `root` that `names` names,
-// each decoded in place, and skips every other child. A child named twice is
-// a fault. As in `read_session`, nothing is taken off the body until the root
-// is closed, so every span indexes the whole document.
-fn read_values<'b, const N: usize>(
-    body: &'b mut [u8],
-    root: &[u8],
-    names: [&[u8]; N],
-) -> Result<[Option<&'b str>; N]> {
-    check_body(body)?;
-    let mut scan = Scan::new(body);
-    open_root_element(&mut scan, root)?;
-    let mut fields: [Option<(Span, u8)>; N] = [None; N];
-    loop {
-        match scan.child(root)? {
-            Child::Close => break,
-            Child::Open(tag) => match names.iter().position(|name| *name == scan.text(tag.name)) {
-                Some(slot) => set_once(&mut fields[slot], scan.value(tag)?)?,
-                None => scan.skip(tag)?,
-            },
-        }
-    }
-    let chunk = scan.take();
-    let mut spans = [None; N];
-    for (span, field) in spans.iter_mut().zip(fields) {
-        *span = decode_value_in_place(chunk, field)?;
-    }
-    let chunk: &'b [u8] = chunk;
-    let mut values = [None; N];
-    for (value, span) in values.iter_mut().zip(spans) {
-        *value = span
-            .map(|(start, end)| text(&chunk[start..end]))
-            .transpose()?;
-    }
-    Ok(values)
 }
 
 const PARTS_ROOT: &[u8] = b"ListPartsResult";
@@ -130,7 +94,7 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
     };
     Ok(Listing {
         filled: held,
-        next_marker,
+        next_marker: next_marker.map(ListMarker::Text),
     })
 }
 

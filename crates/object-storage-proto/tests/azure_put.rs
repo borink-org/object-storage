@@ -1,10 +1,10 @@
 //! Azure write encoding and response interpretation.
 
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, ConditionKind, Container, Error, Failure, FailureClass, HeaderSpan,
-    InvalidPlan, MetadataPair, Method, ObjectMeta, Payload, PhysicalPut, PutHeadOutcome, PutShape,
-    ResponseFault, ResponseHead, ServiceErrorKind, Timestamps, TransactionalChecksum, WriteOptions,
-    layered,
+    AzureNamespace, Blobs, Condition, ConditionKind, ConditionValue, Container, Error, Failure,
+    FailureClass, HeaderSpan, InvalidPlan, MetadataPair, Method, ObjectMeta, Payload, PhysicalPut,
+    PutHeadOutcome, PutShape, ResponseFault, ResponseHead, ServiceErrorKind, Timestamps,
+    TransactionalChecksum, WriteOptions, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -91,11 +91,7 @@ fn an_empty_write_states_a_zero_length() {
 fn a_conditional_write_sends_the_condition_header() {
     let mut request_headers = [HeaderSpan::default(); 8];
     let blobs = blobs();
-    let create = PhysicalPut {
-        condition: ConditionKind::IfNoneMatch,
-        condition_value: Some(b"*"),
-        ..PhysicalPut::new("object.bin")
-    };
+    let create = PhysicalPut::new("object.bin").with_condition(Condition::IfNoneMatch(b"*"));
     let mut buf = vec![
         0;
         layered::put_requirements(&blobs, &create, Payload::Slice(b"one"), &now())
@@ -116,7 +112,7 @@ fn a_conditional_write_sends_the_condition_header() {
     let replace = PhysicalPut::from_shape(
         conditional(ConditionKind::IfMatch),
         "object.bin",
-        Some(b"\"etag\""),
+        Some(ConditionValue::ETag(b"\"etag\"")),
     );
     let mut buf = vec![
         0;
@@ -187,7 +183,7 @@ fn a_write_plan_is_validated_before_any_byte_is_written() {
         (
             PhysicalPut {
                 condition: ConditionKind::None,
-                condition_value: Some(b"\"etag\""),
+                condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
                 ..PhysicalPut::new("object.bin")
             },
             InvalidPlan::Condition,

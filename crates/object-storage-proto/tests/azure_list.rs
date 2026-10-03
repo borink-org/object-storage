@@ -2,9 +2,9 @@
 
 use borink_object_storage_proto::{
     AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, HeaderSpan,
-    InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListShape, Listing, Metadata, Method,
-    PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead, ServiceErrorKind,
-    Timestamps, layered,
+    InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListMarker, ListShape, Listing, Metadata,
+    Method, PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -125,7 +125,7 @@ fn every_query_parameter_is_written_in_one_order() {
     // not unreserved is encoded, including one that is already a percent.
     assert_eq!(
         url(&PhysicalList {
-            marker: Some("2!72!MDAwMDI4!a+b%c"),
+            marker: Some(ListMarker::Text("2!72!MDAwMDI4!a+b%c")),
             ..PhysicalList::new("")
         }),
         format!("{base}&marker=2%2172%21MDAwMDI4%21a%2Bb%25c")
@@ -139,7 +139,7 @@ fn every_query_parameter_is_written_in_one_order() {
                 ..ListShape::default()
             },
             "directory/",
-            Some("next"),
+            Some(ListMarker::Text("next")),
         )),
         format!("{base}&prefix=directory%2F&delimiter=%2F&marker=next&maxresults=2")
     );
@@ -186,7 +186,7 @@ fn a_listing_plan_is_validated_before_any_byte_is_written() {
         (PhysicalList::new(&over), InvalidPlan::UrlTooLong),
         (
             PhysicalList {
-                marker: Some(""),
+                marker: Some(ListMarker::Text("")),
                 ..PhysicalList::new("")
             },
             InvalidPlan::Marker,
@@ -463,7 +463,7 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
     let mut body = page(&object("a.txt", 1), "2!72!MDAwMDI4");
     let mut entries = [ListEntry::default(); 1];
     let listing = fill(&mut body, &mut entries);
-    assert_eq!(listing.next_marker, Some("2!72!MDAwMDI4"));
+    assert_eq!(listing.next_marker, Some(ListMarker::Text("2!72!MDAwMDI4")));
 
     let mut body = page(&object("a.txt", 1), "");
     assert_eq!(fill(&mut body, &mut entries).next_marker, None);
@@ -491,7 +491,7 @@ fn a_marker_names_the_next_page_and_an_empty_one_names_none() {
         let mut entries = [ListEntry::default(); 1];
         assert_eq!(
             fill(&mut body, &mut entries).next_marker,
-            Some("2!72!MDAwMDI4"),
+            Some(ListMarker::Text("2!72!MDAwMDI4")),
             "{named}"
         );
     }
@@ -551,7 +551,7 @@ fn an_empty_page_holds_nothing_and_may_still_name_a_next() {
     let mut body = page("", "next");
     let listing = fill(&mut body, &mut []);
     assert_eq!(listing.filled, 0);
-    assert_eq!(listing.next_marker, Some("next"));
+    assert_eq!(listing.next_marker, Some(ListMarker::Text("next")));
 
     // A container with nothing in it comes back with the tag written this
     // way instead.
@@ -757,7 +757,7 @@ fn whitespace_between_the_entries_is_not_an_entry() {
 
     assert_eq!(listing.filled, 2);
     assert_eq!(entries[1].key, "b.txt");
-    assert_eq!(listing.next_marker, Some("next"));
+    assert_eq!(listing.next_marker, Some(ListMarker::Text("next")));
 }
 
 /// One page exactly as the service sent it, byte for byte, from a live run.

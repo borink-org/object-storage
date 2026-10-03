@@ -6,9 +6,9 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    BodyWindow, ConditionKind, Error, FailureClass, GetHeadOutcome, GetKind, HeaderSpan,
-    InvalidPlan, PhysicalGet, RequestedRange, ResponseFault, ResponseHead, ServiceErrorKind,
-    Timestamps, layered,
+    BodyWindow, ConditionKind, ConditionValue, Error, FailureClass, GetHeadOutcome, GetKind,
+    HeaderSpan, InvalidPlan, PhysicalGet, RequestedRange, ResponseFault, ResponseHead,
+    ServiceErrorKind, Timestamps, layered,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -72,7 +72,8 @@ fn head<'h>(status: u16, headers: &[(&'h str, &'h [u8])]) -> ResponseHead<'h> {
 
 #[test]
 fn the_url_names_the_bucket_where_the_addressing_says() {
-    let path = |endpoint| Bucket::new(endpoint, "bucket", "auto", Service::Aws).unwrap();
+    let path =
+        |endpoint| Bucket::new_allowing_http(endpoint, "bucket", "auto", Service::Aws).unwrap();
     assert_eq!(
         url(path("https://s3.example.com"), "a/b"),
         "https://s3.example.com/bucket/a/b"
@@ -289,7 +290,7 @@ fn a_read_checks_the_range_and_the_condition_it_asked_for() {
     let conditional = |condition| {
         PhysicalGet {
             condition,
-            condition_value: Some(b"\"etag\""),
+            condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
             ..PhysicalGet::new("k")
         }
         .shape()

@@ -2,20 +2,24 @@
 // answer holds a result for each.
 
 use crate::checksum::ChecksumKind;
-use crate::common::{decimal_header, encoded_with_body, failure, finish_with_body, push_checksum};
+use crate::common::{
+    decimal_header, encoded_with_body, failure, finish_with_body, push_checksum, validate_revision,
+};
 use crate::encoding;
-use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, validate_key,
     validate_s3_checksum,
 };
-use crate::url::QueryValue;
+use crate::url;
 use crate::{
-    ConditionKind, DeleteManyHeadOutcome, Failure, HeaderSpan, InvalidPlan, Method,
-    PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Timestamps,
+    ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan, Method,
+    PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Revision, Timestamps,
     TransactionalChecksum, WireRequest,
 };
 
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
 
@@ -29,6 +33,10 @@ const DELETE_CLOSE: &[u8] = b"</Delete>";
 ///
 /// [`Objects::fill_delete_results`] writes one for each object that the
 /// request named. S3 reports a key that held no object as removed.
+///
+/// S3 lists the results in an order of its own. Match each to the object it
+/// answers by its key and its version: a request may name one key with two
+/// versions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeleteResult<'b> {
     /// The key, as S3 wrote it.
@@ -36,6 +44,13 @@ pub struct DeleteResult<'b> {
     /// The error code if S3 did not remove the object, such as
     /// `AccessDenied`, or [`None`] if it did.
     pub code: Option<&'b str>,
+    /// The version that the request named, as S3 repeated it.
+    pub version: Option<&'b str>,
+    /// Whether the removal wrote a delete marker, which a removal without a
+    /// version does on a bucket that keeps versions, or removed one.
+    pub delete_marker: bool,
+    /// The version of that delete marker.
+    pub delete_marker_version: Option<&'b str>,
 }
 
 impl<'a> Objects<'a> {
@@ -72,17 +87,19 @@ impl<'a> Objects<'a> {
         plan: &PhysicalDeleteMany<'_>,
         now: &Timestamps,
     ) -> Result<WireRequest<'r>> {
-        if plan.keys.is_empty() || plan.keys.len() > MAX_DELETE_KEYS {
+        if plan.objects.is_empty() || plan.objects.len() > MAX_DELETE_KEYS {
             return Err(InvalidPlan::Keys.into());
         }
-        for key in plan.keys {
-            validate_key(key)?;
-            if key
+        for object in plan.objects {
+            validate_key(object.key)?;
+            if object
+                .key
                 .bytes()
                 .any(|byte| byte.is_ascii_control() && byte != b'\t')
             {
                 return Err(InvalidPlan::KeyControlCharacter.into());
             }
+            validate_revision(object.revision, false)?;
         }
         let needs_checksum = match self.bucket.service {
             Service::Aws | Service::AwsDirectory => true,
@@ -95,23 +112,27 @@ impl<'a> Objects<'a> {
         validate_s3_checksum(checksum, true, &self.checksums)?;
 
         let mut counted = Writer::new(&mut []);
-        write_delete(&mut counted, plan.keys);
+        write_delete(&mut counted, plan.objects);
         let length = counted.position();
-        let dry = buf.is_empty();
-        let content_sha256 = if dry {
+        let pass = Pass::of(buf);
+        let content_sha256 = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
             let mut sum = self.sha256.start();
-            write_delete(&mut sum, plan.keys);
+            write_delete(&mut sum, plan.objects);
             encoding::hex(&sum.finish())
         };
         let mut text = [0; CHECKSUM_TEXT_LEN];
-        let signed_checksum =
-            self.signed_checksum(checksum, |sum| write_delete(sum, plan.keys), dry, &mut text);
+        let signed_checksum = self.signed_checksum(
+            checksum,
+            |sum| write_delete(sum, plan.objects),
+            pass,
+            &mut text,
+        );
         let signed = Signed {
             method: Method::Post,
             key: None,
-            query: &[Some(("delete", QueryValue::Literal("")))],
+            query: &[url::literal("delete", "")],
             headers: signed_checksum.as_slice(),
             range: RequestedRange::Whole,
             condition: ConditionKind::None,
@@ -119,17 +140,16 @@ impl<'a> Objects<'a> {
             metadata: &[],
             content_sha256: &content_sha256,
             tags: &[],
+            copy: None,
         };
         let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, dry, now);
-        head.header("content-length", |out| {
-            out.push(U64Decimal::new(length as u64).as_bytes());
-        });
+        self.write_head(&mut head, &signed, pass, now);
+        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
         let md5 = checksum.filter(|_| plan.checksum == Some(ChecksumKind::Md5));
         push_checksum(&mut head, md5, &self.checksums, |sum| {
-            write_delete(sum, plan.keys);
+            write_delete(sum, plan.objects);
         });
-        encoded_with_body(head, Method::Post, |out| write_delete(out, plan.keys))
+        encoded_with_body(head, Method::Post, |out| write_delete(out, plan.objects))
     }
 
     /// Reads the response head of a DeleteObjects and reports what to do
@@ -192,12 +212,19 @@ impl<'a> Objects<'a> {
     }
 }
 
-fn write_delete(out: &mut dyn ByteSink, keys: &[&str]) {
+fn write_delete(out: &mut dyn ByteSink, objects: &[DeleteTarget<'_>]) {
     out.push(DELETE_OPEN);
-    for key in keys {
+    for object in objects {
         out.push(b"<Object><Key>");
-        encoding::write_xml_text(out, key.as_bytes());
-        out.push(b"</Key></Object>");
+        encoding::write_xml_text(out, object.key.as_bytes());
+        out.push(b"</Key>");
+        // Validation refused a snapshot.
+        if let Some(Revision::Version(id)) = object.revision {
+            out.push(b"<VersionId>");
+            encoding::write_xml_text(out, id.as_bytes());
+            out.push(b"</VersionId>");
+        }
+        out.push(b"</Object>");
     }
     out.push(DELETE_CLOSE);
 }

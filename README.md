@@ -39,12 +39,17 @@ We also provide C/C++ bindings, but these only implement a subset of the feature
 - Checksums (crypto implementations through [`crates/object-storage-crypto`](https://github.com/borink-org/object-storage/tree/master/crates/object-storage-crypto))
   - CRC64 and MD5 on both; CRC32, CRC32C, SHA-1 and SHA-256 on S3
 - Object multipart upload
+- Object versions; and snapshots (Azure only)
+- Object server-side copy
+- Object storage tiers and archive restoration
 - Response classification: object metadata, byte-range windows, request IDs, and complete error handling
 - Support for less strict verification to better support S3-compatible services
 
 ### Azure Blob Storage-only
 
 - Setting the access tier (Set Blob Tier)
+- Taking a snapshot (Snapshot Blob)
+- Handling storage accounts with hierarchical namespace (HNS) enabled
 
 ### S3-only
 
@@ -67,16 +72,13 @@ The goal is a full-featured object storage library that supports both Azure Blob
 The core library functionality is not expected to change a lot from now on, but there is no API stability yet. That will come in 1.0, which I'm planning to get to sooner rather than later. We have initial support for S3 and Azure. Until 0.1, do expect some significant churn. The main approach of the core library was already validated before, but the C/C++ layer might still go through some iterations.
 
 Roadmap:
-- S3 directory buckets, S3 Express One Zone, full Azure HNS compatibility
-- S3 multipart
-- ... potentially various other features: Azure snapshots, versions, more S3 checksum algorithms
 - ... support for various AWS and Azure authorization schemes
 - 0.1 release (with promise to try and keep the Rust API stable from now on, but no guarantee)
 - Generic API (so layer over the providers) -> 0.3 release
 - Convenience API that allocates -> 0.4 release
 - C/C++ bindings for the provider-specific, generic and convenience APIs, will remain unstable and versioned separately
 - Rust API stability promise -> 1.0
-- ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings)
+- ... potentially support various additional Azure/AWS features (e.g. appends, page blobs, Arrow listings, encryption)
 - ... various improvements to the convenience layer and API and CLI that implements various non-core features that are coupled to the transport
 
 ## Usage notes
