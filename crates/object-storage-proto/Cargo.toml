@@ -1,6 +1,6 @@
 [package]
 name = "borink-object-storage-proto"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "Builds Azure Blob Storage and S3 requests and reads their responses, without I/O or allocation"
