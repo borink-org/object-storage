@@ -188,7 +188,7 @@ impl<'a> Objects<'a> {
         into: &mut [DeleteResult<'b>],
     ) -> Result<usize> {
         refuse_error_document(body)?;
-        crate::xml::s3_batch::fill_delete_results(body, into)
+        crate::xml::s3::batch::fill_delete_results(body, into)
     }
 }
 

@@ -2,11 +2,11 @@
 // CreateMultipartUpload returns, the entity tag of a committed object, and a
 // page of ListParts.
 
-use super::page::{
+use crate::s3::Part;
+use crate::xml::page::{
     check_body, check_room, decode_value_in_place, open_root_element, read_size, set_once, text,
 };
-use super::scan::{Child, Scan, Span, fault};
-use crate::s3::Part;
+use crate::xml::scan::{Child, Scan, Span, fault};
 use crate::{Listing, Result};
 
 // Reads an `InitiateMultipartUploadResult`, the answer to a

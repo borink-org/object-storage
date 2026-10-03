@@ -1323,7 +1323,7 @@ mod tests {
 /// not listed here with [`ListEntry::properties`].
 ///
 /// The page reader matches each of these by its whole start tag, in
-/// `xml/azure.rs`. A property added here is added to that match too, and a
+/// `xml/azure/mod.rs`. A property added here is added to that match too, and a
 /// test there checks that every one of these is matched.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

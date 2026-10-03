@@ -403,7 +403,7 @@ impl<'a> Blobs<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::azure_blocks::fill_blocks(body, into)
+        crate::xml::azure::blocks::fill_blocks(body, into)
     }
 
     /// Reads the head that answers a stage.

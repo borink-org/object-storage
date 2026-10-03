@@ -1,14 +1,14 @@
 // Reads a `DeleteResult`, the answer to an S3 DeleteObjects: a `Deleted` for
 // each object that S3 removed, and an `Error` for each that it did not. Each
 // is taken off the body whole once it is read, and its fields are decoded in
-// place, as `s3_parts.rs` reads the parts of an upload.
+// place, as `parts.rs` reads the parts of an upload.
 
-use super::page::{
-    check_body, check_room, decode_value_in_place, open_root_element, set_once, text,
-};
-use super::scan::{Child, Scan, Span, fault};
 use crate::Result;
 use crate::s3::DeleteResult;
+use crate::xml::page::{
+    check_body, check_room, decode_value_in_place, open_root_element, set_once, text,
+};
+use crate::xml::scan::{Child, Scan, Span, fault};
 
 const ROOT: &[u8] = b"DeleteResult";
 

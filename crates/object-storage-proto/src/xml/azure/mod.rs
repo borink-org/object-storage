@@ -6,13 +6,15 @@
 // the caller passed must hold the whole page; one that does not is refused
 // with the number of entries the page holds.
 
-use super::decode::decode;
-use super::page::{
+pub(crate) mod blocks;
+
+use crate::xml::decode::decode;
+use crate::xml::page::{
     ListProperty, ListPropertySet, capture, check_body, check_room, decode_value_in_place,
     end_decoded_key, open_root_element, read_known, read_other, read_size, set_once, text,
     values_of,
 };
-use super::scan::{Child, Scan, Span, Tag, fault, trim};
+use crate::xml::scan::{Child, Scan, Span, Tag, fault, trim};
 use crate::{BlobProperty, EntryKind, ListEntry, Listing, PropertySet, PropertyValues, Result};
 
 const ROOT: &[u8] = b"EnumerationResults";

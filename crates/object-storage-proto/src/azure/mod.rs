@@ -20,8 +20,12 @@ use crate::{
     TransactionalChecksum, WireRequest, WriteOptions,
 };
 
-pub use crate::azure_batch::{BatchResult, MAX_BATCH_KEYS};
-pub use crate::azure_blocks::{
+mod batch;
+mod blocks;
+mod tags;
+
+pub use batch::{BatchResult, MAX_BATCH_KEYS};
+pub use blocks::{
     Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, MAX_STAGE_LEN,
     PhysicalListBlocks, PhysicalStageBlock,
 };

@@ -348,8 +348,12 @@ use crate::{
     WriteOptions,
 };
 
-pub use crate::s3_batch::{DeleteResult, MAX_DELETE_KEYS};
-pub use crate::s3_parts::{
+mod batch;
+mod parts;
+mod tags;
+
+pub use batch::{DeleteResult, MAX_DELETE_KEYS};
+pub use parts::{
     CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
     PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
 };

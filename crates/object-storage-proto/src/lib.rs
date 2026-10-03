@@ -227,9 +227,6 @@
 #![forbid(unsafe_code)]
 
 pub mod azure;
-mod azure_batch;
-mod azure_blocks;
-mod azure_tags;
 pub mod checksum;
 mod common;
 mod encoding;
@@ -242,9 +239,6 @@ mod multipart;
 mod outcome;
 mod request;
 pub mod s3;
-mod s3_batch;
-mod s3_parts;
-mod s3_tags;
 pub mod sigv4;
 mod time;
 mod types;

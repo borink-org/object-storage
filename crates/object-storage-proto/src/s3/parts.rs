@@ -352,7 +352,7 @@ impl<'a> Objects<'a> {
     /// error document, which S3 can send under status 200.
     pub fn read_upload_id<'b>(&self, body: &'b mut [u8]) -> Result<&'b str> {
         refuse_error_document(body)?;
-        crate::xml::s3_parts::read_upload_id(body)
+        crate::xml::s3::parts::read_upload_id(body)
     }
 
     /// Writes the signed request head of an UploadPart into `buf`.
@@ -685,7 +685,7 @@ impl<'a> Objects<'a> {
                 _ => finish_with_body(failure(head.status, None, head.request_id), kind),
             });
         }
-        let e_tag = crate::xml::s3_parts::read_committed(body)?;
+        let e_tag = crate::xml::s3::parts::read_committed(body)?;
         Ok(CommitHeadOutcome::Committed {
             meta: ObjectMeta {
                 e_tag: Some(e_tag.as_bytes()),
@@ -930,7 +930,7 @@ impl<'a> Objects<'a> {
         into: &mut [E],
     ) -> Result<Listing<'b>> {
         refuse_error_document(body)?;
-        crate::xml::s3_parts::fill_parts(body, into)
+        crate::xml::s3::parts::fill_parts(body, into)
     }
 }
 

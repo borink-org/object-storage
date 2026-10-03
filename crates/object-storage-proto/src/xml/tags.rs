@@ -1,7 +1,7 @@
 // Reads the tags of an object: an Azure `Tags` or an S3 `Tagging` document,
 // whose `TagSet` holds one `Tag` with a `Key` and a `Value` for each tag.
 // Each `Tag` is taken off the body whole once it is read, and its two fields
-// are decoded in place, as `s3_parts.rs` reads the parts of an upload.
+// are decoded in place, as `s3/parts.rs` reads the parts of an upload.
 
 use super::page::{
     check_body, check_room, decode_value_in_place, open_root_element, set_once, text,

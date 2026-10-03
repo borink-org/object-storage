@@ -1,6 +1,6 @@
 // The Azure Get Block List body, read whole into a caller's array.
 //
-// This is the reading half only: `azure.rs` writes the Put Block List body
+// This is the reading half only: `azure/blocks.rs` writes the Put Block List body
 // that a commit sends, and nothing here is shared with it beyond the names
 // of the tags. As for a listing, the scanner in `scan.rs` walks the
 // structure, IDs are decoded in place with `decode.rs`, and each entry
@@ -12,10 +12,10 @@
 // stored, and a listed ID is passed back to it unchanged. That is what fixes
 // the 43-byte minimum element that `layered::max_blocks_in` divides by.
 
-use super::decode::decode;
-use super::page::check_body;
-use super::scan::{Child, Scan, fault, trim};
 use crate::azure::{Block, BlockState};
+use crate::xml::decode::decode;
+use crate::xml::page::check_body;
+use crate::xml::scan::{Child, Scan, fault, trim};
 use crate::{CapacityError, Error, Listing, Result};
 
 pub(crate) fn fill_blocks<'b, E: From<Block<'b>>>(
