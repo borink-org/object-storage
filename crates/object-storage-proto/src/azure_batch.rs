@@ -1,7 +1,14 @@
 // Azure Blob Batch, of Delete Blob requests: the removal of up to 256 blobs
-// in one request. The request body is a `multipart/mixed` document that holds
-// one Delete Blob for each blob, and the answer is one that holds a response
-// for each.
+// in one request. The request body is a `multipart/mixed` body that holds a
+// Delete Blob request for each blob, and the answer is one that holds a
+// response for each. `multipart.rs` reads and writes the parts, and
+// `http_message.rs` reads each response. This file holds what Azure adds:
+// the fields of each part, and the numbering that ties a response to its
+// request.
+//
+// Each part of the answer carries `Content-Type: application/http` and the
+// `Content-ID` of the request it answers, and no other field. Every request
+// is answered once. Anything else is a fault.
 
 #[cfg(doc)]
 use crate::Error;
@@ -9,11 +16,14 @@ use crate::azure::{Blobs, body_kind, named, validate_key};
 use crate::common::{
     decimal, decimal_header, encoded_with_body, failure, finish_with_body, missing,
 };
+use crate::http_message::Response;
+use crate::multipart::{self, Part};
 use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url::QueryValue;
 use crate::{
-    DeleteManyHeadOutcome, Failure, HeaderSpan, InvalidPlan, Method, PhysicalDeleteMany,
-    RequestedRange, ResponseFault, ResponseHead, Result, Timestamps, WireRequest,
+    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, Failure, HeaderSpan, InvalidPlan,
+    Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Timestamps,
+    WireRequest,
 };
 
 /// The most blobs that one Blob Batch removes.
@@ -26,16 +36,30 @@ const BOUNDARY: &str = "batch_borink-object-storage";
 
 /// The result of one removal in a Blob Batch.
 ///
-/// [`Blobs::fill_delete_results`] writes one for each response in the
-/// answer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// [`Blobs::fill_delete_results`] writes one for each key of the plan, at
+/// the key's position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchResult<'b> {
-    /// The position of the key in [`PhysicalDeleteMany::keys`].
-    pub index: usize,
-    /// The status of the removal: 202 if Azure removed the blob.
-    pub status: u16,
-    /// The error code of a failed removal, such as `BlobNotFound`.
-    pub code: Option<&'b str>,
+    /// What the removal did, read as the answer to a single Delete Blob is:
+    /// [`DeleteHeadOutcome::Accepted`] if Azure removed the blob.
+    pub outcome: DeleteHeadOutcome<'b>,
+    /// The head of the response to the removal. Pass it with `body` to
+    /// [`azure::error_code`](crate::azure::error_code) for the error code that
+    /// Azure named.
+    pub head: ResponseHead<'b>,
+    /// The content of the response to the removal: empty, or the error
+    /// document.
+    pub body: &'b [u8],
+}
+
+impl Default for BatchResult<'_> {
+    fn default() -> Self {
+        Self {
+            outcome: DeleteHeadOutcome::Accepted,
+            head: ResponseHead::default(),
+            body: &[],
+        }
+    }
 }
 
 impl<'a> Blobs<'a> {
@@ -100,13 +124,18 @@ impl<'a> Blobs<'a> {
         })
     }
 
-    // The body of a batch: one part that holds a Delete Blob for each key,
-    // numbered by its position, then the closing boundary.
+    // The body of a batch: a part for each key, numbered by its position,
+    // that holds a Delete Blob request. The request has no content, so the
+    // CRLF of the delimiter after it stands for the empty line that ends its
+    // head, as in the example of Azure's documentation.
     fn write_batch(&self, out: &mut dyn ByteSink, keys: &[&str], now: &Timestamps) {
         for (index, key) in keys.iter().enumerate() {
-            out.push(b"--");
-            out.push(BOUNDARY.as_bytes());
-            out.push(b"\r\nContent-Type: application/http\r\n");
+            if index == 0 {
+                multipart::write_first_delimiter(out, BOUNDARY);
+            } else {
+                multipart::write_delimiter(out, BOUNDARY);
+            }
+            out.push(b"Content-Type: application/http\r\n");
             out.push(b"Content-Transfer-Encoding: binary\r\nContent-ID: ");
             out.push(U64Decimal::new(index as u64).as_bytes());
             out.push(b"\r\n\r\nDELETE ");
@@ -115,11 +144,9 @@ impl<'a> Blobs<'a> {
             out.push(now.rfc1123().as_bytes());
             out.push(b"\r\nAuthorization: Bearer ");
             out.push(self.token.as_bytes());
-            out.push(b"\r\nContent-Length: 0\r\n\r\n");
+            out.push(b"\r\nContent-Length: 0\r\n");
         }
-        out.push(b"--");
-        out.push(BOUNDARY.as_bytes());
-        out.push(b"--\r\n");
+        multipart::write_close_delimiter(out, BOUNDARY);
     }
 
     /// Reads the response head of a Blob Batch and reports what to do next.
@@ -127,15 +154,20 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 202 is [`ResponseFault::Status`].
+    /// status other than 202 is [`ResponseFault::Status`], and a 202 whose
+    /// `Content-Type` is not `multipart/mixed` with a boundary is
+    /// [`ResponseFault::Head`].
     pub fn accept_delete_many_head<'h>(
         &self,
         head: ResponseHead<'h>,
     ) -> Result<DeleteManyHeadOutcome<'h>> {
         match head.status {
-            202 => Ok(DeleteManyHeadOutcome::Results {
-                expected_len: decimal_header(head.content_length)?,
-            }),
+            202 => {
+                multipart::boundary(head.content_type.ok_or(ResponseFault::Head)?)?;
+                Ok(DeleteManyHeadOutcome::Results {
+                    expected_len: decimal_header(head.content_length)?,
+                })
+            }
             200..=299 => Err(ResponseFault::Status.into()),
             404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
             status if head.error_code.is_none() => Ok(DeleteManyHeadOutcome::NeedErrorBody(
@@ -160,106 +192,112 @@ impl<'a> Blobs<'a> {
     }
 
     /// Reads the result of each removal out of the response body of a Blob
-    /// Batch into `into`, and returns how many it read.
+    /// Batch into `into`, at the position of each key in `plan`, and returns
+    /// how many it read: one for each key.
     ///
-    /// The results borrow the body. An array as long as the plan's keys holds
-    /// every result.
+    /// Pass the plan of the request and the head that
+    /// [`Self::accept_delete_many_head`] read, whose `Content-Type` names the
+    /// boundary between the parts. The results borrow `body`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Capacity`] if the body holds more results than the
-    /// array, with `required` set to the number it holds.
+    /// Returns [`Error::InvalidPlan`] with [`InvalidPlan::Keys`] for a plan
+    /// that [`Self::encode_delete_many`] refuses for its number of keys, and
+    /// [`Error::Capacity`] if `into` is shorter than the plan's keys, with
+    /// `required` set to their number. Both are reported before anything is
+    /// read.
     ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a `multipart/mixed` document of HTTP responses.
+    /// Returns [`Error::Response`] with [`ResponseFault::Head`] if the head
+    /// names no `multipart/mixed` boundary, and with [`ResponseFault::Body`]
+    /// if `body` is not a batch answer: a `multipart/mixed` body whose parts
+    /// each carry an HTTP/1.1 response and the `Content-ID` of a request,
+    /// with every request answered once. A response that a single Delete
+    /// Blob could not answer is the error that [`Self::accept_delete_head`]
+    /// returns for it.
     pub fn fill_delete_results<'b>(
         &self,
+        plan: &PhysicalDeleteMany<'_>,
+        head: ResponseHead<'_>,
         body: &'b [u8],
         into: &mut [BatchResult<'b>],
     ) -> Result<usize> {
-        fill_batch(body, into)
+        let count = plan.keys.len();
+        if count == 0 || count > MAX_BATCH_KEYS {
+            return Err(InvalidPlan::Keys.into());
+        }
+        if into.len() < count {
+            return Err(crate::Error::Capacity(crate::CapacityError {
+                required: count,
+                ..crate::CapacityError::default()
+            }));
+        }
+        let boundary = multipart::boundary(head.content_type.ok_or(ResponseFault::Head)?)?;
+        // One bit for each request that an answer has named.
+        let mut answered = [0u64; MAX_BATCH_KEYS.div_ceil(64)];
+        let mut held = 0;
+        for part in multipart::parts(body, boundary) {
+            let part = part?;
+            let index = request_index(&part, count)?;
+            let bit = 1 << (index % 64);
+            if answered[index / 64] & bit != 0 {
+                return Err(ResponseFault::Body.into());
+            }
+            answered[index / 64] |= bit;
+            into[index] = self.read_removal(part.content)?;
+            held += 1;
+        }
+        if held != count {
+            return Err(ResponseFault::Body.into());
+        }
+        Ok(count)
+    }
+
+    // Reads the response to one removal, as the answer to a single Delete
+    // Blob is read.
+    fn read_removal<'b>(&self, message: &'b [u8]) -> Result<BatchResult<'b>> {
+        let response = Response::parse(message)?;
+        let head = response.head();
+        let shape = DeleteShape::default();
+        let outcome = match self.accept_delete_head(shape, head)? {
+            DeleteHeadOutcome::NeedErrorBody(failure) => {
+                self.accept_delete_error_body(shape, failure, response.content)
+            }
+            outcome => outcome,
+        };
+        Ok(BatchResult {
+            outcome,
+            head,
+            body: response.content,
+        })
     }
 }
 
-// Reads the parts of a batch answer. The first line names the boundary. Each
-// part holds a head of its own, which may name the `Content-ID` of the
-// request it answers, a blank line, and the response: a status line, a head
-// that may name an error code, a blank line, and a body up to the next
-// boundary.
-fn fill_batch<'b>(body: &'b [u8], into: &mut [BatchResult<'b>]) -> Result<usize> {
-    let fault = || Err(ResponseFault::Body.into());
-    let mut lines = body
-        .split(|byte| *byte == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
-    let first = lines.find(|line| !line.is_empty()).unwrap_or_default();
-    let Some(boundary) = first.strip_prefix(b"--").filter(|rest| !rest.is_empty()) else {
-        return fault();
-    };
-    let mut held = 0;
-    let mut closed = false;
-    while !closed {
-        let mut index = None;
-        for line in lines.by_ref() {
-            if line.is_empty() {
-                break;
+// The position of the request that a part answers, which its `Content-ID`
+// names. The part carries that field and `Content-Type: application/http`,
+// each once, and no other.
+fn request_index(part: &Part<'_>, count: usize) -> Result<usize> {
+    let mut index = None;
+    let mut application_http = false;
+    for (name, value) in part.fields() {
+        if name.eq_ignore_ascii_case("content-id") && index.is_none() {
+            // Azure numbers the requests in decimal from 0, with no leading
+            // zero.
+            if value.len() > 1 && value[0] == b'0' {
+                return Err(ResponseFault::Body.into());
             }
-            if let Some(value) = header_value(line, b"content-id") {
-                index = Some(decimal(value).ok_or(ResponseFault::Body)?);
-            }
+            let value = decimal(value).ok_or(ResponseFault::Body)?;
+            index = Some(usize::try_from(value).or(Err(ResponseFault::Body))?);
+        } else if name.eq_ignore_ascii_case("content-type")
+            && !application_http
+            && value.eq_ignore_ascii_case(b"application/http")
+        {
+            application_http = true;
+        } else {
+            return Err(ResponseFault::Body.into());
         }
-        let status_line = lines.next().unwrap_or_default();
-        let status = match status_line.strip_prefix(b"HTTP/1.1 ") {
-            Some(rest) if rest.len() >= 3 => decimal(&rest[..3]).ok_or(ResponseFault::Body)?,
-            _ => return fault(),
-        };
-        let mut code = None;
-        for line in lines.by_ref() {
-            if line.is_empty() {
-                break;
-            }
-            if let Some(value) = header_value(line, b"x-ms-error-code") {
-                code = Some(core::str::from_utf8(value).or(Err(ResponseFault::Body))?);
-            }
-        }
-        // The body of the response, up to the next boundary.
-        let mut delimited = false;
-        for line in lines.by_ref() {
-            if let Some(rest) = line
-                .strip_prefix(b"--")
-                .and_then(|rest| rest.strip_prefix(boundary))
-            {
-                closed = rest == b"--";
-                delimited = closed || rest.is_empty();
-                if delimited {
-                    break;
-                }
-            }
-        }
-        if !delimited {
-            return fault();
-        }
-        let result = BatchResult {
-            index: index.map_or(held, |index| index as usize),
-            status: u16::try_from(status).or(Err(ResponseFault::Body))?,
-            code,
-        };
-        if let Some(slot) = into.get_mut(held) {
-            *slot = result;
-        }
-        held += 1;
     }
-    if held > into.len() {
-        return Err(crate::Error::Capacity(crate::CapacityError {
-            required: held,
-            ..crate::CapacityError::default()
-        }));
+    match index {
+        Some(index) if application_http && index < count => Ok(index),
+        _ => Err(ResponseFault::Body.into()),
     }
-    Ok(held)
-}
-
-// The value of a header line if it names `name`, without case, trimmed.
-fn header_value<'l>(line: &'l [u8], name: &[u8]) -> Option<&'l [u8]> {
-    let (found, value) = line.split_at_checked(name.len())?;
-    let value = value.strip_prefix(b":")?;
-    found.eq_ignore_ascii_case(name).then(|| value.trim_ascii())
 }

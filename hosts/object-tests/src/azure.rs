@@ -896,15 +896,24 @@ fn delete_many(
         return Ok(error_result(&exchange, status));
     }
     let mut results = vec![BatchResult::default(); keys.len()];
-    let count = crate_step!(blobs.fill_delete_results(&exchange.body, &mut results));
+    let count = crate_step!(blobs.fill_delete_results(
+        &plan,
+        exchange.response_head(),
+        &exchange.body,
+        &mut results
+    ));
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
-    for result in &results[..count] {
-        let key = keys.get(result.index).copied().unwrap_or_default();
-        if result.status == 202 {
+    for (key, result) in keys.iter().zip(&results[..count]) {
+        if result.outcome == DeleteHeadOutcome::Accepted {
             deleted.push(json!(key));
         } else {
-            errors.push(json!({"key": key, "status": result.status, "code": result.code}));
+            let code = azure::error_code(&result.head, result.body);
+            errors.push(json!({
+                "key": key,
+                "status": result.head.status,
+                "code": code.map(String::from_utf8_lossy),
+            }));
         }
     }
     Ok(successful_result(
