@@ -20,7 +20,7 @@ use crate::s3::{
     s3_tag_char, stored_headers, validate_content, validate_key, validate_metadata,
     validate_write_condition,
 };
-use crate::sigv4::EMPTY_SHA256;
+use crate::sigv4::{EMPTY_SHA256, Token};
 use crate::url;
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
@@ -405,7 +405,7 @@ impl Objects<'_> {
     // AWS authorizes a copy into a directory bucket by the caller's own
     // credentials, and refuses those of a session.
     fn validate_copy_credentials(&self) -> Result<()> {
-        if self.credentials.is_s3_session() {
+        if let Token::S3Session(_) = self.credentials.token() {
             return Err(InvalidPlan::Option.into());
         }
         Ok(())

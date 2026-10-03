@@ -1380,8 +1380,7 @@ impl<'a> Objects<'a> {
     {
         let credentials =
             Credentials::new(session.key_id, session.secret, self.credentials.wipe())?
-                .with_session_token(session.token)?
-                .for_s3_session();
+                .with_s3_session_token(session.token)?;
         Ok(Objects {
             credentials,
             signing_key: None,
@@ -1462,9 +1461,7 @@ impl<'a> Objects<'a> {
 
     // The session token and the header that carries it.
     fn token(&self) -> Option<(&'static str, &'a str)> {
-        self.credentials
-            .session_token()
-            .map(|token| (self.credentials.token_header(), token))
+        self.credentials.token().header()
     }
 
     // The text of `x-amz-content-sha256` for `content`. A dry run returns no

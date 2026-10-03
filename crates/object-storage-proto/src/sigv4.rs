@@ -167,11 +167,33 @@ pub const MAX_REGION_LEN: usize = 64;
 pub struct Credentials<'a> {
     key_id: &'a str,
     secret: &'a str,
-    session_token: Option<&'a str>,
-    // The header that carries the token: `x-amz-security-token`, or
-    // `x-amz-s3session-token` for the credentials of an S3 Express session.
-    token_header: &'static str,
+    token: Token<'a>,
     wipe: fn(&mut [u8]),
+}
+
+// The token that a set of credentials carries, which decides the header
+// that sends it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Token<'a> {
+    // Long-lived credentials, with no token.
+    None,
+    // Temporary credentials, such as STS hands out, sent as
+    // `x-amz-security-token`.
+    Temporary(&'a str),
+    // The credentials of an S3 Express session, sent as
+    // `x-amz-s3session-token`.
+    S3Session(&'a str),
+}
+
+impl<'a> Token<'a> {
+    // The header that carries the token, and the token.
+    pub(crate) fn header(self) -> Option<(&'static str, &'a str)> {
+        match self {
+            Self::None => None,
+            Self::Temporary(token) => Some(("x-amz-security-token", token)),
+            Self::S3Session(token) => Some(("x-amz-s3session-token", token)),
+        }
+    }
 }
 
 impl<'a> Credentials<'a> {
@@ -203,8 +225,7 @@ impl<'a> Credentials<'a> {
         Ok(Self {
             key_id,
             secret,
-            session_token: None,
-            token_header: "x-amz-security-token",
+            token: Token::None,
             wipe,
         })
     }
@@ -218,11 +239,20 @@ impl<'a> Credentials<'a> {
     ///
     /// Returns [`Error::InvalidCredentials`] if `token` is not usable as one
     /// HTTP header value.
-    pub fn with_session_token(mut self, token: &'a str) -> Result<Self> {
+    pub fn with_session_token(self, token: &'a str) -> Result<Self> {
+        self.with_token(Token::Temporary(token), token)
+    }
+
+    // These credentials, with the token of an S3 Express session.
+    pub(crate) fn with_s3_session_token(self, token: &'a str) -> Result<Self> {
+        self.with_token(Token::S3Session(token), token)
+    }
+
+    fn with_token(mut self, kind: Token<'a>, token: &str) -> Result<Self> {
         if !crate::common::valid_header(token.as_bytes()) {
             return Err(Error::InvalidCredentials);
         }
-        self.session_token = Some(token);
+        self.token = kind;
         Ok(self)
     }
 
@@ -231,25 +261,8 @@ impl<'a> Credentials<'a> {
         self.key_id
     }
 
-    pub(crate) fn session_token(&self) -> Option<&'a str> {
-        self.session_token
-    }
-
-    // The header that carries the session token.
-    pub(crate) fn token_header(&self) -> &'static str {
-        self.token_header
-    }
-
-    // These credentials, sending their token as the token of an S3 Express
-    // session rather than of temporary credentials.
-    pub(crate) fn for_s3_session(mut self) -> Self {
-        self.token_header = "x-amz-s3session-token";
-        self
-    }
-
-    // Whether these are the credentials of an S3 Express session.
-    pub(crate) fn is_s3_session(&self) -> bool {
-        self.token_header == "x-amz-s3session-token"
+    pub(crate) fn token(&self) -> Token<'a> {
+        self.token
     }
 
     pub(crate) fn wipe(&self) -> fn(&mut [u8]) {
@@ -274,7 +287,13 @@ impl fmt::Debug for Credentials<'_> {
         f.debug_struct("Credentials")
             .field("key_id", &self.key_id)
             .field("secret", &"<redacted>")
-            .field("session_token", &self.session_token.map(|_| "<redacted>"))
+            .field(
+                "token",
+                &self
+                    .token
+                    .header()
+                    .map(|(header, _)| (header, "<redacted>")),
+            )
             .finish()
     }
 }
