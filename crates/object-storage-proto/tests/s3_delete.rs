@@ -12,8 +12,7 @@ use borink_object_storage_proto::{
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TOKEN: &str = "session-token";
 
-const ZEROS: Sha256Provider =
-    Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 
 fn bucket() -> Bucket<'static> {
     Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws).unwrap()

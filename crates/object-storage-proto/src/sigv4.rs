@@ -1,10 +1,11 @@
 //! AWS Signature Version 4, and the SHA-256 and HMAC-SHA256 it is built
 //! from.
 //!
-//! This crate computes neither. An [`s3::Objects`](crate::s3::Objects) client
-//! signs every request with the [`Sha256Provider`] you give it. The
+//! This crate computes no SHA-256 itself. An
+//! [`s3::Objects`](crate::s3::Objects) client signs every request with the
+//! [`Sha256Provider`] you give it, and builds HMAC-SHA256 from it. The
 //! `borink-object-storage-crypto` crate has two, and a trait that turns any
-//! other implementation into one. To build a provider by hand, pass four
+//! other implementation into one. To build a provider by hand, pass three
 //! functions to [`Sha256Provider::new`].
 //!
 //! A request is signed over its method, its path, the headers this crate
@@ -22,6 +23,12 @@ use crate::{Error, Result, Timestamps};
 /// The encoder creates one with [`Self::uninit`], passes it to the
 /// provider's `start`, then to each `update`, then to `finish`, and drops
 /// it. Only the provider reads or writes the bytes.
+///
+/// The encoder also copies a slot between calls, and goes on from each copy
+/// on its own. A client keeps the state of a hash after the padding block of
+/// its signing key, and starts each signature from a copy. A provider's
+/// state must therefore stay valid when its bytes are copied: it holds no
+/// pointer and nothing that it must release.
 ///
 /// The slot is [`Self::LEN`] bytes long and aligned to sixteen bytes. It is
 /// on the encoder's stack: nothing here is allocated.
@@ -65,11 +72,11 @@ impl fmt::Debug for Sha256State {
     }
 }
 
-/// An implementation of SHA-256 and HMAC-SHA256, which a client signs with.
+/// An implementation of SHA-256, which a client signs with.
 ///
-/// A provider holds four function pointers. The first three compute one
-/// SHA-256 a piece at a time, keeping their state in a [`Sha256State`]. The
-/// fourth computes one HMAC-SHA256 in one call.
+/// A provider holds three function pointers, which compute one SHA-256 a
+/// piece at a time, keeping their state in a [`Sha256State`]. A client
+/// builds HMAC-SHA256 from them.
 ///
 /// A provider holds no borrows, so it can be a `const`. The providers of
 /// `borink-object-storage-crypto` are.
@@ -78,27 +85,23 @@ pub struct Sha256Provider {
     start: fn() -> Sha256State,
     update: fn(&mut Sha256State, &[u8]),
     finish: fn(Sha256State) -> [u8; 32],
-    hmac: fn(&[u8], &[u8]) -> [u8; 32],
 }
 
 impl Sha256Provider {
-    /// Creates a provider from the calls that compute SHA-256 and
-    /// HMAC-SHA256.
+    /// Creates a provider from the calls that compute SHA-256.
     ///
     /// For one SHA-256, the encoder calls `start` once, `update` once for
-    /// each piece of the input in order, and `finish` once. `hmac` takes the
-    /// key first and the message second.
+    /// each piece of the input in order, and `finish` once, on the state
+    /// or on a copy of it: see [`Sha256State`].
     pub const fn new(
         start: fn() -> Sha256State,
         update: fn(&mut Sha256State, &[u8]),
         finish: fn(Sha256State) -> [u8; 32],
-        hmac: fn(key: &[u8], message: &[u8]) -> [u8; 32],
     ) -> Self {
         Self {
             start,
             update,
             finish,
-            hmac,
         }
     }
 
@@ -111,14 +114,11 @@ impl Sha256Provider {
 
     /// Returns the HMAC-SHA256 of `message` under `key`.
     pub fn hmac(&self, key: &[u8], message: &[u8]) -> [u8; 32] {
-        (self.hmac)(key, message)
+        HmacKey::new(key, self, wipe_best_effort).mac(self, |sum| sum.update(message))
     }
 
     pub(crate) fn start(&self) -> Sum {
-        Sum {
-            provider: *self,
-            state: (self.start)(),
-        }
+        Sum::resume(self, (self.start)())
     }
 }
 
@@ -128,10 +128,14 @@ impl fmt::Debug for Sha256Provider {
     }
 }
 
-// A SHA-256 in progress.
+// A SHA-256 in progress. A canonical request arrives in some 30 pieces of a
+// few bytes, so pieces are gathered into a block's worth before the provider
+// sees them: a call through its function pointer costs more than the copy.
 pub(crate) struct Sum {
     provider: Sha256Provider,
     state: Sha256State,
+    pending: [u8; 64],
+    filled: usize,
 }
 
 impl crate::request::ByteSink for Sum {
@@ -141,12 +145,48 @@ impl crate::request::ByteSink for Sum {
 }
 
 impl Sum {
-    pub(crate) fn update(&mut self, bytes: &[u8]) {
-        (self.provider.update)(&mut self.state, bytes);
+    // Goes on from `state`, a copy of the state of an earlier hash.
+    fn resume(provider: &Sha256Provider, state: Sha256State) -> Self {
+        Self {
+            provider: *provider,
+            state,
+            pending: [0; 64],
+            filled: 0,
+        }
     }
 
-    pub(crate) fn finish(self) -> [u8; 32] {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        if bytes.len() <= self.pending.len() - self.filled {
+            let end = self.filled + bytes.len();
+            crate::request::copy_short(&mut self.pending[self.filled..end], bytes);
+            self.filled = end;
+            return;
+        }
+        self.flush();
+        if bytes.len() >= self.pending.len() {
+            (self.provider.update)(&mut self.state, bytes);
+        } else {
+            crate::request::copy_short(&mut self.pending[..bytes.len()], bytes);
+            self.filled = bytes.len();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.filled > 0 {
+            (self.provider.update)(&mut self.state, &self.pending[..self.filled]);
+            self.filled = 0;
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> [u8; 32] {
+        self.flush();
         (self.provider.finish)(self.state)
+    }
+
+    // The provider's state, with every piece given to it.
+    fn into_state(mut self) -> Sha256State {
+        self.flush();
+        self.state
     }
 }
 
@@ -304,11 +344,56 @@ pub(crate) const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 pub(crate) const EMPTY_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+// The key of an HMAC-SHA256, absorbed: the states of SHA-256 after its
+// inner and after its outer padding block. Each message under the key goes
+// on from copies of them, so the padding is hashed once per key rather than
+// once per message.
+#[derive(Clone, Copy)]
+struct HmacKey {
+    inner: Sha256State,
+    outer: Sha256State,
+}
+
+impl HmacKey {
+    // `wipe` clears the copies of the key that this makes.
+    fn new(key: &[u8], provider: &Sha256Provider, wipe: fn(&mut [u8])) -> Self {
+        // RFC 2104: a key longer than a block is hashed first.
+        let mut pad = [0u8; 64];
+        if key.len() > pad.len() {
+            let mut digest = provider.hash(key);
+            pad[..digest.len()].copy_from_slice(&digest);
+            wipe(&mut digest);
+        } else {
+            pad[..key.len()].copy_from_slice(key);
+        }
+        pad.iter_mut().for_each(|byte| *byte ^= 0x36);
+        let mut inner = provider.start();
+        inner.update(&pad);
+        pad.iter_mut().for_each(|byte| *byte ^= 0x36 ^ 0x5c);
+        let mut outer = provider.start();
+        outer.update(&pad);
+        wipe(&mut pad);
+        Self {
+            inner: inner.into_state(),
+            outer: outer.into_state(),
+        }
+    }
+
+    // The HMAC of the message that `write` adds.
+    fn mac(&self, provider: &Sha256Provider, write: impl FnOnce(&mut Sum)) -> [u8; 32] {
+        let mut inner = Sum::resume(provider, self.inner);
+        write(&mut inner);
+        let mut outer = Sum::resume(provider, self.outer);
+        outer.update(&inner.finish());
+        outer.finish()
+    }
+}
+
 // The key that signs every request of one day, in one region, for one
-// service. Deriving it takes four HMACs.
-#[derive(Clone, Copy, PartialEq, Eq)]
+// service, absorbed as an HMAC key. Deriving it takes four HMACs.
+#[derive(Clone, Copy)]
 pub(crate) struct SigningKey {
-    key: [u8; 32],
+    key: HmacKey,
     date: [u8; 8],
 }
 
@@ -321,25 +406,34 @@ impl SigningKey {
         provider: &Sha256Provider,
     ) -> Self {
         let date = now.date();
+        let wipe = credentials.wipe;
         let mut seed = [0u8; 4 + MAX_SECRET_LEN];
         let secret = credentials.secret.as_bytes();
         // `Credentials::new` bounds the secret by MAX_SECRET_LEN.
         seed[..4].copy_from_slice(b"AWS4");
         seed[4..4 + secret.len()].copy_from_slice(secret);
-        let mut key = provider.hmac(&seed[..4 + secret.len()], date.as_bytes());
-        // The caller's `&str` and the provider's HMAC state still hold the
-        // secret. This crate wipes only the copy it made.
-        (credentials.wipe)(&mut seed);
-        key = provider.hmac(&key, region.as_bytes());
-        key = provider.hmac(&key, service.as_bytes());
-        key = provider.hmac(&key, b"aws4_request");
+        let seed_key = HmacKey::new(&seed[..4 + secret.len()], provider, wipe);
+        // The caller's `&str` still holds the secret. This crate wipes only
+        // the copies it made.
+        wipe(&mut seed);
+        let mut key = seed_key.mac(provider, |sum| sum.update(date));
+        for part in [region.as_bytes(), service.as_bytes(), b"aws4_request"] {
+            let mut next = HmacKey::new(&key, provider, wipe).mac(provider, |sum| sum.update(part));
+            core::mem::swap(&mut key, &mut next);
+            wipe(&mut next);
+        }
+        let absorbed = HmacKey::new(&key, provider, wipe);
+        wipe(&mut key);
         let mut day = [0; 8];
-        day.copy_from_slice(date.as_bytes());
-        Self { key, date: day }
+        day.copy_from_slice(date);
+        Self {
+            key: absorbed,
+            date: day,
+        }
     }
 
     pub(crate) fn covers(&self, now: &Timestamps) -> bool {
-        self.date == *now.date().as_bytes()
+        self.date == *now.date()
     }
 
     // Signs a request whose canonical form hashes to `canonical`, and
@@ -352,27 +446,23 @@ impl SigningKey {
         now: &Timestamps,
         provider: &Sha256Provider,
     ) -> [u8; 64] {
-        // The string to sign is 122 bytes plus the region and the service. A
-        // bucket bounds the region by MAX_REGION_LEN, and a service name is
-        // one of this crate's own.
-        let mut text = [0u8; 122 + MAX_REGION_LEN + 16];
-        let mut at = 0;
-        for piece in [
-            ALGORITHM.as_bytes(),
-            b"\n",
-            now.iso8601().as_bytes(),
-            b"\n",
-            now.date().as_bytes(),
-            b"/",
-            region.as_bytes(),
-            b"/",
-            service.as_bytes(),
-            b"/aws4_request\n",
-            &crate::encoding::hex(canonical),
-        ] {
-            text[at..at + piece.len()].copy_from_slice(piece);
-            at += piece.len();
-        }
-        crate::encoding::hex(&provider.hmac(&self.key, &text[..at]))
+        let mac = self.key.mac(provider, |sum| {
+            for piece in [
+                ALGORITHM.as_bytes(),
+                b"\n",
+                now.iso8601_bytes(),
+                b"\n",
+                now.date(),
+                b"/",
+                region.as_bytes(),
+                b"/",
+                service.as_bytes(),
+                b"/aws4_request\n",
+                &crate::encoding::hex(canonical),
+            ] {
+                sum.update(piece);
+            }
+        });
+        crate::encoding::hex(&mac)
     }
 }

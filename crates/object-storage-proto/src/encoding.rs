@@ -9,14 +9,25 @@ const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 
 // Writes 32 bytes as lowercase hexadecimal, as SigV4 writes a digest.
 pub(crate) fn hex(bytes: &[u8; 32]) -> [u8; 64] {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = [0; 64];
-    for (index, byte) in bytes.iter().enumerate() {
-        out[2 * index] = DIGITS[usize::from(byte >> 4)];
-        out[2 * index + 1] = DIGITS[usize::from(byte & 0xF)];
+    for (pair, byte) in out.chunks_exact_mut(2).zip(bytes) {
+        pair.copy_from_slice(&HEX_PAIRS[usize::from(*byte)]);
     }
     out
 }
+
+// The two lowercase hexadecimal digits of each byte, so that a byte is one
+// lookup rather than two.
+static HEX_PAIRS: [[u8; 2]; 256] = {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut pairs = [[0; 2]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        pairs[byte] = [DIGITS[byte >> 4], DIGITS[byte & 0xF]];
+        byte += 1;
+    }
+    pairs
+};
 
 // Reads one hexadecimal digit of either case.
 pub(crate) fn hex_digit(c: u8) -> Option<u8> {

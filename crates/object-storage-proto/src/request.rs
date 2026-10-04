@@ -35,9 +35,11 @@ pub struct Span {
 }
 
 impl Span {
-    fn of(self, bytes: &str) -> &str {
+    // The text of this part of a head. Only the part is checked as UTF-8, so
+    // a host that reads the head by range pays for no check.
+    fn of(self, bytes: &[u8]) -> &str {
         // HeadWriter bounds start + len by the finished buffer's length.
-        &bytes[self.start..self.start + self.len]
+        text(&bytes[self.start..self.start + self.len])
     }
 }
 
@@ -94,7 +96,7 @@ impl core::fmt::Display for Method {
 /// Drop the request before reusing either region.
 #[derive(Debug, Clone, Copy)]
 pub struct WireRequest<'r> {
-    bytes: &'r str,
+    bytes: &'r [u8],
     method: Method,
     url: Span,
     headers: &'r [HeaderSpan],
@@ -183,18 +185,35 @@ impl<'a> Writer<'a> {
         Self { bytes, position: 0 }
     }
 
+    #[inline]
     pub(crate) fn push(&mut self, value: &[u8]) {
         // Counting continues past capacity; aliased inputs can exceed usize
         // in aggregate. Saturation preserves monotonicity and cannot fit a slice.
         let end = self.position.saturating_add(value.len());
         if end <= self.bytes.len() {
-            self.bytes[self.position..end].copy_from_slice(value);
+            copy_short(&mut self.bytes[self.position..end], value);
         }
         self.position = end;
     }
 
     pub(crate) fn position(&self) -> usize {
         self.position
+    }
+
+    // Writes with `write` and returns where its bytes are.
+    pub(crate) fn part(&mut self, write: impl FnOnce(&mut Self)) -> Span {
+        let start = self.position;
+        write(self);
+        // push only increases or saturates position, so subtraction cannot underflow.
+        Span {
+            start,
+            len: self.position - start,
+        }
+    }
+
+    // Whether every byte pushed so far is in the buffer.
+    fn fits(&self) -> bool {
+        self.position <= self.bytes.len()
     }
 
     pub(crate) fn finish(self) -> Option<&'a [u8]> {
@@ -225,6 +244,34 @@ impl<'a> HeadWriter<'a> {
         self.out.position()
     }
 
+    // Whether every byte and every header so far is in the buffers, so that
+    // `Self::written` and `Self::header_spans` can read them.
+    pub(crate) fn fits(&self) -> bool {
+        self.out.fits() && self.count <= self.headers.len()
+    }
+
+    // The bytes of a part already written, in a head that fits.
+    pub(crate) fn written(&self, span: Span) -> &[u8] {
+        &self.out.bytes[span.start..span.start + span.len]
+    }
+
+    // Writes `bytes` over a part already written, as long, in a head that
+    // fits.
+    pub(crate) fn overwrite(&mut self, span: Span, bytes: &[u8]) {
+        self.out.bytes[span.start..span.start + span.len].copy_from_slice(bytes);
+    }
+
+    // The number of headers written so far.
+    pub(crate) fn header_count(&self) -> usize {
+        self.count
+    }
+
+    // The headers written so far, from the one at `first`, in a head that
+    // fits.
+    pub(crate) fn header_spans(&self, first: usize) -> &[HeaderSpan] {
+        &self.headers[first..self.count]
+    }
+
     pub(crate) fn capacity(&self) -> crate::CapacityError {
         crate::CapacityError {
             required: self.position(),
@@ -253,6 +300,31 @@ impl<'a> HeadWriter<'a> {
     ) {
         let name = self.part(name);
         let value = self.part(value);
+        self.record(name, value);
+    }
+
+    // A field written as a line of a SigV4 canonical request: `name:value`,
+    // after a `\n` that ends the field before, which the spans leave out. A
+    // run of such fields is the signed headers' lines but for the last `\n`,
+    // so a signer hashes the run in one piece. It costs two bytes a field, so
+    // only a client that signs writes its fields so.
+    pub(crate) fn line_with(&mut self, name: &str, value: impl FnOnce(&mut Writer<'a>)) {
+        self.line_parts(|out| out.push(name.as_bytes()), value);
+    }
+
+    pub(crate) fn line_parts(
+        &mut self,
+        name: impl FnOnce(&mut Writer<'a>),
+        value: impl FnOnce(&mut Writer<'a>),
+    ) {
+        self.out.push(b"\n");
+        let name = self.part(name);
+        self.out.push(b":");
+        let value = self.part(value);
+        self.record(name, value);
+    }
+
+    fn record(&mut self, name: Span, value: Span) {
         if let Some(slot) = self.headers.get_mut(self.count) {
             *slot = HeaderSpan { name, value };
         }
@@ -286,7 +358,7 @@ impl<'a> HeadWriter<'a> {
             Payload::Slice(&bytes[span.start..span.start + span.len])
         });
         Some(WireRequest {
-            bytes: text(&bytes[..head_end]),
+            bytes: &bytes[..head_end],
             method,
             url,
             headers,
@@ -296,13 +368,39 @@ impl<'a> HeadWriter<'a> {
     }
 
     fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
-        let start = self.out.position();
-        write(&mut self.out);
-        // push only increases or saturates position, so subtraction cannot underflow.
-        Span {
-            start,
-            len: self.out.position() - start,
+        self.out.part(write)
+    }
+}
+
+// Copies `from` into `to`, which is as long. A copy of up to 32 bytes is two
+// overlapping copies of a fixed length, which compile to a few moves, where
+// `copy_from_slice` of a length known only at run time calls the C library's
+// `memcpy`, which costs more than the copy for so few bytes. Slicing `to` to
+// that length first lets the compiler drop the bounds checks of each copy.
+#[inline]
+pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
+    let len = from.len();
+    let to = &mut to[..len];
+    match len {
+        0 => {}
+        1..=3 => {
+            to[0] = from[0];
+            to[len / 2] = from[len / 2];
+            to[len - 1] = from[len - 1];
         }
+        4..=7 => {
+            to[..4].copy_from_slice(&from[..4]);
+            to[len - 4..].copy_from_slice(&from[len - 4..]);
+        }
+        8..=16 => {
+            to[..8].copy_from_slice(&from[..8]);
+            to[len - 8..].copy_from_slice(&from[len - 8..]);
+        }
+        17..=32 => {
+            to[..16].copy_from_slice(&from[..16]);
+            to[len - 16..].copy_from_slice(&from[len - 16..]);
+        }
+        _ => to.copy_from_slice(from),
     }
 }
 
@@ -361,6 +459,17 @@ impl HeaderValue for U64Decimal {
     }
 }
 
+// The two decimal digits of each number below 100.
+static DIGIT_PAIRS: [[u8; 2]; 100] = {
+    let mut pairs = [[0; 2]; 100];
+    let mut value = 0;
+    while value < 100 {
+        pairs[value] = [b'0' + (value / 10) as u8, b'0' + (value % 10) as u8];
+        value += 1;
+    }
+    pairs
+};
+
 // Unlike the fixed-width date fields in `time`, range offsets need the shortest
 // decimal representation. This buffer owns that representation without allocating.
 pub(crate) struct U64Decimal {
@@ -369,17 +478,27 @@ pub(crate) struct U64Decimal {
 }
 
 impl U64Decimal {
+    // Kept out of line: the compiler unrolls the digit loop, and inlined at
+    // each of the 21 places that write a number it made one range header
+    // alone 2,400 instructions long.
+    #[inline(never)]
     pub(crate) fn new(mut value: u64) -> Self {
         let mut bytes = [0; 20];
         let mut start = bytes.len();
-        loop {
-            // A u64 has at most 20 decimal digits; each division consumes one.
+        // Two digits a division, from a table of them. A u64 has at most 20
+        // decimal digits, so `start` stays in the array.
+        while value >= 100 {
+            let pair = DIGIT_PAIRS[(value % 100) as usize];
+            value /= 100;
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&pair);
+        }
+        if value >= 10 {
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&DIGIT_PAIRS[value as usize]);
+        } else {
             start -= 1;
-            bytes[start] = b'0' + (value % 10) as u8;
-            value /= 10;
-            if value == 0 {
-                break;
-            }
+            bytes[start] = b'0' + value as u8;
         }
         Self { bytes, start }
     }
