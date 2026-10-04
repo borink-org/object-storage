@@ -300,6 +300,31 @@ impl<'a> HeadWriter<'a> {
     ) {
         let name = self.part(name);
         let value = self.part(value);
+        self.record(name, value);
+    }
+
+    // A field written as a line of a SigV4 canonical request: `name:value`,
+    // after a `\n` that ends the field before, which the spans leave out. A
+    // run of such fields is the signed headers' lines but for the last `\n`,
+    // so a signer hashes the run in one piece. It costs two bytes a field, so
+    // only a client that signs writes its fields so.
+    pub(crate) fn line_with(&mut self, name: &str, value: impl FnOnce(&mut Writer<'a>)) {
+        self.line_parts(|out| out.push(name.as_bytes()), value);
+    }
+
+    pub(crate) fn line_parts(
+        &mut self,
+        name: impl FnOnce(&mut Writer<'a>),
+        value: impl FnOnce(&mut Writer<'a>),
+    ) {
+        self.out.push(b"\n");
+        let name = self.part(name);
+        self.out.push(b":");
+        let value = self.part(value);
+        self.record(name, value);
+    }
+
+    fn record(&mut self, name: Span, value: Span) {
         if let Some(slot) = self.headers.get_mut(self.count) {
             *slot = HeaderSpan { name, value };
         }

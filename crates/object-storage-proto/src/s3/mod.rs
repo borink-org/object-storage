@@ -1491,7 +1491,7 @@ impl<'a> Objects<'a> {
         for header in headers.iter() {
             match header {
                 Header::Fixed(_, SignedValue::Host) => {}
-                Header::Fixed(name, value) => head.header_with(name, |out| match value {
+                Header::Fixed(name, value) => head.line_with(name, |out| match value {
                     SignedValue::Bytes(bytes) | SignedValue::Formatted(bytes) => out.push(bytes),
                     SignedValue::Condition(value) => value.write_to(out),
                     SignedValue::Range => write_range(out, signed.range),
@@ -1501,7 +1501,7 @@ impl<'a> Objects<'a> {
                     SignedValue::CopyRange => write_copy_range(out, signed),
                     SignedValue::Host => {}
                 }),
-                Header::Meta(pair) => head.header_parts(
+                Header::Meta(pair) => head.line_parts(
                     |out| {
                         out.push(METADATA_PREFIX.as_bytes());
                         for byte in pair.name.bytes() {
@@ -1655,24 +1655,41 @@ impl<'a> Objects<'a> {
         sum.update(head.written(parts.query));
         sum.update(b"\n");
         // The head writes every signed header but `host` in this order, right
-        // after `authorization`. The HTTP client writes `host` from the URL.
-        let mut sent = head.header_spans(parts.first_header).iter();
-        for header in headers.iter() {
-            if let Header::Fixed(_, SignedValue::Host) = header {
-                sum.update(b"host:");
-                sum.update(head.written(parts.host));
-            } else {
-                let span = sent.next().expect("the head writes each signed header");
-                sum.update(head.written(span.name));
-                sum.update(b":");
-                let value = head.written(span.value);
-                if folds_spaces(header, self.bucket.service) {
-                    write_canonical_value(&mut sum, value);
-                } else {
-                    sum.update(value);
+        // after `authorization`, as `name:value` lines: the canonical lines,
+        // unless SigV4 folds spaces in a value. The HTTP client writes `host`
+        // from the URL.
+        let sent = head.header_spans(parts.first_header);
+        let as_sent = headers
+            .iter()
+            .filter(|header| !matches!(header, Header::Fixed(_, SignedValue::Host)))
+            .zip(sent)
+            .all(|(header, span)| {
+                !folds_spaces(header, self.bucket.service)
+                    || !needs_folding(head.written(span.value))
+            });
+        if as_sent {
+            // The fields before `host` in one piece, `host`, then the rest.
+            let before = headers
+                .iter()
+                .take_while(|header| !matches!(header, Header::Fixed(_, SignedValue::Host)))
+                .count();
+            let lines = |sum: &mut crate::sigv4::Sum, spans: &[HeaderSpan]| {
+                if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
+                    let end = last.value.start + last.value.len;
+                    sum.update(head.written(Span {
+                        start: first.name.start,
+                        len: end - first.name.start,
+                    }));
+                    sum.update(b"\n");
                 }
-            }
+            };
+            lines(&mut sum, &sent[..before]);
+            sum.update(b"host:");
+            sum.update(head.written(parts.host));
             sum.update(b"\n");
+            lines(&mut sum, &sent[before..]);
+        } else {
+            self.write_folded_headers(&mut sum, head, parts, headers);
         }
         sum.update(b"\n");
         sum.update(head.written(parts.names));
@@ -1690,6 +1707,35 @@ impl<'a> Objects<'a> {
             now,
             &self.sha256,
         )
+    }
+
+    // The signed headers of the canonical request one at a time, with the
+    // spaces of each value that SigV4 folds folded.
+    fn write_folded_headers(
+        &self,
+        sum: &mut crate::sigv4::Sum,
+        head: &HeadWriter<'_>,
+        parts: &SignedParts,
+        headers: &SignedHeaders<'_>,
+    ) {
+        let mut sent = head.header_spans(parts.first_header).iter();
+        for header in headers.iter() {
+            if let Header::Fixed(_, SignedValue::Host) = header {
+                sum.update(b"host:");
+                sum.update(head.written(parts.host));
+            } else {
+                let span = sent.next().expect("the head writes each signed header");
+                sum.update(head.written(span.name));
+                sum.update(b":");
+                let value = head.written(span.value);
+                if folds_spaces(header, self.bucket.service) {
+                    write_canonical_value(sum, value);
+                } else {
+                    sum.update(value);
+                }
+            }
+            sum.update(b"\n");
+        }
     }
 
     /// Reads the response head of a GET or a HEAD and reports what to do
@@ -2207,6 +2253,14 @@ fn folds_spaces(header: Header<'_>, service: Service) -> bool {
         Header::Fixed(..) => false,
         Header::Meta(pair) => !encodes(pair.value, service),
     }
+}
+
+// Whether SigV4 would change `value` by folding its spaces: a space at
+// either end, or two in a row.
+fn needs_folding(value: &[u8]) -> bool {
+    value.first() == Some(&b' ')
+        || value.last() == Some(&b' ')
+        || value.windows(2).any(|pair| pair == b"  ")
 }
 
 // The signed headers other than metadata, in no order.
