@@ -459,6 +459,17 @@ impl HeaderValue for U64Decimal {
     }
 }
 
+// The two decimal digits of each number below 100.
+static DIGIT_PAIRS: [[u8; 2]; 100] = {
+    let mut pairs = [[0; 2]; 100];
+    let mut value = 0;
+    while value < 100 {
+        pairs[value] = [b'0' + (value / 10) as u8, b'0' + (value % 10) as u8];
+        value += 1;
+    }
+    pairs
+};
+
 // Unlike the fixed-width date fields in `time`, range offsets need the shortest
 // decimal representation. This buffer owns that representation without allocating.
 pub(crate) struct U64Decimal {
@@ -467,17 +478,27 @@ pub(crate) struct U64Decimal {
 }
 
 impl U64Decimal {
+    // Kept out of line: the compiler unrolls the digit loop, and inlined at
+    // each of the 21 places that write a number it made one range header
+    // alone 2,400 instructions long.
+    #[inline(never)]
     pub(crate) fn new(mut value: u64) -> Self {
         let mut bytes = [0; 20];
         let mut start = bytes.len();
-        loop {
-            // A u64 has at most 20 decimal digits; each division consumes one.
+        // Two digits a division, from a table of them. A u64 has at most 20
+        // decimal digits, so `start` stays in the array.
+        while value >= 100 {
+            let pair = DIGIT_PAIRS[(value % 100) as usize];
+            value /= 100;
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&pair);
+        }
+        if value >= 10 {
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&DIGIT_PAIRS[value as usize]);
+        } else {
             start -= 1;
-            bytes[start] = b'0' + (value % 10) as u8;
-            value /= 10;
-            if value == 0 {
-                break;
-            }
+            bytes[start] = b'0' + value as u8;
         }
         Self { bytes, start }
     }
