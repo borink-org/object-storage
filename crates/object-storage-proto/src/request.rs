@@ -185,12 +185,13 @@ impl<'a> Writer<'a> {
         Self { bytes, position: 0 }
     }
 
+    #[inline]
     pub(crate) fn push(&mut self, value: &[u8]) {
         // Counting continues past capacity; aliased inputs can exceed usize
         // in aggregate. Saturation preserves monotonicity and cannot fit a slice.
         let end = self.position.saturating_add(value.len());
         if end <= self.bytes.len() {
-            self.bytes[self.position..end].copy_from_slice(value);
+            copy_short(&mut self.bytes[self.position..end], value);
         }
         self.position = end;
     }
@@ -343,6 +344,38 @@ impl<'a> HeadWriter<'a> {
 
     fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
         self.out.part(write)
+    }
+}
+
+// Copies `from` into `to`, which is as long. A copy of up to 32 bytes is two
+// overlapping copies of a fixed length, which compile to a few moves, where
+// `copy_from_slice` of a length known only at run time calls the C library's
+// `memcpy`, which costs more than the copy for so few bytes. Slicing `to` to
+// that length first lets the compiler drop the bounds checks of each copy.
+#[inline]
+pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
+    let len = from.len();
+    let to = &mut to[..len];
+    match len {
+        0 => {}
+        1..=3 => {
+            to[0] = from[0];
+            to[len / 2] = from[len / 2];
+            to[len - 1] = from[len - 1];
+        }
+        4..=7 => {
+            to[..4].copy_from_slice(&from[..4]);
+            to[len - 4..].copy_from_slice(&from[len - 4..]);
+        }
+        8..=16 => {
+            to[..8].copy_from_slice(&from[..8]);
+            to[len - 8..].copy_from_slice(&from[len - 8..]);
+        }
+        17..=32 => {
+            to[..16].copy_from_slice(&from[..16]);
+            to[len - 16..].copy_from_slice(&from[len - 16..]);
+        }
+        _ => to.copy_from_slice(from),
     }
 }
 
