@@ -1458,10 +1458,12 @@ impl<'a> Objects<'a> {
         pass: Pass,
         now: &Timestamps,
     ) {
+        let token = self.token();
+        let headers = SignedHeaders::of(signed, token);
         let signature = if pass == Pass::Measure {
             [b'0'; 64]
         } else {
-            self.signature(signed, now)
+            self.signature(signed, &headers, now)
         };
         head.url(|out| {
             out.push(self.bucket.scheme.as_str().as_bytes());
@@ -1470,7 +1472,6 @@ impl<'a> Objects<'a> {
             self.bucket.write_path(out, signed.key);
             url::write_query_in_url(out, signed.query);
         });
-        let token = self.token();
         head.header_with("authorization", |out| {
             out.push(sigv4::ALGORITHM.as_bytes());
             out.push(b" Credential=");
@@ -1478,11 +1479,11 @@ impl<'a> Objects<'a> {
             out.push(b"/");
             self.write_scope(out, now);
             out.push(b", SignedHeaders=");
-            write_signed_names(out, signed, token);
+            write_signed_names(out, &headers);
             out.push(b", Signature=");
             out.push(&signature);
         });
-        for header in ordered_headers(signed, token) {
+        for header in headers.iter() {
             match header {
                 Header::Fixed(_, SignedValue::Host) => {}
                 Header::Fixed(name, value) => head.header_with(name, |out| match value {
@@ -1622,9 +1623,14 @@ impl<'a> Objects<'a> {
 
     // Returns the signature of the request, as lowercase hexadecimal. The
     // canonical request is hashed as it is written, so it is never held.
-    fn signature(&self, signed: &Signed<'_>, now: &Timestamps) -> [u8; 64] {
+    fn signature(
+        &self,
+        signed: &Signed<'_>,
+        headers: &SignedHeaders<'_>,
+        now: &Timestamps,
+    ) -> [u8; 64] {
         let mut sum = self.sha256.start();
-        self.write_canonical_request(&mut sum, signed, now);
+        self.write_canonical_request(&mut sum, signed, headers, now);
         let canonical = sum.finish();
         let key = match self.signing_key {
             Some(key) if key.covers(now) => key,
@@ -1644,6 +1650,7 @@ impl<'a> Objects<'a> {
         &self,
         out: &mut dyn ByteSink,
         signed: &Signed<'_>,
+        headers: &SignedHeaders<'_>,
         now: &Timestamps,
     ) {
         out.push(signed.method.as_str().as_bytes());
@@ -1654,8 +1661,7 @@ impl<'a> Objects<'a> {
         // text.
         url::write_query(out, signed.query);
         out.push(b"\n");
-        let token = self.token();
-        for header in ordered_headers(signed, token) {
+        for header in headers.iter() {
             write_header_name(out, header);
             out.push(b":");
             match header {
@@ -1680,7 +1686,7 @@ impl<'a> Objects<'a> {
             out.push(b"\n");
         }
         out.push(b"\n");
-        write_signed_names(out, signed, token);
+        write_signed_names(out, headers);
         out.push(b"\n");
         out.push(signed.content_sha256);
     }
@@ -2122,15 +2128,58 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     })
 }
 
-// Every signed header in the order of its name: the fixed set sorted, merged
-// with the metadata sorted by lowercase name.
-fn ordered_headers<'s>(
+// Every signed header of one request in the order of its name: the fixed
+// set, sorted once per encode, merged with the metadata sorted by lowercase
+// name. The canonical request, the `authorization` header and the head each
+// walk it.
+struct SignedHeaders<'s> {
+    fixed: [Header<'s>; 24],
+    count: usize,
+    metadata: &'s [MetadataPair<'s>],
+}
+
+impl<'s> SignedHeaders<'s> {
+    fn of(signed: &'s Signed<'s>, token: Option<(&'static str, &'s str)>) -> Self {
+        let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
+        let mut count = 0;
+        for (name, value) in fixed_headers(signed, token) {
+            let mut at = count;
+            while at > 0 && matches!(fixed[at - 1], Header::Fixed(previous, _) if previous > name) {
+                fixed[at] = fixed[at - 1];
+                at -= 1;
+            }
+            fixed[at] = Header::Fixed(name, value);
+            count += 1;
+        }
+        Self {
+            fixed,
+            count,
+            metadata: signed.metadata,
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Header<'s>> + '_ {
+        let mut fixed = self.fixed[..self.count].iter().copied().peekable();
+        let mut metadata = sorted_metadata(self.metadata).peekable();
+        core::iter::from_fn(move || match (fixed.peek(), metadata.peek()) {
+            (None, None) => None,
+            (Some(_), None) => fixed.next(),
+            (Some(Header::Fixed(name, _)), Some(pair))
+                if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
+            {
+                fixed.next()
+            }
+            _ => metadata.next().map(Header::Meta),
+        })
+    }
+}
+
+// The signed headers other than metadata, in no order.
+fn fixed_headers<'s>(
     signed: &'s Signed<'s>,
     token: Option<(&'static str, &'s str)>,
-) -> impl Iterator<Item = Header<'s>> {
-    let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
-    let mut count = 0;
-    let entries = [
+) -> impl Iterator<Item = (&'s str, SignedValue<'s>)> {
+    [
         Some(("host", SignedValue::Host)),
         Some((
             "x-amz-content-sha256",
@@ -2168,35 +2217,7 @@ fn ordered_headers<'s>(
             .headers
             .iter()
             .map(|(name, value)| (*name, SignedValue::Bytes(value))),
-    );
-    for (name, value) in entries {
-        let mut at = count;
-        while at > 0 && matches!(fixed[at - 1], Header::Fixed(previous, _) if previous > name) {
-            fixed[at] = fixed[at - 1];
-            at -= 1;
-        }
-        fixed[at] = Header::Fixed(name, value);
-        count += 1;
-    }
-    let mut index = 0;
-    let mut metadata = sorted_metadata(signed.metadata).peekable();
-    core::iter::from_fn(move || {
-        let next = (index < count).then(|| fixed[index]);
-        match (next, metadata.peek()) {
-            (None, None) => None,
-            (Some(header), None) => {
-                index += 1;
-                Some(header)
-            }
-            (Some(Header::Fixed(name, value)), Some(pair))
-                if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
-            {
-                index += 1;
-                Some(Header::Fixed(name, value))
-            }
-            _ => metadata.next().map(Header::Meta),
-        }
-    })
+    )
 }
 
 fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = u8> + 'p {
@@ -2217,12 +2238,8 @@ fn write_header_name(out: &mut dyn ByteSink, header: Header<'_>) {
 }
 
 // The names of the signed headers, in order, separated by `;`.
-fn write_signed_names(
-    out: &mut dyn ByteSink,
-    signed: &Signed<'_>,
-    token: Option<(&'static str, &str)>,
-) {
-    for (index, header) in ordered_headers(signed, token).enumerate() {
+fn write_signed_names(out: &mut dyn ByteSink, headers: &SignedHeaders<'_>) {
+    for (index, header) in headers.iter().enumerate() {
         if index != 0 {
             out.push(b";");
         }
