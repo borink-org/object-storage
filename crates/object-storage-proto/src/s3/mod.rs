@@ -350,7 +350,7 @@ use crate::{
     DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
     ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
     Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Span, Tag,
     Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
 };
 
@@ -1449,8 +1449,9 @@ impl<'a> Objects<'a> {
         })
     }
 
-    // Writes the URL and every signed header. A measuring pass writes a signature
-    // of zeros, which is as long as a real one.
+    // Writes the URL and every signed header, then signs them. The signature
+    // is written as zeros, which are as long, and a writing pass replaces
+    // them once the head is written.
     pub(crate) fn write_head(
         &self,
         head: &mut HeadWriter<'_>,
@@ -1460,17 +1461,16 @@ impl<'a> Objects<'a> {
     ) {
         let token = self.token();
         let headers = SignedHeaders::of(signed, token);
-        let signature = if pass == Pass::Measure {
-            [b'0'; 64]
-        } else {
-            self.signature(signed, &headers, now)
-        };
+        let mut parts = SignedParts::default();
         head.url(|out| {
             out.push(self.bucket.scheme.as_str().as_bytes());
             out.push(b"://");
-            self.bucket.write_host(out);
-            self.bucket.write_path(out, signed.key);
-            url::write_query_in_url(out, signed.query);
+            parts.host = out.part(|out| self.bucket.write_host(out));
+            parts.path = out.part(|out| self.bucket.write_path(out, signed.key));
+            if signed.query.iter().any(Option::is_some) {
+                out.push(b"?");
+                parts.query = out.part(|out| url::write_query(out, signed.query));
+            }
         });
         head.header_with("authorization", |out| {
             out.push(sigv4::ALGORITHM.as_bytes());
@@ -1479,10 +1479,11 @@ impl<'a> Objects<'a> {
             out.push(b"/");
             self.write_scope(out, now);
             out.push(b", SignedHeaders=");
-            write_signed_names(out, &headers);
+            parts.names = out.part(|out| write_signed_names(out, &headers));
             out.push(b", Signature=");
-            out.push(&signature);
+            parts.signature = out.part(|out| out.push(&[b'0'; 64]));
         });
+        parts.first_header = head.header_count();
         for header in headers.iter() {
             match header {
                 Header::Fixed(_, SignedValue::Host) => {}
@@ -1506,6 +1507,11 @@ impl<'a> Objects<'a> {
                     |out| write_metadata_value(out, pair.value, self.bucket.service),
                 ),
             }
+        }
+        // A head that does not fit is refused, so it needs no signature.
+        if pass == Pass::Write && head.fits() {
+            let signature = self.signature(head, &parts, signed, &headers, now);
+            head.overwrite(parts.signature, &signature);
         }
     }
 
@@ -1621,16 +1627,53 @@ impl<'a> Objects<'a> {
         out.push(b"/aws4_request");
     }
 
-    // Returns the signature of the request, as lowercase hexadecimal. The
-    // canonical request is hashed as it is written, so it is never held.
+    // Returns the signature of the head, as lowercase hexadecimal.
+    //
+    // The canonical request of SigV4 is the method and the parts of the head
+    // that the signature covers: the path, the query, and each signed header
+    // with its value. Each is hashed from the bytes that the head holds, so
+    // nothing is written twice and the canonical request is never held. A
+    // value that the head sends with runs of spaces is signed with them
+    // folded, as SigV4 asks.
     fn signature(
         &self,
+        head: &HeadWriter<'_>,
+        parts: &SignedParts,
         signed: &Signed<'_>,
         headers: &SignedHeaders<'_>,
         now: &Timestamps,
     ) -> [u8; 64] {
         let mut sum = self.sha256.start();
-        self.write_canonical_request(&mut sum, signed, headers, now);
+        sum.update(signed.method.as_str().as_bytes());
+        sum.update(b"\n");
+        sum.update(head.written(parts.path));
+        sum.update(b"\n");
+        sum.update(head.written(parts.query));
+        sum.update(b"\n");
+        // The head writes every signed header but `host` in this order, right
+        // after `authorization`. The HTTP client writes `host` from the URL.
+        let mut sent = head.header_spans(parts.first_header).iter();
+        for header in headers.iter() {
+            if let Header::Fixed(_, SignedValue::Host) = header {
+                sum.update(b"host:");
+                sum.update(head.written(parts.host));
+            } else {
+                let span = sent.next().expect("the head writes each signed header");
+                sum.update(head.written(span.name));
+                sum.update(b":");
+                let value = head.written(span.value);
+                if folds_spaces(header, self.bucket.service) {
+                    write_canonical_value(&mut sum, value);
+                } else {
+                    sum.update(value);
+                }
+            }
+            sum.update(b"\n");
+        }
+        sum.update(b"\n");
+        sum.update(head.written(parts.names));
+        sum.update(b"\n");
+        sum.update(signed.content_sha256);
         let canonical = sum.finish();
         let key = match self.signing_key {
             Some(key) if key.covers(now) => key,
@@ -1643,52 +1686,6 @@ impl<'a> Objects<'a> {
             now,
             &self.sha256,
         )
-    }
-
-    // The canonical request of SigV4.
-    fn write_canonical_request(
-        &self,
-        out: &mut dyn ByteSink,
-        signed: &Signed<'_>,
-        headers: &SignedHeaders<'_>,
-        now: &Timestamps,
-    ) {
-        out.push(signed.method.as_str().as_bytes());
-        out.push(b"\n");
-        self.bucket.write_path(out, signed.key);
-        out.push(b"\n");
-        // The URL carries the query in canonical form, so this is the same
-        // text.
-        url::write_query(out, signed.query);
-        out.push(b"\n");
-        for header in headers.iter() {
-            write_header_name(out, header);
-            out.push(b":");
-            match header {
-                Header::Fixed(_, SignedValue::Bytes(bytes)) => write_canonical_value(out, bytes),
-                Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(tag))) => {
-                    write_canonical_value(out, tag);
-                }
-                // An HTTP date has no space at either end, nor a run of them.
-                Header::Fixed(_, SignedValue::Condition(value)) => value.write_to(out),
-                Header::Fixed(_, SignedValue::Host) => self.bucket.write_host(out),
-                Header::Fixed(_, SignedValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, SignedValue::Date) => out.push(now.iso8601().as_bytes()),
-                // The encoded form holds no space, so it is its canonical form.
-                Header::Fixed(_, SignedValue::Tags) => write_tags(out, signed.tags),
-                Header::Fixed(_, SignedValue::CopySource) => self.write_copy_source(out, signed),
-                Header::Fixed(_, SignedValue::CopyRange) => write_copy_range(out, signed),
-                Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
-                    write_metadata_value(out, pair.value, self.bucket.service)
-                }
-                Header::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
-            }
-            out.push(b"\n");
-        }
-        out.push(b"\n");
-        write_signed_names(out, headers);
-        out.push(b"\n");
-        out.push(signed.content_sha256);
     }
 
     /// Reads the response head of a GET or a HEAD and reports what to do
@@ -2171,6 +2168,32 @@ impl<'s> SignedHeaders<'s> {
             }
             _ => metadata.next().map(Header::Meta),
         })
+    }
+}
+
+// Where the head holds what the signature covers, beside the headers.
+#[derive(Default)]
+struct SignedParts {
+    host: Span,
+    path: Span,
+    // The query without its `?`, empty if the URL has none.
+    query: Span,
+    // The names in `SignedHeaders=`.
+    names: Span,
+    signature: Span,
+    // The index of the first signed header after `authorization`.
+    first_header: usize,
+}
+
+// Whether SigV4 signs the value of `header` with each run of spaces folded,
+// rather than as the head sends it. The values that this crate formats hold
+// no such run; a value from the plan may.
+fn folds_spaces(header: Header<'_>, service: Service) -> bool {
+    match header {
+        Header::Fixed(_, SignedValue::Bytes(_))
+        | Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(_))) => true,
+        Header::Fixed(..) => false,
+        Header::Meta(pair) => !encodes(pair.value, service),
     }
 }
 

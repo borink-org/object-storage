@@ -197,6 +197,22 @@ impl<'a> Writer<'a> {
         self.position
     }
 
+    // Writes with `write` and returns where its bytes are.
+    pub(crate) fn part(&mut self, write: impl FnOnce(&mut Self)) -> Span {
+        let start = self.position;
+        write(self);
+        // push only increases or saturates position, so subtraction cannot underflow.
+        Span {
+            start,
+            len: self.position - start,
+        }
+    }
+
+    // Whether every byte pushed so far is in the buffer.
+    fn fits(&self) -> bool {
+        self.position <= self.bytes.len()
+    }
+
     pub(crate) fn finish(self) -> Option<&'a [u8]> {
         (self.position <= self.bytes.len()).then(|| &self.bytes[..self.position])
     }
@@ -223,6 +239,34 @@ impl<'a> HeadWriter<'a> {
 
     pub(crate) fn position(&self) -> usize {
         self.out.position()
+    }
+
+    // Whether every byte and every header so far is in the buffers, so that
+    // `Self::written` and `Self::header_spans` can read them.
+    pub(crate) fn fits(&self) -> bool {
+        self.out.fits() && self.count <= self.headers.len()
+    }
+
+    // The bytes of a part already written, in a head that fits.
+    pub(crate) fn written(&self, span: Span) -> &[u8] {
+        &self.out.bytes[span.start..span.start + span.len]
+    }
+
+    // Writes `bytes` over a part already written, as long, in a head that
+    // fits.
+    pub(crate) fn overwrite(&mut self, span: Span, bytes: &[u8]) {
+        self.out.bytes[span.start..span.start + span.len].copy_from_slice(bytes);
+    }
+
+    // The number of headers written so far.
+    pub(crate) fn header_count(&self) -> usize {
+        self.count
+    }
+
+    // The headers written so far, from the one at `first`, in a head that
+    // fits.
+    pub(crate) fn header_spans(&self, first: usize) -> &[HeaderSpan] {
+        &self.headers[first..self.count]
     }
 
     pub(crate) fn capacity(&self) -> crate::CapacityError {
@@ -296,13 +340,7 @@ impl<'a> HeadWriter<'a> {
     }
 
     fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
-        let start = self.out.position();
-        write(&mut self.out);
-        // push only increases or saturates position, so subtraction cannot underflow.
-        Span {
-            start,
-            len: self.out.position() - start,
-        }
+        self.out.part(write)
     }
 }
 
