@@ -236,6 +236,12 @@ pub(crate) enum ContentRange {
 // This keeps inclusive lengths and exclusive ends representable even for /*.
 pub(crate) fn parse_content_range(value: &[u8]) -> Option<ContentRange> {
     let rest = trim_ascii(value).strip_prefix(b"bytes ")?;
+    // `start-end/total` in digits, as both services write it, in one pass.
+    // Anything else takes the general reading below, which agrees with this
+    // one wherever this one reads a value.
+    if let Some(range) = digits_range(rest) {
+        return Some(range);
+    }
     let slash = rest.iter().rposition(|byte| *byte == b'/')?;
     let (spec, total) = (trim_ascii(&rest[..slash]), trim_ascii(&rest[slash + 1..]));
     let total = match total {
@@ -252,6 +258,36 @@ pub(crate) fn parse_content_range(value: &[u8]) -> Option<ContentRange> {
         return None;
     }
     Some(ContentRange::Satisfied { start, end, total })
+}
+
+// `start-end/total`, digits only, as a satisfied range.
+fn digits_range(text: &[u8]) -> Option<ContentRange> {
+    let (start, text) = leading_decimal(text)?;
+    let (end, text) = leading_decimal(text.strip_prefix(b"-")?)?;
+    let (total, text) = leading_decimal(text.strip_prefix(b"/")?)?;
+    (text.is_empty() && start <= end && end < total).then_some(ContentRange::Satisfied {
+        start,
+        end,
+        total: Some(total),
+    })
+}
+
+// The number that `text` starts with, of 1 to 19 digits, which cannot
+// overflow, and the rest of `text`. One loop reads the digits and their
+// value; a 20th digit is refused, so the wrapping arithmetic never wraps in a
+// value that is returned.
+fn leading_decimal(text: &[u8]) -> Option<(u64, &[u8])> {
+    let (mut value, mut len) = (0u64, 0);
+    while let Some(&byte) = text.get(len) {
+        let digit = byte.wrapping_sub(b'0');
+        if digit > 9 || len == 19 {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(u64::from(digit));
+        len += 1;
+    }
+    let refused = len == 0 || text.get(len).is_some_and(u8::is_ascii_digit);
+    (!refused).then_some((value, &text[len..]))
 }
 
 // Reads a header value that carries text. Both services write
@@ -275,6 +311,13 @@ pub(crate) fn decimal_header(value: Option<&[u8]>) -> Result<Option<u64>> {
 pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
     if bytes.is_empty() {
         return None;
+    }
+    // Up to 19 digits cannot overflow, so they need no checked arithmetic.
+    if bytes.len() <= 19 {
+        return bytes.iter().try_fold(0u64, |value, byte| {
+            let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+            Some(value * 10 + u64::from(digit))
+        });
     }
     bytes.iter().try_fold(0u64, |value, byte| {
         let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
