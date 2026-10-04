@@ -2375,10 +2375,21 @@ pub(crate) fn validate_key(key: &str) -> Result<()> {
     }
     // A host resolves `.` and `..` segments out of the URL before it sends
     // it, which would address another object.
-    if key.split('/').any(|segment| matches!(segment, "." | "..")) {
+    if has_dot_segment(key.as_bytes()) {
         return Err(InvalidPlan::KeyWouldBeNormalized.into());
     }
     Ok(())
+}
+
+// Whether `key` has a segment, between slashes or at either end, that is
+// `.` or `..`. One pass, looking only at a dot that starts a segment.
+fn has_dot_segment(key: &[u8]) -> bool {
+    let ends = |at: usize| key.get(at).is_none_or(|&byte| byte == b'/');
+    key.iter().enumerate().any(|(at, &byte)| {
+        byte == b'.'
+            && (at == 0 || key[at - 1] == b'/')
+            && (ends(at + 1) || (key[at + 1] == b'.' && ends(at + 2)))
+    })
 }
 
 fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
