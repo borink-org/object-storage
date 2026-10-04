@@ -44,8 +44,8 @@
 //!
 //! # SHA-256
 //!
-//! An S3 client signs each request with SHA-256 and HMAC-SHA256. Pass a
-//! provider to
+//! An S3 client signs each request with SHA-256, and with HMAC-SHA256,
+//! which it builds from SHA-256. Pass a provider to
 //! [`s3::Objects::new`](borink_object_storage_proto::s3::Objects::new):
 //!
 //! ```
@@ -68,7 +68,7 @@
 //!
 //! This crate has two providers, each behind a feature of its name:
 //!
-//! - [`SHA256_RUSTCRYPTO`], over RustCrypto's `sha2` and `hmac`. It needs no
+//! - [`SHA256_RUSTCRYPTO`], over RustCrypto's `sha2`. It needs no
 //!   `std`, runs on every target, and uses the CPU's SHA extensions where it
 //!   finds them.
 //! - [`SHA256_MINIMAL`], over `hmac-sha256`. That crate has no dependencies
@@ -79,9 +79,10 @@
 //!
 //! Pass [`wipe`] to `Credentials::new`, as above. A client calls it on the
 //! copy of the secret access key that it makes to derive its signing key.
-//! The `zeroize` feature routes it through the `zeroize` crate. That
-//! feature also has RustCrypto wipe its SHA-256 and HMAC state, which holds
-//! the key of each HMAC. `hmac-sha256` leaves its state on the stack.
+//! The `zeroize` feature routes it through the `zeroize` crate. A client
+//! keeps its signing key as two SHA-256 states, which it copies with
+//! itself and never wipes, and neither provider wipes the states of a
+//! signature it leaves on the stack.
 //!
 //! [`borink-object-storage-proto`]: borink_object_storage_proto
 
@@ -258,13 +259,17 @@ fn finish<C: Checksum>(mut state: ChecksumState) -> Digest {
     checksum.finish()
 }
 
-/// SHA-256 computed one piece of the input at a time, and HMAC-SHA256
-/// computed in one call.
+/// SHA-256 computed one piece of the input at a time.
 ///
 /// Implement this for a SHA-256 of your own, such as a library you already
 /// link, and pass the type to [`sha256_provider`]. The encoder creates the
 /// value with [`Default`], calls [`Self::update`] with each piece of the
-/// input in order, and calls [`Self::finish`] once.
+/// input in order, and calls [`Self::finish`] once. It builds HMAC-SHA256
+/// from these calls itself.
+///
+/// The value is [`Copy`]: a client keeps the state of a hash after the
+/// padding block of its signing key, and starts each signature from a copy
+/// of it.
 ///
 /// # Size
 ///
@@ -272,15 +277,12 @@ fn finish<C: Checksum>(mut state: ChecksumState) -> Digest {
 /// no larger than [`Sha256State::LEN`] bytes and aligned to no more than
 /// sixteen. [`sha256_provider`] fails to compile for a type that breaks
 /// either limit.
-pub trait Sha256: Default {
+pub trait Sha256: Default + Copy {
     /// Adds `bytes` to the input seen so far.
     fn update(&mut self, bytes: &[u8]);
 
     /// Returns the SHA-256 of everything added so far.
     fn finish(self) -> [u8; 32];
-
-    /// Returns the HMAC-SHA256 of `message` under `key`.
-    fn hmac(key: &[u8], message: &[u8]) -> [u8; 32];
 }
 
 /// Sets every byte of `bytes` to zero, in writes that the compiler keeps.
@@ -306,7 +308,7 @@ pub fn wipe(bytes: &mut [u8]) {
     }
 }
 
-/// Returns a provider that computes SHA-256 and HMAC-SHA256 with `S`.
+/// Returns a provider that computes SHA-256 with `S`.
 ///
 /// Pass it to
 /// [`s3::Objects::new`](borink_object_storage_proto::s3::Objects::new).
@@ -321,7 +323,7 @@ pub fn wipe(bytes: &mut [u8]) {
 /// ```compile_fail
 /// use borink_object_storage_crypto::{Sha256, sha256_provider};
 ///
-/// #[derive(Default)]
+/// #[derive(Clone, Copy, Default)]
 /// struct Wide([u64; 32]);
 ///
 /// impl Sha256 for Wide {
@@ -329,20 +331,12 @@ pub fn wipe(bytes: &mut [u8]) {
 ///     fn finish(self) -> [u8; 32] {
 ///         [0; 32]
 ///     }
-///     fn hmac(_: &[u8], _: &[u8]) -> [u8; 32] {
-///         [0; 32]
-///     }
 /// }
 ///
 /// let too_wide = sha256_provider::<Wide>();
 /// ```
 pub const fn sha256_provider<S: Sha256>() -> Sha256Provider {
-    Sha256Provider::new(
-        sha256_start::<S>,
-        sha256_update::<S>,
-        sha256_finish::<S>,
-        S::hmac,
-    )
+    Sha256Provider::new(sha256_start::<S>, sha256_update::<S>, sha256_finish::<S>)
 }
 
 // An `S` lives in the state slot for the length of one hash. Each of the
@@ -371,18 +365,18 @@ fn sha256_start<S: Sha256>() -> Sha256State {
 fn sha256_update<S: Sha256>(state: &mut Sha256State, bytes: &[u8]) {
     const { assert_sha256_fits::<S>() };
     // SAFETY: a client only ever calls this on a state that
-    // `sha256_start::<S>` wrote an `S` into, and nothing between the two
-    // reads or writes the bytes, so the slot holds a live `S` that this
-    // borrow does not alias.
+    // `sha256_start::<S>` wrote an `S` into, or on a copy of one, and only
+    // `update` writes the bytes in between. `S` is `Copy`, so a copy of
+    // the bytes is a valid `S` of its own, and this borrow of the slot
+    // aliases nothing.
     let sum = unsafe { &mut *state.as_mut_ptr().cast::<S>() };
     sum.update(bytes);
 }
 
 fn sha256_finish<S: Sha256>(mut state: Sha256State) -> [u8; 32] {
     const { assert_sha256_fits::<S>() };
-    // SAFETY: as in `sha256_update`, the slot holds a live `S`. The state is
-    // taken by value and is dropped here, so the `S` is moved out exactly
-    // once and the bytes are never read again.
+    // SAFETY: as in `sha256_update`, the slot holds a valid `S`, which is
+    // `Copy`, so reading it out leaves nothing to release.
     let sum = unsafe { state.as_mut_ptr().cast::<S>().read() };
     sum.finish()
 }

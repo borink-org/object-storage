@@ -9,8 +9,7 @@ use borink_object_storage_proto::{
     ResponseFault, Timestamps, layered,
 };
 
-const ZEROS: Sha256Provider =
-    Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 
 fn objects(addressing: Addressing) -> Objects<'static> {
     let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws)

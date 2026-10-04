@@ -15,36 +15,41 @@ use crate::encoding::hex_digit;
 use crate::request::{ByteSink, U64Decimal};
 
 // A set of ASCII bytes, as `percent-encoding`'s `AsciiSet`. `percent_encode`
-// escapes the bytes in the set and every byte outside ASCII.
+// escapes the bytes in the set and every byte outside ASCII. It is kept as
+// one flag for each of the 256 bytes, the bytes outside ASCII set, so that
+// asking about a byte is one load.
 pub(crate) struct AsciiSet {
-    mask: [u32; 4],
+    escape: [bool; 256],
 }
 
 impl AsciiSet {
-    const fn contains(&self, byte: u8) -> bool {
-        self.mask[byte as usize / 32] & (1 << (byte % 32)) != 0
-    }
-
     fn should_percent_encode(&self, byte: u8) -> bool {
-        !byte.is_ascii() || self.contains(byte)
+        self.escape[byte as usize]
     }
 
     const fn add(&self, byte: u8) -> Self {
-        let mut mask = self.mask;
-        mask[byte as usize / 32] |= 1 << (byte % 32);
-        Self { mask }
+        let mut escape = self.escape;
+        escape[byte as usize] = true;
+        Self { escape }
     }
 
     const fn remove(&self, byte: u8) -> Self {
-        let mut mask = self.mask;
-        mask[byte as usize / 32] &= !(1 << (byte % 32));
-        Self { mask }
+        let mut escape = self.escape;
+        escape[byte as usize] = false;
+        Self { escape }
     }
 }
 
-// The C0 controls, 0x00 to 0x1F, and DEL, 0x7F.
-const CONTROLS: &AsciiSet = &AsciiSet {
-    mask: [!0, 0, 0, 1 << (0x7F % 32)],
+// The C0 controls, 0x00 to 0x1F, and DEL, 0x7F, with every byte outside
+// ASCII.
+const CONTROLS: &AsciiSet = &{
+    let mut escape = [false; 256];
+    let mut byte = 0;
+    while byte < escape.len() {
+        escape[byte] = byte < 0x20 || byte >= 0x7F;
+        byte += 1;
+    }
+    AsciiSet { escape }
 };
 
 // Every ASCII byte that is not a letter or a digit.

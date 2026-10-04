@@ -18,15 +18,13 @@ use borink_object_storage_proto::{
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TOKEN: &str = "session-token";
 
-const ZEROS: Sha256Provider =
-    Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 
 // A provider that fails the test if the encoder hashes anything.
 const REFUSES: Sha256Provider = Sha256Provider::new(
     Sha256State::uninit,
     |_, _| panic!("the encoder hashed content"),
     |_| panic!("the encoder finished a hash"),
-    |_, _| panic!("the encoder computed an HMAC"),
 );
 
 fn bucket() -> Bucket<'static> {

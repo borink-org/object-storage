@@ -141,7 +141,7 @@ impl<'a> Blobs<'a> {
             self.write_path(out, Some(object.key));
             url::write_query_in_url(out, &[revision_parameter(object.revision)]);
             out.push(b" HTTP/1.1\r\nx-ms-date: ");
-            out.push(now.rfc1123().as_bytes());
+            out.push(now.rfc1123_bytes());
             out.push(b"\r\nAuthorization: Bearer ");
             out.push(self.token.as_bytes());
             out.push(b"\r\nContent-Length: 0\r\n");

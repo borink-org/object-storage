@@ -106,58 +106,109 @@ impl<'h> ResponseHead<'h> {
 
     /// Consumes one parsed header without copying its value. The first value wins.
     pub fn insert(&mut self, name: &str, value: &'h [u8]) {
-        let slot = if name.eq_ignore_ascii_case("content-length") {
-            &mut self.content_length
-        } else if name.eq_ignore_ascii_case("content-range") {
-            &mut self.content_range
-        } else if name.eq_ignore_ascii_case("content-encoding") {
-            &mut self.content_encoding
-        } else if name.eq_ignore_ascii_case("content-type") {
-            &mut self.content_type
-        } else if name.eq_ignore_ascii_case("content-md5") {
-            &mut self.content_md5
-        } else if name.eq_ignore_ascii_case("content-language") {
-            &mut self.content_language
-        } else if name.eq_ignore_ascii_case("content-disposition") {
-            &mut self.content_disposition
-        } else if name.eq_ignore_ascii_case("cache-control") {
-            &mut self.cache_control
-        } else if name.eq_ignore_ascii_case("x-amz-storage-class")
-            || name.eq_ignore_ascii_case("x-ms-access-tier")
+        if let Some(slot) = self.slot(name)
+            && slot.is_none()
         {
-            &mut self.storage_class
-        } else if name.eq_ignore_ascii_case("etag") {
-            &mut self.e_tag
-        } else if name.eq_ignore_ascii_case("last-modified") {
-            &mut self.last_modified
-        } else if name.eq_ignore_ascii_case("x-ms-version-id")
-            || name.eq_ignore_ascii_case("x-amz-version-id")
-        {
-            &mut self.version
-        } else if name.eq_ignore_ascii_case("x-ms-snapshot") {
-            &mut self.snapshot
-        } else if name.eq_ignore_ascii_case("x-ms-copy-id") {
-            &mut self.copy_id
-        } else if name.eq_ignore_ascii_case("x-ms-copy-status") {
-            &mut self.copy_status
-        } else if name.eq_ignore_ascii_case("x-amz-restore")
-            || name.eq_ignore_ascii_case("x-ms-archive-status")
-        {
-            &mut self.restore_status
-        } else if name.eq_ignore_ascii_case("x-ms-error-code") {
-            &mut self.error_code
-        } else if name.eq_ignore_ascii_case("x-ms-request-id")
-            || name.eq_ignore_ascii_case("x-amz-request-id")
-        {
-            &mut self.request_id
-        } else if name.eq_ignore_ascii_case("x-amz-id-2") {
-            &mut self.extended_request_id
-        } else {
-            return;
-        };
-        if slot.is_none() {
             *slot = Some(value);
         }
+    }
+
+    // The field that the header `name` fills, in any case, or `None` for a
+    // header that a head does not keep. A name is compared only with the
+    // known names of its length, so most headers that a service sends and a
+    // head does not keep cost one comparison of lengths.
+    fn slot(&mut self, name: &str) -> Option<&mut Option<&'h [u8]>> {
+        let name = name.as_bytes();
+        let is = |known: &Known| known.is(name);
+        Some(match name.len() {
+            4 if is(const { &Known::new("etag") }) => &mut self.e_tag,
+            10 if is(const { &Known::new("x-amz-id-2") }) => &mut self.extended_request_id,
+            11 if is(const { &Known::new("content-md5") }) => &mut self.content_md5,
+            12 if is(const { &Known::new("content-type") }) => &mut self.content_type,
+            12 if is(const { &Known::new("x-ms-copy-id") }) => &mut self.copy_id,
+            13 if is(const { &Known::new("content-range") }) => &mut self.content_range,
+            13 if is(const { &Known::new("cache-control") }) => &mut self.cache_control,
+            13 if is(const { &Known::new("last-modified") }) => &mut self.last_modified,
+            13 if is(const { &Known::new("x-ms-snapshot") }) => &mut self.snapshot,
+            13 if is(const { &Known::new("x-amz-restore") }) => &mut self.restore_status,
+            14 if is(const { &Known::new("content-length") }) => &mut self.content_length,
+            15 if is(const { &Known::new("x-ms-version-id") }) => &mut self.version,
+            15 if is(const { &Known::new("x-ms-error-code") }) => &mut self.error_code,
+            15 if is(const { &Known::new("x-ms-request-id") }) => &mut self.request_id,
+            16 if is(const { &Known::new("content-encoding") }) => &mut self.content_encoding,
+            16 if is(const { &Known::new("content-language") }) => &mut self.content_language,
+            16 if is(const { &Known::new("x-ms-access-tier") }) => &mut self.storage_class,
+            16 if is(const { &Known::new("x-amz-version-id") }) => &mut self.version,
+            16 if is(const { &Known::new("x-ms-copy-status") }) => &mut self.copy_status,
+            16 if is(const { &Known::new("x-amz-request-id") }) => &mut self.request_id,
+            19 if is(const { &Known::new("content-disposition") }) => &mut self.content_disposition,
+            19 if is(const { &Known::new("x-amz-storage-class") }) => &mut self.storage_class,
+            19 if is(const { &Known::new("x-ms-archive-status") }) => &mut self.restore_status,
+            _ => return None,
+        })
+    }
+}
+
+// A header name that a head keeps, ready to compare: its bytes as words, and
+// the case bit `0x20` of each byte that is a letter. A byte matches if it
+// equals the known byte once that bit is set, which is exact for each byte,
+// and a name of 4 to 24 bytes is two or three overlapping words, so a
+// comparison is a few loads whatever the length.
+struct Known {
+    len: usize,
+    // The words at the start, in the middle (only past 16 bytes) and at the
+    // end, each as `(bytes, case bits)`. Below 8 bytes they are 4 wide.
+    words: [(u64, u64); 3],
+}
+
+impl Known {
+    const fn new(name: &str) -> Self {
+        let name = name.as_bytes();
+        let len = name.len();
+        assert!(4 <= len && len <= 24, "a known name is 4 to 24 bytes");
+        let width = if len < 8 { 4 } else { 8 };
+        let middle = if len > 16 { 8 } else { 0 };
+        Self {
+            len,
+            words: [
+                Self::word(name, 0, width),
+                Self::word(name, middle, width),
+                Self::word(name, len - width, width),
+            ],
+        }
+    }
+
+    const fn word(name: &[u8], at: usize, width: usize) -> (u64, u64) {
+        let (mut bytes, mut fold, mut i) = (0u64, 0u64, 0);
+        while i < width {
+            let byte = name[at + i];
+            bytes |= (byte as u64) << (8 * i);
+            if byte.is_ascii_lowercase() {
+                fold |= 0x20 << (8 * i);
+            }
+            i += 1;
+        }
+        (bytes, fold)
+    }
+
+    // Whether `name`, as long as this one, is this name in any case. Inlined
+    // with a constant name, the lengths fold away and each word is one load.
+    #[inline]
+    fn is(&self, name: &[u8]) -> bool {
+        let narrow = self.len < 8;
+        let width = if narrow { 4 } else { 8 };
+        let middle = if self.len > 16 { 8 } else { 0 };
+        let word = |at: usize| -> u64 {
+            if narrow {
+                u32::from_le_bytes(name[at..at + 4].try_into().expect("4 bytes")).into()
+            } else {
+                u64::from_le_bytes(name[at..at + 8].try_into().expect("8 bytes"))
+            }
+        };
+        let [first, mid, last] = self.words;
+        word(0) | first.1 == first.0
+            && word(middle) | mid.1 == mid.0
+            && word(self.len - width) | last.1 == last.0
     }
 }
 

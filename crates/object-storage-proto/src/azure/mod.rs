@@ -376,7 +376,7 @@ impl<'a> Blobs<'a> {
         }
         head.url(|out| self.write_url(out, key, query));
         head.header("authorization", Bearer(self.token));
-        head.header("x-ms-date", now.rfc1123().as_bytes());
+        head.header("x-ms-date", now.rfc1123_bytes());
         head.header("x-ms-version", VERSION.as_bytes());
         if range != RequestedRange::Whole {
             head.header("range", range);
@@ -1179,29 +1179,41 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     if namespace == AzureNamespace::Flat && name_units(key) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::KeyTooLong.into());
     }
+    // One pass over the bytes finds what the three rules below look for.
+    let bytes = key.as_bytes();
+    let (mut control, mut slashes, mut dot_ends) = (false, 0usize, false);
+    for (at, &byte) in bytes.iter().enumerate() {
+        control |= byte.is_ascii_control();
+        if byte == b'/' {
+            slashes += 1;
+            dot_ends |= at > 0 && bytes[at - 1] == b'.';
+        }
+    }
+    dot_ends |= bytes.last() == Some(&b'.');
     // Azure refuses an ASCII control character in a name, with 400. Measured
     // for U+0001, U+000B, U+000C, U+000E and U+007F. Testing the bytes is
     // testing the characters: every byte of a character outside ASCII is 0x80
     // or above, and none of those is an ASCII control.
-    if key.bytes().any(|byte| byte.is_ascii_control()) {
+    if control {
         return Err(InvalidPlan::KeyControlCharacter.into());
     }
     // Azure takes a name of 255 `/`-delimited segments and refuses 256,
     // whatever the 254 in its documentation says. Measured by bisection
     // against the live service.
     // At most one segment per byte plus one; str lengths fit isize.
-    if key.matches('/').count() + 1 > MAX_BLOB_NAME_SEGMENTS {
+    if slashes + 1 > MAX_BLOB_NAME_SEGMENTS {
         return Err(InvalidPlan::KeyTooManySegments.into());
     }
     // Azure drops a dot from the end of every segment of a name: `dot.` is
     // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
-    // suite.
+    // suite. A segment ends in a dot where a dot comes before a `/` or ends
+    // the name.
     //
     // The same test covers a segment that is only dots. A host resolves `.`
     // and `..` out of the URL before it sends it, as the standard for URLs
     // requires, so those would name another object entirely; measured, as
     // `dots/../up` wrote `up`.
-    if key.split('/').any(|segment| segment.ends_with('.')) {
+    if dot_ends {
         return Err(InvalidPlan::KeyWouldBeNormalized.into());
     }
     Ok(())

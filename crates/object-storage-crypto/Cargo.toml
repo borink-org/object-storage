@@ -16,13 +16,12 @@ borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0
 # because this crate needs the hasher alone: not `std`, `alloc` or the OID
 # tables.
 md-5 = { version = "0.11", optional = true, default-features = false }
-# The SHA-256 and HMAC-SHA256 that SigV4 signs with, one provider per
+# The SHA-256 that SigV4 signs with, one provider per
 # feature. Each links only its own crates.
 #
 # RustCrypto's, which uses the CPU's SHA extensions where it finds them and
 # needs no `std`.
 sha2 = { version = "0.11", optional = true, default-features = false }
-hmac = { version = "0.13", optional = true, default-features = false }
 # One crate with no dependencies, in portable code.
 hmac-sha256 = { version = "1.1.14", optional = true, default-features = false }
 # Only the `sha1-rustcrypto` feature links this, with its default features
@@ -44,14 +43,13 @@ crc32c = []
 sha1-rustcrypto = ["dep:sha1"]
 # The `Md5RustCrypto` adapter over RustCrypto's `md-5`.
 md5-rustcrypto = ["dep:md-5"]
-# `Sha256RustCrypto`, over RustCrypto's `sha2` and `hmac`.
-sha256-rustcrypto = ["dep:sha2", "dep:hmac"]
+# `Sha256RustCrypto`, over RustCrypto's `sha2`.
+sha256-rustcrypto = ["dep:sha2"]
 # `Sha256Minimal`, over `hmac-sha256`.
 sha256-minimal = ["dep:hmac-sha256"]
 # `wipe` through the `zeroize` crate, in place of this crate's volatile
-# writes. With `sha256-rustcrypto`, RustCrypto's SHA-256 and HMAC state is
-# also wiped when it is dropped, which holds the key of each HMAC.
-zeroize = ["dep:zeroize", "sha2?/zeroize", "hmac?/zeroize"]
+# writes.
+zeroize = ["dep:zeroize"]
 
 [lints.rust]
 missing_docs = "deny"
