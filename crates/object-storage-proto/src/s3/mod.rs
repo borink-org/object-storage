@@ -31,7 +31,7 @@
 //! };
 //! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
 //! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let bucket = Bucket::new(
@@ -93,8 +93,9 @@
 //!
 //! Every request is signed for the bucket's region. Signing takes five
 //! HMACs, and four of them depend only on the day. Call
-//! [`Objects::with_signing_key`] to compute those four once. A client whose
-//! key is for another day computes them again for each request.
+//! [`Objects::with_signing_key`] to compute those four once, and to hash the
+//! padding of the key of the fifth once. A client whose key is for another
+//! day computes them again for each request.
 //!
 //! The signature covers the `host` header, which your HTTP client writes from
 //! the URL. Send the URL as the request holds it. An endpoint that names the
@@ -125,7 +126,7 @@
 //! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 //! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
 //! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 //! use borink_object_storage_proto::{
 //!     EntryKind, HeaderSpan, ListEntry, PhysicalList, Timestamps, layered,
 //! };
@@ -198,7 +199,7 @@
 //! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 //! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
 //! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 //! use borink_object_storage_proto::s3::{PartRef, PhysicalCreateUpload, PhysicalStagePart};
 //! use borink_object_storage_proto::{
 //!     CommitHeadOutcome, HeaderSpan, Payload, PhysicalCommit, ResponseHead, StageHeadOutcome,
@@ -1098,7 +1099,7 @@ enum Header<'a> {
 
 impl<'a> Objects<'a> {
     /// Creates a client that signs requests to `bucket` with `credentials`,
-    /// computing SHA-256 and HMAC-SHA256 with `sha256`.
+    /// computing SHA-256 with `sha256`.
     pub const fn new(
         bucket: Bucket<'a>,
         credentials: Credentials<'a>,
