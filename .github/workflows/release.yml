@@ -10,7 +10,7 @@ on:
 permissions: {}
 jobs:
   release:
-    uses: borink-org/touchgate/.github/workflows/release.yml@348af247b478f9632e73b11f230143790b7149b8
+    uses: borink-org/touchgate/.github/workflows/release.yml@f740ecd17a7c43b887d52438b7204727f6911bd9
     permissions:
       contents: write
       id-token: write
