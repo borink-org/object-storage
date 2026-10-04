@@ -35,9 +35,11 @@ pub struct Span {
 }
 
 impl Span {
-    fn of(self, bytes: &str) -> &str {
+    // The text of this part of a head. Only the part is checked as UTF-8, so
+    // a host that reads the head by range pays for no check.
+    fn of(self, bytes: &[u8]) -> &str {
         // HeadWriter bounds start + len by the finished buffer's length.
-        &bytes[self.start..self.start + self.len]
+        text(&bytes[self.start..self.start + self.len])
     }
 }
 
@@ -94,7 +96,7 @@ impl core::fmt::Display for Method {
 /// Drop the request before reusing either region.
 #[derive(Debug, Clone, Copy)]
 pub struct WireRequest<'r> {
-    bytes: &'r str,
+    bytes: &'r [u8],
     method: Method,
     url: Span,
     headers: &'r [HeaderSpan],
@@ -330,7 +332,7 @@ impl<'a> HeadWriter<'a> {
             Payload::Slice(&bytes[span.start..span.start + span.len])
         });
         Some(WireRequest {
-            bytes: text(&bytes[..head_end]),
+            bytes: &bytes[..head_end],
             method,
             url,
             headers,

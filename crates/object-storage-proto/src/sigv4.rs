@@ -326,7 +326,7 @@ impl SigningKey {
         // `Credentials::new` bounds the secret by MAX_SECRET_LEN.
         seed[..4].copy_from_slice(b"AWS4");
         seed[4..4 + secret.len()].copy_from_slice(secret);
-        let mut key = provider.hmac(&seed[..4 + secret.len()], date.as_bytes());
+        let mut key = provider.hmac(&seed[..4 + secret.len()], date);
         // The caller's `&str` and the provider's HMAC state still hold the
         // secret. This crate wipes only the copy it made.
         (credentials.wipe)(&mut seed);
@@ -334,12 +334,12 @@ impl SigningKey {
         key = provider.hmac(&key, service.as_bytes());
         key = provider.hmac(&key, b"aws4_request");
         let mut day = [0; 8];
-        day.copy_from_slice(date.as_bytes());
+        day.copy_from_slice(date);
         Self { key, date: day }
     }
 
     pub(crate) fn covers(&self, now: &Timestamps) -> bool {
-        self.date == *now.date().as_bytes()
+        self.date == *now.date()
     }
 
     // Signs a request whose canonical form hashes to `canonical`, and
@@ -360,9 +360,9 @@ impl SigningKey {
         for piece in [
             ALGORITHM.as_bytes(),
             b"\n",
-            now.iso8601().as_bytes(),
+            now.iso8601_bytes(),
             b"\n",
-            now.date().as_bytes(),
+            now.date(),
             b"/",
             region.as_bytes(),
             b"/",

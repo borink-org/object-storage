@@ -84,14 +84,24 @@ impl Timestamps {
         core::str::from_utf8(&self.rfc1123).expect("HTTP dates are ASCII")
     }
 
+    // The bytes of `Self::rfc1123`, for a writer that needs no `str`.
+    pub(crate) fn rfc1123_bytes(&self) -> &[u8] {
+        &self.rfc1123
+    }
+
     /// Returns the time as `YYYYMMDDTHHMMSSZ`, for `x-amz-date`.
     pub fn iso8601(&self) -> &str {
         core::str::from_utf8(&self.iso8601).expect("ISO 8601 basic dates are ASCII")
     }
 
+    // The bytes of `Self::iso8601`, for a writer that needs no `str`.
+    pub(crate) fn iso8601_bytes(&self) -> &[u8] {
+        &self.iso8601
+    }
+
     // The `YYYYMMDD` that a SigV4 credential scope names.
-    pub(crate) fn date(&self) -> &str {
-        &self.iso8601()[..8]
+    pub(crate) fn date(&self) -> &[u8] {
+        &self.iso8601[..8]
     }
 }
 
@@ -131,7 +141,7 @@ mod tests {
             assert_eq!(&text[17..], b"00:00:00 GMT", "{year}-{month}-{day}");
             let iso = actual.iso8601();
             assert_eq!(iso, std::format!("{year:04}{month:02}{day:02}T000000Z"));
-            assert_eq!(actual.date(), &iso[..8]);
+            assert_eq!(actual.date(), &iso.as_bytes()[..8]);
 
             if (year, month, day) == (2400, 12, 31) {
                 break;

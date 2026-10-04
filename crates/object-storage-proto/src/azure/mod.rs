@@ -376,7 +376,7 @@ impl<'a> Blobs<'a> {
         }
         head.url(|out| self.write_url(out, key, query));
         head.header("authorization", Bearer(self.token));
-        head.header("x-ms-date", now.rfc1123().as_bytes());
+        head.header("x-ms-date", now.rfc1123_bytes());
         head.header("x-ms-version", VERSION.as_bytes());
         if range != RequestedRange::Whole {
             head.header("range", range);

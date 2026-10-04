@@ -429,7 +429,7 @@ impl HeaderValue for ConditionValue<'_> {
     fn write_to(self, out: &mut dyn ByteSink) {
         match self {
             Self::ETag(tag) => out.push(tag),
-            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123().as_bytes()),
+            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123_bytes()),
         }
     }
 }

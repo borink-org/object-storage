@@ -1491,7 +1491,7 @@ impl<'a> Objects<'a> {
                     SignedValue::Bytes(bytes) => out.push(bytes),
                     SignedValue::Condition(value) => value.write_to(out),
                     SignedValue::Range => write_range(out, signed.range),
-                    SignedValue::Date => out.push(now.iso8601().as_bytes()),
+                    SignedValue::Date => out.push(now.iso8601_bytes()),
                     SignedValue::Tags => write_tags(out, signed.tags),
                     SignedValue::CopySource => self.write_copy_source(out, signed),
                     SignedValue::CopyRange => write_copy_range(out, signed),
@@ -1619,7 +1619,7 @@ impl<'a> Objects<'a> {
     }
 
     fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
-        out.push(now.date().as_bytes());
+        out.push(now.date());
         out.push(b"/");
         out.push(self.bucket.region.as_bytes());
         out.push(b"/");
