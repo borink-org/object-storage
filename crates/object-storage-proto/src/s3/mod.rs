@@ -2189,7 +2189,21 @@ impl<'s> SignedHeaders<'s> {
     fn of(signed: &'s Signed<'s>, token: Option<(&'static str, &'s str)>) -> Self {
         let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
         let mut count = 0;
+        // The headers this crate names come in the order of their names, so
+        // they are appended; only the plan's own are sorted in among them.
         for (name, value) in fixed_headers(signed, token) {
+            fixed[count] = Header::Fixed(name, value);
+            count += 1;
+        }
+        debug_assert!(fixed[..count].is_sorted_by_key(|header| match header {
+            Header::Fixed(name, _) => *name,
+            Header::Meta(_) => "",
+        }));
+        for (name, value) in signed
+            .headers
+            .iter()
+            .map(|(name, value)| (*name, SignedValue::Bytes(value)))
+        {
             let mut at = count;
             while at > 0 && matches!(fixed[at - 1], Header::Fixed(previous, _) if previous > name) {
                 fixed[at] = fixed[at - 1];
@@ -2263,50 +2277,48 @@ fn needs_folding(value: &[u8]) -> bool {
         || value.windows(2).any(|pair| pair == b"  ")
 }
 
-// The signed headers other than metadata, in no order.
+// The signed headers that this crate names, other than metadata, in the
+// order of their names: the four conditions all sort between `host` and
+// `range`, the copy's headers between `x-amz-content-sha256` and
+// `x-amz-date`, and either token between `x-amz-date` and `x-amz-tagging`.
 fn fixed_headers<'s>(
     signed: &'s Signed<'s>,
     token: Option<(&'static str, &'s str)>,
 ) -> impl Iterator<Item = (&'s str, SignedValue<'s>)> {
+    let copy_condition = signed.copy.and_then(|copy| {
+        let name = match copy.source.condition {
+            ConditionKind::None => return None,
+            ConditionKind::IfMatch => "x-amz-copy-source-if-match",
+            ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
+            ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
+            ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
+        };
+        Some((name, SignedValue::Condition(copy.source.condition_value?)))
+    });
     [
         Some(("host", SignedValue::Host)),
+        condition_header(signed.condition)
+            .zip(signed.condition_value)
+            .map(|(name, value)| (name, SignedValue::Condition(value))),
+        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
         Some((
             "x-amz-content-sha256",
             SignedValue::Formatted(signed.content_sha256),
         )),
-        Some(("x-amz-date", SignedValue::Date)),
-        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
-        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
-        condition_header(signed.condition)
-            .zip(signed.condition_value)
-            .map(|(name, value)| (name, SignedValue::Condition(value))),
-        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
         signed
             .copy
             .map(|_| ("x-amz-copy-source", SignedValue::CopySource)),
+        copy_condition,
         signed
             .copy
             .filter(|copy| copy.range != RequestedRange::Whole)
             .map(|_| ("x-amz-copy-source-range", SignedValue::CopyRange)),
-        signed.copy.and_then(|copy| {
-            let name = match copy.source.condition {
-                ConditionKind::None => return None,
-                ConditionKind::IfMatch => "x-amz-copy-source-if-match",
-                ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
-                ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
-                ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
-            };
-            Some((name, SignedValue::Condition(copy.source.condition_value?)))
-        }),
+        Some(("x-amz-date", SignedValue::Date)),
+        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
+        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
     ]
     .into_iter()
     .flatten()
-    .chain(
-        signed
-            .headers
-            .iter()
-            .map(|(name, value)| (*name, SignedValue::Bytes(value))),
-    )
 }
 
 fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = u8> + 'p {
