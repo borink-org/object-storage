@@ -2157,17 +2157,25 @@ impl<'s> SignedHeaders<'s> {
     }
 
     fn iter(&self) -> impl Iterator<Item = Header<'s>> + '_ {
+        let plain = self.metadata.is_empty();
         let mut fixed = self.fixed[..self.count].iter().copied().peekable();
         let mut metadata = sorted_metadata(self.metadata).peekable();
-        core::iter::from_fn(move || match (fixed.peek(), metadata.peek()) {
-            (None, None) => None,
-            (Some(_), None) => fixed.next(),
-            (Some(Header::Fixed(name, _)), Some(pair))
-                if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
-            {
-                fixed.next()
+        // Without metadata, which most requests carry none of, there is
+        // nothing to merge.
+        core::iter::from_fn(move || {
+            if plain {
+                return fixed.next();
             }
-            _ => metadata.next().map(Header::Meta),
+            match (fixed.peek(), metadata.peek()) {
+                (None, None) => None,
+                (Some(_), None) => fixed.next(),
+                (Some(Header::Fixed(name, _)), Some(pair))
+                    if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
+                {
+                    fixed.next()
+                }
+                _ => metadata.next().map(Header::Meta),
+            }
         })
     }
 }
