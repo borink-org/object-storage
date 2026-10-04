@@ -118,6 +118,8 @@ impl Sha256Provider {
         Sum {
             provider: *self,
             state: (self.start)(),
+            pending: [0; 64],
+            filled: 0,
         }
     }
 }
@@ -128,10 +130,14 @@ impl fmt::Debug for Sha256Provider {
     }
 }
 
-// A SHA-256 in progress.
+// A SHA-256 in progress. A canonical request arrives in some 30 pieces of a
+// few bytes, so pieces are gathered into a block's worth before the provider
+// sees them: a call through its function pointer costs more than the copy.
 pub(crate) struct Sum {
     provider: Sha256Provider,
     state: Sha256State,
+    pending: [u8; 64],
+    filled: usize,
 }
 
 impl crate::request::ByteSink for Sum {
@@ -142,10 +148,30 @@ impl crate::request::ByteSink for Sum {
 
 impl Sum {
     pub(crate) fn update(&mut self, bytes: &[u8]) {
-        (self.provider.update)(&mut self.state, bytes);
+        if bytes.len() <= self.pending.len() - self.filled {
+            let end = self.filled + bytes.len();
+            crate::request::copy_short(&mut self.pending[self.filled..end], bytes);
+            self.filled = end;
+            return;
+        }
+        self.flush();
+        if bytes.len() >= self.pending.len() {
+            (self.provider.update)(&mut self.state, bytes);
+        } else {
+            crate::request::copy_short(&mut self.pending[..bytes.len()], bytes);
+            self.filled = bytes.len();
+        }
     }
 
-    pub(crate) fn finish(self) -> [u8; 32] {
+    fn flush(&mut self) {
+        if self.filled > 0 {
+            (self.provider.update)(&mut self.state, &self.pending[..self.filled]);
+            self.filled = 0;
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> [u8; 32] {
+        self.flush();
         (self.provider.finish)(self.state)
     }
 }
