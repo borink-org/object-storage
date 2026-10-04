@@ -9,6 +9,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - `sigv4::Sha256Provider::new` takes three functions, `start`, `update` and `finish`, and no longer an `hmac`: a client builds HMAC-SHA256 from SHA-256 itself, and `Sha256Provider::hmac` does the same. A client copies a provider's state between calls, so the state must hold no pointer and nothing it must release; `Sha256State` states this.
 - `Objects::with_signing_key` also hashes the padding blocks of the day's signing key once, so each signature hashes two fewer blocks.
 - An S3 client sorts a request's signed headers once per request, and hashes its canonical request from the head it has written instead of writing each value a second time. It no longer signs a head that does not fit its buffers, which it refuses anyway.
+- `ResponseHead::insert` compares a header's name only with the known names of the same length, so a header that a head does not keep costs one comparison of lengths rather than up to 25 of names.
 - In `borink-object-storage-crypto`, the trait `Sha256` requires `Copy` and no longer has `hmac`. `Sha256RustCrypto` keeps its own state over `sha2`'s compression function, and the crate no longer depends on `hmac`. The `zeroize` feature now changes only `wipe`: the signing key's hash states are copied with the client and never wiped.
 
 ## 0.0.4 - 2026-10-03
