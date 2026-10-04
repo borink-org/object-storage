@@ -1082,6 +1082,9 @@ pub(crate) struct SignedCopy<'p> {
 #[derive(Clone, Copy)]
 enum SignedValue<'a> {
     Bytes(&'a [u8]),
+    // Bytes that this crate formatted, such as a digest in hexadecimal,
+    // which hold no space for SigV4 to fold.
+    Formatted(&'a [u8]),
     Host,
     Range,
     Date,
@@ -1489,7 +1492,7 @@ impl<'a> Objects<'a> {
             match header {
                 Header::Fixed(_, SignedValue::Host) => {}
                 Header::Fixed(name, value) => head.header_with(name, |out| match value {
-                    SignedValue::Bytes(bytes) => out.push(bytes),
+                    SignedValue::Bytes(bytes) | SignedValue::Formatted(bytes) => out.push(bytes),
                     SignedValue::Condition(value) => value.write_to(out),
                     SignedValue::Range => write_range(out, signed.range),
                     SignedValue::Date => out.push(now.iso8601_bytes()),
@@ -2215,7 +2218,7 @@ fn fixed_headers<'s>(
         Some(("host", SignedValue::Host)),
         Some((
             "x-amz-content-sha256",
-            SignedValue::Bytes(signed.content_sha256),
+            SignedValue::Formatted(signed.content_sha256),
         )),
         Some(("x-amz-date", SignedValue::Date)),
         token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
