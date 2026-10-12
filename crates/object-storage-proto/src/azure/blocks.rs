@@ -10,7 +10,7 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{
-    Describe, Detail, Field, FieldList, Operation, Template, Value, encode as encode_template,
+    Describe, Detail, Field, FieldList, Holes, Operation, Template, encode as encode_template,
     prepare as prepare_template,
 };
 use crate::azure::{
@@ -18,12 +18,12 @@ use crate::azure::{
     push_stored, validate_key, validate_metadata, validate_options,
 };
 use crate::azure::{
-    Container, ObjectRequest, azure_tag_char, encode_object, prepare_object, revision_param,
-    stored_fields, utf8_properties,
+    Container, ObjectText, azure_tag_char, encode_object, prepare_object, stored_fields,
+    utf8_properties,
 };
 use crate::checksum::{BASE64_LEN, ChecksumKind};
 use crate::common::{
-    checksum_text, validate_checksum_item, validate_properties, validate_tags,
+    checksum_text, condition_header, validate_checksum_item, validate_properties, validate_tags,
     validate_template_options,
 };
 use crate::common::{
@@ -67,11 +67,12 @@ impl BlockSource {
         }
     }
 
-    fn tag(self) -> &'static str {
+    // The element that names the source in a block list, opened and closed.
+    const fn tags(self) -> (&'static str, &'static str) {
         match self {
-            Self::Uncommitted => "Uncommitted",
-            Self::Committed => "Committed",
-            Self::Latest => "Latest",
+            Self::Uncommitted => ("<Uncommitted>", "</Uncommitted>"),
+            Self::Committed => ("<Committed>", "</Committed>"),
+            Self::Latest => ("<Latest>", "</Latest>"),
         }
     }
 }
@@ -542,18 +543,24 @@ fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
 pub(super) fn validate_block_id(id: &str) -> Result<()> {
-    let data = id.trim_end_matches('=');
-    // Trimming returns a subslice, so its length cannot exceed id.len().
+    let id = id.as_bytes();
+    let data = match id {
+        [data @ .., b'=', b'='] | [data @ .., b'='] => data,
+        data => data,
+    };
+    // The padding is the one or two `=` that end the ID.
     let padding = id.len() - data.len();
+    // Every byte is tested, without stopping at the first bad one, so that
+    // the test runs on many bytes at once.
+    let base64 = data.iter().fold(true, |valid, &b| {
+        valid & (b.is_ascii_alphanumeric() | (b == b'+') | (b == b'/'))
+    });
     if id.is_empty()
         || id.len() > 88
         || !id.len().is_multiple_of(4)
-        || padding > 2
-        // The preceding checks establish 4 <= len <= 88 and padding <= 2.
+        // The preceding checks establish 4 <= len <= 88.
         || id.len() / 4 * 3 - padding > 64
-        || !data
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        || !base64
     {
         return Err(InvalidPlan::PartId.into());
     }
@@ -572,7 +579,10 @@ fn block_list_len<I: AsRef<str>>(blocks: impl Iterator<Item = (I, BlockSource)>)
     COMMIT_OPEN.len()
         + COMMIT_CLOSE.len()
         + blocks
-            .map(|(id, source)| 5 + 2 * source.tag().len() + id.as_ref().len())
+            .map(|(id, source)| {
+                let (open, close) = source.tags();
+                open.len() + id.as_ref().len() + close.len()
+            })
             .sum::<usize>()
 }
 
@@ -582,13 +592,10 @@ fn write_block_list<I: AsRef<str>>(
 ) {
     out.push(COMMIT_OPEN);
     for (id, source) in blocks {
-        out.push(b"<");
-        out.push(source.tag().as_bytes());
-        out.push(b">");
+        let (open, close) = source.tags();
+        out.push(open.as_bytes());
         out.push(id.as_ref().as_bytes());
-        out.push(b"</");
-        out.push(source.tag().as_bytes());
-        out.push(b">");
+        out.push(close.as_bytes());
     }
     out.push(COMMIT_CLOSE);
 }
@@ -763,35 +770,36 @@ pub fn prepare_stage_block(
     if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
         return Err(InvalidPlan::Option.into());
     }
-    let query = [
-        Some(("comp", ParamValue::Fixed(QueryValue::Literal("block")))),
-        Some(("blockid", ParamValue::Hole(Hole::BlockId))),
-    ];
-    let mut fields = FieldList::new();
-    fields.push(Field::new(
-        "content-length",
-        Value::Hole(Hole::ContentLength),
-    ));
-    if let Some(kind) = options.checksum {
-        fields.push(Field::new(kind.header(), Value::Hole(Hole::Checksum)));
-    }
-    let describe = Describe {
-        method: Method::Put,
-        key: true,
-        query: &query,
-        fields: fields.as_slice(),
-        metadata: &[],
-        body: Body::None,
-    };
     prepare_template(
         container,
         token,
         namespace,
-        &describe,
+        &describe_stage(options.checksum),
         Operation::StageBlock,
         Detail::Stage(options.checksum),
         buf,
+        |_| {},
     )
+}
+
+// The request of a Put Block of a template with `checksum`.
+fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
+    Describe {
+        method: Method::Put,
+        key: true,
+        query: [
+            Some(("comp", ParamValue::Fixed(QueryValue::Literal("block")))),
+            Some(("blockid", ParamValue::Hole(Hole::BlockId))),
+        ],
+        holes: Holes {
+            content_length: Some(Hole::ContentLength),
+            checksum: checksum.map(|kind| kind.header()),
+            ..Holes::default()
+        },
+        fields: &[],
+        metadata: &[],
+        body: Body::None,
+    }
 }
 
 /// Writes the Put Block `item` at `now` from `template` into `buf`, and
@@ -820,7 +828,7 @@ pub fn encode_stage_block<'r>(
     let Detail::Stage(checksum) = template.detail else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_block_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_block_id(item.id)?;
     if item.content.len() > MAX_STAGE_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
@@ -829,13 +837,20 @@ pub fn encode_stage_block<'r>(
     let mut text = [0; BASE64_LEN];
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         block_id: Some(item.id),
         content_length: Some(item.content.len()),
         checksum: checksum_text(item.checksum, &mut text, false),
         ..Values::default()
     };
-    encode_template(template, bytes, &values, item.content, buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        item.content,
+        buf,
+        &describe_stage(checksum),
+    )
 }
 
 /// Reads the response head of a Put Block and reports what Azure did.
@@ -882,31 +897,56 @@ pub fn prepare_commit_blocks(
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
-    let mut request = ObjectRequest {
-        comp: Some("blocklist"),
-        condition: options.condition,
-        metadata: options.metadata,
+    let mut fields = FieldList::new();
+    stored_fields(&mut fields, &options.options);
+    prepare_template(
+        container,
+        token,
+        namespace,
+        &describe_commit(
+            options.condition,
+            options.content_md5,
+            fields.as_slice(),
+            options.metadata,
+        ),
+        Operation::CommitBlocks,
+        Detail::Commit {
+            condition: options.condition,
+            content_md5: options.content_md5,
+        },
+        buf,
+        |_| {},
+    )
+}
+
+// The request of a Put Block List of a template with `condition`, and an
+// MD5 of the object when `content_md5` says so, which sends `fields` and
+// `metadata`. Its block list is its body.
+fn describe_commit<'p>(
+    condition: ConditionKind,
+    content_md5: bool,
+    fields: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+) -> Describe<'p, 1> {
+    Describe {
+        method: Method::Put,
+        key: true,
+        query: [Some((
+            "comp",
+            ParamValue::Fixed(QueryValue::Literal("blocklist")),
+        ))],
+        holes: Holes {
+            content_length: Some(Hole::BodyLength),
+            // The object's own MD5 is a property of the blob, which Azure
+            // stores as it is declared.
+            checksum: content_md5.then_some("x-ms-blob-content-md5"),
+            condition: condition_header(condition),
+            ..Holes::default()
+        },
+        fields,
+        metadata,
         body: Body::Each,
-        ..ObjectRequest::new(Operation::CommitBlocks, Method::Put)
-    };
-    request
-        .fields
-        .push(Field::new("content-length", Value::Hole(Hole::BodyLength)));
-    // The object's own MD5 is a property of the blob, which Azure stores
-    // as it is declared.
-    if options.content_md5 {
-        request.fields.push(Field::new(
-            "x-ms-blob-content-md5",
-            Value::Hole(Hole::Checksum),
-        ));
     }
-    stored_fields(&mut request.fields, &options.options);
-    let mut template = prepare_object(container, token, namespace, request, buf)?;
-    template.detail = Detail::Commit {
-        condition: options.condition,
-        content_md5: options.content_md5,
-    };
-    Ok(template)
 }
 
 // Writes the block list of a commit as the body of its request.
@@ -916,27 +956,27 @@ struct CommitFill<'i> {
 }
 
 impl Fill for CommitFill<'_> {
+    const BODY: bool = true;
+
+    fn values(&self) -> &Values<'_> {
+        &self.values
+    }
+
     fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
-        match hole {
-            Hole::Body => {
-                write_block_list(
-                    out,
-                    self.blocks.iter().map(|block| (block.id, block.source)),
-                );
-                true
-            }
-            hole => self.values.write(hole, out),
+        if hole != Hole::Body {
+            return false;
         }
+        write_block_list(
+            out,
+            self.blocks.iter().map(|block| (block.id, block.source)),
+        );
+        true
     }
 
     fn body_len(&self) -> Option<usize> {
         Some(block_list_len(
             self.blocks.iter().map(|block| (block.id, block.source)),
         ))
-    }
-
-    fn url_bound(&self) -> usize {
-        self.values.url_bound()
     }
 }
 
@@ -967,7 +1007,7 @@ pub fn encode_commit_blocks<'r>(
     else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_block_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_condition(condition, item.condition_value)?;
     match (content_md5, item.content_md5) {
         (false, None) => {}
@@ -983,14 +1023,21 @@ pub fn encode_commit_blocks<'r>(
     let fill = CommitFill {
         values: Values {
             now: Some(now),
-            key: Some(item.key),
+            key,
             condition: item.condition_value,
             checksum: item.content_md5,
             ..Values::default()
         },
         blocks: item.blocks,
     };
-    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &fill,
+        Payload::Slice(&[]),
+        buf,
+        &describe_commit(condition, content_md5, &[], &[]),
+    )
 }
 
 /// Reads the response head of a Put Block List and reports what Azure did.
@@ -1054,31 +1101,19 @@ pub fn prepare_list_blocks(
         BlockListKind::Staged => "uncommitted",
         BlockListKind::All => "all",
     };
-    let query = [
-        Some(("comp", ParamValue::Fixed(QueryValue::Literal("blocklist")))),
-        Some((
-            "blocklisttype",
-            ParamValue::Fixed(QueryValue::Literal(kind)),
-        )),
-        revision_param(revision),
-    ];
-    let describe = Describe {
-        method: Method::Get,
-        key: true,
-        query: &query,
-        fields: &[],
-        metadata: &[],
-        body: Body::None,
-    };
-    prepare_template(
+    prepare_object(
         container,
         token,
         namespace,
-        &describe,
         Operation::ListBlocks,
-        Detail::Object {
-            condition: ConditionKind::None,
-            revision,
+        ConditionKind::None,
+        revision,
+        &ObjectText {
+            param: Some((
+                "blocklisttype",
+                ParamValue::Fixed(QueryValue::Literal(kind)),
+            )),
+            ..ObjectText::default()
         },
         buf,
     )

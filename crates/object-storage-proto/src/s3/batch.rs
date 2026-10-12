@@ -8,8 +8,10 @@ use crate::common::{
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
-use crate::s3::template::{Detail, Operation, Template, Unsigned, encode as encode_template};
-use crate::s3::{Bucket, Request, S3Values, prepare_request};
+use crate::s3::template::{
+    self, Describe, Detail, Operation, Template, Unsigned, encode as encode_template,
+};
+use crate::s3::{Bucket, S3Values};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Signed, body_kind, failed, refuse_error_document, validate_key,
     validate_s3_checksum,
@@ -228,6 +230,12 @@ struct DeleteFill<'i> {
 }
 
 impl Fill for DeleteFill<'_> {
+    const BODY: bool = true;
+
+    fn values(&self) -> &Values<'_> {
+        &self.values.0
+    }
+
     fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
         match hole {
             Hole::Body => {
@@ -264,15 +272,21 @@ pub fn prepare_delete_many(
     if bucket.service.is_aws() && checksum.is_none() {
         return Err(InvalidPlan::Option.into());
     }
-    let mut request = Request::new(
+    template::prepare(bucket, credentials, &describe_delete_many(checksum), buf)
+}
+
+// The request of a DeleteObjects of a template with `checksum`. Its list of
+// objects is its body.
+fn describe_delete_many(checksum: Option<ChecksumKind>) -> Describe<'static, 4> {
+    let mut describe = Describe::new(
         Operation::DeleteMany,
         Method::Post,
         Detail::DeleteMany(checksum),
     );
-    request.key = false;
-    request.query[0] = Some(("delete", ParamValue::Fixed(QueryValue::Literal(""))));
-    request.with_body(Body::Each, checksum);
-    prepare_request(bucket, credentials, &request, buf)
+    describe.key = false;
+    describe.query[0] = Some(("delete", ParamValue::Fixed(QueryValue::Literal(""))));
+    describe.with_body(Body::Each, checksum);
+    describe
 }
 
 /// Writes the DeleteObjects that removes `objects` at `now` from `template`
@@ -321,7 +335,14 @@ pub fn encode_delete_many(
         }),
         objects,
     };
-    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &fill,
+        Payload::Slice(&[]),
+        buf,
+        &describe_delete_many(checksum),
+    )
 }
 
 /// Reads the response head of a DeleteObjects and reports what to do next.

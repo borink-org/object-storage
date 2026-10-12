@@ -32,8 +32,8 @@ fn reads_the_page_that_the_generated_request_asked_for() {
         }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with(
-            "GET /container?restype=container&comp=list&prefix=directory%2F\
-             &delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"
+            "GET /container?restype=container&comp=list&delimiter=%2F\
+             &maxresults=1000&prefix=directory%2F HTTP/1.1\r\n"
         ));
         stream
             .write_all(

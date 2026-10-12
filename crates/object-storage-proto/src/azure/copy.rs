@@ -13,8 +13,8 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{
-    Describe, Detail, Field, FieldList, Operation, Template, Value, encode as encode_template,
-    prepare as prepare_template,
+    CopyFrom, Describe, Detail, Field, FieldList, Holes, Operation, Template, Value,
+    encode as encode_template, prepare as prepare_template,
 };
 use crate::azure::{
     AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind, failed, named,
@@ -40,7 +40,7 @@ use crate::{
     LegacyRequest, Method, ObjectMeta, Payload, PhysicalCopy, PutHeadOutcome, RequestedRange,
     ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, UpdateHeadOutcome,
 };
-use crate::{CopyItem, CopyOptions, Ranging, RevisionKind, WriteOptions};
+use crate::{CopyItem, CopyOptions, MetadataPair, Ranging, RevisionKind, WriteOptions};
 
 /// One Put Block From URL: a block staged from the bytes of another blob,
 /// which Azure reads itself.
@@ -508,6 +508,18 @@ enum CopyKind {
     StageBlock,
 }
 
+impl CopyKind {
+    // The operation of a template of copies of this kind.
+    const fn operation(self) -> Operation {
+        match self {
+            Self::Copy => Operation::Copy,
+            Self::CopyFromUrl => Operation::CopyFromUrl,
+            Self::PutFromUrl => Operation::PutFromUrl,
+            Self::StageBlock => Operation::StageBlockFromUrl,
+        }
+    }
+}
+
 // Checks the options of a copy of `kind` against the rules of Azure.
 fn validate_copy_options(
     options: &CopyOptions<'_>,
@@ -596,20 +608,6 @@ fn prepare_copy_kind(
             fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")))
         }
     }
-    fields.push(Field::new(
-        "x-ms-copy-source",
-        Value::CopySource {
-            origin: options.source_endpoint.unwrap_or(container.endpoint),
-            container: options.source_container.unwrap_or(container.name),
-            revision: options.source_revision,
-        },
-    ));
-    if options.source_ranging == Ranging::Ranged {
-        fields.push(Field::new(
-            "x-ms-source-range",
-            Value::Hole(Hole::SourceRange),
-        ));
-    }
     // A From URL operation reads the source as a client would, with the
     // client's token.
     if kind != CopyKind::Copy {
@@ -618,50 +616,83 @@ fn prepare_copy_kind(
             Value::Bearer(token),
         ));
     }
-    if let Some(name) = source_condition_header(options.source_condition) {
-        fields.push(Field::new(name, Value::Hole(Hole::SourceCondition)));
-    }
     stored_fields(&mut fields, &options.options);
     if let Some(tags) = options.tags.filter(|tags| !tags.is_empty()) {
         fields.push(Field::new("x-ms-tags", Value::Tags(tags)));
     }
-    if let Some(name) = condition_header(options.condition) {
-        fields.push(Field::new(name, Value::Hole(Hole::Condition)));
-    }
     fields.push(Field::new("content-length", Value::Bytes(b"0")));
-    let query = [
-        (kind == CopyKind::StageBlock)
-            .then_some(("comp", ParamValue::Fixed(QueryValue::Literal("block")))),
-        (kind == CopyKind::StageBlock).then_some(("blockid", ParamValue::Hole(Hole::BlockId))),
-    ];
-    let operation = match kind {
-        CopyKind::Copy => Operation::Copy,
-        CopyKind::CopyFromUrl => Operation::CopyFromUrl,
-        CopyKind::PutFromUrl => Operation::PutFromUrl,
-        CopyKind::StageBlock => Operation::StageBlockFromUrl,
+    let detail = Detail::Copy {
+        condition: options.condition,
+        source_revision: options.source_revision,
+        source_condition: options.source_condition,
+        source_ranging: options.source_ranging,
     };
-    let describe = Describe {
-        method: Method::Put,
-        key: true,
-        query: &query,
+    let text = CopyText {
         fields: fields.as_slice(),
         metadata: options.metadata.unwrap_or(&[]),
-        body: Body::None,
+        origin: options.source_endpoint.unwrap_or(container.endpoint),
+        container: options.source_container.unwrap_or(container.name),
     };
     prepare_template(
         container,
         token,
         namespace,
-        &describe,
-        operation,
-        Detail::Copy {
-            condition: options.condition,
-            source_revision: options.source_revision,
-            source_condition: options.source_condition,
-            source_ranging: options.source_ranging,
-        },
+        &describe_copy(kind, detail, Some(&text)),
+        kind.operation(),
+        detail,
         buf,
+        |_| {},
     )
+}
+
+// What every copy of a template sends alike, beside its structure: the
+// fixed fields and the metadata, and where its sources are.
+struct CopyText<'p> {
+    fields: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+    origin: &'p str,
+    container: &'p str,
+}
+
+// The request of a copy of `kind` for a template of `detail`. `text` is
+// the template's, and none for a request.
+fn describe_copy<'p>(
+    kind: CopyKind,
+    detail: Detail,
+    text: Option<&CopyText<'p>>,
+) -> Describe<'p, 2> {
+    let Detail::Copy {
+        condition,
+        source_revision,
+        source_condition,
+        source_ranging,
+    } = detail
+    else {
+        unreachable!("a copy's template has the detail of a copy");
+    };
+    let staged = kind == CopyKind::StageBlock;
+    Describe {
+        method: Method::Put,
+        key: true,
+        query: [
+            staged.then_some(("comp", ParamValue::Fixed(QueryValue::Literal("block")))),
+            staged.then_some(("blockid", ParamValue::Hole(Hole::BlockId))),
+        ],
+        holes: Holes {
+            copy_source: Some(CopyFrom {
+                origin: text.map_or("", |text| text.origin),
+                container: text.map_or("", |text| text.container),
+                revision: source_revision,
+            }),
+            source_range: source_ranging == Ranging::Ranged,
+            source_condition: source_condition_header(source_condition),
+            condition: condition_header(condition),
+            ..Holes::default()
+        },
+        fields: text.map_or(&[], |text| text.fields),
+        metadata: text.map_or(&[], |text| text.metadata),
+        body: Body::None,
+    }
 }
 
 // Writes the copy `item` of `operation`, to the block `block_id` when it
@@ -669,13 +700,13 @@ fn prepare_copy_kind(
 fn encode_copy_kind<'r>(
     template: &Template,
     bytes: &[u8],
-    operation: Operation,
+    kind: CopyKind,
     item: &CopyItem<'_>,
     block_id: Option<&str>,
     now: &Timestamps,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    let Detail::Copy {
+    let detail @ Detail::Copy {
         condition,
         source_revision,
         source_condition,
@@ -684,10 +715,10 @@ fn encode_copy_kind<'r>(
     else {
         return Err(InvalidPlan::Template.into());
     };
-    if template.operation != operation {
+    if template.operation != kind.operation() {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key, template.namespace)?;
     if let Some(id) = block_id {
         super::blocks::validate_block_id(id)?;
@@ -698,7 +729,7 @@ fn encode_copy_kind<'r>(
     validate_source_range(source_ranging, item.source_range)?;
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         source_key: Some(item.source_key),
         source_revision: item.source_revision,
@@ -707,7 +738,14 @@ fn encode_copy_kind<'r>(
         block_id,
         ..Values::default()
     };
-    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_copy(kind, detail, None),
+    )
 }
 
 /// Writes the template of Copy Blobs with `options` into `buf`. A Copy Blob
@@ -828,7 +866,7 @@ pub fn encode_copy<'r>(
     now: &Timestamps,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    encode_copy_kind(template, bytes, Operation::Copy, item, None, now, buf)
+    encode_copy_kind(template, bytes, CopyKind::Copy, item, None, now, buf)
 }
 
 /// Writes the Copy Blob From URL `item` at `now` from `template` into
@@ -844,15 +882,7 @@ pub fn encode_copy_from_url<'r>(
     now: &Timestamps,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    encode_copy_kind(
-        template,
-        bytes,
-        Operation::CopyFromUrl,
-        item,
-        None,
-        now,
-        buf,
-    )
+    encode_copy_kind(template, bytes, CopyKind::CopyFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Blob From URL `item` at `now` from `template` into
@@ -868,7 +898,7 @@ pub fn encode_put_from_url<'r>(
     now: &Timestamps,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    encode_copy_kind(template, bytes, Operation::PutFromUrl, item, None, now, buf)
+    encode_copy_kind(template, bytes, CopyKind::PutFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Block From URL `item` at `now` from `template` into
@@ -892,7 +922,7 @@ pub fn encode_stage_block_from_url<'r>(
     encode_copy_kind(
         template,
         bytes,
-        Operation::StageBlockFromUrl,
+        CopyKind::StageBlock,
         &item.copy,
         Some(item.id),
         now,
@@ -1001,34 +1031,39 @@ pub fn prepare_abort_copy(
     namespace: AzureNamespace,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let query = [
-        Some(("comp", ParamValue::Fixed(QueryValue::Literal("copy")))),
-        Some(("copyid", ParamValue::Hole(Hole::CopyId))),
-    ];
     let fields = [
         Field::new("x-ms-copy-action", Value::Bytes(b"abort")),
         Field::new("content-length", Value::Bytes(b"0")),
     ];
-    let describe = Describe {
-        method: Method::Put,
-        key: true,
-        query: &query,
-        fields: &fields,
-        metadata: &[],
-        body: Body::None,
-    };
     prepare_template(
         container,
         token,
         namespace,
-        &describe,
+        &describe_abort_copy(&fields),
         Operation::AbortCopy,
         Detail::Object {
             condition: ConditionKind::None,
             revision: RevisionKind::Current,
         },
         buf,
+        |_| {},
     )
+}
+
+// The request of an Abort Copy Blob, which sends `fields`.
+fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
+    Describe {
+        method: Method::Put,
+        key: true,
+        query: [
+            Some(("comp", ParamValue::Fixed(QueryValue::Literal("copy")))),
+            Some(("copyid", ParamValue::Hole(Hole::CopyId))),
+        ],
+        holes: Holes::default(),
+        fields,
+        metadata: &[],
+        body: Body::None,
+    }
 }
 
 /// Writes the Abort Copy Blob `item` at `now` from `template` into `buf`,
@@ -1053,17 +1088,24 @@ pub fn encode_abort_copy<'r>(
     if template.operation != Operation::AbortCopy {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     if item.copy_id.is_empty() {
         return Err(InvalidPlan::Option.into());
     }
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         copy_id: Some(item.copy_id),
         ..Values::default()
     };
-    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_abort_copy(&[]),
+    )
 }
 
 /// Reads the response head of an Abort Copy Blob and reports what Azure did.

@@ -185,7 +185,7 @@ impl<'a> Writer<'a> {
         Self { bytes, position: 0 }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn push(&mut self, value: &[u8]) {
         // Counting continues past capacity; aliased inputs can exceed usize
         // in aggregate. Saturation preserves monotonicity and cannot fit a slice.
@@ -201,6 +201,7 @@ impl<'a> Writer<'a> {
     }
 
     // Writes with `write` and returns where its bytes are.
+    #[inline(always)]
     pub(crate) fn part(&mut self, write: impl FnOnce(&mut Self)) -> Span {
         let start = self.position;
         write(self);
@@ -213,6 +214,7 @@ impl<'a> Writer<'a> {
 
     // Writes again the bytes of `span`, which this writer wrote before. If
     // they did not fit, it only counts them.
+    #[inline(always)]
     pub(crate) fn repeat(&mut self, span: Span) {
         let end = self.position.saturating_add(span.len);
         if end <= self.bytes.len() {
@@ -225,6 +227,11 @@ impl<'a> Writer<'a> {
     // Whether every byte pushed so far is in the buffer.
     pub(crate) fn fits(&self) -> bool {
         self.position <= self.bytes.len()
+    }
+
+    // The bytes written so far that are in the buffer.
+    pub(crate) fn written(&self) -> &[u8] {
+        &self.bytes[..self.position.min(self.bytes.len())]
     }
 
     pub(crate) fn finish(self) -> Option<&'a [u8]> {
@@ -388,7 +395,7 @@ impl<'a> HeadWriter<'a> {
 // `copy_from_slice` of a length known only at run time calls the C library's
 // `memcpy`, which costs more than the copy for so few bytes. Slicing `to` to
 // that length first lets the compiler drop the bounds checks of each copy.
-#[inline]
+#[inline(always)]
 pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
     let len = from.len();
     let to = &mut to[..len];
@@ -415,8 +422,14 @@ pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
     }
 }
 
+// The text of bytes that this crate wrote. A request written from bytes that
+// are not its template's can cut a character in two; its text then ends
+// before that character, rather than the program.
 pub(crate) fn text(bytes: &[u8]) -> &str {
-    str::from_utf8(bytes).expect("request construction writes UTF-8")
+    match str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
+    }
 }
 
 // Whether an encoder writes a request, or only measures it. A

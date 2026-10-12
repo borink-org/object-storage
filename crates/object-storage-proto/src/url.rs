@@ -27,6 +27,25 @@ impl AsciiSet {
         self.escape[byte as usize]
     }
 
+    // The length of the run of bytes at the start of `bytes` that need no
+    // escape. Sixteen bytes are tested at once while none of them does.
+    fn unescaped(&self, bytes: &[u8]) -> usize {
+        let (chunks, _) = bytes.as_chunks::<16>();
+        let clean = chunks
+            .iter()
+            .take_while(|chunk| {
+                !chunk
+                    .iter()
+                    .fold(false, |any, &byte| any | self.should_percent_encode(byte))
+            })
+            .count();
+        let at = clean * 16;
+        at + bytes[at..]
+            .iter()
+            .position(|&byte| self.should_percent_encode(byte))
+            .unwrap_or(bytes.len() - at)
+    }
+
     const fn add(&self, byte: u8) -> Self {
         let mut escape = self.escape;
         escape[byte as usize] = true;
@@ -150,6 +169,22 @@ const fn escapes() -> [[u8; 3]; 256] {
     table
 }
 
+// Whether no byte of `key` is one that `encode_object_key` escapes: each is
+// a letter, a digit, or one of `-./_~`. One pass over every byte, with no
+// early exit and no table, which costs less than the encoder's search for
+// runs when a key, as most do, has nothing to escape.
+pub(crate) fn key_is_plain(key: &[u8]) -> bool {
+    key.iter().fold(true, |plain, &byte| {
+        plain
+            & (byte.is_ascii_alphanumeric()
+                | (byte == b'-')
+                | (byte == b'.')
+                | (byte == b'/')
+                | (byte == b'_')
+                | (byte == b'~'))
+    })
+}
+
 pub(crate) fn encode_object_key(value: &str) -> PercentEncode<'_> {
     percent_encode(value.as_bytes(), OBJECT_KEY_ESCAPE)
 }
@@ -182,10 +217,7 @@ impl<'v> Iterator for PercentEncode<'v> {
             self.bytes = remaining;
             return Some(&ESCAPES[first as usize]);
         }
-        let end = remaining
-            .iter()
-            .position(|&byte| self.ascii_set.should_percent_encode(byte))
-            .map_or(self.bytes.len(), |at| at + 1);
+        let end = 1 + self.ascii_set.unescaped(remaining);
         let (unchanged, remaining) = self.bytes.split_at(end);
         self.bytes = remaining;
         Some(unchanged)
@@ -341,6 +373,18 @@ mod tests {
         OBJECT_KEY_ESCAPE, QUERY_VALUE_ESCAPE, encode_object_key, encode_query_value,
         form_decode_in_place, percent_decode_in_place,
     };
+
+    // `key_is_plain` finds exactly the bytes that the key's set escapes.
+    #[test]
+    fn a_plain_key_is_one_with_no_byte_to_escape() {
+        for byte in 0..=255u8 {
+            assert_eq!(
+                super::key_is_plain(&[byte]),
+                !OBJECT_KEY_ESCAPE.should_percent_encode(byte),
+                "byte {byte:#04x}"
+            );
+        }
+    }
 
     fn key(value: &str) -> String {
         written(encode_object_key(value).collect())

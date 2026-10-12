@@ -35,12 +35,13 @@ use crate::common::{
 };
 use crate::template::{Body, Param, ParamValue};
 use crate::template::{Hole, Values};
+use crate::template::{NO_TEXT, Text};
 use crate::url::QueryValue;
 use crate::{
     DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
     Ranging, RevisionKind, WireRequest,
 };
-use template::{Describe, Detail, Field, FieldList, Value};
+use template::{Describe, Detail, Field, FieldList, Holes, Value};
 pub use template::{Operation, Template};
 mod restore;
 mod tags;
@@ -135,6 +136,8 @@ impl HeaderValue for Bearer<'_> {
 pub struct Container<'a> {
     endpoint: &'a str,
     name: &'a str,
+    // The object that templates from this container name, if they name one.
+    object: Option<&'a str>,
 }
 
 impl<'a> Container<'a> {
@@ -178,7 +181,29 @@ impl<'a> Container<'a> {
         {
             return Err(Error::InvalidContainer);
         }
-        Ok(Self { endpoint, name })
+        Ok(Self {
+            endpoint,
+            name,
+            object: None,
+        })
+    }
+
+    /// Names the object `key` of this container, for templates of that one
+    /// object.
+    ///
+    /// A template prepared from it writes the key as fixed text, checked
+    /// once, and so does each request's line: a request of it checks and
+    /// encodes no key. Pass each encoding function an empty key, or this
+    /// one; any other is [`InvalidPlan::Template`]. Keep one template for
+    /// each object you read or write often, such as the files of a
+    /// database. An operation that names no object, such as a listing,
+    /// refuses a container that names one with [`InvalidPlan::Option`].
+    #[must_use]
+    pub const fn object(self, key: &'a str) -> Self {
+        Self {
+            object: Some(key),
+            ..self
+        }
     }
 }
 
@@ -681,38 +706,36 @@ pub fn prepare_get(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_get_options(options, true)?;
-    let method = match options.kind {
-        GetKind::Bytes => Method::Get,
-        GetKind::Head => Method::Head,
-    };
-    let query = [revision_param(options.revision)];
-    let condition = condition_header(options.condition)
-        .map(|name| Field::new(name, Value::Hole(Hole::Condition)));
-    let range =
-        (options.ranging == Ranging::Ranged).then(|| Field::new("range", Value::Hole(Hole::Range)));
-    let mut fields = [Field::new("", Value::Bytes(b"")); 2];
-    let mut count = 0;
-    for field in [range, condition].into_iter().flatten() {
-        fields[count] = field;
-        count += 1;
-    }
-    let describe = Describe {
-        method,
-        key: true,
-        query: &query,
-        fields: &fields[..count],
-        metadata: &[],
-        body: Body::None,
-    };
     template::prepare(
         container,
         token,
         namespace,
-        &describe,
+        &describe_get(options),
         Operation::Get,
         Detail::Get(*options),
         buf,
+        |_| {},
     )
+}
+
+// The request of a read with `options`.
+fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
+    Describe {
+        method: match options.kind {
+            GetKind::Bytes => Method::Get,
+            GetKind::Head => Method::Head,
+        },
+        key: true,
+        query: [revision_param(options.revision)],
+        holes: Holes {
+            range: options.ranging == Ranging::Ranged,
+            condition: condition_header(options.condition),
+            ..Holes::default()
+        },
+        fields: &[],
+        metadata: &[],
+        body: Body::None,
+    }
 }
 
 /// Writes the read `item` at `now` from `template` into `buf`, and returns
@@ -726,8 +749,7 @@ pub fn prepare_get(
 /// writes, or not a key that Azure takes: see [Object keys](crate#object-keys).
 /// Azure serves no suffix range, which is [`InvalidPlan::UnsupportedRange`].
 /// A URL longer than [`MAX_URL_LEN`] is [`InvalidPlan::UrlTooLong`]. A
-/// template for another operation, or bytes that are not its own, is
-/// [`InvalidPlan::Template`].
+/// template for another operation is [`InvalidPlan::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -741,20 +763,27 @@ pub fn encode_get<'r>(
     let Detail::Get(options) = template.detail else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     if let RequestedRange::Suffix(_) = item.range {
         return Err(InvalidPlan::UnsupportedRange.into());
     }
     validate_get_item(&options, item)?;
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
         condition: item.condition_value,
         revision: item.revision,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_get(&options),
+    )
 }
 
 /// Reads the response head of a read and reports what to do next.
@@ -837,36 +866,48 @@ pub fn prepare_put(
     let mut fields = FieldList::new();
     fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")));
     stored_fields(&mut fields, &options.options);
-    fields.push(Field::new(
-        "content-length",
-        Value::Hole(Hole::ContentLength),
-    ));
-    if let Some(kind) = options.checksum {
-        fields.push(Field::new(kind.header(), Value::Hole(Hole::Checksum)));
-    }
-    if let Some(name) = condition_header(options.condition) {
-        fields.push(Field::new(name, Value::Hole(Hole::Condition)));
-    }
-    let describe = Describe {
-        method: Method::Put,
-        key: true,
-        query: &[],
-        fields: fields.as_slice(),
-        metadata: options.metadata,
-        body: Body::None,
-    };
     template::prepare(
         container,
         token,
         namespace,
-        &describe,
+        &describe_put(
+            options.condition,
+            options.checksum,
+            fields.as_slice(),
+            options.metadata,
+        ),
         Operation::Put,
         Detail::Put {
             condition: options.condition,
             checksum: options.checksum,
         },
         buf,
+        |_| {},
     )
+}
+
+// The request of a whole-object write of a template with `condition` and
+// `checksum`, which sends `fields` and `metadata`.
+fn describe_put<'p>(
+    condition: ConditionKind,
+    checksum: Option<ChecksumKind>,
+    fields: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+) -> Describe<'p, 0> {
+    Describe {
+        method: Method::Put,
+        key: true,
+        query: [],
+        holes: Holes {
+            content_length: Some(Hole::ContentLength),
+            checksum: checksum.map(|kind| kind.header()),
+            condition: condition_header(condition),
+            ..Holes::default()
+        },
+        fields,
+        metadata,
+        body: Body::None,
+    }
 }
 
 /// Writes the whole-object write `item` at `now` from `template` into `buf`,
@@ -900,7 +941,7 @@ pub fn encode_put<'r>(
     else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     if item.content.len() > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
@@ -909,13 +950,20 @@ pub fn encode_put<'r>(
     let mut text = [0; BASE64_LEN];
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         content_length: Some(item.content.len()),
         checksum: checksum_text(item.checksum, &mut text, false),
         ..Values::default()
     };
-    template::encode(template, bytes, &values, item.content, buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        item.content,
+        buf,
+        &describe_put(condition, checksum, &[], &[]),
+    )
 }
 
 /// Reads the response head of a write and reports what Azure did.
@@ -991,20 +1039,23 @@ pub fn prepare_delete(
     if options.revision != RevisionKind::Current && options.kind != DeleteKind::Object {
         return Err(InvalidPlan::Revision.into());
     }
-    let mut request = ObjectRequest {
-        revision: options.revision,
-        condition: options.condition,
-        ..ObjectRequest::new(Operation::Delete, Method::Delete)
-    };
     // Azure refuses an object with snapshots when the header is absent,
     // which is the outcome a removal of the object alone asks for.
-    if let Some(snapshots) = delete_snapshots(options.kind) {
-        request.fields.push(Field::new(
-            "x-ms-delete-snapshots",
-            Value::Bytes(snapshots.as_bytes()),
-        ));
-    }
-    prepare_object(container, token, namespace, request, buf)
+    let snapshots = delete_snapshots(options.kind)
+        .map(|snapshots| Field::new("x-ms-delete-snapshots", Value::Bytes(snapshots.as_bytes())));
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::Delete,
+        options.condition,
+        options.revision,
+        &ObjectText {
+            fields: snapshots.as_slice(),
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the removal `item` at `now` from `template` into `buf`, and
@@ -1033,9 +1084,8 @@ pub fn encode_delete<'r>(
     encode_object(template, bytes, Operation::Delete, item, now, buf)
 }
 
-// A request that names one object, described for its template: the
-// parameter `comp` that names the operation, the kinds of revision and
-// condition that each request names, and its fields, metadata and body.
+// Writes the request of `operation` that names the one object `item`, from
+// a template of that operation.
 pub(in crate::azure) fn encode_object<'r>(
     template: &Template,
     bytes: &[u8],
@@ -1054,87 +1104,107 @@ pub(in crate::azure) fn encode_object<'r>(
     if template.operation != operation {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key, template.namespace)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
     let values = Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         revision: item.revision,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_object(operation, condition, revision, None),
+    )
 }
 
-// A request that names one object, described for its template: the
-// parameter `comp` that names the operation, the kinds of revision and
-// condition that each request names, and its fields, metadata and body.
-pub(in crate::azure) struct ObjectRequest<'d> {
-    pub(in crate::azure) operation: Operation,
-    pub(in crate::azure) method: Method,
-    pub(in crate::azure) comp: Option<&'static str>,
-    pub(in crate::azure) revision: RevisionKind,
-    pub(in crate::azure) condition: ConditionKind,
-    pub(in crate::azure) fields: FieldList<'d>,
-    pub(in crate::azure) metadata: &'d [MetadataPair<'d>],
-    pub(in crate::azure) body: Body<'d>,
+// What every request of a template that names one object sends alike,
+// beside its structure: the fixed fields and the metadata, a fixed
+// parameter after `comp`, and the text of a fixed body.
+#[derive(Default)]
+pub(in crate::azure) struct ObjectText<'p> {
+    pub(in crate::azure) fields: &'p [Field<'p>],
+    pub(in crate::azure) metadata: &'p [MetadataPair<'p>],
+    pub(in crate::azure) param: Param<'p>,
+    pub(in crate::azure) body: Option<Text<'p>>,
 }
 
-impl<'d> ObjectRequest<'d> {
-    pub(in crate::azure) const fn new(operation: Operation, method: Method) -> Self {
-        Self {
-            operation,
-            method,
-            comp: None,
-            revision: RevisionKind::Current,
-            condition: ConditionKind::None,
-            fields: FieldList::new(),
-            metadata: &[],
-            body: Body::None,
-        }
-    }
-}
-
-// Writes the template of `request`.
+// Writes the template of `operation`, which names one object, with the
+// condition `condition` and the kind of revision `revision`.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::azure) fn prepare_object(
     container: &Container<'_>,
     token: &str,
     namespace: AzureNamespace,
-    mut request: ObjectRequest<'_>,
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    text: &ObjectText<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let query = [
-        request
-            .comp
-            .map(|comp| ("comp", ParamValue::Fixed(QueryValue::Literal(comp)))),
-        revision_param(request.revision),
-    ];
-    if let Some(name) = condition_header(request.condition) {
-        request
-            .fields
-            .push(Field::new(name, Value::Hole(Hole::Condition)));
-    }
-    let describe = Describe {
-        method: request.method,
-        key: true,
-        query: &query,
-        fields: request.fields.as_slice(),
-        metadata: request.metadata,
-        body: request.body,
-    };
     template::prepare(
         container,
         token,
         namespace,
-        &describe,
-        request.operation,
+        &describe_object(operation, condition, revision, Some(text)),
+        operation,
         Detail::Object {
-            condition: request.condition,
-            revision: request.revision,
+            condition,
+            revision,
         },
         buf,
+        |_| {},
     )
+}
+
+// The request of `operation`, which names one object, for a template with
+// `condition` and `revision`: its method, the parameter `comp` that names
+// the operation, the fields that each request fills, and its body. `text`
+// is the template's, and none for a request.
+pub(in crate::azure) fn describe_object<'p>(
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    text: Option<&ObjectText<'p>>,
+) -> Describe<'p, 3> {
+    let (method, comp) = match operation {
+        Operation::Delete => (Method::Delete, None),
+        Operation::GetTags => (Method::Get, Some("tags")),
+        Operation::ListBlocks => (Method::Get, Some("blocklist")),
+        Operation::SetTier | Operation::Restore => (Method::Put, Some("tier")),
+        Operation::SetMetadata => (Method::Put, Some("metadata")),
+        Operation::SetProperties => (Method::Put, Some("properties")),
+        Operation::SetTags => (Method::Put, Some("tags")),
+        _ => (Method::Put, Some("snapshot")),
+    };
+    // A Set Blob Tags sends the body that its template holds.
+    let tags = operation == Operation::SetTags;
+    Describe {
+        method,
+        key: true,
+        query: [
+            comp.map(|comp| ("comp", ParamValue::Fixed(QueryValue::Literal(comp)))),
+            text.and_then(|text| text.param),
+            revision_param(revision),
+        ],
+        holes: Holes {
+            content_length: tags.then_some(Hole::BodyLength),
+            condition: condition_header(condition),
+            ..Holes::default()
+        },
+        fields: text.map_or(&[], |text| text.fields),
+        metadata: text.map_or(&[], |text| text.metadata),
+        body: match tags {
+            true => Body::Fixed(text.and_then(|text| text.body).unwrap_or(NO_TEXT)),
+            false => Body::None,
+        },
+    }
 }
 
 /// Reads the response head of a removal and reports what Azure did.
@@ -1214,16 +1284,20 @@ pub fn prepare_snapshot(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_metadata(options.metadata)?;
-    let mut request = ObjectRequest {
-        comp: Some("snapshot"),
-        condition: options.condition,
-        metadata: options.metadata,
-        ..ObjectRequest::new(Operation::Snapshot, Method::Put)
-    };
-    request
-        .fields
-        .push(Field::new("content-length", Value::Bytes(b"0")));
-    prepare_object(container, token, namespace, request, buf)
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::Snapshot,
+        options.condition,
+        RevisionKind::Current,
+        &ObjectText {
+            fields: &[Field::new("content-length", Value::Bytes(b"0"))],
+            metadata: options.metadata,
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the Snapshot Blob of `item` at `now` from `template` into `buf`,
@@ -1340,49 +1414,52 @@ pub fn prepare_list(
             word_count += 1;
         }
     }
-    // The query is written in this order every time, so a caller can
-    // compare the URL byte for byte. Azure signs none of it.
-    let query = [
-        Some((
-            "restype",
-            ParamValue::Fixed(QueryValue::Literal("container")),
-        )),
-        Some(("comp", ParamValue::Fixed(QueryValue::Literal("list")))),
-        Some(("prefix", ParamValue::Optional(Hole::Prefix))),
-        options.delimiter.map(|text| {
-            (
-                "delimiter",
-                ParamValue::Fixed(QueryValue::Encoded(text.as_bytes())),
-            )
-        }),
-        Some(("marker", ParamValue::Optional(Hole::Marker))),
-        options
-            .max_results
-            .map(|count| ("maxresults", ParamValue::Fixed(QueryValue::Number(count)))),
-        (word_count > 0).then(|| {
-            (
-                "include",
-                ParamValue::Fixed(QueryValue::Words(&words[..word_count])),
-            )
-        }),
-    ];
-    let describe = Describe {
-        method: Method::Get,
-        key: false,
-        query: &query,
-        fields: &[],
-        metadata: &[],
-        body: Body::None,
-    };
     template::prepare(
         container,
         token,
         namespace,
-        &describe,
+        &describe_list(Some((options, &words[..word_count]))),
         Operation::List,
         Detail::List,
         buf,
+        |_| {},
     )
+}
+
+// The request of a page of a listing. `text` is the template's options
+// and the words of what it includes, and none for a request: the
+// parameters that every page sends alike come before the ones that a page
+// may leave out, so a request writes none of them.
+fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Describe<'p, 7> {
+    let options = text.map(|(options, _)| options);
+    let words = text.map_or(&[][..], |(_, words)| words);
+    Describe {
+        method: Method::Get,
+        key: false,
+        query: [
+            Some((
+                "restype",
+                ParamValue::Fixed(QueryValue::Literal("container")),
+            )),
+            Some(("comp", ParamValue::Fixed(QueryValue::Literal("list")))),
+            options.and_then(|options| options.delimiter).map(|text| {
+                (
+                    "delimiter",
+                    ParamValue::Fixed(QueryValue::Encoded(text.as_bytes())),
+                )
+            }),
+            options
+                .and_then(|options| options.max_results)
+                .map(|count| ("maxresults", ParamValue::Fixed(QueryValue::Number(count)))),
+            (!words.is_empty()).then_some(("include", ParamValue::Fixed(QueryValue::Words(words)))),
+            Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+            Some(("marker", ParamValue::Optional(Hole::Marker))),
+        ],
+        holes: Holes::default(),
+        fields: &[],
+        metadata: &[],
+        body: Body::None,
+    }
 }
 
 /// Writes the page `item` at `now` from `template` into `buf`, and
@@ -1439,7 +1516,14 @@ pub fn encode_list<'r>(
         marker,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_list(None),
+    )
 }
 
 /// Reads the response head of a listing and reports what Azure did.
@@ -1617,17 +1701,29 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     if namespace == AzureNamespace::Flat && name_units(key) > MAX_BLOB_NAME_UNITS {
         return Err(InvalidPlan::KeyTooLong.into());
     }
-    // One pass over the bytes finds what the three rules below look for.
+    // Each pass over the bytes finds what one rule below looks for. None
+    // stops early, so each tests many bytes at once. The `/` are counted in
+    // runs of 255 bytes, whose count fits a byte.
     let bytes = key.as_bytes();
-    let (mut control, mut slashes, mut dot_ends) = (false, 0usize, false);
-    for (at, &byte) in bytes.iter().enumerate() {
-        control |= byte.is_ascii_control();
-        if byte == b'/' {
-            slashes += 1;
-            dot_ends |= at > 0 && bytes[at - 1] == b'.';
-        }
-    }
-    dot_ends |= bytes.last() == Some(&b'.');
+    let control = bytes
+        .iter()
+        .fold(false, |control, &byte| control | byte.is_ascii_control());
+    let slashes: usize = bytes
+        .chunks(255)
+        .map(|run| {
+            let count = run
+                .iter()
+                .fold(0u8, |count, &byte| count + u8::from(byte == b'/'));
+            usize::from(count)
+        })
+        .sum();
+    let dot_ends = bytes
+        .iter()
+        .zip(&bytes[1..])
+        .fold(false, |dot_ends, (&byte, &next)| {
+            dot_ends | (byte == b'.' && next == b'/')
+        })
+        || bytes.last() == Some(&b'.');
     // Azure refuses an ASCII control character in a name, with 400. Measured
     // for U+0001, U+000B, U+000C, U+000E and U+007F. Testing the bytes is
     // testing the characters: every byte of a character outside ASCII is 0x80

@@ -17,9 +17,10 @@ use crate::common::{
 use crate::common::{validate_revision_item, validate_source_container, validate_template_options};
 use crate::request::{HeadWriter, Pass};
 use crate::s3::template::{
-    Detail, Field, Operation, Template, Unsigned, Value, encode as encode_template,
+    self, CopyFrom, Describe, Detail, Field, FieldList, Operation, Template, Unsigned, Value,
+    encode as encode_template,
 };
-use crate::s3::{Bucket, Request, S3Values, prepare_request, push_stored, validate_stored};
+use crate::s3::{Bucket, S3Values, push_stored, validate_stored};
 use crate::s3::{
     Objects, PayloadHash, Service, Signed, SignedCopy, Stores, body_kind, failed,
     is_error_document, s3_tag_char, stored_headers, validate_content, validate_key,
@@ -463,68 +464,73 @@ fn prepare_copy_kind(
     if service.is_aws() && options.condition.is_date() {
         return Err(InvalidPlan::Condition.into());
     }
-    let (operation, method) = match staged {
-        false => (Operation::Copy, Method::Put),
-        true => (Operation::StagePartCopy, Method::Put),
+    let detail = Detail::Copy {
+        condition: options.condition,
+        source_revision: options.source_revision,
+        source_condition: options.source_condition,
+        source_ranging: options.source_ranging,
     };
-    let mut request = Request::new(
-        operation,
-        method,
-        Detail::Copy {
-            condition: options.condition,
-            source_revision: options.source_revision,
-            source_condition: options.source_condition,
-            source_ranging: options.source_ranging,
-        },
-    );
-    if staged {
-        request.query[0] = Some(("partNumber", ParamValue::Hole(Hole::PartNumber)));
-        request.query[1] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
-    }
-    request.signed.push(Field::new(
-        "x-amz-copy-source",
-        Value::CopySource {
-            bucket: options.source_container.unwrap_or(bucket.name),
-            revision: options.source_revision,
-        },
-    ));
-    if let Some(name) = source_condition_header(options.source_condition) {
-        request.signed.push(Field::new(
-            name,
-            Value::Hole(Hole::SourceCondition, Hole::SignedSourceCondition),
-        ));
-    }
-    if options.source_ranging == Ranging::Ranged {
-        request.signed.push(Field::new(
-            "x-amz-copy-source-range",
-            Value::Hole(Hole::SourceRange, Hole::SourceRange),
-        ));
-    }
-    push_stored(&mut request.signed, &options.options);
+    let mut signed = FieldList::new();
+    push_stored(&mut signed, &options.options);
     // S3 keeps the source's metadata and content properties unless told to
     // replace them, and its tags likewise. Replacing the tags with none
     // sends an empty `x-amz-tagging`.
     if options.metadata.is_some() || !options.options.properties.is_empty() {
-        request.signed.push(Field::new(
+        signed.push(Field::new(
             "x-amz-metadata-directive",
             Value::Formatted(b"REPLACE"),
         ));
     }
     if let Some(tags) = options.tags {
-        request.signed.push(Field::new(
+        signed.push(Field::new(
             "x-amz-tagging-directive",
             Value::Formatted(b"REPLACE"),
         ));
-        request
-            .signed
-            .push(Field::new("x-amz-tagging", Value::Tags(tags)));
+        signed.push(Field::new("x-amz-tagging", Value::Tags(tags)));
     }
-    request.condition(options.condition);
-    request.metadata = options.metadata.unwrap_or(&[]);
-    request
-        .unsigned
-        .push(Field::new("content-length", Value::Formatted(b"0")));
-    prepare_request(bucket, credentials, &request, buf)
+    let describe = Describe {
+        signed: signed.as_slice(),
+        unsigned: &[Field::new("content-length", Value::Formatted(b"0"))],
+        metadata: options.metadata.unwrap_or(&[]),
+        ..describe_copy(
+            staged,
+            detail,
+            options.source_container.unwrap_or(bucket.name),
+        )
+    };
+    template::prepare(bucket, credentials, &describe, buf)
+}
+
+// The request of a copy, or of a copy that stages a part, for a template of
+// `detail`, from the bucket `source_bucket`, which is the template's text
+// and empty for a request.
+fn describe_copy(staged: bool, detail: Detail, source_bucket: &str) -> Describe<'_, 4> {
+    let Detail::Copy {
+        condition,
+        source_revision,
+        source_condition,
+        source_ranging,
+    } = detail
+    else {
+        unreachable!("a copy's template has the detail of a copy");
+    };
+    let operation = match staged {
+        false => Operation::Copy,
+        true => Operation::StagePartCopy,
+    };
+    let mut describe = Describe::new(operation, Method::Put, detail);
+    if staged {
+        describe.query[0] = Some(("partNumber", ParamValue::Hole(Hole::PartNumber)));
+        describe.query[1] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    }
+    describe.holes.copy_source = Some(CopyFrom {
+        bucket: source_bucket,
+        revision: source_revision,
+    });
+    describe.holes.source_condition = source_condition_header(source_condition);
+    describe.holes.source_range = source_ranging == Ranging::Ranged;
+    describe.condition(condition);
+    describe
 }
 
 // Writes the copy `item`, to the part `part` of an upload when it stages
@@ -538,7 +544,7 @@ fn encode_copy_kind(
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
-    let Detail::Copy {
+    let detail @ Detail::Copy {
         condition,
         source_revision,
         source_condition,
@@ -550,7 +556,7 @@ fn encode_copy_kind(
     if template.operation != operation {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key)?;
     if let Some((upload_id, number)) = part {
         super::parts::validate_upload_id(upload_id)?;
@@ -562,7 +568,7 @@ fn encode_copy_kind(
     crate::common::validate_source_range(source_ranging, item.source_range)?;
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         source_key: Some(item.source_key),
         source_revision: item.source_revision,
@@ -572,7 +578,14 @@ fn encode_copy_kind(
         part_number: part.map(|(_, number)| number),
         ..Values::default()
     });
-    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_copy(operation == Operation::StagePartCopy, detail, ""),
+    )
 }
 
 /// Writes the template of CopyObjects with `options` into `buf`, signed with

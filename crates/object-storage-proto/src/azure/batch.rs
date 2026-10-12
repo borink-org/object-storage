@@ -16,8 +16,8 @@
 use crate::Error;
 use crate::Payload;
 use crate::azure::template::{
-    Describe, Detail, Field, Operation, Template, Value, encode as encode_template,
-    prepare_with as prepare_template_with,
+    Describe, Detail, Field, Holes, Operation, Template, Value, encode as encode_template,
+    prepare as prepare_template,
 };
 use crate::azure::{AzureNamespace, Container};
 use crate::azure::{Blobs, body_kind, failed, revision_parameter, validate_key};
@@ -284,20 +284,20 @@ struct BatchFill<'i> {
 }
 
 impl Fill for BatchFill<'_> {
-    fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
-        match hole {
-            Hole::Body => {
-                let path = |out: &mut dyn ByteSink| out.push(self.path);
-                let tail = |out: &mut dyn ByteSink| out.push(self.tail);
-                write_batch(out, self.objects, &path, &tail, self.now);
-                true
-            }
-            hole => self.values.write(hole, out),
-        }
+    const BODY: bool = true;
+
+    fn values(&self) -> &Values<'_> {
+        &self.values
     }
 
-    fn url_bound(&self) -> usize {
-        self.values.url_bound()
+    fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
+        if hole != Hole::Body {
+            return false;
+        }
+        let path = |out: &mut dyn ByteSink| out.push(self.path);
+        let tail = |out: &mut dyn ByteSink| out.push(self.tail);
+        write_batch(out, self.objects, &path, &tail, self.now);
+        true
     }
 }
 
@@ -316,36 +316,25 @@ pub fn prepare_delete_many(
     // The template holds the text that each part repeats, outside its
     // sections, for each request to read.
     let mut stash = [crate::Span::default(); 2];
-    let query = [
-        Some((
-            "restype",
-            ParamValue::Fixed(QueryValue::Literal("container")),
-        )),
-        Some(("comp", ParamValue::Fixed(QueryValue::Literal("batch")))),
-    ];
     let content_type = MixedContentType(BOUNDARY);
     let mut type_text = [0u8; 80];
     let mut writer = Writer::new(&mut type_text);
     content_type.write_to(&mut writer);
     let type_len = writer.position();
-    let fields = [
-        Field::new("content-type", Value::Bytes(&type_text[..type_len])),
-        Field::new("content-length", Value::Hole(Hole::BodyLength)),
-    ];
-    let describe = Describe {
-        method: Method::Post,
-        key: false,
-        query: &query,
-        fields: &fields,
-        metadata: &[],
-        body: Body::Each,
-    };
-    let mut template = prepare_template_with(
+    let fields = [Field::new(
+        "content-type",
+        Value::Bytes(&type_text[..type_len]),
+    )];
+    let mut template = prepare_template(
         container,
         token,
         namespace,
-        &describe,
+        &describe_batch(&fields),
         Operation::DeleteMany,
+        Detail::Batch {
+            path: crate::Span::default(),
+            tail: crate::Span::default(),
+        },
         buf,
         |b| {
             stash[0] = b.stash(|out| {
@@ -361,6 +350,29 @@ pub fn prepare_delete_many(
         tail: stash[1],
     };
     Ok(template)
+}
+
+// The request of a Blob Batch of Delete Blobs, which sends `fields`. Its
+// parts are its body.
+fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
+    Describe {
+        method: Method::Post,
+        key: false,
+        query: [
+            Some((
+                "restype",
+                ParamValue::Fixed(QueryValue::Literal("container")),
+            )),
+            Some(("comp", ParamValue::Fixed(QueryValue::Literal("batch")))),
+        ],
+        holes: Holes {
+            content_length: Some(Hole::BodyLength),
+            ..Holes::default()
+        },
+        fields,
+        metadata: &[],
+        body: Body::Each,
+    }
 }
 
 /// Writes the Blob Batch that removes `objects` at `now` from `template`
@@ -408,7 +420,14 @@ pub fn encode_delete_many<'r>(
         tail,
         now,
     };
-    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &fill,
+        Payload::Slice(&[]),
+        buf,
+        &describe_batch(&[]),
+    )
 }
 
 /// Reads the response head of a Blob Batch and reports what to do next.

@@ -114,7 +114,7 @@
 //! assert_eq!(
 //!     request.url(),
 //!     "https://account.blob.core.windows.net/objects\
-//!      ?restype=container&comp=list&prefix=directory%2F&delimiter=%2F&maxresults=2"
+//!      ?restype=container&comp=list&delimiter=%2F&maxresults=2&prefix=directory%2F"
 //! );
 //!
 //! match azure::accept_list_head(ResponseHead::new(200))? {
@@ -269,6 +269,10 @@ mod head;
 mod http;
 mod http_message;
 pub mod layered;
+#[cfg(test)]
+mod layout_tests;
+#[cfg(test)]
+mod misuse_tests;
 mod multipart;
 mod outcome;
 mod request;

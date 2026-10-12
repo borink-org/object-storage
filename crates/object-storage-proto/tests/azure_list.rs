@@ -105,7 +105,8 @@ fn every_query_parameter_is_written_in_one_order() {
         format!("{base}&marker=2%2172%21MDAwMDI4%21a%2Bb%25c")
     );
 
-    // The parameters each page fills stand between those of the template.
+    // The parameters of the template come first, then those each page
+    // fills.
     let both = ListOptions {
         delimiter: Some("/"),
         max_results: Some(2),
@@ -116,7 +117,7 @@ fn every_query_parameter_is_written_in_one_order() {
             &both,
             &ListItem::new("directory/").after(ListMarker::Text("next"))
         ),
-        format!("{base}&prefix=directory%2F&delimiter=%2F&marker=next&maxresults=2")
+        format!("{base}&delimiter=%2F&maxresults=2&prefix=directory%2F&marker=next")
     );
 }
 

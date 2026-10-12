@@ -349,6 +349,7 @@ use crate::common::{
 };
 use crate::template::{Body, ParamValue};
 use crate::template::{Hole, Values};
+use crate::template::{NO_TEXT, Param, Text};
 use crate::url::QueryValue;
 use crate::{
     DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
@@ -568,6 +569,8 @@ pub struct Bucket<'a> {
     region: &'a str,
     addressing: Addressing,
     pub(crate) service: Service,
+    // The object that templates from this bucket name, if they name one.
+    object: Option<&'a str>,
 }
 
 impl<'a> Bucket<'a> {
@@ -680,7 +683,27 @@ impl<'a> Bucket<'a> {
             region,
             addressing,
             service,
+            object: None,
         })
+    }
+
+    /// Names the object `key` of this bucket, for templates of that one
+    /// object.
+    ///
+    /// A template prepared from it writes the key as fixed text, checked
+    /// once, and so does each request's line and canonical request: a
+    /// request of it checks and encodes no key. Pass each encoding function
+    /// an empty key, or this one; any other is [`InvalidPlan::Template`].
+    /// Keep one template for each object you read or write often, such as
+    /// the files of a database. An operation that names no object, such as
+    /// a listing, refuses a bucket that names one with
+    /// [`InvalidPlan::Option`].
+    #[must_use]
+    pub const fn object(self, key: &'a str) -> Self {
+        Self {
+            object: Some(key),
+            ..self
+        }
     }
 
     /// Returns this bucket with `addressing` in place of the addressing that
@@ -1679,42 +1702,29 @@ pub fn prepare_get(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_get_options(options, false)?;
+    template::prepare(bucket, credentials, &describe_get(options), buf)
+}
+
+// The request of a read with `options`.
+fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
     let method = match options.kind {
         GetKind::Bytes => Method::Get,
         GetKind::Head => Method::Head,
     };
-    let query = [match options.revision {
+    let mut describe = Describe::new(Operation::Get, method, Detail::Get(*options));
+    describe.query = [version_param(options.revision)];
+    describe.condition(options.condition);
+    describe.holes.range = options.ranging == Ranging::Ranged;
+    describe
+}
+
+// The query parameter that names a template's version. S3 keeps no
+// snapshots.
+const fn version_param(revision: RevisionKind) -> Param<'static> {
+    match revision {
         RevisionKind::Version => Some(("versionId", ParamValue::Hole(Hole::Revision))),
         RevisionKind::Current | RevisionKind::Snapshot => None,
-    }];
-    let condition = condition_header(options.condition)
-        .map(|name| Field::new(name, Value::Hole(Hole::Condition, Hole::SignedCondition)));
-    let range = (options.ranging == Ranging::Ranged)
-        .then(|| Field::new("range", Value::Hole(Hole::Range, Hole::Range)));
-    let mut signed = [Field::new("", Value::Formatted(b"")); 2];
-    let mut count = 0;
-    for field in [condition, range].into_iter().flatten() {
-        signed[count] = field;
-        count += 1;
     }
-    let describe = Describe {
-        method,
-        key: true,
-        query: &query,
-        signed: &signed[..count],
-        metadata: &[],
-        content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
-        unsigned: &[],
-        body: Body::None,
-    };
-    template::prepare(
-        bucket,
-        credentials,
-        &describe,
-        Operation::Get,
-        Detail::Get(*options),
-        buf,
-    )
 }
 
 /// Writes the read `item` at `now` from `template` into `buf`, ready to
@@ -1726,8 +1736,7 @@ pub fn prepare_get(
 ///
 /// Returns [`Error::InvalidPlan`] if `item` is not a read that the template
 /// writes, or not a key that S3 takes: see [Object keys](crate#object-keys).
-/// A template for another operation, or bytes that are not its own, is
-/// [`InvalidPlan::Template`].
+/// A template for another operation is [`InvalidPlan::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1741,17 +1750,24 @@ pub fn encode_get(
     let Detail::Get(options) = template.detail else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_get_item(&options, item)?;
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
         condition: item.condition_value,
         revision: item.revision,
         ..Values::default()
     });
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_get(&options),
+    )
 }
 
 /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
@@ -1805,30 +1821,42 @@ pub fn prepare_put(
     if aws && options.condition.is_date() {
         return Err(InvalidPlan::Condition.into());
     }
-    let mut request = Request::new(
+    let mut signed = FieldList::new();
+    push_stored(&mut signed, &options.options);
+    let describe = Describe {
+        signed: signed.as_slice(),
+        metadata: options.metadata,
+        ..describe_put(options.condition, options.checksum, signing)
+    };
+    template::prepare(bucket, credentials, &describe, buf)
+}
+
+// The request of a whole-object write of a template with `condition`,
+// `checksum` and `signing`.
+fn describe_put(
+    condition: ConditionKind,
+    checksum: Option<ChecksumKind>,
+    signing: PayloadSigning,
+) -> Describe<'static, 0> {
+    let mut describe = Describe::new(
         Operation::Put,
         Method::Put,
         Detail::Put {
-            condition: options.condition,
-            checksum: options.checksum,
+            condition,
+            checksum,
             signing,
         },
     );
-    push_stored(&mut request.signed, &options.options);
-    request.condition(options.condition);
-    request.unsigned.push(Field::new(
-        "content-length",
-        Value::Hole(Hole::ContentLength, Hole::ContentLength),
-    ));
-    if let Some(kind) = options.checksum {
-        request.checksum(kind, Hole::Checksum);
+    describe.condition(condition);
+    describe.holes.content_length = Some(Hole::ContentLength);
+    if let Some(kind) = checksum {
+        describe.checksum(kind, Hole::Checksum);
     }
-    request.metadata = options.metadata;
-    request.content_sha256 = match signing {
-        PayloadSigning::Unsigned => Value::Formatted(UNSIGNED_PAYLOAD.as_bytes()),
-        PayloadSigning::Signed => Value::Hole(Hole::PayloadHash, Hole::PayloadHash),
-    };
-    prepare_request(bucket, credentials, &request, buf)
+    match signing {
+        PayloadSigning::Unsigned => describe.content_sha256 = UNSIGNED_PAYLOAD.as_bytes(),
+        PayloadSigning::Signed => describe.holes.content_sha256 = Some(Hole::PayloadHash),
+    }
+    describe
 }
 
 /// Writes the whole-object write `item` at `now` from `template` into
@@ -1866,7 +1894,7 @@ pub fn encode_put<'i>(
     else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     if item.content.len() > MAX_PUT_LEN {
         return Err(InvalidPlan::PayloadTooLarge.into());
     }
@@ -1880,14 +1908,21 @@ pub fn encode_put<'i>(
     let mut text = [0; BASE64_LEN];
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         content_length: Some(item.content.len()),
         checksum: checksum_text(item.checksum, &mut text, true),
         payload_hash: hex.as_ref(),
         ..Values::default()
     });
-    template::encode(template, bytes, &values, item.content, buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        item.content,
+        buf,
+        &describe_put(condition, checksum, signing),
+    )
 }
 
 /// Reads the response head of a write and reports what S3 did.
@@ -1959,9 +1994,16 @@ pub fn prepare_delete(
     {
         return Err(InvalidPlan::Condition.into());
     }
-    let mut request = Request::object(Operation::Delete, Method::Delete, options.revision)?;
-    request.condition(options.condition);
-    prepare_request(bucket, credentials, &request, buf)
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::Delete,
+        options.condition,
+        options.revision,
+        None,
+        &ObjectText::default(),
+        buf,
+    )
 }
 /// Writes the removal `item` at `now` from `template` into `buf`, ready
 /// to sign.
@@ -2068,63 +2110,81 @@ pub fn prepare_list(
     {
         return Err(InvalidPlan::Option.into());
     }
-    let fixed = ParamValue::Fixed;
-    let delimiter = options
-        .delimiter
-        .map(|text| ("delimiter", fixed(QueryValue::Encoded(text.as_bytes()))));
-    let max_keys = options
-        .max_results
-        .map(|count| ("max-keys", fixed(QueryValue::Number(count))));
-    // SigV4 signs the parameters in the order of their names. With
-    // `encoding-type=url`, a key that XML cannot carry still arrives.
-    let encoding = Some(("encoding-type", fixed(QueryValue::Literal("url"))));
-    let version_query = [
-        delimiter,
-        encoding,
-        Some(("key-marker", ParamValue::Optional(Hole::Marker))),
-        max_keys,
-        Some(("prefix", ParamValue::Optional(Hole::Prefix))),
-        Some((
-            "version-id-marker",
-            ParamValue::Optional(Hole::VersionMarker),
-        )),
-        Some(("versions", fixed(QueryValue::Literal("")))),
-    ];
-    let object_query = [
-        Some(("continuation-token", ParamValue::Optional(Hole::Marker))),
-        delimiter,
-        encoding,
-        options
-            .include
-            .contains(ListInclude::OWNER)
-            .then_some(("fetch-owner", fixed(QueryValue::Literal("true")))),
-        Some(("list-type", fixed(QueryValue::Literal("2")))),
-        max_keys,
-        Some(("prefix", ParamValue::Optional(Hole::Prefix))),
-        Some(("start-after", ParamValue::Optional(Hole::StartAfter))),
-    ];
-    let describe = Describe {
-        method: Method::Get,
-        key: false,
-        query: if versions {
-            &version_query
-        } else {
-            &object_query
-        },
-        signed: &[],
-        metadata: &[],
-        content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
-        unsigned: &[],
-        body: Body::None,
+    let detail = Detail::List {
+        include: options.include,
+        delimiter: options.delimiter.is_some(),
+        max_keys: options.max_results.is_some(),
     };
     template::prepare(
         bucket,
         credentials,
-        &describe,
-        Operation::List,
-        Detail::List(options.include),
+        &describe_list(detail, Some(options)),
         buf,
     )
+}
+
+// The request of a page of a listing of `detail`. `options` are the
+// template's, which hold the values of its fixed parameters, and none for a
+// request: whether each is there is the detail's.
+fn describe_list<'p>(detail: Detail, options: Option<&ListOptions<'p>>) -> Describe<'p, 8> {
+    let Detail::List {
+        include,
+        delimiter,
+        max_keys,
+    } = detail
+    else {
+        unreachable!("a listing's template has the detail of a listing");
+    };
+    let fixed = ParamValue::Fixed;
+    let delimiter = delimiter.then(|| {
+        let text = options.and_then(|options| options.delimiter);
+        (
+            "delimiter",
+            fixed(text.map_or(QueryValue::Literal(""), |text| {
+                QueryValue::Encoded(text.as_bytes())
+            })),
+        )
+    });
+    let max_keys = max_keys.then(|| {
+        let count = options.and_then(|options| options.max_results);
+        (
+            "max-keys",
+            fixed(count.map_or(QueryValue::Literal(""), QueryValue::Number)),
+        )
+    });
+    // SigV4 signs the parameters in the order of their names. With
+    // `encoding-type=url`, a key that XML cannot carry still arrives.
+    let encoding = Some(("encoding-type", fixed(QueryValue::Literal("url"))));
+    let mut describe = Describe::new(Operation::List, Method::Get, detail);
+    describe.key = false;
+    describe.query = match include.contains(ListInclude::VERSIONS) {
+        true => [
+            delimiter,
+            encoding,
+            Some(("key-marker", ParamValue::Optional(Hole::Marker))),
+            max_keys,
+            Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+            Some((
+                "version-id-marker",
+                ParamValue::Optional(Hole::VersionMarker),
+            )),
+            Some(("versions", fixed(QueryValue::Literal("")))),
+            None,
+        ],
+        false => [
+            Some(("continuation-token", ParamValue::Optional(Hole::Marker))),
+            delimiter,
+            encoding,
+            include
+                .contains(ListInclude::OWNER)
+                .then_some(("fetch-owner", fixed(QueryValue::Literal("true")))),
+            Some(("list-type", fixed(QueryValue::Literal("2")))),
+            max_keys,
+            Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+            Some(("start-after", ParamValue::Optional(Hole::StartAfter))),
+        ],
+    };
+    describe
 }
 
 /// Writes the page `item` at `now` from `template` into `buf`, ready to
@@ -2154,7 +2214,7 @@ pub fn encode_list(
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
-    let Detail::List(include) = template.detail else {
+    let detail @ Detail::List { include, .. } = template.detail else {
         return Err(InvalidPlan::Template.into());
     };
     // A listing continues from the kind of marker that its pages hand out,
@@ -2188,7 +2248,14 @@ pub fn encode_list(
         version_marker,
         ..Values::default()
     });
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_list(detail, None),
+    )
 }
 
 /// Reads the response head of a listing and reports what S3 did.
@@ -2878,140 +2945,77 @@ fn token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
-// One S3 request, described for its template: the shared form of every
-// template's request, which `prepare_request` writes.
-pub(in crate::s3) struct Request<'d> {
-    pub(in crate::s3) operation: Operation,
-    pub(in crate::s3) method: Method,
-    // Whether the path ends in the request's key, or names the bucket.
-    pub(in crate::s3) key: bool,
-    // The query, in the order of the parameters' names.
-    pub(in crate::s3) query: [crate::template::Param<'d>; 4],
-    pub(in crate::s3) signed: FieldList<'d>,
-    pub(in crate::s3) unsigned: FieldList<'d>,
-    pub(in crate::s3) metadata: &'d [MetadataPair<'d>],
-    pub(in crate::s3) content_sha256: Value<'d>,
-    pub(in crate::s3) body: Body<'d>,
-    pub(in crate::s3) detail: Detail,
-}
-
-impl<'d> Request<'d> {
-    // A request of `operation` with no content.
-    pub(in crate::s3) const fn new(operation: Operation, method: Method, detail: Detail) -> Self {
-        Self {
-            operation,
-            method,
-            key: true,
-            query: [None; 4],
-            signed: FieldList::new(),
-            unsigned: FieldList::new(),
-            metadata: &[],
-            content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
-            body: Body::None,
-            detail,
-        }
-    }
-
-    // A request of `operation` that names one object, and a version of it
-    // when `revision` says so. S3 keeps no snapshots.
-    pub(in crate::s3) fn object(
-        operation: Operation,
-        method: Method,
-        revision: RevisionKind,
-    ) -> Result<Self> {
-        validate_revision_kind(revision, false)?;
-        let mut request = Self::new(
-            operation,
-            method,
-            Detail::Object {
-                condition: ConditionKind::None,
-                revision,
-                checksum: None,
-            },
-        );
-        request.query[3] = match revision {
-            RevisionKind::Version => Some(("versionId", ParamValue::Hole(Hole::Revision))),
-            RevisionKind::Current | RevisionKind::Snapshot => None,
-        };
-        Ok(request)
-    }
-
-    // Adds the condition of the kind `condition` on the target, which each
-    // request fills.
-    pub(in crate::s3) fn condition(&mut self, condition: ConditionKind) {
-        if let Some(name) = condition_header(condition) {
-            self.signed.push(Field::new(
-                name,
-                Value::Hole(Hole::Condition, Hole::SignedCondition),
-            ));
-        }
-        if let Detail::Object {
-            condition: kind, ..
-        } = &mut self.detail
-        {
-            *kind = condition;
-        }
-    }
-
-    // Adds the field of a checksum of `kind` that `hole` fills. S3 reads an
-    // MD5 from `Content-MD5`, which it does not sign, and every other kind
-    // from its own `x-amz-checksum-` field, which it signs.
-    pub(in crate::s3) fn checksum(&mut self, kind: ChecksumKind, hole: Hole) {
-        let name = match kind {
-            ChecksumKind::Md5 => "content-md5",
-            ChecksumKind::Crc64 => CRC64_HEADER,
-            kind => kind.header(),
-        };
-        let field = Field::new(name, Value::Hole(hole, hole));
-        match kind {
-            ChecksumKind::Md5 => self.unsigned.push(field),
-            _ => self.signed.push(field),
-        }
-    }
-
-    // Gives the request a body that this crate writes: its length, its
-    // SHA-256, which the request signs, and a checksum of `checksum`'s kind.
-    pub(in crate::s3) fn with_body(&mut self, body: Body<'d>, checksum: Option<ChecksumKind>) {
-        self.body = body;
-        self.content_sha256 = Value::Hole(Hole::BodyHash, Hole::BodyHash);
-        self.unsigned.push(Field::new(
-            "content-length",
-            Value::Hole(Hole::BodyLength, Hole::BodyLength),
-        ));
-        if let Some(kind) = checksum {
-            self.checksum(kind, Hole::BodyChecksum);
-        }
-        if let Detail::Object { checksum: kind, .. } = &mut self.detail {
-            *kind = checksum;
-        }
-    }
-}
-
 // Writes the template of `request` into `buf`.
-pub(in crate::s3) fn prepare_request(
+// What every request of a template that names one object sends alike,
+// beside its structure: the fixed fields, signed and not, the metadata, and
+// the text of a fixed body.
+#[derive(Default)]
+pub(in crate::s3) struct ObjectText<'p> {
+    pub(in crate::s3) signed: &'p [Field<'p>],
+    pub(in crate::s3) unsigned: &'p [Field<'p>],
+    pub(in crate::s3) metadata: &'p [MetadataPair<'p>],
+    pub(in crate::s3) body: Option<Text<'p>>,
+}
+
+// Writes the template of `operation`, which names one object, with the
+// condition `condition`, the kind of revision `revision`, and the checksum
+// of its body `checksum`.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::s3) fn prepare_object(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
-    request: &Request<'_>,
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    checksum: Option<ChecksumKind>,
+    text: &ObjectText<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
+    validate_revision_kind(revision, false)?;
     let describe = Describe {
-        method: request.method,
-        key: request.key,
-        query: &request.query,
-        signed: request.signed.as_slice(),
-        metadata: request.metadata,
-        content_sha256: request.content_sha256,
-        unsigned: request.unsigned.as_slice(),
-        body: request.body,
+        signed: text.signed,
+        unsigned: text.unsigned,
+        metadata: text.metadata,
+        ..describe_object(operation, condition, revision, checksum, text.body)
     };
-    template::prepare(
-        bucket,
-        credentials,
-        &describe,
-        request.operation,
-        request.detail,
-        buf,
-    )
+    template::prepare(bucket, credentials, &describe, buf)
+}
+
+// The request of `operation`, which names one object, for a template with
+// `condition`, `revision` and `checksum`: its method, its parameter, and
+// its body, which a PutObjectTagging and a RestoreObject write from their
+// templates. `body` is the text of that body, the template's, and none for
+// a request.
+pub(in crate::s3) fn describe_object<'p>(
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    checksum: Option<ChecksumKind>,
+    body: Option<Text<'p>>,
+) -> Describe<'p, 4> {
+    let (method, param) = match operation {
+        Operation::Delete => (Method::Delete, None),
+        Operation::GetTagging => (Method::Get, Some("tagging")),
+        Operation::PutTagging => (Method::Put, Some("tagging")),
+        Operation::Restore => (Method::Post, Some("restore")),
+        _ => (Method::Post, Some("uploads")),
+    };
+    let mut describe = Describe::new(
+        operation,
+        method,
+        Detail::Object {
+            condition,
+            revision,
+            checksum,
+        },
+    );
+    describe.query[0] = param.map(|name| (name, ParamValue::Fixed(QueryValue::Literal(""))));
+    describe.query[3] = version_param(revision);
+    describe.condition(condition);
+    if matches!(operation, Operation::PutTagging | Operation::Restore) {
+        describe.with_body(Body::Fixed(body.unwrap_or(NO_TEXT)), checksum);
+    }
+    describe
 }
 
 // Adds the fields of what a write stores beside its content and its
@@ -3052,18 +3056,25 @@ pub(in crate::s3) fn encode_object(
     if template.operation != operation {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         condition: item.condition_value,
         revision: item.revision,
         body_checksum: checksum,
         ..Values::default()
     });
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_object(operation, condition, revision, checksum, None),
+    )
 }
 
 /// Writes the template of CreateSessions into `buf`, signed with
@@ -3085,11 +3096,23 @@ pub fn prepare_create_session(
     if bucket.service != Service::AwsDirectory {
         return Err(InvalidPlan::Option.into());
     }
-    let mut request =
-        Request::object(Operation::CreateSession, Method::Get, RevisionKind::Current)?;
-    request.key = false;
-    request.query[0] = Some(("session", ParamValue::Fixed(QueryValue::Literal(""))));
-    prepare_request(bucket, credentials, &request, buf)
+    template::prepare(bucket, credentials, &describe_session(), buf)
+}
+
+// The request of a CreateSession.
+fn describe_session() -> Describe<'static, 4> {
+    let mut describe = Describe::new(
+        Operation::CreateSession,
+        Method::Get,
+        Detail::Object {
+            condition: ConditionKind::None,
+            revision: RevisionKind::Current,
+            checksum: None,
+        },
+    );
+    describe.key = false;
+    describe.query[0] = Some(("session", ParamValue::Fixed(QueryValue::Literal(""))));
+    describe
 }
 
 /// Writes a CreateSession at `now` from `template` into `buf`, ready to
@@ -3114,7 +3137,14 @@ pub fn encode_create_session(
         now: Some(now),
         ..Values::default()
     });
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    template::encode(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_session(),
+    )
 }
 
 /// Reads the response head of a CreateSession and reports what to do next.

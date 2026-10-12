@@ -11,15 +11,13 @@ use crate::common::{encoded_with_body, finish_with_body, push_checksum, validate
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::template::{Operation, Template, Unsigned};
-use crate::s3::{Bucket, Request, encode_object, prepare_request};
+use crate::s3::{Bucket, ObjectText, encode_object, prepare_object};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, failed, validate_key,
     validate_s3_checksum, version_parameter,
 };
 use crate::sigv4::Credentials;
-use crate::template::{Body, ParamValue};
 use crate::url;
-use crate::url::QueryValue;
 use crate::{
     ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest, Method, PhysicalRestore,
     RequestedRange, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
@@ -197,10 +195,19 @@ pub fn prepare_restore(
     }
     let (days, priority) = (options.days, options.priority);
     let write = move |out: &mut dyn ByteSink| write_restore_request(out, days, priority);
-    let mut request = Request::object(Operation::Restore, Method::Post, options.revision)?;
-    request.query[0] = Some(("restore", ParamValue::Fixed(QueryValue::Literal(""))));
-    request.with_body(Body::Fixed(&write), options.checksum);
-    prepare_request(bucket, credentials, &request, buf)
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::Restore,
+        ConditionKind::None,
+        options.revision,
+        options.checksum,
+        &ObjectText {
+            body: Some(&write),
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the RestoreObject of `item` at `now` from `template` into `buf`,

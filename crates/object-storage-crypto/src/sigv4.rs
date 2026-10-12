@@ -170,10 +170,7 @@ pub fn stamp<S: Sha256>(
 /// body that the crate wrote signs the SHA-256 of that body, which this
 /// function computes first. Write in a checksum of the body with
 /// `borink_object_storage_proto::s3::set_body_checksum` before you call it.
-///
-/// # Panics
-///
-/// Panics if `buf` is shorter than `unsigned`.
+/// Another buffer gives a wrong request, but never a panic.
 pub fn sign<'r, S: Sha256>(
     stamp: &Stamp<S>,
     unsigned: &Unsigned<'r>,
@@ -188,10 +185,6 @@ pub fn sign<'r, S: Sha256>(
 /// signs it. Does nothing for a request that signs no body of its own.
 ///
 /// [`sign`] calls this. Call it yourself before [`sign_batch`].
-///
-/// # Panics
-///
-/// Panics if `buf` is not the buffer that `unsigned` was written into.
 pub fn seal_body<S: Sha256>(unsigned: &Unsigned<'_>, buf: &mut [u8]) {
     if unsigned.signs_body()
         && let Some(body) = unsigned.body(buf)

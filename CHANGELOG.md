@@ -11,6 +11,9 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 - A request whose body the crate writes, such as a list of blocks or parts, a set of tags, a restore or a removal of many objects, holds the body after its head. On S3 its SHA-256 and its checksum are placeholders until `s3::set_body_hash` and `s3::set_body_checksum` write them in; `sigv4::sign` writes the SHA-256 itself.
 - `WireRequest` names its URL, its HTTP/1.1 head, its field lines and a body it holds by offset, and a host that writes HTTP/1.1 itself sends `WireRequest::head` as it is.
 - `ChecksumValue` passes a checksum that the caller computed as base64 text or as a `Digest`, which a request writes in its service's byte order.
+- Templates of one object: `Container::object` and `Bucket::object` name the object that every request of a template writes. The template holds its key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidPlan::Option`.
+- `azure::Template::check` and `s3::Template::check` check once that bytes are a template's own, against a hash of its text and its table that `prepare_*` keeps in the template. Use them where bytes could be another template's, such as bytes read back from storage.
+- The feature `compact` writes every request by walking its template's table, one function for every operation, in place of the code that each operation's layout compiles to: less code, for a target where size matters more than speed.
 
 ### Removed
 
@@ -18,6 +21,10 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ### Changed
 
+- Encoding trusts that the bytes passed with a template are its own, and checks nothing of them per request. Bytes that are not write a wrong request or are refused, and never make an encoder panic.
+- `WireRequest`'s accessors, `s3::Unsigned::canonical`, `s3::set_body_hash`, `s3::set_body_checksum` and `s3::finish` no longer panic for a buffer that is not the request's, and neither do `sigv4::sign` and `sigv4::seal_body`: they read and write only what fits in it.
+- An Azure listing sends `delimiter`, `maxresults` and `include` before `prefix` and `marker` in its query.
+- A request copies a key that has no byte to escape whole, rather than percent-encoding it byte by byte.
 - `sigv4::Sha256Provider::new` takes three functions, `start`, `update` and `finish`, and no longer an `hmac`: a client builds HMAC-SHA256 from SHA-256 itself, and `Sha256Provider::hmac` does the same. A client copies a provider's state between calls, so the state must hold no pointer and nothing it must release; `Sha256State` states this.
 - `Objects::with_signing_key` also hashes the padding blocks of the day's signing key once, so each signature hashes two fewer blocks.
 - An S3 client sorts a request's signed headers once per request, and hashes its canonical request from the head it has written instead of writing each value a second time. It no longer signs a head that does not fit its buffers, which it refuses anyway. It also hashes the canonical request in blocks rather than in some 30 calls to the provider, copies short pieces without `memcpy`, checks a key for `.` and `..` segments in one pass, and percent-encodes a key with a table of 256 flags. An Azure client checks a key's rules in one pass instead of three. Both read a plain `Content-Range` in one pass, format numbers two digits at a time and hex-encode from a table of digit pairs, and an S3 client lists its own signed headers already in name order.

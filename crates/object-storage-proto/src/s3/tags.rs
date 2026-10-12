@@ -9,15 +9,13 @@ use crate::common::{
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::template::{Operation, Template, Unsigned};
-use crate::s3::{Bucket, Request, encode_object, prepare_request};
+use crate::s3::{Bucket, ObjectText, encode_object, prepare_object};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, failed, refuse_error_document,
     s3_tag_char, validate_key, validate_s3_checksum, version_parameter,
 };
 use crate::sigv4::Credentials;
-use crate::template::{Body, ParamValue};
 use crate::url;
-use crate::url::QueryValue;
 use crate::{
     ConditionKind, Failure, HeaderSpan, LegacyRequest, Method, PhysicalSetTags, RequestedRange,
     ResponseFault, ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps,
@@ -260,10 +258,19 @@ pub fn prepare_put_tagging(
     let limits = bucket.service.is_aws().then_some((10, 128, 256));
     validate_tags(tags, s3_tag_char, limits)?;
     let write = |out: &mut dyn ByteSink| write_tagging(out, tags);
-    let mut request = Request::object(Operation::PutTagging, Method::Put, revision)?;
-    request.query[0] = Some(("tagging", ParamValue::Fixed(QueryValue::Literal(""))));
-    request.with_body(Body::Fixed(&write), checksum);
-    prepare_request(bucket, credentials, &request, buf)
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::PutTagging,
+        ConditionKind::None,
+        revision,
+        checksum,
+        &ObjectText {
+            body: Some(&write),
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the PutObjectTagging of `item` at `now` from `template` into
@@ -325,9 +332,16 @@ pub fn prepare_get_tagging(
     revision: RevisionKind,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let mut request = Request::object(Operation::GetTagging, Method::Get, revision)?;
-    request.query[0] = Some(("tagging", ParamValue::Fixed(QueryValue::Literal(""))));
-    prepare_request(bucket, credentials, &request, buf)
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::GetTagging,
+        ConditionKind::None,
+        revision,
+        None,
+        &ObjectText::default(),
+        buf,
+    )
 }
 
 /// Writes the GetObjectTagging of `item` at `now` from `template` into

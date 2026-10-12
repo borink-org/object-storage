@@ -7,10 +7,10 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::template::{Field, Operation, Template, Value};
+use crate::azure::template::{Field, FieldList, Operation, Template, Value};
 use crate::azure::{
-    AzureNamespace, Blobs, Container, ObjectRequest, azure_tag_char, body_kind, encode_object,
-    failed, named, prepare_object, push_metadata, push_stored, revision_parameter, stored_fields,
+    AzureNamespace, Blobs, Container, ObjectText, azure_tag_char, body_kind, encode_object, failed,
+    named, prepare_object, push_metadata, push_stored, revision_parameter, stored_fields,
     utf8_properties, validate_azure_checksum, validate_key, validate_metadata,
 };
 use crate::common::{
@@ -19,7 +19,7 @@ use crate::common::{
     validate_revision, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
-use crate::template::{Body, Hole, WireRequest};
+use crate::template::WireRequest;
 use crate::url;
 use crate::{
     Condition, ConditionKind, ConditionValue, ContentProperties, Failure, HeaderSpan, InvalidPlan,
@@ -499,18 +499,23 @@ pub fn prepare_set_tier(
     if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
         return Err(InvalidPlan::ContentProperty.into());
     }
-    let mut request = ObjectRequest {
-        comp: Some("tier"),
-        ..ObjectRequest::new(Operation::SetTier, Method::Put)
-    };
-    request.fields.push(Field::new(
-        "x-ms-access-tier",
-        Value::Bytes(tier.as_bytes()),
-    ));
-    request
-        .fields
-        .push(Field::new("content-length", Value::Bytes(b"0")));
-    prepare_object(container, token, namespace, request, buf)
+    let fields = [
+        Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
+        Field::new("content-length", Value::Bytes(b"0")),
+    ];
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::SetTier,
+        ConditionKind::None,
+        RevisionKind::Current,
+        &ObjectText {
+            fields: &fields,
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the Set Blob Tier of `item` at `now` from `template` into `buf`,
@@ -562,16 +567,20 @@ pub fn prepare_set_metadata(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_metadata(options.metadata)?;
-    let mut request = ObjectRequest {
-        comp: Some("metadata"),
-        condition: options.condition,
-        metadata: options.metadata,
-        ..ObjectRequest::new(Operation::SetMetadata, Method::Put)
-    };
-    request
-        .fields
-        .push(Field::new("content-length", Value::Bytes(b"0")));
-    prepare_object(container, token, namespace, request, buf)
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::SetMetadata,
+        options.condition,
+        RevisionKind::Current,
+        &ObjectText {
+            fields: &[Field::new("content-length", Value::Bytes(b"0"))],
+            metadata: options.metadata,
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the Set Blob Metadata of `item` at `now` from `template` into
@@ -630,16 +639,22 @@ pub fn prepare_set_properties(
         ..WriteOptions::new()
     };
     validate_properties(&stored, utf8_properties(namespace))?;
-    let mut request = ObjectRequest {
-        comp: Some("properties"),
-        condition: options.condition,
-        ..ObjectRequest::new(Operation::SetProperties, Method::Put)
-    };
-    stored_fields(&mut request.fields, &stored);
-    request
-        .fields
-        .push(Field::new("content-length", Value::Bytes(b"0")));
-    prepare_object(container, token, namespace, request, buf)
+    let mut fields = FieldList::new();
+    stored_fields(&mut fields, &stored);
+    fields.push(Field::new("content-length", Value::Bytes(b"0")));
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::SetProperties,
+        options.condition,
+        RevisionKind::Current,
+        &ObjectText {
+            fields: fields.as_slice(),
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the Set Blob Properties of `item` at `now` from `template` into
@@ -700,19 +715,20 @@ pub fn prepare_set_tags(
 ) -> Result<Template> {
     validate_tags(tags, azure_tag_char, Some((10, 128, 256)))?;
     let write = |out: &mut dyn crate::request::ByteSink| write_tags_document(out, tags);
-    let mut request = ObjectRequest {
-        comp: Some("tags"),
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::SetTags,
+        ConditionKind::None,
         revision,
-        body: Body::Fixed(&write),
-        ..ObjectRequest::new(Operation::SetTags, Method::Put)
-    };
-    request
-        .fields
-        .push(Field::new("content-type", Value::Bytes(b"application/xml")));
-    request
-        .fields
-        .push(Field::new("content-length", Value::Hole(Hole::BodyLength)));
-    prepare_object(container, token, namespace, request, buf)
+        &ObjectText {
+            fields: &[Field::new("content-type", Value::Bytes(b"application/xml"))],
+            body: Some(&write),
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the Set Blob Tags of `item` at `now` from `template` into `buf`,
@@ -757,12 +773,16 @@ pub fn prepare_get_tags(
     revision: RevisionKind,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let request = ObjectRequest {
-        comp: Some("tags"),
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::GetTags,
+        ConditionKind::None,
         revision,
-        ..ObjectRequest::new(Operation::GetTags, Method::Get)
-    };
-    prepare_object(container, token, namespace, request, buf)
+        &ObjectText::default(),
+        buf,
+    )
 }
 
 /// Writes the Get Blob Tags of `item` at `now` from `template` into `buf`,

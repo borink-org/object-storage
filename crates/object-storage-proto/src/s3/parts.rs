@@ -14,10 +14,12 @@ use crate::common::{
 use crate::common::{checksum_text, validate_checksum_item, validate_template_options};
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
-use crate::s3::template::{Detail, Operation, Template, Unsigned, encode as encode_template};
-use crate::s3::template::{Field, Value};
+use crate::s3::template::{
+    self, Describe, Detail, Field, FieldList, Operation, Template, Unsigned, Value,
+    encode as encode_template,
+};
 use crate::s3::{
-    Bucket, PayloadSigning, Request, S3Values, encode_object, prepare_request, push_stored,
+    Bucket, ObjectText, PayloadSigning, S3Values, encode_object, prepare_object, push_stored,
     validate_stored,
 };
 use crate::s3::{
@@ -1065,16 +1067,24 @@ pub fn prepare_create_upload(
     validate_template_options(&options.options)?;
     validate_metadata(options.metadata, bucket.service)?;
     validate_stored(&options.options, bucket.service)?;
-    let mut request =
-        Request::object(Operation::CreateUpload, Method::Post, RevisionKind::Current)?;
-    request.query[0] = Some(("uploads", ParamValue::Fixed(QueryValue::Literal(""))));
-    push_stored(&mut request.signed, &options.options);
-    request.metadata = options.metadata;
-    // A POST states its length even when it has no content.
-    request
-        .unsigned
-        .push(Field::new("content-length", Value::Formatted(b"0")));
-    prepare_request(bucket, credentials, &request, buf)
+    let mut signed = FieldList::new();
+    push_stored(&mut signed, &options.options);
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::CreateUpload,
+        ConditionKind::None,
+        RevisionKind::Current,
+        None,
+        &ObjectText {
+            signed: signed.as_slice(),
+            // A POST states its length even when it has no content.
+            unsigned: &[Field::new("content-length", Value::Formatted(b"0"))],
+            metadata: options.metadata,
+            body: None,
+        },
+        buf,
+    )
 }
 
 /// Writes the CreateMultipartUpload of `item` at `now` from `template` into
@@ -1153,28 +1163,34 @@ pub fn prepare_stage_part(
     signing: PayloadSigning,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let mut request = Request::new(
+    template::prepare(
+        bucket,
+        credentials,
+        &describe_stage(options.checksum, signing),
+        buf,
+    )
+}
+
+// The request of an UploadPart of a template with `checksum` and `signing`.
+fn describe_stage(checksum: Option<ChecksumKind>, signing: PayloadSigning) -> Describe<'static, 4> {
+    let mut describe = Describe::new(
         Operation::StagePart,
         Method::Put,
-        Detail::Stage {
-            checksum: options.checksum,
-            signing,
-        },
+        Detail::Stage { checksum, signing },
     );
-    request.query[0] = Some(("partNumber", ParamValue::Hole(Hole::PartNumber)));
-    request.query[1] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
-    request.unsigned.push(Field::new(
-        "content-length",
-        Value::Hole(Hole::ContentLength, Hole::ContentLength),
-    ));
-    if let Some(kind) = options.checksum {
-        request.checksum(kind, Hole::Checksum);
+    describe.query[0] = Some(("partNumber", ParamValue::Hole(Hole::PartNumber)));
+    describe.query[1] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    describe.holes.content_length = Some(Hole::ContentLength);
+    if let Some(kind) = checksum {
+        describe.checksum(kind, Hole::Checksum);
     }
-    request.content_sha256 = match signing {
-        PayloadSigning::Unsigned => Value::Formatted(super::UNSIGNED_PAYLOAD.as_bytes()),
-        PayloadSigning::Signed => Value::Hole(Hole::PayloadHash, Hole::PayloadHash),
-    };
-    prepare_request(bucket, credentials, &request, buf)
+    match signing {
+        PayloadSigning::Unsigned => {
+            describe.content_sha256 = super::UNSIGNED_PAYLOAD.as_bytes();
+        }
+        PayloadSigning::Signed => describe.holes.content_sha256 = Some(Hole::PayloadHash),
+    }
+    describe
 }
 
 /// Writes the UploadPart `item` at `now` from `template` into `buf`, ready
@@ -1203,7 +1219,7 @@ pub fn encode_stage_part<'i>(
     let Detail::Stage { checksum, signing } = template.detail else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     validate_part_number(item.number, template.service)?;
     if item.content.len() > MAX_PART_LEN {
@@ -1218,7 +1234,7 @@ pub fn encode_stage_part<'i>(
     let mut text = [0; BASE64_LEN];
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         upload_id: Some(item.upload_id),
         part_number: Some(item.number),
         content_length: Some(item.content.len()),
@@ -1226,7 +1242,14 @@ pub fn encode_stage_part<'i>(
         payload_hash: hex.as_ref(),
         ..Values::default()
     });
-    encode_template(template, bytes, &values, item.content, buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        item.content,
+        buf,
+        &describe_stage(checksum, signing),
+    )
 }
 
 /// Reads the response head of an UploadPart and reports what S3 did. Keep
@@ -1275,25 +1298,36 @@ pub fn prepare_commit_parts(
     if bucket.service.is_aws() && options.condition.is_date() {
         return Err(InvalidPlan::Condition.into());
     }
-    let mut request = Request::new(
+    template::prepare(
+        bucket,
+        credentials,
+        &describe_commit(options.condition, options.checksum, options.sized),
+        buf,
+    )
+}
+
+// The request of a CompleteMultipartUpload of a template with `condition`,
+// `checksum`, and the size of the object when `sized` says so. Its list
+// of parts is its body.
+fn describe_commit(
+    condition: ConditionKind,
+    checksum: Option<ChecksumKind>,
+    sized: bool,
+) -> Describe<'static, 4> {
+    let mut describe = Describe::new(
         Operation::CommitParts,
         Method::Post,
         Detail::Commit {
-            condition: options.condition,
-            checksum: options.checksum,
-            sized: options.sized,
+            condition,
+            checksum,
+            sized,
         },
     );
-    request.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
-    request.condition(options.condition);
-    if options.sized {
-        request.signed.push(Field::new(
-            "x-amz-mp-object-size",
-            Value::Hole(Hole::ObjectSize, Hole::ObjectSize),
-        ));
-    }
-    request.with_body(Body::Each, options.checksum);
-    prepare_request(bucket, credentials, &request, buf)
+    describe.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    describe.condition(condition);
+    describe.holes.object_size = sized;
+    describe.with_body(Body::Each, checksum);
+    describe
 }
 
 // Writes the parts of a commit as the body of its request.
@@ -1303,6 +1337,12 @@ struct CommitFill<'i> {
 }
 
 impl Fill for CommitFill<'_> {
+    const BODY: bool = true;
+
+    fn values(&self) -> &Values<'_> {
+        &self.values.0
+    }
+
     fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
         match hole {
             Hole::Body => {
@@ -1345,7 +1385,7 @@ pub fn encode_commit_parts(
     else {
         return Err(InvalidPlan::Template.into());
     };
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     validate_write_condition(condition, item.condition_value, template.service)?;
     validate_parts(
@@ -1358,7 +1398,7 @@ pub fn encode_commit_parts(
     let fill = CommitFill {
         values: S3Values(Values {
             now: Some(now),
-            key: Some(item.key),
+            key,
             condition: item.condition_value,
             upload_id: Some(item.upload_id),
             object_size: item.size,
@@ -1367,7 +1407,14 @@ pub fn encode_commit_parts(
         }),
         parts: item.parts,
     };
-    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &fill,
+        Payload::Slice(&[]),
+        buf,
+        &describe_commit(condition, checksum, sized),
+    )
 }
 
 /// Reads the response head of a CompleteMultipartUpload and reports what to
@@ -1454,9 +1501,14 @@ pub fn prepare_abort_upload(
     credentials: &Credentials<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let mut request = Request::new(Operation::AbortUpload, Method::Delete, Detail::Upload);
-    request.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
-    prepare_request(bucket, credentials, &request, buf)
+    template::prepare(bucket, credentials, &describe_abort_upload(), buf)
+}
+
+// The request of an AbortMultipartUpload.
+fn describe_abort_upload() -> Describe<'static, 4> {
+    let mut describe = Describe::new(Operation::AbortUpload, Method::Delete, Detail::Upload);
+    describe.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    describe
 }
 
 /// Writes the AbortMultipartUpload `item` at `now` from `template` into
@@ -1481,15 +1533,22 @@ pub fn encode_abort_upload(
     if template.operation != Operation::AbortUpload {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         upload_id: Some(item.upload_id),
         ..Values::default()
     });
-    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_abort_upload(),
+    )
 }
 
 /// Reads the response head of an AbortMultipartUpload and reports what S3
@@ -1535,13 +1594,20 @@ pub fn prepare_list_parts(
     max_parts: Option<u32>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    let mut request = Request::new(Operation::ListParts, Method::Get, Detail::Upload);
+    template::prepare(bucket, credentials, &describe_list_parts(max_parts), buf)
+}
+
+// The request of a page of a ListParts. `max_parts` is the template's, and
+// none for a request: it comes before the parameter that a page may leave
+// out, so a request writes none of it.
+fn describe_list_parts(max_parts: Option<u32>) -> Describe<'static, 4> {
+    let mut describe = Describe::new(Operation::ListParts, Method::Get, Detail::Upload);
     // SigV4 signs the parameters in the order of their names.
-    request.query[0] =
+    describe.query[0] =
         max_parts.map(|count| ("max-parts", ParamValue::Fixed(QueryValue::Number(count))));
-    request.query[1] = Some(("part-number-marker", ParamValue::Optional(Hole::Marker)));
-    request.query[2] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
-    prepare_request(bucket, credentials, &request, buf)
+    describe.query[1] = Some(("part-number-marker", ParamValue::Optional(Hole::Marker)));
+    describe.query[2] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    describe
 }
 
 /// Writes the ListParts page `item` at `now` from `template` into `buf`,
@@ -1567,19 +1633,26 @@ pub fn encode_list_parts(
     if template.operation != Operation::ListParts {
         return Err(InvalidPlan::Template.into());
     }
-    validate_key(item.key)?;
+    let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     if item.marker.is_some_and(str::is_empty) {
         return Err(InvalidPlan::Marker.into());
     }
     let values = S3Values(Values {
         now: Some(now),
-        key: Some(item.key),
+        key,
         upload_id: Some(item.upload_id),
         marker: item.marker,
         ..Values::default()
     });
-    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_list_parts(None),
+    )
 }
 
 /// Reads the response head of a ListParts and reports what to do next.

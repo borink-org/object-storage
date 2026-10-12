@@ -8,18 +8,18 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{Field, Operation, Template, Value};
-use crate::azure::{AzureNamespace, Container, ObjectRequest, encode_object, prepare_object};
+use crate::azure::{AzureNamespace, Container, ObjectText, encode_object, prepare_object};
 use crate::azure::{Blobs, body_kind, failed, revision_parameter, validate_key};
 use crate::common::{encoded, finish_with_body, valid_header, validate_revision};
 use crate::request::HeadWriter;
 use crate::template::WireRequest;
 use crate::url;
+use crate::{ConditionKind, ObjectItem, RestoreOptions};
 use crate::{
     Failure, HeaderSpan, InvalidPlan, LegacyRequest, Method, Payload, PhysicalRestore,
     RequestedRange, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
     Timestamps,
 };
-use crate::{ObjectItem, RestoreOptions};
 
 impl<'a> Blobs<'a> {
     /// Writes the request head of a Set Blob Tier into `buf` that rehydrates
@@ -142,23 +142,24 @@ pub fn prepare_restore(
     if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
         return Err(InvalidPlan::ContentProperty.into());
     }
-    let mut request = ObjectRequest {
-        comp: Some("tier"),
-        revision: options.revision,
-        ..ObjectRequest::new(Operation::Restore, Method::Put)
-    };
-    request.fields.push(Field::new(
-        "x-ms-access-tier",
-        Value::Bytes(tier.as_bytes()),
-    ));
-    request.fields.push(Field::new(
-        "x-ms-rehydrate-priority",
-        Value::Bytes(priority.as_bytes()),
-    ));
-    request
-        .fields
-        .push(Field::new("content-length", Value::Bytes(b"0")));
-    prepare_object(container, token, namespace, request, buf)
+    let fields = [
+        Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
+        Field::new("x-ms-rehydrate-priority", Value::Bytes(priority.as_bytes())),
+        Field::new("content-length", Value::Bytes(b"0")),
+    ];
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::Restore,
+        ConditionKind::None,
+        options.revision,
+        &ObjectText {
+            fields: &fields,
+            ..ObjectText::default()
+        },
+        buf,
+    )
 }
 
 /// Writes the rehydration of `item` at `now` from `template` into `buf`,
