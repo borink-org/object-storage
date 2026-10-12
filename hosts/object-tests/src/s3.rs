@@ -13,33 +13,29 @@ use crate::listing::{
 use crate::{
     AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, checksum_value,
     current_timestamps, decode_base64_field, failed_result, optional_text, owned, read_body_fields,
-    read_meta_fields, request_buffers, requested_checksum_kind, requested_condition,
-    requested_delete, requested_get, requested_keys, requested_metadata, requested_properties,
-    requested_restore, requested_revision, requested_source, requested_source_range,
-    requested_tags, required, restore_value, send_request, send_request_with, served_range,
-    successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
-    unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
+    read_meta_fields, requested_checksum_kind, requested_condition, requested_copy,
+    requested_delete, requested_get, requested_keys, requested_metadata, requested_object,
+    requested_properties, requested_restore_options, requested_tags, required, restore_value,
+    send_request, send_request_with, served_range, successful_result, tags_value, text_of,
+    transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
+    unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_object_storage_crypto::{
-    CRC32, CRC32C, CRC64, MD5_RUSTCRYPTO, SHA1_RUSTCRYPTO, SHA256_CHECKSUM_RUSTCRYPTO,
-    SHA256_RUSTCRYPTO, Sha256RustCrypto, sigv4, wipe,
-};
+use borink_object_storage_crypto::{Sha256RustCrypto, sigv4, wipe};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
-    PartRef, PayloadHash, PayloadSigning, PhysicalAbortUpload, PhysicalCreateUpload,
-    PhysicalListParts, PhysicalStagePart, PhysicalStagePartCopy, PropertySet, Service, Session,
-    SessionHeadOutcome, Template, Unsigned,
+    self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Part, PartRef,
+    PayloadHash, PayloadSigning, PropertySet, Service, Session, SessionHeadOutcome, Template,
+    Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
-    DeleteItem, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
-    GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
-    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit,
-    PhysicalCopy, PhysicalDeleteMany, PhysicalSetTags, PutHeadOutcome, PutItem, PutOptions,
-    Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind, StageHeadOutcome, Tag,
-    TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WireRequest, WriteOptions, layered,
+    DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError, GetHeadOutcome, GetItem,
+    GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker,
+    ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload, PutHeadOutcome, PutItem,
+    PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind,
+    StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+    WireRequest, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -70,33 +66,32 @@ fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
         .collect()
 }
 
-/// The clients of one case: the one of the case's own credentials, and for a
-/// directory bucket the one of a session, which is opened for the first
-/// request that needs it.
+/// The bucket and the credentials of one case, and for a directory bucket
+/// the credentials of a session, which are opened for the first request
+/// that needs them.
 struct Client<'a> {
     context: AdapterContext,
-    objects: Objects<'a>,
     bucket: Bucket<'a>,
     credentials: Credentials<'a>,
     directory: bool,
-    session: OnceCell<Objects<'a>>,
     session_credentials: OnceCell<Credentials<'static>>,
 }
 
 impl<'a> Client<'a> {
-    /// Returns the client that signs requests to the objects, or the result
-    /// to report if no session could be opened.
-    ///
-    /// Call it after the crate checked the plan with `self.objects`, so that
-    /// a refused plan sends no request, not even a CreateSession.
-    fn signer(&self) -> Result<Result<Objects<'a>, Value>, AdapterError> {
+    /// Returns the credentials that sign requests to the objects: the
+    /// case's own, or a session's for a directory bucket, which the first
+    /// call opens. Call it after the crate checked the request with the
+    /// case's own credentials, so that a refused request sends nothing, not
+    /// even a CreateSession.
+    fn signing_credentials(&self) -> Result<Result<Credentials<'_>, Value>, AdapterError> {
         if !self.directory {
-            return Ok(Ok(self.objects));
+            return Ok(Ok(self.credentials));
         }
-        if let Some(objects) = self.session.get() {
-            return Ok(Ok(*objects));
+        if let Some(credentials) = self.session_credentials.get() {
+            return Ok(Ok(*credentials));
         }
-        let mut session = match open_session(&self.context, &self.objects)? {
+        let open = || open_session(&self.context, &self.bucket, &self.credentials);
+        let mut session = match open()? {
             Ok(session) => session,
             Err(result) => return Ok(Err(result)),
         };
@@ -107,33 +102,15 @@ impl<'a> Client<'a> {
             .expires_at
             .is_some_and(|expires_at| expires_at <= now)
         {
-            session = match open_session(&self.context, &self.objects)? {
+            session = match open()? {
                 Ok(session) => session,
                 Err(result) => return Ok(Err(result)),
             };
         }
-        let objects = match self.objects.with_session(session) {
-            Ok(objects) => objects.with_signing_key(&current_timestamps()),
-            Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
-        };
-        if let Ok(credentials) = session.credentials(wipe) {
-            self.session_credentials.get_or_init(|| credentials);
+        match session.credentials(wipe) {
+            Ok(credentials) => Ok(Ok(*self.session_credentials.get_or_init(|| credentials))),
+            Err(error) => Ok(Err(crate::result_for_crate_error(error))),
         }
-        Ok(Ok(*self.session.get_or_init(|| objects)))
-    }
-
-    /// Returns the credentials that sign requests to the objects: the
-    /// case's own, or a session's for a directory bucket.
-    fn signing_credentials(&self) -> Result<Result<Credentials<'_>, Value>, AdapterError> {
-        if !self.directory {
-            return Ok(Ok(self.credentials));
-        }
-        if let Err(result) = self.signer()? {
-            return Ok(Err(result));
-        }
-        Ok(self.session_credentials.get().copied().ok_or_else(
-            || json!({"outcome": "error", "kind": "other", "reason": "no session credentials"}),
-        ))
     }
 
     /// Writes, signs and sends one request from the template that
@@ -144,6 +121,30 @@ impl<'a> Client<'a> {
     /// CreateSession.
     fn send<'c>(
         &self,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        body: Option<&CallBody>,
+        read: BodyRead<'_>,
+    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+        self.send_signed(false, prepare, encode, body, read)
+    }
+
+    /// Writes, signs and sends one request as `send` does, with the case's
+    /// own credentials even for a directory bucket: AWS authorizes a copy
+    /// by them, never by those of a session.
+    fn send_own<'c>(
+        &self,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        body: Option<&CallBody>,
+        read: BodyRead<'_>,
+    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+        self.send_signed(true, prepare, encode, body, read)
+    }
+
+    fn send_signed<'c>(
+        &self,
+        own: bool,
         prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
         encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
         body: Option<&CallBody>,
@@ -163,9 +164,12 @@ impl<'a> Client<'a> {
         if let Err(error) = checked {
             return Ok(Err(crate::result_for_crate_error(error)));
         }
-        let credentials = match self.signing_credentials()? {
-            Ok(credentials) => credentials,
-            Err(result) => return Ok(Err(result)),
+        let credentials = match own {
+            true => self.credentials,
+            false => match self.signing_credentials()? {
+                Ok(credentials) => credentials,
+                Err(result) => return Ok(Err(result)),
+            },
         };
         let mut buf = Vec::new();
         let (template, request) = match signed(
@@ -204,32 +208,43 @@ fn signed<'b, 'c: 'b>(
     let stamp = sigv4::stamp(&key, &template, &bytes, now)?;
     *buf = vec![0; required(|out| encode(&template, &bytes, out))?];
     let unsigned = encode(&template, &bytes, buf)?;
+    // The crate writes a body of its own with a placeholder for its
+    // checksum, which the caller computes.
+    if let Some(kind) = unsigned.body_checksum() {
+        let digest = crate::digest_of(kind, unsigned.body(buf).unwrap_or_default());
+        s3::set_body_checksum(&unsigned, buf, &digest)?;
+    }
     Ok((template, sigv4::sign(&stamp, &unsigned, buf)))
 }
 
-/// Sends a CreateSession and reads the credentials of the session, or
-/// returns the result to report instead.
+/// Sends a CreateSession, signed with the case's own credentials, and reads
+/// the credentials of the session, or returns the result to report instead.
 ///
 /// The session borrows the response body, which is leaked: the process
 /// grades one case and exits.
 fn open_session(
     context: &AdapterContext,
-    objects: &Objects<'_>,
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
 ) -> Result<Result<Session<'static>, Value>, AdapterError> {
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
-        layered::s3::create_session_requirements(objects, &now)
+    let mut buf = Vec::new();
+    let (_, request) = page_step!(signed(
+        bucket,
+        credentials,
+        &now,
+        &|bucket, credentials, buf| s3::prepare_create_session(bucket, credentials, buf),
+        &|template, bytes, buf| s3::encode_create_session(template, bytes, &now, buf),
+        &mut buf
     ));
-    let request =
-        page_step!(objects.encode_create_session(&mut request_bytes, &mut header_spans, &now));
     let exchange = match send_request(context, &request) {
         Ok(exchange) => exchange,
         Err(error) => return Ok(Err(transport_failure(&error))),
     };
-    let head_outcome = page_step!(objects.accept_create_session_head(exchange.response_head()));
+    let head_outcome = page_step!(s3::accept_create_session_head(exchange.response_head()));
     let outcome = match head_outcome {
         SessionHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_create_session_error_body(failure, &exchange.body)
+            s3::accept_create_session_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -243,14 +258,15 @@ fn open_session(
         return Ok(Err(error_result(&exchange, status)));
     }
     let body = Vec::leak(exchange.body);
-    Ok(Ok(page_step!(objects.read_session(body))))
+    Ok(Ok(page_step!(s3::read_session(body))))
 }
 
-/// Returns early with the result to report if no session could be opened.
-macro_rules! signer_step {
-    ($client:expr) => {
-        match $client.signer()? {
-            Ok(objects) => objects,
+/// Unwraps what `Client::send` returns, or returns the result it reports
+/// instead.
+macro_rules! sent {
+    ($expression:expr) => {
+        match $expression? {
+            Ok(sent) => sent,
             Err(result) => return Ok(result),
         }
     };
@@ -418,7 +434,7 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         Ok(sent) => sent,
         Err(result) => return Ok(result),
     };
-    let shape = item.shape(&options);
+    let shape = options.shape();
     let head_outcome = crate_step!(s3::accept_delete_head(
         template.service(),
         shape,
@@ -443,40 +459,29 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
 }
 
 fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
+    let item = ObjectItem::new(optional_text(call, "key").unwrap_or_default());
     let tags = requested_tags(call);
-    let create_plan = PhysicalCreateUpload {
+    let options = s3::CreateUploadOptions {
         options: WriteOptions {
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "storage_class"),
             ..WriteOptions::default()
         },
-        ..PhysicalCreateUpload::new(key)
+        ..s3::CreateUploadOptions::default()
     };
-
     let now = current_timestamps();
-    crate_step!(layered::s3::create_upload_requirements(
-        &client.objects,
-        &create_plan,
-        &now
+    let (_, mut exchange) = sent!(client.send(
+        |bucket, credentials, buf| s3::prepare_create_upload(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_create_upload(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::create_upload_requirements(objects, &create_plan, &now)
-    ));
-    let request = crate_step!(objects.encode_create_upload(
-        &mut request_bytes,
-        &mut header_spans,
-        &create_plan,
-        &now
-    ));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
 
-    let head_outcome = crate_step!(objects.accept_create_upload_head(exchange.response_head()));
+    let head_outcome = crate_step!(s3::accept_create_upload_head(exchange.response_head()));
     let outcome = match head_outcome {
         CreateUploadHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_create_upload_error_body(failure, &exchange.body)
+            s3::accept_create_upload_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -490,54 +495,51 @@ fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         return Ok(error_result(&exchange, status));
     }
 
-    let upload_id = crate_step!(objects.read_upload_id(&mut exchange.body));
+    let upload_id = crate_step!(s3::read_upload_id(&mut exchange.body));
     Ok(successful_result(json!({"upload_id": upload_id})))
 }
 
 fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
     // A number that no `u32` holds is above every limit, as `u32::MAX` is.
     let number = call
         .get("part_number")
         .and_then(Value::as_u64)
         .ok_or("missing part_number")?;
-    let stage_plan =
-        PhysicalStagePart::new(key, upload_id, u32::try_from(number).unwrap_or(u32::MAX));
     let body = decode_base64_field(call, "body_base64")?;
-    let payload = Payload::Slice(&body);
-
+    let item = s3::StagePartItem::new(
+        optional_text(call, "key").unwrap_or_default(),
+        optional_text(call, "upload_id").unwrap_or_default(),
+        u32::try_from(number).unwrap_or(u32::MAX),
+        Payload::Slice(&body),
+    );
+    let digest = sigv4::sha256::<Sha256RustCrypto>(&body);
     let now = current_timestamps();
-    crate_step!(layered::s3::stage_part_requirements(
-        &client.objects,
-        &stage_plan,
-        payload,
-        PayloadHash::Compute,
-        &now
+    let (_, exchange) = sent!(client.send(
+        |bucket, credentials, buf| {
+            s3::prepare_stage_part(
+                bucket,
+                credentials,
+                &StageOptions::default(),
+                PayloadSigning::Signed,
+                buf,
+            )
+        },
+        |template, bytes, buf| s3::encode_stage_part(
+            template,
+            bytes,
+            &item,
+            Some(&digest),
+            &now,
+            buf
+        ),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) =
-        request_buffers(crate_step!(layered::s3::stage_part_requirements(
-            objects,
-            &stage_plan,
-            payload,
-            PayloadHash::Compute,
-            &now
-        )));
-    let request = crate_step!(objects.encode_stage_part(
-        &mut request_bytes,
-        &mut header_spans,
-        &stage_plan,
-        payload,
-        PayloadHash::Compute,
-        &now
-    ));
-    let exchange = transport_step!(send_request(&client.context, &request));
 
-    let head_outcome = crate_step!(objects.accept_stage_part_head(exchange.response_head()));
+    let head_outcome = crate_step!(s3::accept_stage_part_head(exchange.response_head()));
     let outcome = match head_outcome {
         StageHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_stage_part_error_body(failure, &exchange.body)
+            s3::accept_stage_part_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -555,49 +557,29 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
 }
 
 fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
+    let (metadata, tags) = (requested_metadata(call), requested_tags(call));
+    let Some((options, item)) =
+        requested_copy(call, "source_bucket", "storage_class", &metadata, &tags)?
+    else {
         return Ok(unsupported_by_crate(
-            "PhysicalCopy carries one condition on the target",
+            "a copy carries one condition on the target and one on the source",
         ));
     };
-    let Some(source) = requested_source(call, "source_bucket") else {
-        return Ok(unsupported_by_crate("CopySource carries one condition"));
-    };
-    let (metadata, tags) = (requested_metadata(call), requested_tags(call));
-    let plan = PhysicalCopy {
-        condition,
-        condition_value,
-        // A call that names no metadata or no tags keeps the source's.
-        metadata: call.get("metadata").map(|_| metadata.as_slice()),
-        tags: call.get("tags").map(|_| tags.as_slice()),
-        options: WriteOptions {
-            properties: requested_properties(call),
-            storage_class: optional_text(call, "storage_class"),
-            ..WriteOptions::default()
-        },
-        ..PhysicalCopy::new(optional_text(call, "key").unwrap_or_default(), source)
-    };
-
     let now = current_timestamps();
-    // AWS authorizes a copy by the caller's own credentials, never those of
-    // a session.
-    let objects = &client.objects;
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::copy_requirements(objects, &plan, &now)
+    let (_, mut exchange) = sent!(client.send_own(
+        |bucket, credentials, buf| s3::prepare_copy(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_copy(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(objects.encode_copy(&mut request_bytes, &mut header_spans, &plan, &now));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
 
-    let shape = plan.shape();
+    let shape = options.shape();
     let (head, body) = exchange.head_and_body();
-    let outcome = match crate_step!(objects.accept_copy_head(shape, head)) {
+    let outcome = match crate_step!(s3::accept_copy_head(shape, head)) {
         CopyHeadOutcome::NeedResultBody { .. } => {
-            crate_step!(objects.accept_copy_body(shape, head, body))
+            crate_step!(s3::accept_copy_body(shape, head, body))
         }
-        CopyHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_copy_error_body(shape, failure, body)
-        }
+        CopyHeadOutcome::NeedErrorBody(failure) => s3::accept_copy_error_body(shape, failure, body),
         outcome => outcome,
     };
 
@@ -625,46 +607,35 @@ fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
 }
 
 fn stage_part_copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let Some(source) = requested_source(call, "source_bucket") else {
-        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    let Some((options, copy)) = requested_copy(call, "source_bucket", "storage_class", &[], &[])?
+    else {
+        return Ok(unsupported_by_crate(
+            "a copy carries one condition on the source",
+        ));
     };
     let number = call
         .get("part_number")
         .and_then(Value::as_u64)
         .ok_or("part copy without part_number")?;
-    let plan = PhysicalStagePartCopy {
-        range: requested_source_range(call)?,
-        ..PhysicalStagePartCopy::new(
-            optional_text(call, "key").unwrap_or_default(),
-            optional_text(call, "upload_id").unwrap_or_default(),
-            u32::try_from(number).unwrap_or(u32::MAX),
-            source,
-        )
+    let item = s3::StagePartCopyItem {
+        copy,
+        upload_id: optional_text(call, "upload_id").unwrap_or_default(),
+        number: u32::try_from(number).unwrap_or(u32::MAX),
     };
-
     let now = current_timestamps();
-    // AWS authorizes a copy by the caller's own credentials, never those of
-    // a session.
-    let objects = &client.objects;
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::stage_part_copy_requirements(objects, &plan, &now)
+    let (_, mut exchange) = sent!(client.send_own(
+        |bucket, credentials, buf| s3::prepare_stage_part_copy(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_stage_part_copy(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(objects.encode_stage_part_copy(
-        &mut request_bytes,
-        &mut header_spans,
-        &plan,
-        &now
-    ));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
 
     let (head, body) = exchange.head_and_body();
-    let outcome = match crate_step!(objects.accept_stage_part_copy_head(head)) {
+    let outcome = match crate_step!(s3::accept_stage_part_copy_head(head)) {
         StageHeadOutcome::NeedResultBody { .. } => {
-            crate_step!(objects.accept_stage_part_copy_body(head, body))
+            crate_step!(s3::accept_stage_part_copy_body(head, body))
         }
-        StageHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_stage_part_error_body(failure, body)
-        }
+        StageHeadOutcome::NeedErrorBody(failure) => s3::accept_stage_part_error_body(failure, body),
         outcome => outcome,
     };
 
@@ -688,9 +659,7 @@ fn stage_part_copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterEr
 
 fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate(
-            "PhysicalCommit carries one precondition",
-        ));
+        return Ok(unsupported_by_crate("a commit carries one precondition"));
     };
     let mut part_references = Vec::new();
     for part in call
@@ -709,50 +678,37 @@ fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         });
     }
 
-    let key = optional_text(call, "key").unwrap_or_default();
-    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
-    let commit_plan = PhysicalCommit {
+    let size = call.get("object_size").and_then(Value::as_u64);
+    let options = s3::CommitOptions {
         condition,
-        condition_value,
-        size: call.get("object_size").and_then(Value::as_u64),
-        ..PhysicalCommit::new(key)
+        sized: size.is_some(),
+        ..s3::CommitOptions::default()
     };
-
-    let now = current_timestamps();
-    crate_step!(layered::s3::commit_parts_requirements(
-        &client.objects,
-        &commit_plan,
-        upload_id,
-        &part_references,
-        &now
-    ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) =
-        request_buffers(crate_step!(layered::s3::commit_parts_requirements(
-            objects,
-            &commit_plan,
-            upload_id,
+    let item = s3::CommitItem {
+        condition_value,
+        size,
+        ..s3::CommitItem::new(
+            optional_text(call, "key").unwrap_or_default(),
+            optional_text(call, "upload_id").unwrap_or_default(),
             &part_references,
-            &now
-        )));
-    let request = crate_step!(objects.encode_commit_parts(
-        &mut request_bytes,
-        &mut header_spans,
-        &commit_plan,
-        upload_id,
-        &part_references,
-        &now
+        )
+    };
+    let now = current_timestamps();
+    let (_, mut exchange) = sent!(client.send(
+        |bucket, credentials, buf| s3::prepare_commit_parts(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_commit_parts(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
 
-    let shape = commit_plan.shape();
+    let shape = item.shape(&options);
     let (head, body) = exchange.head_and_body();
-    let outcome = match crate_step!(objects.accept_commit_parts_head(shape, head)) {
+    let outcome = match crate_step!(s3::accept_commit_parts_head(shape, head)) {
         CommitHeadOutcome::NeedResultBody { .. } => {
-            crate_step!(objects.accept_commit_parts_body(shape, head, body))
+            crate_step!(s3::accept_commit_parts_body(shape, head, body))
         }
         CommitHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_commit_parts_error_body(shape, failure, body)
+            s3::accept_commit_parts_error_body(shape, failure, body)
         }
         outcome => outcome,
     };
@@ -771,32 +727,25 @@ fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
 }
 
 fn abort_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let upload_id = optional_text(call, "upload_id").unwrap_or_default();
-    let abort_plan = PhysicalAbortUpload::new(key, upload_id);
-
+    let item = s3::UploadItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        upload_id: optional_text(call, "upload_id").unwrap_or_default(),
+    };
     let now = current_timestamps();
-    crate_step!(layered::s3::abort_upload_requirements(
-        &client.objects,
-        &abort_plan,
-        &now
+    let (template, exchange) = sent!(client.send(
+        s3::prepare_abort_upload,
+        |template, bytes, buf| s3::encode_abort_upload(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::abort_upload_requirements(objects, &abort_plan, &now)
-    ));
-    let request = crate_step!(objects.encode_abort_upload(
-        &mut request_bytes,
-        &mut header_spans,
-        &abort_plan,
-        &now
-    ));
-    let exchange = transport_step!(send_request(&client.context, &request));
 
-    let head_outcome = crate_step!(objects.accept_abort_upload_head(exchange.response_head()));
+    let head_outcome = crate_step!(s3::accept_abort_upload_head(
+        template.service(),
+        exchange.response_head()
+    ));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_abort_upload_error_body(failure, &exchange.body)
+            s3::accept_abort_upload_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -819,32 +768,23 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
     let mut listed = Vec::new();
     let mut marker: Option<String> = None;
     loop {
-        let list_plan = PhysicalListParts {
+        let item = s3::ListPartsItem {
+            key,
+            upload_id,
             marker: marker.as_deref(),
-            ..PhysicalListParts::new(key, upload_id)
         };
         let now = current_timestamps();
-        crate_step!(layered::s3::list_parts_requirements(
-            &client.objects,
-            &list_plan,
-            &now
+        let (_, mut exchange) = sent!(client.send(
+            |bucket, credentials, buf| s3::prepare_list_parts(bucket, credentials, None, buf),
+            |template, bytes, buf| s3::encode_list_parts(template, bytes, &item, &now, buf),
+            None,
+            BodyRead::Hold,
         ));
-        let objects = &signer_step!(client);
-        let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-            layered::s3::list_parts_requirements(objects, &list_plan, &now)
-        ));
-        let request = crate_step!(objects.encode_list_parts(
-            &mut request_bytes,
-            &mut header_spans,
-            &list_plan,
-            &now
-        ));
-        let mut exchange = transport_step!(send_request(&client.context, &request));
 
-        let head_outcome = crate_step!(objects.accept_list_parts_head(exchange.response_head()));
+        let head_outcome = crate_step!(s3::accept_list_parts_head(exchange.response_head()));
         let outcome = match head_outcome {
             ListPartsHeadOutcome::NeedErrorBody(failure) => {
-                objects.accept_list_parts_error_body(failure, &exchange.body)
+                s3::accept_list_parts_error_body(failure, &exchange.body)
             }
             outcome => outcome,
         };
@@ -860,7 +800,7 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         }
 
         let mut parts = vec![Part::default(); MAX_PAGE_ENTRIES];
-        let page = crate_step!(objects.fill_parts(&mut exchange.body, &mut parts));
+        let page = crate_step!(s3::fill_parts(&mut exchange.body, &mut parts));
         listed.extend(
             parts[..page.filled]
                 .iter()
@@ -1186,24 +1126,9 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
     {
         credentials = crate_step!(credentials.with_session_token(token));
     }
-    let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO);
-    // The credentials of the case are those of a session that CreateSession
-    // returned.
-    let objects = match session_token {
-        Some(token) if service == Service::AwsDirectory => {
-            crate_step!(objects.with_session(Session {
-                key_id,
-                secret,
-                token,
-                expires_at: None,
-            }))
-        }
-        _ => objects,
-    };
     let body = STANDARD.decode(optional_text(call, "body_base64").unwrap_or_default())?;
 
     let method = optional_text(call, "method").unwrap_or("GET");
-    let (mut request_bytes, mut header_spans);
     let mut get_buf = Vec::new();
     // The credentials of the case are those of a session that CreateSession
     // returned.
@@ -1222,16 +1147,28 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
     let request: (String, Vec<(String, String)>) = match method {
         // A GetObjectTagging, of the object or of a version of it.
         "GET" if param("tagging").is_some() && only(&["tagging", "versionId"]) => {
-            (request_bytes, header_spans) = request_buffers(crate_step!(
-                layered::s3::get_tagging_requirements(&objects, key, version, &now)
+            let revision = match version {
+                Some(_) => RevisionKind::Version,
+                None => RevisionKind::Current,
+            };
+            let item = ObjectItem {
+                revision: param("versionId"),
+                ..ObjectItem::new(key)
+            };
+            let (_, request) = crate_step!(signed(
+                &bucket,
+                &signing_credentials,
+                &now,
+                &|bucket, credentials, buf| s3::prepare_get_tagging(
+                    bucket,
+                    credentials,
+                    revision,
+                    buf
+                ),
+                &|template, bytes, buf| s3::encode_get_tagging(template, bytes, &item, &now, buf),
+                &mut get_buf
             ));
-            owned(&crate_step!(objects.encode_get_tagging(
-                &mut request_bytes,
-                &mut header_spans,
-                key,
-                version,
-                &now
-            )))
+            owned(&request)
         }
         // A ListObjectsV2, which asks for URL-encoded keys every time.
         "GET" if key.is_empty() && param("list-type").is_some() => {
@@ -1352,9 +1289,9 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 },
                 ..DeleteOptions::new()
             };
-            let item = DeleteItem {
+            let item = ObjectItem {
                 revision: param("versionId"),
-                ..DeleteItem::new(key)
+                ..ObjectItem::new(key)
             };
             let (_, request) = crate_step!(signed(
                 &bucket,
@@ -1597,19 +1534,10 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     if let Some(token) = &session_token {
         credentials = crate_step!(credentials.with_session_token(token));
     }
-    let now = current_timestamps();
-    let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO)
-        .with_signing_key(&now)
-        .with_checksum(MD5_RUSTCRYPTO)
-        .with_checksum(CRC64)
-        .with_checksum(CRC32)
-        .with_checksum(CRC32C)
-        .with_checksum(SHA1_RUSTCRYPTO)
-        .with_checksum(SHA256_CHECKSUM_RUSTCRYPTO);
 
     let context = AdapterContext::for_endpoint(endpoint)?;
     if operation == "s3.create_session" {
-        return Ok(match open_session(&context, &objects)? {
+        return Ok(match open_session(&context, &bucket, &credentials)? {
             Ok(session) => successful_result(json!({
                 "has_access_key": !session.key_id.is_empty(),
                 "has_secret_key": !session.secret.is_empty(),
@@ -1620,11 +1548,9 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     }
     let client = Client {
         context,
-        objects,
         bucket,
         credentials,
         directory: service == Service::AwsDirectory,
-        session: OnceCell::new(),
         session_credentials: OnceCell::new(),
     };
     match operation {
@@ -1650,25 +1576,19 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
 }
 
 fn restore(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let Some(plan) = requested_restore(call) else {
+    let Some((options, item)) = requested_restore_options(call, None) else {
         return Ok(unsupported_by_adapter("priority not mapped"));
     };
     let now = current_timestamps();
-    crate_step!(layered::s3::restore_requirements(
-        &client.objects,
-        &plan,
-        &now
+    let (_, exchange) = sent!(client.send(
+        |bucket, credentials, buf| s3::prepare_restore(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_restore(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::restore_requirements(objects, &plan, &now)
-    ));
-    let request =
-        crate_step!(objects.encode_restore(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(&client.context, &request));
-    let outcome = match crate_step!(objects.accept_restore_head(exchange.response_head())) {
+    let outcome = match crate_step!(s3::accept_restore_head(exchange.response_head())) {
         RestoreHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_restore_error_body(failure, &exchange.body)
+            s3::accept_restore_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1685,29 +1605,31 @@ fn restore(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
 }
 
 fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let tags = requested_tags(call);
-    let plan = PhysicalSetTags {
-        checksum: Some(ChecksumKind::Crc64),
-        revision: requested_revision(call),
-        ..PhysicalSetTags::new(key, &tags)
+    let Some((_, revision, item)) = requested_object(call) else {
+        return Ok(unsupported_by_crate(
+            "a PutObjectTagging carries no condition",
+        ));
     };
+    let tags = requested_tags(call);
     let now = current_timestamps();
-    crate_step!(layered::s3::put_tagging_requirements(
-        &client.objects,
-        &plan,
-        &now
+    let (_, exchange) = sent!(client.send(
+        |bucket, credentials, buf| {
+            s3::prepare_put_tagging(
+                bucket,
+                credentials,
+                &tags,
+                revision,
+                Some(ChecksumKind::Crc64),
+                buf,
+            )
+        },
+        |template, bytes, buf| s3::encode_put_tagging(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::put_tagging_requirements(objects, &plan, &now)
-    ));
-    let request =
-        crate_step!(objects.encode_put_tagging(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(&client.context, &request));
-    let outcome = match crate_step!(objects.accept_put_tagging_head(exchange.response_head())) {
+    let outcome = match crate_step!(s3::accept_put_tagging_head(exchange.response_head())) {
         UpdateHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_update_error_body(failure, &exchange.body)
+            s3::accept_update_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1722,30 +1644,21 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
 }
 
 fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
+    let Some((_, revision, item)) = requested_object(call) else {
+        return Ok(unsupported_by_crate(
+            "a GetObjectTagging carries no condition",
+        ));
+    };
     let now = current_timestamps();
-    let revision = requested_revision(call);
-    crate_step!(layered::s3::get_tagging_requirements(
-        &client.objects,
-        key,
-        revision,
-        &now
+    let (_, mut exchange) = sent!(client.send(
+        |bucket, credentials, buf| s3::prepare_get_tagging(bucket, credentials, revision, buf),
+        |template, bytes, buf| s3::encode_get_tagging(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::get_tagging_requirements(objects, key, revision, &now)
-    ));
-    let request = crate_step!(objects.encode_get_tagging(
-        &mut request_bytes,
-        &mut header_spans,
-        key,
-        revision,
-        &now
-    ));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
-    let outcome = match crate_step!(objects.accept_get_tagging_head(exchange.response_head())) {
+    let outcome = match crate_step!(s3::accept_get_tagging_head(exchange.response_head())) {
         TagsHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_get_tagging_error_body(failure, &exchange.body)
+            s3::accept_get_tagging_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1762,7 +1675,7 @@ fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     }
     // AWS holds at most ten tags on an object.
     let mut tags = [Tag::default(); 10];
-    let count = crate_step!(objects.fill_tags(&mut exchange.body, &mut tags));
+    let count = crate_step!(s3::fill_tags(&mut exchange.body, &mut tags));
     Ok(successful_result(
         json!({"tags": tags_value(&tags[..count])}),
     ))
@@ -1770,26 +1683,18 @@ fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
 
 fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let keys = requested_keys(call);
-    let plan = PhysicalDeleteMany {
-        checksum: Some(ChecksumKind::Crc64),
-        ..PhysicalDeleteMany::new(&keys)
-    };
     let now = current_timestamps();
-    crate_step!(layered::s3::delete_many_requirements(
-        &client.objects,
-        &plan,
-        &now
+    let (_, mut exchange) = sent!(client.send(
+        |bucket, credentials, buf| {
+            s3::prepare_delete_many(bucket, credentials, Some(ChecksumKind::Crc64), buf)
+        },
+        |template, bytes, buf| s3::encode_delete_many(template, bytes, &keys, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::delete_many_requirements(objects, &plan, &now)
-    ));
-    let request =
-        crate_step!(objects.encode_delete_many(&mut request_bytes, &mut header_spans, &plan, &now));
-    let mut exchange = transport_step!(send_request(&client.context, &request));
-    let outcome = match crate_step!(objects.accept_delete_many_head(exchange.response_head())) {
+    let outcome = match crate_step!(s3::accept_delete_many_head(exchange.response_head())) {
         DeleteManyHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_delete_many_error_body(failure, &exchange.body)
+            s3::accept_delete_many_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1803,7 +1708,7 @@ fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
         return Ok(error_result(&exchange, status));
     }
     let mut results = vec![DeleteResult::default(); keys.len()];
-    let count = crate_step!(objects.fill_delete_results(&mut exchange.body, &mut results));
+    let count = crate_step!(s3::fill_delete_results(&mut exchange.body, &mut results));
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
     for result in &results[..count] {

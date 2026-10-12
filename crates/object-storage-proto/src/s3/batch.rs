@@ -1,17 +1,23 @@
 // S3 DeleteObjects: the removal of up to 1,000 objects in one request, whose
 // answer holds a result for each.
 
+use crate::Payload;
 use crate::checksum::ChecksumKind;
 use crate::common::{
     decimal_header, encoded_with_body, finish_with_body, push_checksum, validate_revision,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
+use crate::s3::template::{Detail, Operation, Template, Unsigned, encode as encode_template};
+use crate::s3::{Bucket, Request, S3Values, prepare_request};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Signed, body_kind, failed, refuse_error_document, validate_key,
     validate_s3_checksum,
 };
+use crate::sigv4::Credentials;
+use crate::template::{Body, Fill, Hole, ParamValue, Values};
 use crate::url;
+use crate::url::QueryValue;
 use crate::{
     ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan,
     LegacyRequest, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
@@ -161,13 +167,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<DeleteManyHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(DeleteManyHeadOutcome::Results {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_delete_many_head(head)
     }
 
     /// Finishes a [`DeleteManyHeadOutcome::NeedErrorBody`] with the response
@@ -178,7 +178,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> DeleteManyHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_delete_many_error_body(failure, body)
     }
 
     /// Reads the result of each removal out of the response body of a
@@ -200,8 +200,7 @@ impl<'a> Objects<'a> {
         body: &'b mut [u8],
         into: &mut [DeleteResult<'b>],
     ) -> Result<usize> {
-        refuse_error_document(body)?;
-        crate::xml::s3::batch::fill_delete_results(body, into)
+        fill_delete_results(body, into)
     }
 }
 
@@ -220,4 +219,146 @@ fn write_delete(out: &mut dyn ByteSink, objects: &[DeleteTarget<'_>]) {
         out.push(b"</Object>");
     }
     out.push(DELETE_CLOSE);
+}
+
+// Writes the objects of a removal as the body of its request.
+struct DeleteFill<'i> {
+    values: S3Values<'i>,
+    objects: &'i [DeleteTarget<'i>],
+}
+
+impl Fill for DeleteFill<'_> {
+    fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
+        match hole {
+            Hole::Body => {
+                write_delete(out, self.objects);
+                true
+            }
+            hole => self.values.write(hole, out),
+        }
+    }
+}
+
+/// Writes the template of DeleteObjects into `buf`, signed with
+/// `credentials`, each with a checksum of its body of the kind `checksum`.
+///
+/// Sign each request with the SHA-256 of its body, see
+/// [`set_body_hash`](crate::s3::set_body_hash), and write in its checksum
+/// with [`set_body_checksum`](crate::s3::set_body_checksum) first.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Option`] for no checksum, for
+/// [`Service::Aws`](crate::s3::Service::Aws) and
+/// [`Service::AwsDirectory`](crate::s3::Service::AwsDirectory): AWS takes a removal of
+/// several objects only with one.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_delete_many(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    checksum: Option<ChecksumKind>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if bucket.service.is_aws() && checksum.is_none() {
+        return Err(InvalidPlan::Option.into());
+    }
+    let mut request = Request::new(
+        Operation::DeleteMany,
+        Method::Post,
+        Detail::DeleteMany(checksum),
+    );
+    request.key = false;
+    request.query[0] = Some(("delete", ParamValue::Fixed(QueryValue::Literal(""))));
+    request.with_body(Body::Each, checksum);
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the DeleteObjects that removes `objects` at `now` from `template`
+/// into `buf`, with its body after the canonical request, ready to sign.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Keys`] for no object or more than
+/// [`MAX_DELETE_KEYS`], [`Error::InvalidPlan`] for a key that S3 refuses,
+/// see [Object keys](crate#object-keys), [`InvalidPlan::KeyControlCharacter`]
+/// for a key with a control character other than a tab, which XML cannot
+/// carry, [`InvalidPlan::Revision`] for a snapshot, and
+/// [`InvalidPlan::Template`] for a template of another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_delete_many(
+    template: &Template,
+    bytes: &[u8],
+    objects: &[DeleteTarget<'_>],
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let Detail::DeleteMany(checksum) = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    if objects.is_empty() || objects.len() > MAX_DELETE_KEYS {
+        return Err(InvalidPlan::Keys.into());
+    }
+    for object in objects {
+        validate_key(object.key)?;
+        if object
+            .key
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && byte != b'\t')
+        {
+            return Err(InvalidPlan::KeyControlCharacter.into());
+        }
+        validate_revision(object.revision, false)?;
+    }
+    let fill = DeleteFill {
+        values: S3Values(Values {
+            now: Some(now),
+            body_checksum: checksum,
+            ..Values::default()
+        }),
+        objects,
+    };
+    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of a DeleteObjects and reports what to do next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_delete_many_head<'h>(head: ResponseHead<'h>) -> Result<DeleteManyHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(DeleteManyHeadOutcome::Results {
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`DeleteManyHeadOutcome::NeedErrorBody`] with the response
+/// body.
+pub fn accept_delete_many_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> DeleteManyHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads the result of each removal out of the response body of a
+/// DeleteObjects into `into`, and returns how many it read. The results
+/// borrow the body, which is decoded in place.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`] if the body holds more results than the
+/// array, [`Error::Service`] for an error document, and [`Error::Response`]
+/// for a body that is not a `DeleteResult` document.
+pub fn fill_delete_results<'b>(body: &'b mut [u8], into: &mut [DeleteResult<'b>]) -> Result<usize> {
+    refuse_error_document(body)?;
+    crate::xml::s3::batch::fill_delete_results(body, into)
 }

@@ -11,14 +11,16 @@
 // fills each hole. The request is written whole into its own buffer, so it
 // borrows nothing from the template.
 //
-// The table has five sections, written in this order:
+// The table has six sections, written in this order:
 //
 // - origin: the scheme and the host of the URL;
 // - path: the path of the URL, from its first `/`;
 // - query: the query of the URL with its `?`, or nothing;
 // - head: the HTTP/1.1 request head, from the request line to the empty
 //   line;
-// - canonical: the canonical request that S3 signs, which Azure has not.
+// - canonical: the canonical request that S3 signs, which Azure has not;
+// - body: a body that this crate writes, such as a list of blocks, which
+//   most requests have not.
 //
 // The head holds every field as a line `name: value\r\n`. The fields that a
 // template fixes come first, as one run of text, and the fields that each
@@ -82,10 +84,42 @@ pub(crate) enum Hole {
     StartAfter = 20,
     // The version of an S3 version marker.
     VersionMarker = 21,
+    // The part of a body that each request writes, such as its list of
+    // parts.
+    Body = 22,
+    // The length of the body, in decimal, which the engine counts.
+    BodyLength = 23,
+    // A placeholder for the SHA-256 of the body in lowercase hexadecimal, 64
+    // bytes that the caller fills once the body is written.
+    BodyHash = 24,
+    // A placeholder for the base64 of a checksum of the body, as long as the
+    // checksum's text, which the caller fills once the body is written.
+    BodyChecksum = 25,
+    // The ID of an Azure block, percent-encoded as a query value.
+    BlockId = 26,
+    // The ID of an S3 upload, percent-encoded as a query value.
+    UploadId = 27,
+    // The number of an S3 part, in decimal.
+    PartNumber = 28,
+    // The key of a copy's source, percent-encoded as a path.
+    SourceKey = 29,
+    // The snapshot or version of a copy's source, percent-encoded as a query
+    // value.
+    SourceRevision = 30,
+    // The value of a condition on a copy's source, as the field sends it.
+    SourceCondition = 31,
+    // The value of a condition on a copy's source, as S3 signs it.
+    SignedSourceCondition = 32,
+    // The bytes of a copy's source, as `bytes=a-b`.
+    SourceRange = 33,
+    // The ID of an Azure copy, as a query value.
+    CopyId = 34,
+    // The length of the object that an S3 commit publishes, in decimal.
+    ObjectSize = 35,
 }
 
 impl Hole {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 35] = [
         Self::Target,
         Self::Path,
         Self::Query,
@@ -107,10 +141,25 @@ impl Hole {
         Self::Marker,
         Self::StartAfter,
         Self::VersionMarker,
+        Self::Body,
+        Self::BodyLength,
+        Self::BodyHash,
+        Self::BodyChecksum,
+        Self::BlockId,
+        Self::UploadId,
+        Self::PartNumber,
+        Self::SourceKey,
+        Self::SourceRevision,
+        Self::SourceCondition,
+        Self::SignedSourceCondition,
+        Self::SourceRange,
+        Self::CopyId,
+        Self::ObjectSize,
     ];
 
+    // The holes are numbered from 1 in the order of `ALL`.
     fn from_id(id: u32) -> Option<Self> {
-        Self::ALL.iter().copied().find(|hole| *hole as u32 == id)
+        Self::ALL.get((id as usize).wrapping_sub(1)).copied()
     }
 
     // Whether the hole is an optional parameter, whose name follows it.
@@ -136,6 +185,15 @@ pub(crate) enum ParamValue<'p> {
 // One query parameter, or `None` for one that the template leaves out.
 pub(crate) type Param<'p> = Option<(&'p str, ParamValue<'p>)>;
 
+// The body of a template's requests: none, the same text for every request,
+// or a body that each request writes.
+#[derive(Clone, Copy)]
+pub(crate) enum Body<'b> {
+    None,
+    Fixed(&'b dyn Fn(&mut dyn crate::request::ByteSink)),
+    Each,
+}
+
 /// The sections of a table, in the order that a request is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
@@ -144,9 +202,10 @@ pub(crate) enum Section {
     Query = 2,
     Head = 3,
     Canonical = 4,
+    Body = 5,
 }
 
-const SECTIONS: usize = 5;
+const SECTIONS: usize = 6;
 
 // The most pieces one template holds. A listing of S3 versions, with every
 // parameter filled per request, needs about forty.
@@ -170,6 +229,9 @@ pub(crate) struct Table {
     counts: [u8; SECTIONS],
     // The bytes the template takes, the table included.
     end: u32,
+    // The length of the fixed text of the URL, without the values that each
+    // request writes into it.
+    url_fixed: u32,
 }
 
 /// Writes a template: its fixed text, and the table of pieces after it.
@@ -264,6 +326,22 @@ impl<'t> Builder<'t> {
         }
     }
 
+    // Writes text into the template that no section holds, for a request to
+    // read where the returned span says, and returns that span.
+    pub(crate) fn stash(&mut self, write: impl FnOnce(&mut Writer<'t>)) -> Span {
+        self.out.part(write)
+    }
+
+    // Writes the body section.
+    pub(crate) fn body(&mut self, body: Body<'_>) {
+        self.section(Section::Body);
+        match body {
+            Body::None => {}
+            Body::Fixed(write) => self.with(|out| write(out)),
+            Body::Each => self.hole(Hole::Body),
+        }
+    }
+
     fn push(&mut self, piece: Piece) {
         // A template past the table's bound is a fault of this crate's own
         // operations, which `finish` reports.
@@ -297,11 +375,53 @@ impl<'t> Builder<'t> {
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             return Err(InvalidPlan::RequestTooLarge.into());
         };
+        // The URL's sections come first, so their pieces do too.
+        let url_pieces: usize = self.counts[..Section::Head as usize]
+            .iter()
+            .map(|&count| count as usize)
+            .sum();
+        let url_fixed = self.pieces[..url_pieces]
+            .iter()
+            .filter(|piece| piece.start != HOLE)
+            .map(|piece| piece.len)
+            .sum();
         Ok(Table {
             start,
             counts: self.counts,
             end,
+            url_fixed,
         })
+    }
+}
+
+impl Table {
+    // The length of the fixed text of the URL.
+    pub(crate) const fn url_fixed(&self) -> usize {
+        self.url_fixed as usize
+    }
+
+    // The length of the body, from its fixed text and the length that
+    // `fill` knows of what it writes, or `None` if it must be counted.
+    fn body_len(&self, template: &[u8], fill: &impl Fill) -> Result<Option<usize>> {
+        let pieces = self.pieces(template)?;
+        let before: usize = self.counts[..Section::Body as usize]
+            .iter()
+            .map(|&count| count as usize)
+            .sum();
+        let mut len = 0;
+        for chunk in pieces.chunks_exact(8).skip(before) {
+            let start = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let piece_len = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            len += match (start, Hole::from_id(piece_len)) {
+                (HOLE, Some(Hole::Body)) => match fill.body_len() {
+                    Some(len) => len,
+                    None => return Ok(None),
+                },
+                (HOLE, _) => return Ok(None),
+                _ => piece_len as usize,
+            };
+        }
+        Ok(Some(len))
     }
 }
 
@@ -319,6 +439,18 @@ pub(crate) trait Fill {
         let _ = hole;
         None
     }
+
+    // Returns the length of the body that `Hole::Body` writes, if the fill
+    // knows it without writing it.
+    fn body_len(&self) -> Option<usize> {
+        None
+    }
+
+    // Returns at least the bytes that the request's values take in its URL,
+    // so that a URL that is surely short enough needs no counting.
+    fn url_bound(&self) -> usize {
+        usize::MAX
+    }
 }
 
 /// Where a request's parts are in its buffer, once it is written.
@@ -330,6 +462,13 @@ pub(crate) struct Written {
     pub(crate) fields: Span,
     pub(crate) canonical: Span,
     pub(crate) signature: Option<Span>,
+    // The body that the request wrote, if its template has one.
+    pub(crate) body: Option<Span>,
+    // The placeholders for the SHA-256 and the checksum of the body: in the
+    // head, and in the canonical request that S3 signs, whose last line
+    // repeats the SHA-256.
+    pub(crate) body_hash: [Option<Span>; 3],
+    pub(crate) body_checksum: [Option<Span>; 2],
     pub(crate) end: usize,
 }
 
@@ -354,14 +493,40 @@ pub(crate) fn write(
     fill: &impl Fill,
     out: &mut Writer<'_>,
 ) -> Result<Written> {
-    write_sections(table, template, fill, out, SECTIONS)
+    // The head states the length of the body, which is counted first, by
+    // writing the body section alone into nothing.
+    let body = Section::Body as usize;
+    let body_len = if table.counts[body] == 0 {
+        0
+    } else if let Some(len) = table.body_len(template, fill)? {
+        len
+    } else {
+        let mut counted = Writer::new(&mut []);
+        write_sections(table, template, fill, &mut counted, body..SECTIONS, 0)?;
+        counted.position()
+    };
+    let written = write_sections(table, template, fill, out, 0..SECTIONS, body_len)?;
+    if !out.fits() {
+        return Err(capacity_error(CapacityError {
+            required: written.end,
+            required_headers: 0,
+        }));
+    }
+    Ok(written)
 }
 
 /// Returns the length of the URL that a request from the template would
 /// have, without writing it.
 pub(crate) fn url_len(table: &Table, template: &[u8], fill: &impl Fill) -> Result<usize> {
     let mut counted = Writer::new(&mut []);
-    write_sections(table, template, fill, &mut counted, Section::Head as usize)?;
+    write_sections(
+        table,
+        template,
+        fill,
+        &mut counted,
+        0..Section::Head as usize,
+        0,
+    )?;
     Ok(counted.position())
 }
 
@@ -370,7 +535,8 @@ fn write_sections(
     template: &[u8],
     fill: &impl Fill,
     out: &mut Writer<'_>,
-    sections: usize,
+    sections: core::ops::Range<usize>,
+    body_len: usize,
 ) -> Result<Written> {
     let pieces = table.pieces(template)?;
     let mut spans = [Span::default(); SECTIONS];
@@ -391,7 +557,12 @@ fn write_sections(
             _ => Err(crate::Error::from(InvalidPlan::Template)),
         }
     };
-    for (section, &count) in table.counts.iter().enumerate().take(sections) {
+    for (section, &count) in table.counts.iter().enumerate().take(sections.end) {
+        // A section before the range is skipped, piece by piece.
+        if section < sections.start {
+            pieces.by_ref().take(count as usize).for_each(drop);
+            continue;
+        }
         let start = out.position();
         let mut section_pieces = pieces.by_ref().take(count as usize);
         while let Some(piece) = section_pieces.next() {
@@ -420,6 +591,21 @@ fn write_sections(
                 Some(Hole::Fields) => fields = out.position(),
                 Some(Hole::Signature) => {
                     written.signature = Some(out.part(|out| out.push(&[b'0'; 64])));
+                }
+                Some(Hole::BodyLength) => {
+                    out.push(crate::request::U64Decimal::new(body_len as u64).as_bytes());
+                }
+                Some(Hole::BodyHash) => {
+                    let span = out.part(|out| out.push(&[b'0'; 64]));
+                    record(&mut written.body_hash, span);
+                }
+                Some(Hole::BodyChecksum) => {
+                    let mut filled = false;
+                    let span = out.part(|out| filled = fill.write(Hole::BodyChecksum, out));
+                    if !filled {
+                        return Err(InvalidPlan::Template.into());
+                    }
+                    record(&mut written.body_checksum, span);
                 }
                 Some(Hole::Separator) => {
                     out.push(if params == 0 { b"?" } else { b"&" });
@@ -463,14 +649,18 @@ fn write_sections(
         len: head_end.saturating_sub(2).saturating_sub(fields),
     };
     written.canonical = spans[Section::Canonical as usize];
+    written.body =
+        (table.counts[Section::Body as usize] > 0).then_some(spans[Section::Body as usize]);
     written.end = out.position();
-    if sections == SECTIONS && !out.fits() {
-        return Err(capacity_error(CapacityError {
-            required: written.end,
-            required_headers: 0,
-        }));
-    }
     Ok(written)
+}
+
+// Records the span of a placeholder in the first free slot: the head's,
+// then the canonical request's.
+fn record(slots: &mut [Option<Span>], span: Span) {
+    if let Some(slot) = slots.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(span);
+    }
 }
 
 /// One request, written whole into a buffer you own.
@@ -498,13 +688,18 @@ pub struct WireRequest<'r> {
 }
 
 impl<'r> WireRequest<'r> {
+    // A request with a body that this crate wrote sends that body, and any
+    // other sends `payload`.
     pub(crate) fn new(
         bytes: &'r [u8],
         method: Method,
         written: &Written,
         payload: Payload<'r>,
-        body: Option<Span>,
     ) -> Self {
+        let payload = match written.body {
+            Some(body) => Payload::Slice(&bytes[body.start..body.start + body.len]),
+            None => payload,
+        };
         Self {
             bytes,
             method,
@@ -512,7 +707,7 @@ impl<'r> WireRequest<'r> {
             head: written.head,
             fields: written.fields,
             payload,
-            body,
+            body: written.body,
         }
     }
 
@@ -617,6 +812,20 @@ pub(crate) struct Values<'i> {
     pub(crate) marker: Option<&'i str>,
     pub(crate) start_after: Option<&'i str>,
     pub(crate) version_marker: Option<&'i str>,
+    // What names one part of an object written in parts.
+    pub(crate) block_id: Option<&'i str>,
+    pub(crate) upload_id: Option<&'i str>,
+    pub(crate) part_number: Option<u32>,
+    // The source of a copy, and the ID of an Azure copy.
+    pub(crate) source_key: Option<&'i str>,
+    pub(crate) source_revision: Option<&'i str>,
+    pub(crate) source_condition: Option<crate::ConditionValue<'i>>,
+    pub(crate) source_range: Option<crate::RequestedRange>,
+    pub(crate) copy_id: Option<&'i str>,
+    // The kind of checksum of a body that this crate writes, whose
+    // placeholder the request holds, and the length of an S3 object.
+    pub(crate) body_checksum: Option<crate::checksum::ChecksumKind>,
+    pub(crate) object_size: Option<u64>,
 }
 
 impl Fill for Values<'_> {
@@ -671,9 +880,79 @@ impl Fill for Values<'_> {
                 Some(hex) => out.push(hex),
                 None => return false,
             },
+            Hole::BlockId | Hole::UploadId => match self.block_id.or(self.upload_id) {
+                Some(text) => {
+                    for part in crate::url::encode_query_value(text.as_bytes()) {
+                        out.push(part);
+                    }
+                }
+                None => return false,
+            },
+            Hole::SourceKey => match self.source_key {
+                Some(key) => {
+                    for part in crate::url::encode_object_key(key) {
+                        out.push(part);
+                    }
+                }
+                None => return false,
+            },
+            Hole::SourceRevision | Hole::CopyId => match self.source_revision.or(self.copy_id) {
+                Some(text) => {
+                    for part in crate::url::encode_query_value(text.as_bytes()) {
+                        out.push(part);
+                    }
+                }
+                None => return false,
+            },
+            Hole::SourceCondition => match self.source_condition {
+                Some(value) => value.write_to(out),
+                None => return false,
+            },
+            Hole::SourceRange => match self.source_range {
+                Some(range) => crate::common::write_range(out, range),
+                None => return false,
+            },
+            Hole::BodyChecksum => match self.body_checksum {
+                Some(kind) => {
+                    for _ in 0..kind.digest_len().div_ceil(3) * 4 {
+                        out.push(b"=");
+                    }
+                }
+                None => return false,
+            },
+            Hole::ObjectSize => match self.object_size {
+                Some(size) => out.push(crate::request::U64Decimal::new(size).as_bytes()),
+                None => return false,
+            },
+            Hole::PartNumber => match self.part_number {
+                Some(number) => out.push(crate::request::U64Decimal::new(number.into()).as_bytes()),
+                None => return false,
+            },
             _ => return false,
         }
         true
+    }
+
+    fn url_bound(&self) -> usize {
+        // Percent-encoding writes at most three bytes for one, and each
+        // parameter adds its separator and a name of under 24 bytes.
+        let texts = [
+            self.key,
+            self.revision,
+            self.prefix,
+            self.marker,
+            self.start_after,
+            self.version_marker,
+            self.block_id,
+            self.upload_id,
+            self.copy_id,
+        ];
+        texts
+            .iter()
+            .flatten()
+            .map(|text| 3 * text.len() + 25)
+            .sum::<usize>()
+            + 25
     }
 
     fn param(&self, hole: Hole) -> Option<Option<&[u8]>> {
@@ -685,5 +964,22 @@ impl Fill for Values<'_> {
             _ => return None,
         };
         Some(value.filter(|text| !text.is_empty()).map(str::as_bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Hole;
+
+    // `Hole::from_id` reads a hole by its number, so `ALL` lists the holes
+    // in the order of their numbers, from 1.
+    #[test]
+    fn the_holes_are_listed_in_the_order_of_their_numbers() {
+        for (index, hole) in Hole::ALL.iter().enumerate() {
+            assert_eq!(*hole as usize, index + 1);
+            assert_eq!(Hole::from_id(index as u32 + 1), Some(*hole));
+        }
+        assert_eq!(Hole::from_id(0), None);
+        assert_eq!(Hole::from_id(Hole::ALL.len() as u32 + 1), None);
     }
 }

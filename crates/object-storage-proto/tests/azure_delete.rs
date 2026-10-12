@@ -2,15 +2,15 @@
 
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::{
-    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteItem, DeleteKind,
-    DeleteOptions, Error, InvalidPlan, RevisionKind, Timestamps,
+    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteKind, DeleteOptions, Error,
+    InvalidPlan, ObjectItem, RevisionKind, Timestamps,
 };
 
 fn container() -> Container<'static> {
     Container::new("https://account.blob.core.windows.net", "container").unwrap()
 }
 
-fn refusal(options: &DeleteOptions, item: &DeleteItem<'_>) -> Option<Error> {
+fn refusal(options: &DeleteOptions, item: &ObjectItem<'_>) -> Option<Error> {
     let mut bytes = [0; 512];
     let template = match azure::prepare_delete(
         &container(),
@@ -44,26 +44,26 @@ fn a_removal_is_refused_before_any_byte_is_written() {
     for (options, item, expected) in [
         (
             DeleteOptions::new(),
-            DeleteItem::new(""),
+            ObjectItem::new(""),
             InvalidPlan::EmptyKey,
         ),
         // The template carries a condition, so each removal names its value.
-        (if_match, DeleteItem::new("k"), InvalidPlan::Condition),
+        (if_match, ObjectItem::new("k"), InvalidPlan::Condition),
         (
             DeleteOptions::new(),
-            DeleteItem {
+            ObjectItem {
                 condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-                ..DeleteItem::new("k")
+                ..ObjectItem::new("k")
             },
             InvalidPlan::Condition,
         ),
         // The template names a version, so each removal names one.
-        (version, DeleteItem::new("k"), InvalidPlan::Revision),
+        (version, ObjectItem::new("k"), InvalidPlan::Revision),
         (
             version,
-            DeleteItem {
+            ObjectItem {
                 revision: Some(""),
-                ..DeleteItem::new("k")
+                ..ObjectItem::new("k")
             },
             InvalidPlan::Revision,
         ),
@@ -74,9 +74,9 @@ fn a_removal_is_refused_before_any_byte_is_written() {
                 kind: DeleteKind::ObjectAndSnapshots,
                 ..version
             },
-            DeleteItem {
+            ObjectItem {
                 revision: Some("v1"),
-                ..DeleteItem::new("k")
+                ..ObjectItem::new("k")
             },
             InvalidPlan::Revision,
         ),

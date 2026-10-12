@@ -12,8 +12,8 @@ use borink_object_storage_proto::s3::{
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, DeleteItem, DeleteOptions, Error,
-    GetItem, GetOptions, MetadataPair, Payload, PutItem, PutOptions, RequestedRange, Timestamps,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, DeleteOptions, Error, GetItem,
+    GetOptions, MetadataPair, ObjectItem, Payload, PutItem, PutOptions, RequestedRange, Timestamps,
 };
 
 const KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -248,11 +248,11 @@ fn signs_a_virtual_hosted_conditional_removal() {
         condition: ConditionKind::IfMatch,
         ..DeleteOptions::new()
     };
-    let item = DeleteItem {
+    let item = ObjectItem {
         condition_value: Some(ConditionValue::ETag(
             b"\"9b2cf535f27731c974343645a3985328\"",
         )),
-        ..DeleteItem::new("~tilde/(paren)*")
+        ..ObjectItem::new("~tilde/(paren)*")
     };
     let expected = sorted(&[
         (

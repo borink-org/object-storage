@@ -6,19 +6,31 @@
 // its number within an upload that S3 created, and by the entity tag that S3
 // returned when it staged the part.
 
+use crate::checksum::{BASE64_LEN, ChecksumKind};
 use crate::common::{
     FailureOutcome, decimal_header, encoded, encoded_with_body, failure, finish_with_body,
     push_checksum, valid_header,
 };
+use crate::common::{checksum_text, validate_checksum_item, validate_template_options};
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
+use crate::s3::template::{Detail, Operation, Template, Unsigned, encode as encode_template};
+use crate::s3::template::{Field, Value};
+use crate::s3::{
+    Bucket, PayloadSigning, Request, S3Values, encode_object, prepare_request, push_stored,
+    validate_stored,
+};
 use crate::s3::{
     Objects, PayloadHash, Service, Signed, Stores, body_kind, failed, is_error_document,
     refuse_error_document, stored_headers, validate_content, validate_key, validate_metadata,
     validate_write_condition,
 };
+use crate::sigv4::Credentials;
 use crate::sigv4::EMPTY_SHA256;
+use crate::template::{Body, Fill, Hole, ParamValue, Values};
 use crate::url;
+use crate::url::QueryValue;
+use crate::{ChecksumValue, ConditionValue, ObjectItem, RevisionKind, StageOptions};
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, HeaderSpan,
     InvalidPlan, LegacyRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta,
@@ -309,13 +321,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<CreateUploadHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(CreateUploadHeadOutcome::Created {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_create_upload_head(head)
     }
 
     /// Finishes a [`CreateUploadHeadOutcome::NeedErrorBody`] with the
@@ -330,7 +336,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> CreateUploadHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_create_upload_error_body(failure, body)
     }
 
     /// Reads the ID of the upload out of the response body of a
@@ -348,8 +354,7 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::Service`](crate::Error::Service) if `body` is an
     /// error document, which S3 can send under status 200.
     pub fn read_upload_id<'b>(&self, body: &'b mut [u8]) -> Result<&'b str> {
-        refuse_error_document(body)?;
-        crate::xml::s3::parts::read_upload_id(body)
+        read_upload_id(body)
     }
 
     /// Writes the signed request head of an UploadPart into `buf`.
@@ -432,12 +437,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<StageHeadOutcome<'h>> {
-        match head.status {
-            200 if head.e_tag.is_none() => Err(ResponseFault::Head.into()),
-            200 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_stage_part_head(head)
     }
 
     /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response
@@ -452,7 +452,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> StageHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_stage_part_error_body(failure, body)
     }
 
     /// Writes a CompleteMultipartUpload into `buf`: the signed head, then the
@@ -612,15 +612,7 @@ impl<'a> Objects<'a> {
         shape: CommitShape,
         head: ResponseHead<'h>,
     ) -> Result<CommitHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(CommitHeadOutcome::NeedResultBody {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
-            412 => Ok(CommitHeadOutcome::PreconditionFailed),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_commit_parts_head(shape, head)
     }
 
     /// Finishes a [`CommitHeadOutcome::NeedResultBody`] with the response
@@ -656,29 +648,7 @@ impl<'a> Objects<'a> {
         head: ResponseHead<'h>,
         body: &'h mut [u8],
     ) -> Result<CommitHeadOutcome<'h>> {
-        if head.status != 200 {
-            return Err(ResponseFault::Status.into());
-        }
-        // A directory bucket reports under status 200 what a general purpose
-        // bucket reports under 404 or 412, so those become the same outcomes.
-        if is_error_document(body) {
-            let kind = body_kind(body);
-            return Ok(match kind {
-                Some(ServiceErrorKind::Precondition) if shape.condition != ConditionKind::None => {
-                    CommitHeadOutcome::PreconditionFailed
-                }
-                Some(ServiceErrorKind::NoSuchUpload) => CommitHeadOutcome::NotFound { kind },
-                _ => finish_with_body(failure(head.status, None, head.request_id), kind),
-            });
-        }
-        let e_tag = crate::xml::s3::parts::read_committed(body)?;
-        Ok(CommitHeadOutcome::Committed {
-            meta: ObjectMeta {
-                e_tag: Some(e_tag.as_bytes()),
-                version: head.version,
-                ..ObjectMeta::default()
-            },
-        })
+        accept_commit_parts_body(shape, head, body)
     }
 
     /// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the response
@@ -695,9 +665,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> CommitHeadOutcome<'h> {
-        // S3 reports a failed condition in the head.
-        let _ = shape;
-        finish_with_body(failure, body_kind(body))
+        accept_commit_parts_error_body(shape, failure, body)
     }
 
     /// Writes the signed request head of an AbortMultipartUpload into `buf`.
@@ -756,13 +724,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<DeleteHeadOutcome<'h>> {
-        let accepts_200 = !self.bucket.service.is_aws();
-        match head.status {
-            204 => Ok(DeleteHeadOutcome::Accepted),
-            200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
-            200..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_abort_upload_head(self.bucket.service, head)
     }
 
     /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] of an abort with the
@@ -777,7 +739,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> DeleteHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_abort_upload_error_body(failure, body)
     }
 
     /// Writes the signed request head for one page of a ListParts into
@@ -848,14 +810,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<ListPartsHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(ListPartsHeadOutcome::Parts {
-                meta: ObjectMeta::default(),
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_list_parts_head(head)
     }
 
     /// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
@@ -870,7 +825,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> ListPartsHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_list_parts_error_body(failure, body)
     }
 
     /// Reads a page of parts out of the response body of a ListParts.
@@ -901,8 +856,7 @@ impl<'a> Objects<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        refuse_error_document(body)?;
-        crate::xml::s3::parts::fill_parts(body, into)
+        fill_parts(body, into)
     }
 }
 
@@ -970,4 +924,701 @@ fn write_part_list<E: AsRef<[u8]>>(out: &mut dyn ByteSink, parts: impl Iterator<
         out.push(b"</ETag></Part>");
     }
     out.push(COMMIT_CLOSE);
+}
+
+/// What every CreateMultipartUpload of a template does alike: what each
+/// object it starts stores once it is committed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CreateUploadOptions<'o> {
+    /// The metadata pairs of each object, under the rules of
+    /// [`PutOptions::metadata`](crate::PutOptions::metadata).
+    pub metadata: &'o [MetadataPair<'o>],
+    /// The content properties, the tags and the storage class of each
+    /// object. A checksum belongs to each part, and is refused here.
+    pub options: WriteOptions<'o>,
+}
+
+/// One UploadPart, which stages the part `number` of an upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagePartItem<'i> {
+    /// The key of the upload's object.
+    pub key: &'i str,
+    /// The ID that S3 gave the upload, never empty.
+    pub upload_id: &'i str,
+    /// The part's number, from 1, and at most [`MAX_PARTS`] on AWS.
+    pub number: u32,
+    /// The part's bytes, or the length of those you send yourself. At most
+    /// [`MAX_PART_LEN`].
+    pub content: Payload<'i>,
+    /// The checksum of the part, of the template's kind. Present exactly when
+    /// the template names a kind.
+    pub checksum: Option<ChecksumValue<'i>>,
+}
+
+impl<'i> StagePartItem<'i> {
+    /// Creates the stage of `content` as the part `number` of the upload
+    /// `upload_id` of `key`.
+    pub const fn new(key: &'i str, upload_id: &'i str, number: u32, content: Payload<'i>) -> Self {
+        Self {
+            key,
+            upload_id,
+            number,
+            content,
+            checksum: None,
+        }
+    }
+}
+
+/// What every CompleteMultipartUpload of a template does alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitOptions {
+    /// The condition that each commit carries, on the object that the key
+    /// holds before. AWS takes no date condition on a write.
+    pub condition: ConditionKind,
+    /// The checksum of the body of each commit, its list of parts.
+    pub checksum: Option<ChecksumKind>,
+    /// Whether each commit states the length of the object it publishes, in
+    /// [`CommitItem::size`]. S3 refuses the commit with 400
+    /// `InvalidRequest` if the parts add up to another length, which catches
+    /// a part left out of the list.
+    pub sized: bool,
+}
+
+/// One CompleteMultipartUpload, which commits an object from its parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitItem<'i> {
+    /// The key of the upload's object.
+    pub key: &'i str,
+    /// What the template's condition compares against. Present exactly when
+    /// the template carries one.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// The ID that S3 gave the upload, never empty.
+    pub upload_id: &'i str,
+    /// The parts of the object, at least one. AWS takes them in ascending
+    /// order of their numbers, each once.
+    pub parts: &'i [PartRef<'i>],
+    /// The length of the object. Present exactly when the template's
+    /// [`CommitOptions::sized`] is set.
+    pub size: Option<u64>,
+}
+
+impl<'i> CommitItem<'i> {
+    /// Creates the commit of `parts` of the upload `upload_id` of `key`.
+    pub const fn new(key: &'i str, upload_id: &'i str, parts: &'i [PartRef<'i>]) -> Self {
+        Self {
+            key,
+            condition_value: None,
+            upload_id,
+            parts,
+            size: None,
+        }
+    }
+
+    /// Returns the part of this commit that holds no borrows, for a template
+    /// with `options`.
+    pub const fn shape(&self, options: &CommitOptions) -> CommitShape {
+        CommitShape {
+            condition: options.condition,
+        }
+    }
+}
+
+/// One request that names an upload: an AbortMultipartUpload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadItem<'i> {
+    /// The key of the upload's object.
+    pub key: &'i str,
+    /// The ID that S3 gave the upload, never empty.
+    pub upload_id: &'i str,
+}
+
+/// One page of a ListParts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListPartsItem<'i> {
+    /// The key of the upload's object.
+    pub key: &'i str,
+    /// The ID that S3 gave the upload, never empty.
+    pub upload_id: &'i str,
+    /// Where the previous page ended, as its
+    /// [`Listing::next_marker`](crate::Listing::next_marker) names it, or
+    /// [`None`] for the first page. Never empty.
+    pub marker: Option<&'i str>,
+}
+
+/// Writes the template of CreateMultipartUploads with `options` into
+/// `buf`, signed with `credentials`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a metadata pair or a stored option
+/// that [`prepare_put`](crate::s3::prepare_put) refuses, and
+/// [`InvalidPlan::Option`] for a checksum or a declared MD5.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_create_upload(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &CreateUploadOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_template_options(&options.options)?;
+    validate_metadata(options.metadata, bucket.service)?;
+    validate_stored(&options.options, bucket.service)?;
+    let mut request =
+        Request::object(Operation::CreateUpload, Method::Post, RevisionKind::Current)?;
+    request.query[0] = Some(("uploads", ParamValue::Fixed(QueryValue::Literal(""))));
+    push_stored(&mut request.signed, &options.options);
+    request.metadata = options.metadata;
+    // A POST states its length even when it has no content.
+    request
+        .unsigned
+        .push(Field::new("content-length", Value::Formatted(b"0")));
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the CreateMultipartUpload of `item` at `now` from `template` into
+/// `buf`, ready to sign. Read the upload's ID out of the answer with
+/// [`read_upload_id`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), for a revision or a condition value,
+/// and for a template of another operation.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_create_upload(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    encode_object(template, bytes, Operation::CreateUpload, item, now, buf)
+}
+
+/// Reads the response head of a CreateMultipartUpload and reports what to
+/// do next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_create_upload_head<'h>(
+    head: ResponseHead<'h>,
+) -> Result<CreateUploadHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(CreateUploadHeadOutcome::Created {
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`CreateUploadHeadOutcome::NeedErrorBody`] with the response
+/// body.
+pub fn accept_create_upload_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> CreateUploadHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads the ID of the upload out of the response body of a
+/// CreateMultipartUpload. The ID borrows the body.
+///
+/// # Errors
+///
+/// Returns [`Error::Service`](crate::Error::Service) for an error document, and
+/// [`Error::Response`](crate::Error::Response) for a body that names no upload.
+pub fn read_upload_id(body: &mut [u8]) -> Result<&str> {
+    refuse_error_document(body)?;
+    crate::xml::s3::parts::read_upload_id(body)
+}
+
+/// Writes the template of UploadParts with `options` into `buf`, signed with
+/// `credentials`. `signing` says whether each part's SHA-256 is signed.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_stage_part(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &StageOptions,
+    signing: PayloadSigning,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let mut request = Request::new(
+        Operation::StagePart,
+        Method::Put,
+        Detail::Stage {
+            checksum: options.checksum,
+            signing,
+        },
+    );
+    request.query[0] = Some(("partNumber", ParamValue::Hole(Hole::PartNumber)));
+    request.query[1] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    request.unsigned.push(Field::new(
+        "content-length",
+        Value::Hole(Hole::ContentLength, Hole::ContentLength),
+    ));
+    if let Some(kind) = options.checksum {
+        request.checksum(kind, Hole::Checksum);
+    }
+    request.content_sha256 = match signing {
+        PayloadSigning::Unsigned => Value::Formatted(super::UNSIGNED_PAYLOAD.as_bytes()),
+        PayloadSigning::Signed => Value::Hole(Hole::PayloadHash, Hole::PayloadHash),
+    };
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the UploadPart `item` at `now` from `template` into `buf`, ready
+/// to sign. Pass the SHA-256 of the part's content exactly when the
+/// template signs it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
+/// upload ID, [`InvalidPlan::PartId`] for a part number that S3 refuses,
+/// [`InvalidPlan::PayloadTooLarge`] for content longer than
+/// [`MAX_PART_LEN`], a checksum that is not the template's, a SHA-256 that
+/// the template does not sign, and a template of another operation.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_stage_part<'i>(
+    template: &Template,
+    bytes: &[u8],
+    item: &StagePartItem<'i>,
+    content_sha256: Option<&[u8; 32]>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'i>> {
+    let Detail::Stage { checksum, signing } = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_key(item.key)?;
+    validate_upload_id(item.upload_id)?;
+    validate_part_number(item.number, template.service)?;
+    if item.content.len() > MAX_PART_LEN {
+        return Err(InvalidPlan::PayloadTooLarge.into());
+    }
+    validate_checksum_item(checksum, item.checksum)?;
+    let hex = match (signing, content_sha256) {
+        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex(digest)),
+        (PayloadSigning::Unsigned, None) => None,
+        _ => return Err(InvalidPlan::Option.into()),
+    };
+    let mut text = [0; BASE64_LEN];
+    let values = S3Values(Values {
+        now: Some(now),
+        key: Some(item.key),
+        upload_id: Some(item.upload_id),
+        part_number: Some(item.number),
+        content_length: Some(item.content.len()),
+        checksum: checksum_text(item.checksum, &mut text, true),
+        payload_hash: hex.as_ref(),
+        ..Values::default()
+    });
+    encode_template(template, bytes, &values, item.content, buf)
+}
+
+/// Reads the response head of an UploadPart and reports what S3 did. Keep
+/// the entity tag of [`StageHeadOutcome::Staged`]: the commit names the part
+/// by it.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. A success status
+/// other than 200, and a 200 without an entity tag, are faults.
+pub fn accept_stage_part_head<'h>(head: ResponseHead<'h>) -> Result<StageHeadOutcome<'h>> {
+    match head.status {
+        200 if head.e_tag.is_none() => Err(ResponseFault::Head.into()),
+        200 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_stage_part_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> StageHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Writes the template of CompleteMultipartUploads with `options` into
+/// `buf`, signed with `credentials`.
+///
+/// Sign each request with the SHA-256 of its body, see
+/// [`set_body_hash`](crate::s3::set_body_hash), and write in the checksum of
+/// its body with [`set_body_checksum`](crate::s3::set_body_checksum) first
+/// when the template sends one.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Condition`] for a date condition, for
+/// [`Service::Aws`] and [`Service::AwsDirectory`].
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_commit_parts(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &CommitOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if bucket.service.is_aws() && options.condition.is_date() {
+        return Err(InvalidPlan::Condition.into());
+    }
+    let mut request = Request::new(
+        Operation::CommitParts,
+        Method::Post,
+        Detail::Commit {
+            condition: options.condition,
+            checksum: options.checksum,
+            sized: options.sized,
+        },
+    );
+    request.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    request.condition(options.condition);
+    if options.sized {
+        request.signed.push(Field::new(
+            "x-amz-mp-object-size",
+            Value::Hole(Hole::ObjectSize, Hole::ObjectSize),
+        ));
+    }
+    request.with_body(Body::Each, options.checksum);
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+// Writes the parts of a commit as the body of its request.
+struct CommitFill<'i> {
+    values: S3Values<'i>,
+    parts: &'i [PartRef<'i>],
+}
+
+impl Fill for CommitFill<'_> {
+    fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
+        match hole {
+            Hole::Body => {
+                write_part_list(out, self.parts.iter().map(|part| (part.number, part.e_tag)));
+                true
+            }
+            hole => self.values.write(hole, out),
+        }
+    }
+}
+
+/// Writes the CompleteMultipartUpload `item` at `now` from `template` into
+/// `buf`, with its list of parts as the body after the canonical request,
+/// ready to sign.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
+/// upload ID, a condition value that the template does not take,
+/// [`InvalidPlan::Parts`] for no part or, on AWS, parts out of order,
+/// [`InvalidPlan::PartId`] for a part number or an entity tag that S3
+/// refuses, [`InvalidPlan::Option`] for a size that the template does not
+/// state, and [`InvalidPlan::Template`] for a template of another operation.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_commit_parts(
+    template: &Template,
+    bytes: &[u8],
+    item: &CommitItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let Detail::Commit {
+        condition,
+        checksum,
+        sized,
+    } = template.detail
+    else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_key(item.key)?;
+    validate_upload_id(item.upload_id)?;
+    validate_write_condition(condition, item.condition_value, template.service)?;
+    validate_parts(
+        item.parts.iter().map(|part| (part.number, part.e_tag)),
+        template.service,
+    )?;
+    if sized != item.size.is_some() {
+        return Err(InvalidPlan::Option.into());
+    }
+    let fill = CommitFill {
+        values: S3Values(Values {
+            now: Some(now),
+            key: Some(item.key),
+            condition: item.condition_value,
+            upload_id: Some(item.upload_id),
+            object_size: item.size,
+            body_checksum: checksum,
+            ..Values::default()
+        }),
+        parts: item.parts,
+    };
+    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of a CompleteMultipartUpload and reports what to
+/// do next. S3 answers with 200 before it has finished, and writes the
+/// result into the body: read it with [`accept_commit_parts_body`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. A success status
+/// other than 200, and a failed condition on a commit that carried none,
+/// are [`ResponseFault::Status`].
+pub fn accept_commit_parts_head<'h>(
+    shape: CommitShape,
+    head: ResponseHead<'h>,
+) -> Result<CommitHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(CommitHeadOutcome::NeedResultBody {
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
+        412 => Ok(CommitHeadOutcome::PreconditionFailed),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Reads the result of a CompleteMultipartUpload out of its body, which may
+/// still be an error.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) for a status other than 200, and for a body
+/// that is neither a result nor an error document.
+pub fn accept_commit_parts_body<'h>(
+    shape: CommitShape,
+    head: ResponseHead<'h>,
+    body: &'h mut [u8],
+) -> Result<CommitHeadOutcome<'h>> {
+    if head.status != 200 {
+        return Err(ResponseFault::Status.into());
+    }
+    // A directory bucket reports under status 200 what a general purpose
+    // bucket reports under 404 or 412, so those become the same outcomes.
+    if is_error_document(body) {
+        let kind = body_kind(body);
+        return Ok(match kind {
+            Some(ServiceErrorKind::Precondition) if shape.condition != ConditionKind::None => {
+                CommitHeadOutcome::PreconditionFailed
+            }
+            Some(ServiceErrorKind::NoSuchUpload) => CommitHeadOutcome::NotFound { kind },
+            _ => finish_with_body(failure(head.status, None, head.request_id), kind),
+        });
+    }
+    let e_tag = crate::xml::s3::parts::read_committed(body)?;
+    Ok(CommitHeadOutcome::Committed {
+        meta: ObjectMeta {
+            e_tag: Some(e_tag.as_bytes()),
+            version: head.version,
+            ..ObjectMeta::default()
+        },
+    })
+}
+
+/// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the response body.
+/// S3 reports a failed condition in the head.
+pub fn accept_commit_parts_error_body<'h>(
+    shape: CommitShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> CommitHeadOutcome<'h> {
+    let _ = shape;
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Writes the template of AbortMultipartUploads into `buf`, signed with
+/// `credentials`.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_abort_upload(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let mut request = Request::new(Operation::AbortUpload, Method::Delete, Detail::Upload);
+    request.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the AbortMultipartUpload `item` at `now` from `template` into
+/// `buf`, ready to sign.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
+/// upload ID, and [`InvalidPlan::Template`] for a template of another
+/// operation.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_abort_upload(
+    template: &Template,
+    bytes: &[u8],
+    item: &UploadItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    if template.operation != Operation::AbortUpload {
+        return Err(InvalidPlan::Template.into());
+    }
+    validate_key(item.key)?;
+    validate_upload_id(item.upload_id)?;
+    let values = S3Values(Values {
+        now: Some(now),
+        key: Some(item.key),
+        upload_id: Some(item.upload_id),
+        ..Values::default()
+    });
+    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of an AbortMultipartUpload and reports what S3
+/// did. Pass the service of the template: a [`Service::Compatible`]
+/// service may answer 200 as well as 204.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. Any other success
+/// status is [`ResponseFault::Status`].
+pub fn accept_abort_upload_head<'h>(
+    service: Service,
+    head: ResponseHead<'h>,
+) -> Result<DeleteHeadOutcome<'h>> {
+    let accepts_200 = !service.is_aws();
+    match head.status {
+        204 => Ok(DeleteHeadOutcome::Accepted),
+        200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] of an
+/// AbortMultipartUpload with the response body.
+pub fn accept_abort_upload_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> DeleteHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Writes the template of ListParts into `buf`, signed with `credentials`,
+/// each page of at most `max_parts` parts, or S3's maximum.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_list_parts(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    max_parts: Option<u32>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let mut request = Request::new(Operation::ListParts, Method::Get, Detail::Upload);
+    // SigV4 signs the parameters in the order of their names.
+    request.query[0] =
+        max_parts.map(|count| ("max-parts", ParamValue::Fixed(QueryValue::Number(count))));
+    request.query[1] = Some(("part-number-marker", ParamValue::Optional(Hole::Marker)));
+    request.query[2] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the ListParts page `item` at `now` from `template` into `buf`,
+/// ready to sign. Read the whole response body and pass it to
+/// [`fill_parts`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
+/// upload ID, [`InvalidPlan::Marker`] for an empty marker, and
+/// [`InvalidPlan::Template`] for a template of another operation.
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_list_parts(
+    template: &Template,
+    bytes: &[u8],
+    item: &ListPartsItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    if template.operation != Operation::ListParts {
+        return Err(InvalidPlan::Template.into());
+    }
+    validate_key(item.key)?;
+    validate_upload_id(item.upload_id)?;
+    if item.marker.is_some_and(str::is_empty) {
+        return Err(InvalidPlan::Marker.into());
+    }
+    let values = S3Values(Values {
+        now: Some(now),
+        key: Some(item.key),
+        upload_id: Some(item.upload_id),
+        marker: item.marker,
+        ..Values::default()
+    });
+    encode_template(template, bytes, &values, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of a ListParts and reports what to do next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_list_parts_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(ListPartsHeadOutcome::Parts {
+            meta: ObjectMeta::default(),
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_list_parts_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> ListPartsHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads the parts out of the response body of a ListParts into `into`. The
+/// parts borrow the body, which is decoded in place.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if the page holds more parts than the array,
+/// [`Error::Service`](crate::Error::Service) for an error document, and [`Error::Response`](crate::Error::Response) for a
+/// body that is not a page of parts.
+pub fn fill_parts<'b, E: From<Part<'b>>>(
+    body: &'b mut [u8],
+    into: &mut [E],
+) -> Result<Listing<'b>> {
+    refuse_error_document(body)?;
+    crate::xml::s3::parts::fill_parts(body, into)
 }

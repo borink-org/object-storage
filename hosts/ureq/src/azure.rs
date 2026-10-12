@@ -2,8 +2,8 @@
 
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::{
-    AzureNamespace, Container, DeleteHeadOutcome, DeleteItem, DeleteOptions, GetHeadOutcome,
-    GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem, Listing, Payload, PutHeadOutcome,
+    AzureNamespace, Container, DeleteHeadOutcome, DeleteOptions, GetHeadOutcome, GetItem,
+    GetOptions, ListEntry, ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome,
     PutItem, PutOptions,
 };
 
@@ -96,14 +96,14 @@ pub fn delete(
         azure::prepare_delete(container, token, AzureNamespace::Unknown, &options, buf)
     };
     let (template, bytes) = crate::template(prepare)?;
-    let item = DeleteItem::new(key);
+    let item = ObjectItem::new(key);
     let encode =
         |buf: &mut [u8]| azure::encode_delete(&template, &bytes, &item, &now, buf).map(drop);
     let mut buf = vec![0; crate::required(encode)?];
     let request = azure::encode_delete(&template, &bytes, &item, &now, &mut buf)?;
 
     let (parts, mut body) = crate::send(&request, None)?;
-    let shape = item.shape(&options);
+    let shape = options.shape();
     match azure::accept_delete_head(shape, crate::head(&parts))? {
         DeleteHeadOutcome::Accepted => Ok(()),
         DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(

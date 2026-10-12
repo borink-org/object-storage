@@ -31,19 +31,30 @@
 //! file or a socket.
 //!
 //! A removal has the same three steps too, with [`DeleteOptions`],
-//! [`DeleteItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
+//! [`ObjectItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
 //! [`azure::accept_delete_head`].
 //!
-//! An object can also be written in parts. Stage each part, publish an
-//! ordered list of them with a [`PhysicalCommit`], and read what is staged
-//! with a listing of the parts. Both services take the same commit plan and
-//! answer with the same [`StageHeadOutcome`], [`CommitHeadOutcome`] and
-//! [`ListPartsHeadOutcome`]. They name a part differently. On Azure a part
-//! is a block, named by an ID that you choose: see
-//! [`azure::PhysicalStageBlock`] and [`azure::PhysicalListBlocks`]. On S3 a
-//! part belongs to an upload that S3 creates, and is named by its number and
-//! the entity tag that S3 returned for it: see
-//! [Uploads in parts](s3#uploads-in-parts).
+//! An object can also be written in parts: stage each part, and commit an
+//! ordered list of them. Both services answer with the same
+//! [`StageHeadOutcome`], [`CommitHeadOutcome`] and [`ListPartsHeadOutcome`],
+//! and name a part differently. On Azure a part is a block, named by an ID
+//! that you choose: see [`azure::prepare_stage_block`] and
+//! [`azure::prepare_commit_blocks`]. On S3 a part belongs to an upload that
+//! S3 creates, and is named by its number and the entity tag that S3
+//! returned for it: see [Uploads in parts](s3#uploads-in-parts).
+//!
+//! Every other operation takes the same steps: a copy, with [`CopyOptions`]
+//! and [`CopyItem`], a restore, with [`RestoreOptions`], a removal of many
+//! objects, a change to an object's tags, metadata or tier, and the others
+//! that the [`azure`] and [`s3`] modules list. Each request that names one
+//! object takes an [`ObjectItem`].
+//!
+//! A request whose body this crate writes, such as a list of blocks or a
+//! set of tags, holds the body after its head, and the request borrows it
+//! as its content. On S3 the request signs the body's SHA-256, which
+//! `borink_object_storage_crypto::sigv4::sign` computes, and a checksum of
+//! the body that the template asks for, which you compute over
+//! [`s3::Unsigned::body`] and write in with [`s3::set_body_checksum`].
 //!
 //! S3 works the same way, as the [`s3`] module describes, with one more
 //! step: you sign each request with AWS Signature Version 4. The
@@ -149,8 +160,8 @@
 //! # Metadata and checksums
 //!
 //! To store metadata pairs with an object, put them in
-//! [`PutOptions::metadata`], [`PhysicalCommit::metadata`] or, on S3,
-//! [`s3::PhysicalCreateUpload::metadata`].
+//! [`PutOptions::metadata`], [`azure::CommitOptions::metadata`] or, on S3,
+//! [`s3::CreateUploadOptions::metadata`].
 //! To read them back from a listing, put [`ListInclude::METADATA`] in the
 //! plan and call [`ListEntry::metadata`] on each entry. To read them back
 //! from a head read, pass each response header name to
@@ -172,7 +183,8 @@
 //!
 //! The functions that write a template or a request refuse a buffer that is
 //! too small, and state the exact number of bytes that they need. Pass an
-//! empty buffer to learn it. The methods of [`Blobs`] and [`s3::Objects`]
+//! empty buffer to learn it. The clients [`Blobs`] and [`s3::Objects`],
+//! which write each request whole and stay beside the templates for now,
 //! need header slots as well: call a `*_requirements` function of
 //! [`layered`] first. The functions for an S3 client are in
 //! [`layered::s3`].
@@ -283,10 +295,11 @@ pub use template::WireRequest;
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, ChecksumValue, CommitShape, Condition, ConditionKind, ConditionValue,
-    ContentProperties, CopyShape, CopySource, DeleteItem, DeleteKind, DeleteOptions, DeleteShape,
-    DeleteTarget, EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude,
-    ListItem, ListMarker, ListOptions, Metadata, MetadataPair, Payload, PhysicalCommit,
-    PhysicalCopy, PhysicalDeleteMany, PhysicalRestore, PhysicalSetTags, Properties, PropertySet,
-    PropertyValues, PutItem, PutOptions, PutShape, RangeForm, Ranging, RequestedRange,
-    RestorePriority, Revision, RevisionKind, Tag, TransactionalChecksum, WriteOptions,
+    ContentProperties, CopyItem, CopyOptions, CopyShape, CopySource, DeleteKind, DeleteOptions,
+    DeleteShape, DeleteTarget, EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry,
+    ListInclude, ListItem, ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Payload,
+    PhysicalCommit, PhysicalCopy, PhysicalDeleteMany, PhysicalRestore, PhysicalSetTags, Properties,
+    PropertySet, PropertyValues, PutItem, PutOptions, PutShape, RangeForm, Ranging, RequestedRange,
+    RestoreOptions, RestorePriority, Revision, RevisionKind, StageOptions, Tag,
+    TransactionalChecksum, WriteOptions,
 };

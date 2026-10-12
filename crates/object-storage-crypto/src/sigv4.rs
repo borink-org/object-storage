@@ -166,7 +166,10 @@ pub fn stamp<S: Sha256>(
 
 /// Signs one request and returns it, ready to send.
 ///
-/// `buf` is the buffer that `unsigned` was written into.
+/// `buf` is the buffer that `unsigned` was written into. A request with a
+/// body that the crate wrote signs the SHA-256 of that body, which this
+/// function computes first. Write in a checksum of the body with
+/// `borink_object_storage_proto::s3::set_body_checksum` before you call it.
 ///
 /// # Panics
 ///
@@ -176,8 +179,26 @@ pub fn sign<'r, S: Sha256>(
     unsigned: &Unsigned<'r>,
     buf: &'r mut [u8],
 ) -> WireRequest<'r> {
+    seal_body::<S>(unsigned, buf);
     let mac = stamp.sign(&sha256::<S>(unsigned.canonical(buf)));
     s3::finish(unsigned, buf, &mac)
+}
+
+/// Writes the SHA-256 of the body of `unsigned` into `buf`, where the request
+/// signs it. Does nothing for a request that signs no body of its own.
+///
+/// [`sign`] calls this. Call it yourself before [`sign_batch`].
+///
+/// # Panics
+///
+/// Panics if `buf` is not the buffer that `unsigned` was written into.
+pub fn seal_body<S: Sha256>(unsigned: &Unsigned<'_>, buf: &mut [u8]) {
+    if unsigned.signs_body()
+        && let Some(body) = unsigned.body(buf)
+    {
+        let hash = sha256::<S>(body);
+        s3::set_body_hash(unsigned, buf, &hash);
+    }
 }
 
 /// Computes the signatures of a batch of requests: the SHA-256 of every

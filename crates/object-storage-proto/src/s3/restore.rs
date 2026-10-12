@@ -10,16 +10,22 @@ use crate::checksum::ChecksumKind;
 use crate::common::{encoded_with_body, finish_with_body, push_checksum, validate_revision};
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
+use crate::s3::template::{Operation, Template, Unsigned};
+use crate::s3::{Bucket, Request, encode_object, prepare_request};
 use crate::s3::{
     CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, failed, validate_key,
     validate_s3_checksum, version_parameter,
 };
+use crate::sigv4::Credentials;
+use crate::template::{Body, ParamValue};
 use crate::url;
+use crate::url::QueryValue;
 use crate::{
     ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest, Method, PhysicalRestore,
     RequestedRange, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
     Timestamps, TransactionalChecksum,
 };
+use crate::{ObjectItem, RestoreOptions};
 
 const RESTORE_OPEN: &[u8] = b"<RestoreRequest xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 const RESTORE_CLOSE: &[u8] = b"</RestoreRequest>";
@@ -123,12 +129,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<RestoreHeadOutcome<'h>> {
-        match head.status {
-            202 => Ok(RestoreHeadOutcome::Started),
-            200 => Ok(RestoreHeadOutcome::Readable),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_restore_head(head)
     }
 
     /// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response
@@ -138,21 +139,26 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> RestoreHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_restore_error_body(failure, body)
     }
 }
 
 // The body of a RestoreObject. S3 takes the days only for a storage class
 // that it restores a copy of, so the element is left out without them.
 fn write_restore(out: &mut dyn ByteSink, plan: &PhysicalRestore<'_>) {
+    write_restore_request(out, plan.days, plan.priority);
+}
+
+// The body of a RestoreObject of `days`, at `priority`.
+fn write_restore_request(out: &mut dyn ByteSink, days: Option<u32>, priority: RestorePriority) {
     out.push(RESTORE_OPEN);
-    if let Some(days) = plan.days {
+    if let Some(days) = days {
         out.push(b"<Days>");
         out.push(U64Decimal::new(days.into()).as_bytes());
         out.push(b"</Days>");
     }
     out.push(b"<GlacierJobParameters><Tier>");
-    let tier = match plan.priority {
+    let tier = match priority {
         RestorePriority::Bulk => "Bulk",
         RestorePriority::Standard => "Standard",
         RestorePriority::High => "Expedited",
@@ -160,4 +166,83 @@ fn write_restore(out: &mut dyn ByteSink, plan: &PhysicalRestore<'_>) {
     out.push(tier.as_bytes());
     out.push(b"</Tier></GlacierJobParameters>");
     out.push(RESTORE_CLOSE);
+}
+
+/// Writes the template of RestoreObjects with `options` into `buf`, signed
+/// with `credentials`. Each restores a copy of an archived object, readable
+/// for [`RestoreOptions::days`].
+///
+/// The template holds the body. Sign each request with its SHA-256: see
+/// [`set_body_hash`](crate::s3::set_body_hash).
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Option`] for a directory bucket, which archives
+/// nothing, for a tier, which S3 does not take, and for zero days;
+/// [`InvalidPlan::Revision`] for a snapshot.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_restore(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &RestoreOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    // S3 restores a copy in the object's own storage class, for at least a
+    // day.
+    if bucket.service == Service::AwsDirectory || options.tier.is_some() || options.days == Some(0)
+    {
+        return Err(InvalidPlan::Option.into());
+    }
+    let (days, priority) = (options.days, options.priority);
+    let write = move |out: &mut dyn ByteSink| write_restore_request(out, days, priority);
+    let mut request = Request::object(Operation::Restore, Method::Post, options.revision)?;
+    request.query[0] = Some(("restore", ParamValue::Fixed(QueryValue::Literal(""))));
+    request.with_body(Body::Fixed(&write), options.checksum);
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes the RestoreObject of `item` at `now` from `template` into `buf`,
+/// with its body after the canonical request, ready to sign.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), for a version that is not the
+/// template's kind, for a condition value, and for a template of another
+/// operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_restore(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    encode_object(template, bytes, Operation::Restore, item, now, buf)
+}
+
+/// Reads the response head of a RestoreObject and reports what S3 did:
+/// [`RestoreHeadOutcome::Started`] for 202, and
+/// [`RestoreHeadOutcome::Readable`] for a copy that is restored already.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 and 202 is [`ResponseFault::Status`].
+pub fn accept_restore_head<'h>(head: ResponseHead<'h>) -> Result<RestoreHeadOutcome<'h>> {
+    match head.status {
+        202 => Ok(RestoreHeadOutcome::Started),
+        200 => Ok(RestoreHeadOutcome::Readable),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_restore_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> RestoreHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
 }

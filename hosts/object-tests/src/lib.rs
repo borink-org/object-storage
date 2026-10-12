@@ -12,10 +12,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
     BodyWindow, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties,
-    CopySource, DeleteItem, DeleteKind, DeleteOptions, DeleteTarget, Error as CrateError, GetItem,
-    GetKind, GetOptions, HeaderSpan, LegacyRequest, MetadataPair, ObjectMeta, Payload,
-    PhysicalRestore, Ranging, RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome,
+    CopyItem, CopyOptions, CopySource, DeleteKind, DeleteOptions, DeleteTarget,
+    Error as CrateError, GetItem, GetKind, GetOptions, MetadataPair, ObjectItem, ObjectMeta,
+    Payload, Ranging, RequestedRange, ResponseHead, RestoreHeadOutcome, RestoreOptions,
     RestorePriority, Revision, RevisionKind, ServiceErrorKind, Tag, Timestamps, WireRequest,
+    WriteOptions,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -259,23 +260,35 @@ fn requested_properties(call: &Value) -> ContentProperties<'_> {
 
 /// The restore that a `restore` call names, or `None` for a priority this
 /// adapter does not map.
-fn requested_restore(call: &Value) -> Option<PhysicalRestore<'_>> {
+/// The options and the object of the restore that a call names, with the
+/// checksum of its body that S3 takes, or `None` for a priority that the
+/// adapter does not map.
+pub(crate) fn requested_restore_options(
+    call: &Value,
+    checksum: Option<ChecksumKind>,
+) -> Option<(RestoreOptions<'_>, ObjectItem<'_>)> {
     let priority = match optional_text(call, "priority") {
         None | Some("standard") => RestorePriority::Standard,
         Some("high") => RestorePriority::High,
         Some("bulk") => RestorePriority::Bulk,
         Some(_) => return None,
     };
-    Some(PhysicalRestore {
-        revision: requested_revision(call),
+    let (revision, id) = requested_revision_parts(call);
+    let options = RestoreOptions {
         priority,
         days: call
             .get("days")
             .and_then(Value::as_u64)
             .map(|days| u32::try_from(days).unwrap_or(u32::MAX)),
         tier: optional_text(call, "tier"),
-        ..PhysicalRestore::new(optional_text(call, "key").unwrap_or_default())
-    })
+        revision,
+        checksum,
+    };
+    let item = ObjectItem {
+        revision: id,
+        ..ObjectItem::new(optional_text(call, "key").unwrap_or_default())
+    };
+    Some((options, item))
 }
 
 /// The result of a restore: whether it started, or the object was readable
@@ -334,6 +347,63 @@ fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySo
 }
 
 /// The bytes of the source that a stage from a copy names.
+/// The options and the item of the copy that a call names, or `None` if it
+/// names more than one condition on the target or on the source. The
+/// options borrow `metadata` and `tags`, which the caller read from the
+/// call.
+pub(crate) fn requested_copy<'c>(
+    call: &'c Value,
+    container_field: &str,
+    class_field: &str,
+    metadata: &'c [MetadataPair<'c>],
+    tags: &'c [Tag<'c>],
+) -> Result<Option<(CopyOptions<'c>, CopyItem<'c>)>, AdapterError> {
+    let (Some((condition, condition_value)), Some(source)) = (
+        requested_condition(call),
+        requested_source(call, container_field),
+    ) else {
+        return Ok(None);
+    };
+    let source_range = if call.get("source_range").is_some() {
+        requested_source_range(call)?
+    } else {
+        RequestedRange::Whole
+    };
+    let options = CopyOptions {
+        source_endpoint: source.endpoint,
+        source_container: source.container,
+        source_revision: match source.revision {
+            Some(_) => RevisionKind::Version,
+            None => RevisionKind::Current,
+        },
+        source_condition: source.condition,
+        source_ranging: if source_range == RequestedRange::Whole {
+            Ranging::Whole
+        } else {
+            Ranging::Ranged
+        },
+        condition,
+        // A call that names no metadata or no tags keeps what the service
+        // gives a copy.
+        metadata: call.get("metadata").map(|_| metadata),
+        tags: call.get("tags").map(|_| tags),
+        options: WriteOptions {
+            properties: requested_properties(call),
+            storage_class: optional_text(call, class_field),
+            ..WriteOptions::default()
+        },
+    };
+    let item = CopyItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        source_key: source.key,
+        source_revision: optional_text(call, "source_version"),
+        condition_value,
+        source_condition_value: source.condition_value,
+        source_range,
+    };
+    Ok(Some((options, item)))
+}
+
 fn requested_source_range(call: &Value) -> Result<RequestedRange, AdapterError> {
     range_of(call.get("source_range"))
 }
@@ -354,11 +424,27 @@ fn requested_revision_parts(call: &Value) -> (RevisionKind, Option<&str>) {
     }
 }
 
+/// The object that a call names, with the kinds of its condition and its
+/// revision, or `None` if it names more than the one condition that the
+/// crate takes.
+pub(crate) fn requested_object(
+    call: &Value,
+) -> Option<(ConditionKind, RevisionKind, ObjectItem<'_>)> {
+    let (condition, condition_value) = requested_condition(call)?;
+    let (revision_kind, revision) = requested_revision_parts(call);
+    let item = ObjectItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        condition_value,
+        revision,
+    };
+    Some((condition, revision_kind, item))
+}
+
 /// The options and the item of the removal that a call names, or `None`
 /// if it names more than the one condition that the crate takes.
 pub(crate) fn requested_delete(
     call: &Value,
-) -> Result<Option<(DeleteOptions, DeleteItem<'_>)>, AdapterError> {
+) -> Result<Option<(DeleteOptions, ObjectItem<'_>)>, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
         return Ok(None);
     };
@@ -374,7 +460,7 @@ pub(crate) fn requested_delete(
         condition,
         revision: revision_kind,
     };
-    let item = DeleteItem {
+    let item = ObjectItem {
         key: optional_text(call, "key").unwrap_or_default(),
         condition_value,
         revision,
@@ -477,6 +563,11 @@ pub(crate) fn checksum_value<'a>(
             "the adapter computes a checksum only over a body it holds",
         ));
     };
+    Ok(ChecksumValue::Digest(digest_of(kind, bytes)))
+}
+
+/// The checksum of `kind` of `bytes`.
+pub(crate) fn digest_of(kind: ChecksumKind, bytes: &[u8]) -> borink_object_storage_proto::Digest {
     fn digest<C: borink_object_storage_crypto::Checksum>(
         bytes: &[u8],
     ) -> borink_object_storage_proto::Digest {
@@ -487,14 +578,14 @@ pub(crate) fn checksum_value<'a>(
     use borink_object_storage_crypto::{
         Crc32, Crc32c, Crc64, Md5RustCrypto, Sha1RustCrypto, Sha256RustCrypto,
     };
-    Ok(ChecksumValue::Digest(match kind {
+    match kind {
         ChecksumKind::Md5 => digest::<Md5RustCrypto>(bytes),
         ChecksumKind::Crc64 => digest::<Crc64>(bytes),
         ChecksumKind::Crc32 => digest::<Crc32>(bytes),
         ChecksumKind::Crc32c => digest::<Crc32c>(bytes),
         ChecksumKind::Sha1 => digest::<Sha1RustCrypto>(bytes),
         _ => digest::<Sha256RustCrypto>(bytes),
-    }))
+    }
 }
 
 /// The refusal of a write that names two checksums: a plan holds one, and
@@ -700,14 +791,6 @@ fn current_timestamps() -> Timestamps {
     Timestamps::from_unix(seconds_since_epoch)
 }
 
-// The crate sizes a request as bytes and header slots, and writes into both.
-fn request_buffers(size: RequestSize) -> (Vec<u8>, Vec<HeaderSpan>) {
-    (
-        vec![0; size.bytes],
-        vec![HeaderSpan::default(); size.headers],
-    )
-}
-
 fn send_request(
     context: &AdapterContext,
     request: &impl Outgoing,
@@ -722,21 +805,6 @@ pub(crate) trait Outgoing {
     fn url(&self) -> &str;
     fn fields(&self) -> Vec<(&str, &str)>;
     fn payload(&self) -> Payload<'_>;
-}
-
-impl Outgoing for LegacyRequest<'_> {
-    fn method(&self) -> borink_object_storage_proto::Method {
-        LegacyRequest::method(self)
-    }
-    fn url(&self) -> &str {
-        LegacyRequest::url(self)
-    }
-    fn fields(&self) -> Vec<(&str, &str)> {
-        self.headers().collect()
-    }
-    fn payload(&self) -> Payload<'_> {
-        LegacyRequest::payload(self)
-    }
 }
 
 impl Outgoing for WireRequest<'_> {

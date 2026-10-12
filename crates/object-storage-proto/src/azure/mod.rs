@@ -31,27 +31,50 @@ mod template;
 use crate::checksum::BASE64_LEN;
 use crate::common::{
     checksum_text, condition_header, validate_checksum_item, validate_delimiter, validate_get_item,
-    validate_get_options, validate_put_options, validate_revision_item,
+    validate_get_options, validate_revision_item, validate_template_options,
 };
+use crate::template::{Body, Param, ParamValue};
 use crate::template::{Hole, Values};
-use crate::template::{Param, ParamValue};
 use crate::url::QueryValue;
 use crate::{
-    DeleteItem, DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, PutItem, PutOptions,
+    DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
     Ranging, RevisionKind, WireRequest,
 };
 use template::{Describe, Detail, Field, FieldList, Value};
 pub use template::{Operation, Template};
 mod restore;
 mod tags;
-
-pub use batch::{BatchResult, MAX_BATCH_KEYS};
-pub use blocks::{
-    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, MAX_STAGE_LEN,
-    PhysicalListBlocks, PhysicalStageBlock,
+pub use restore::{
+    accept_restore_error_body, accept_restore_head, encode_restore, prepare_restore,
 };
-pub use copy::PhysicalStageBlockFromUrl;
-pub use tags::{PhysicalSetMetadata, PhysicalSetProperties};
+
+pub use batch::{
+    BatchResult, MAX_BATCH_KEYS, accept_delete_many_error_body, accept_delete_many_head,
+    encode_delete_many, fill_delete_results, prepare_delete_many,
+};
+pub use blocks::{
+    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, CommitItem,
+    CommitOptions, MAX_STAGE_LEN, PhysicalListBlocks, PhysicalStageBlock, StageBlockItem,
+    accept_commit_blocks_error_body, accept_commit_blocks_head, accept_list_blocks_error_body,
+    accept_list_blocks_head, accept_stage_block_error_body, accept_stage_block_head,
+    encode_commit_blocks, encode_list_blocks, encode_stage_block, fill_blocks,
+    prepare_commit_blocks, prepare_list_blocks, prepare_stage_block,
+};
+pub use copy::{
+    AbortCopyItem, PhysicalStageBlockFromUrl, StageBlockFromUrlItem, accept_abort_copy_head,
+    accept_copy_error_body, accept_copy_head, accept_put_from_url_error_body,
+    accept_put_from_url_head, encode_abort_copy, encode_copy, encode_copy_from_url,
+    encode_put_from_url, encode_stage_block_from_url, prepare_abort_copy, prepare_copy,
+    prepare_copy_from_url, prepare_put_from_url, prepare_stage_block_from_url,
+};
+pub use tags::{
+    PhysicalSetMetadata, PhysicalSetProperties, SetMetadataOptions, SetPropertiesOptions,
+    accept_get_tags_error_body, accept_get_tags_head, accept_set_metadata_head,
+    accept_set_properties_head, accept_set_tags_head, accept_set_tier_head,
+    accept_update_error_body, encode_get_tags, encode_set_metadata, encode_set_properties,
+    encode_set_tags, encode_set_tier, fill_tags, prepare_get_tags, prepare_set_metadata,
+    prepare_set_properties, prepare_set_tags, prepare_set_tier,
+};
 
 /// The most recent Azure Storage version that every region supports.
 ///
@@ -396,22 +419,7 @@ impl<'a> Blobs<'a> {
         condition: ConditionKind,
         head: ResponseHead<'h>,
     ) -> Result<SnapshotHeadOutcome<'h>> {
-        match head.status {
-            201 => Ok(SnapshotHeadOutcome::Created {
-                snapshot: text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
-                meta: ObjectMeta {
-                    last_modified: text_header(head.last_modified)?,
-                    ..meta_of(head)
-                },
-            }),
-            412 if condition != ConditionKind::None
-                && named(&head) == Some(ServiceErrorKind::Precondition) =>
-            {
-                Ok(SnapshotHeadOutcome::PreconditionFailed)
-            }
-            200..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_snapshot_head(condition, head)
     }
 
     /// Finishes a [`SnapshotHeadOutcome::NeedErrorBody`] with the response
@@ -425,11 +433,7 @@ impl<'a> Blobs<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> SnapshotHeadOutcome<'h> {
-        let kind = body_kind(body);
-        if names_failed_condition(failure.status, condition != ConditionKind::None, kind) {
-            return SnapshotHeadOutcome::PreconditionFailed;
-        }
-        finish_with_body(failure, kind)
+        accept_snapshot_error_body(condition, failure, body)
     }
 }
 
@@ -640,6 +644,16 @@ pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
     crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
+// The value of `x-ms-delete-snapshots` for a removal of `kind`, or none
+// for the object alone.
+pub(crate) const fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
+    match kind {
+        DeleteKind::Object => None,
+        DeleteKind::ObjectAndSnapshots => Some("include"),
+        DeleteKind::SnapshotsOnly => Some("only"),
+    }
+}
+
 // The length of a name as Azure counts it.
 fn name_units(value: &str) -> usize {
     value.chars().map(char::len_utf16).sum()
@@ -688,6 +702,7 @@ pub fn prepare_get(
         query: &query,
         fields: &fields[..count],
         metadata: &[],
+        body: Body::None,
     };
     template::prepare(
         container,
@@ -739,7 +754,7 @@ pub fn encode_get<'r>(
         revision: item.revision,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
 }
 
 /// Reads the response head of a read and reports what to do next.
@@ -812,7 +827,7 @@ pub fn prepare_put(
     options: &PutOptions<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    validate_put_options(options)?;
+    validate_template_options(&options.options)?;
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -838,6 +853,7 @@ pub fn prepare_put(
         query: &[],
         fields: fields.as_slice(),
         metadata: options.metadata,
+        body: Body::None,
     };
     template::prepare(
         container,
@@ -899,7 +915,7 @@ pub fn encode_put<'r>(
         checksum: checksum_text(item.checksum, &mut text, false),
         ..Values::default()
     };
-    template::encode(template, bytes, &values, item.content, None, buf)
+    template::encode(template, bytes, &values, item.content, buf)
 }
 
 /// Reads the response head of a write and reports what Azure did.
@@ -975,41 +991,20 @@ pub fn prepare_delete(
     if options.revision != RevisionKind::Current && options.kind != DeleteKind::Object {
         return Err(InvalidPlan::Revision.into());
     }
-    let query = [revision_param(options.revision)];
-    let mut fields = FieldList::new();
+    let mut request = ObjectRequest {
+        revision: options.revision,
+        condition: options.condition,
+        ..ObjectRequest::new(Operation::Delete, Method::Delete)
+    };
     // Azure refuses an object with snapshots when the header is absent,
     // which is the outcome a removal of the object alone asks for.
-    match options.kind {
-        DeleteKind::Object => {}
-        DeleteKind::ObjectAndSnapshots => {
-            fields.push(Field::new(
-                "x-ms-delete-snapshots",
-                Value::Bytes(b"include"),
-            ));
-        }
-        DeleteKind::SnapshotsOnly => {
-            fields.push(Field::new("x-ms-delete-snapshots", Value::Bytes(b"only")));
-        }
+    if let Some(snapshots) = delete_snapshots(options.kind) {
+        request.fields.push(Field::new(
+            "x-ms-delete-snapshots",
+            Value::Bytes(snapshots.as_bytes()),
+        ));
     }
-    if let Some(name) = condition_header(options.condition) {
-        fields.push(Field::new(name, Value::Hole(Hole::Condition)));
-    }
-    let describe = Describe {
-        method: Method::Delete,
-        key: true,
-        query: &query,
-        fields: fields.as_slice(),
-        metadata: &[],
-    };
-    template::prepare(
-        container,
-        token,
-        namespace,
-        &describe,
-        Operation::Delete,
-        Detail::Delete(*options),
-        buf,
-    )
+    prepare_object(container, token, namespace, request, buf)
 }
 
 /// Writes the removal `item` at `now` from `template` into `buf`, and
@@ -1031,16 +1026,37 @@ pub fn prepare_delete(
 pub fn encode_delete<'r>(
     template: &Template,
     bytes: &[u8],
-    item: &DeleteItem<'_>,
+    item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    let Detail::Delete(options) = template.detail else {
+    encode_object(template, bytes, Operation::Delete, item, now, buf)
+}
+
+// A request that names one object, described for its template: the
+// parameter `comp` that names the operation, the kinds of revision and
+// condition that each request names, and its fields, metadata and body.
+pub(in crate::azure) fn encode_object<'r>(
+    template: &Template,
+    bytes: &[u8],
+    operation: Operation,
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Object {
+        condition,
+        revision,
+    } = template.detail
+    else {
         return Err(InvalidPlan::Template.into());
     };
+    if template.operation != operation {
+        return Err(InvalidPlan::Template.into());
+    }
     validate_key(item.key, template.namespace)?;
-    validate_revision_item(options.revision, item.revision)?;
-    validate_condition(options.condition, item.condition_value)?;
+    validate_revision_item(revision, item.revision)?;
+    validate_condition(condition, item.condition_value)?;
     let values = Values {
         now: Some(now),
         key: Some(item.key),
@@ -1048,7 +1064,77 @@ pub fn encode_delete<'r>(
         revision: item.revision,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+}
+
+// A request that names one object, described for its template: the
+// parameter `comp` that names the operation, the kinds of revision and
+// condition that each request names, and its fields, metadata and body.
+pub(in crate::azure) struct ObjectRequest<'d> {
+    pub(in crate::azure) operation: Operation,
+    pub(in crate::azure) method: Method,
+    pub(in crate::azure) comp: Option<&'static str>,
+    pub(in crate::azure) revision: RevisionKind,
+    pub(in crate::azure) condition: ConditionKind,
+    pub(in crate::azure) fields: FieldList<'d>,
+    pub(in crate::azure) metadata: &'d [MetadataPair<'d>],
+    pub(in crate::azure) body: Body<'d>,
+}
+
+impl<'d> ObjectRequest<'d> {
+    pub(in crate::azure) const fn new(operation: Operation, method: Method) -> Self {
+        Self {
+            operation,
+            method,
+            comp: None,
+            revision: RevisionKind::Current,
+            condition: ConditionKind::None,
+            fields: FieldList::new(),
+            metadata: &[],
+            body: Body::None,
+        }
+    }
+}
+
+// Writes the template of `request`.
+pub(in crate::azure) fn prepare_object(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    mut request: ObjectRequest<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let query = [
+        request
+            .comp
+            .map(|comp| ("comp", ParamValue::Fixed(QueryValue::Literal(comp)))),
+        revision_param(request.revision),
+    ];
+    if let Some(name) = condition_header(request.condition) {
+        request
+            .fields
+            .push(Field::new(name, Value::Hole(Hole::Condition)));
+    }
+    let describe = Describe {
+        method: request.method,
+        key: true,
+        query: &query,
+        fields: request.fields.as_slice(),
+        metadata: request.metadata,
+        body: request.body,
+    };
+    template::prepare(
+        container,
+        token,
+        namespace,
+        &describe,
+        request.operation,
+        Detail::Object {
+            condition: request.condition,
+            revision: request.revision,
+        },
+        buf,
+    )
 }
 
 /// Reads the response head of a removal and reports what Azure did.
@@ -1095,6 +1181,116 @@ pub fn accept_delete_error_body<'h>(
     let kind = body_kind(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
         return DeleteHeadOutcome::PreconditionFailed;
+    }
+    finish_with_body(failure, kind)
+}
+
+/// What every Snapshot Blob of a template does alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotOptions<'o> {
+    /// The metadata of each snapshot. With no pair, a snapshot has the
+    /// object's metadata; with any, it has these pairs alone. The rules of
+    /// [`PutOptions::metadata`](crate::PutOptions::metadata) apply.
+    pub metadata: &'o [MetadataPair<'o>],
+    /// The condition on the object, as a read carries it.
+    pub condition: ConditionKind,
+}
+
+/// Writes the template of Snapshot Blobs with `options` into `buf`. Each
+/// takes a read-only snapshot of an object as it is now.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a metadata pair that [`prepare_put`]
+/// refuses.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_snapshot(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &SnapshotOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_metadata(options.metadata)?;
+    let mut request = ObjectRequest {
+        comp: Some("snapshot"),
+        condition: options.condition,
+        metadata: options.metadata,
+        ..ObjectRequest::new(Operation::Snapshot, Method::Put)
+    };
+    request
+        .fields
+        .push(Field::new("content-length", Value::Bytes(b"0")));
+    prepare_object(container, token, namespace, request, buf)
+}
+
+/// Writes the Snapshot Blob of `item` at `now` from `template` into `buf`,
+/// and returns it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), for a condition value that the
+/// template's condition does not take, for a revision, and for a template
+/// of another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_snapshot<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    encode_object(template, bytes, Operation::Snapshot, item, now, buf)
+}
+
+/// Reads the response head of a Snapshot Blob and reports what Azure did.
+///
+/// Pass the condition of the template. A 412 is
+/// [`SnapshotHeadOutcome::PreconditionFailed`] only if it carries one and
+/// Azure names a failed condition.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 201 is [`ResponseFault::Status`], and a 201 without
+/// `x-ms-snapshot` is [`ResponseFault::Head`].
+pub fn accept_snapshot_head<'h>(
+    condition: ConditionKind,
+    head: ResponseHead<'h>,
+) -> Result<SnapshotHeadOutcome<'h>> {
+    match head.status {
+        201 => Ok(SnapshotHeadOutcome::Created {
+            snapshot: text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
+            meta: ObjectMeta {
+                last_modified: text_header(head.last_modified)?,
+                ..meta_of(head)
+            },
+        }),
+        412 if condition != ConditionKind::None
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(SnapshotHeadOutcome::PreconditionFailed)
+        }
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`SnapshotHeadOutcome::NeedErrorBody`] with the response body,
+/// as [`accept_get_error_body`] does for a read.
+pub fn accept_snapshot_error_body<'h>(
+    condition: ConditionKind,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> SnapshotHeadOutcome<'h> {
+    let kind = body_kind(body);
+    if names_failed_condition(failure.status, condition != ConditionKind::None, kind) {
+        return SnapshotHeadOutcome::PreconditionFailed;
     }
     finish_with_body(failure, kind)
 }
@@ -1176,6 +1372,7 @@ pub fn prepare_list(
         query: &query,
         fields: &[],
         metadata: &[],
+        body: Body::None,
     };
     template::prepare(
         container,
@@ -1242,7 +1439,7 @@ pub fn encode_list<'r>(
         marker,
         ..Values::default()
     };
-    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
 }
 
 /// Reads the response head of a listing and reports what Azure did.

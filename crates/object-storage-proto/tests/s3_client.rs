@@ -11,9 +11,9 @@ use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteItem, DeleteKind,
-    DeleteOptions, Error, GetHeadOutcome, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions,
-    ResponseFault, ResponseHead, Timestamps,
+    BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions, Error,
+    GetHeadOutcome, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions, ResponseFault,
+    ResponseHead, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -240,7 +240,7 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
 fn an_aws_client_accepts_only_what_aws_answers() {
     let get = borink_object_storage_proto::GetItem::new("k")
         .shape(&borink_object_storage_proto::GetOptions::new());
-    let delete = DeleteItem::new("k").shape(&DeleteOptions::new());
+    let delete = DeleteOptions::new().shape();
     // AWS states the length of every response it serves.
     assert_eq!(
         s3::accept_get_head(Service::Aws, get, head(200, &[])),

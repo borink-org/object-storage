@@ -1069,7 +1069,7 @@ pub struct DeleteShape {
 ///
 /// Pass it to `prepare_delete` of [`azure`](crate::azure) or
 /// [`s3`](crate::s3) to write the template, and describe each removal with
-/// a [`DeleteItem`].
+/// an [`ObjectItem`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeleteOptions {
     /// What each removal takes with it. Azure refuses to remove an object
@@ -1093,14 +1093,24 @@ impl DeleteOptions {
             revision: RevisionKind::Current,
         }
     }
+
+    /// Returns the part of every removal of these options that a response
+    /// is read against.
+    pub const fn shape(&self) -> DeleteShape {
+        DeleteShape {
+            kind: self.kind,
+            condition: self.condition,
+        }
+    }
 }
 
-/// What one removal of a template removes.
+/// One request that names one object: a removal, or a change to what the
+/// service stores about the object.
 ///
 /// Build this for each request and let it go afterwards: it borrows the key
-/// and the values it names. To read the response, keep [`Self::shape`].
+/// and the values it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeleteItem<'i> {
+pub struct ObjectItem<'i> {
     /// The object key, before percent-encoding.
     ///
     /// Each service refuses some keys: see
@@ -1109,28 +1119,18 @@ pub struct DeleteItem<'i> {
     /// What the template's precondition compares against: see
     /// [`ConditionKind`]. Present exactly when the template carries one.
     pub condition_value: Option<ConditionValue<'i>>,
-    /// The snapshot or version to remove, as the service wrote it. Present
-    /// exactly when the template's [`DeleteOptions::revision`] names one,
-    /// and never empty.
+    /// The snapshot or version that the request names, as the service wrote
+    /// it. Present exactly when the template names one, and never empty.
     pub revision: Option<&'i str>,
 }
 
-impl<'i> DeleteItem<'i> {
-    /// Creates a removal of `key`.
+impl<'i> ObjectItem<'i> {
+    /// Creates a request that names `key`, as it is now.
     pub const fn new(key: &'i str) -> Self {
         Self {
             key,
             condition_value: None,
             revision: None,
-        }
-    }
-
-    /// Returns the part of this removal that holds no borrows, for a
-    /// template with `options`.
-    pub const fn shape(&self, options: &DeleteOptions) -> DeleteShape {
-        DeleteShape {
-            kind: options.kind,
-            condition: options.condition,
         }
     }
 }
@@ -1190,6 +1190,119 @@ impl<'a> CopySource<'a> {
             revision: None,
             condition: ConditionKind::None,
             condition_value: None,
+        }
+    }
+}
+
+/// What every staged part of a template does alike: an Azure block, or a
+/// part of an S3 upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StageOptions {
+    /// The checksum of each part that the service checks, or [`None`].
+    /// Azure takes an MD5 or a CRC64, and S3 any kind.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+/// What every restore of a template does alike: an S3 RestoreObject, or the
+/// rehydration of an Azure blob out of the `Archive` tier.
+///
+/// Describe each restore with an [`ObjectItem`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreOptions<'o> {
+    /// How soon the service restores each object. Azure takes no
+    /// [`RestorePriority::Bulk`].
+    pub priority: RestorePriority,
+    /// How many days S3 keeps each restored copy, at least one, or
+    /// [`None`] for a storage class that S3 restores for good. Azure
+    /// rehydrates for good, and takes none.
+    pub days: Option<u32>,
+    /// The online tier that Azure rehydrates each blob to, such as `Hot`.
+    /// S3 restores a copy in the object's own class, and takes none.
+    pub tier: Option<&'o str>,
+    /// Whether each restore names a snapshot or a version of its object.
+    pub revision: RevisionKind,
+    /// The checksum of the body of each S3 request. Azure sends no body,
+    /// and takes none.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+/// Where the sources of a template's copies are, and what every copy does
+/// alike.
+///
+/// Pass it to the `prepare_*` function of a copy, and describe each copy
+/// with a [`CopyItem`]. A copy that stages a part reads only the source
+/// fields, and refuses any other that is not the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyOptions<'o> {
+    /// The origin of another Azure account that holds the sources, such as
+    /// `https://other.blob.core.windows.net`, or [`None`] for the template's
+    /// own. S3 names a bucket of any account by its name alone, and refuses
+    /// one with [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
+    pub source_endpoint: Option<&'o str>,
+    /// The container or bucket that holds the sources, or [`None`] for the
+    /// template's own.
+    pub source_container: Option<&'o str>,
+    /// Whether each copy names a snapshot or a version of its source.
+    pub source_revision: RevisionKind,
+    /// The condition on each source. Each copy names what it compares
+    /// against.
+    pub source_condition: ConditionKind,
+    /// Whether each copy that stages a part names the bytes of the source it
+    /// copies. A whole copy takes [`Ranging::Whole`].
+    pub source_ranging: Ranging,
+    /// The condition on each target.
+    pub condition: ConditionKind,
+    /// The metadata pairs of each copy, or [`None`] to keep the source's.
+    pub metadata: Option<&'o [MetadataPair<'o>]>,
+    /// The tags of each copy, or [`None`] to keep the source's.
+    pub tags: Option<&'o [Tag<'o>]>,
+    /// What each copy stores beside its metadata and tags. A copy takes no
+    /// checksum, and names its tags in [`Self::tags`].
+    pub options: WriteOptions<'o>,
+}
+
+impl CopyOptions<'_> {
+    /// Returns the part of every copy of these options that a response is
+    /// read against.
+    pub const fn shape(&self) -> CopyShape {
+        CopyShape {
+            condition: self.condition,
+            source_condition: self.source_condition,
+        }
+    }
+}
+
+/// One copy of a template, from the object `source_key` to the object `key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyItem<'i> {
+    /// The key of the target, under the rules of
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// The key of the source, under the same rules.
+    pub source_key: &'i str,
+    /// The snapshot or version of the source. Present exactly when the
+    /// template's [`CopyOptions::source_revision`] names one.
+    pub source_revision: Option<&'i str>,
+    /// What the template's condition on the target compares against.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// What the template's condition on the source compares against.
+    pub source_condition_value: Option<ConditionValue<'i>>,
+    /// The bytes of the source that a staged part copies: a bounded range
+    /// exactly when the template's [`CopyOptions::source_ranging`] is
+    /// [`Ranging::Ranged`], and [`RequestedRange::Whole`] otherwise.
+    pub source_range: RequestedRange,
+}
+
+impl<'i> CopyItem<'i> {
+    /// Creates a copy of all of `source_key`, as it is now, to `key`.
+    pub const fn new(key: &'i str, source_key: &'i str) -> Self {
+        Self {
+            key,
+            source_key,
+            source_revision: None,
+            condition_value: None,
+            source_condition_value: None,
+            source_range: RequestedRange::Whole,
         }
     }
 }

@@ -184,36 +184,28 @@
 //! An object longer than [`MAX_PUT_LEN`], or one that you send as it
 //! arrives, is written in parts:
 //!
-//! 1. Create an upload with [`Objects::encode_create_upload`], and read its
-//!    ID out of the answer with [`Objects::read_upload_id`]. The metadata of
-//!    the object goes into this request.
-//! 2. Stage each part with [`Objects::encode_stage_part`], under a number
-//!    from 1, in any order and at once if you like. Keep the entity tag that
-//!    [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged) carries
-//!    for each. On AWS, every part but the last holds at least
+//! 1. Create an upload with [`prepare_create_upload`] and
+//!    [`encode_create_upload`], and read its ID out of the answer with
+//!    [`read_upload_id`]. The metadata of the object goes into this request.
+//! 2. Stage each part with [`prepare_stage_part`] and [`encode_stage_part`],
+//!    under a number from 1, in any order and at once if you like. Keep the
+//!    entity tag that [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged)
+//!    carries for each. On AWS, every part but the last holds at least
 //!    [`MIN_PART_LEN`] bytes.
-//! 3. Commit the parts with [`Objects::encode_commit_parts`], which takes a
-//!    [`PhysicalCommit`](crate::PhysicalCommit).
-//!    S3 answers with status 200 before it has finished, and writes the
-//!    result into the body, which may still be an error. Read it with
-//!    [`Objects::accept_commit_parts_body`].
+//! 3. Commit the parts with [`prepare_commit_parts`] and
+//!    [`encode_commit_parts`]. The request's body is the list of parts, whose
+//!    SHA-256 it signs. S3 answers with status 200 before it has finished,
+//!    and writes the result into the body, which may still be an error. Read
+//!    it with [`accept_commit_parts_body`].
 //!
-//! [`Objects::encode_list_parts`] reads the parts that an upload holds, to
-//! resume it. [`Objects::encode_abort_upload`] ends an upload without an
-//! object. An upload that is neither committed nor aborted keeps its parts,
-//! and AWS bills them.
+//! [`encode_list_parts`] reads the parts that an upload holds, to resume it.
+//! [`encode_abort_upload`] ends an upload without an object. An upload that
+//! is neither committed nor aborted keeps its parts, and AWS bills them.
 //!
 //! ```
-//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects, PayloadHash};
-//! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
-//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
-//! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
-//! use borink_object_storage_proto::s3::{PartRef, PhysicalCreateUpload, PhysicalStagePart};
-//! use borink_object_storage_proto::{
-//!     CommitHeadOutcome, HeaderSpan, Payload, PhysicalCommit, ResponseHead, StageHeadOutcome,
-//!     Timestamps, layered,
-//! };
+//! use borink_object_storage_proto::s3::{self, Bucket, CommitItem, CommitOptions, PartRef, Service};
+//! use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
+//! use borink_object_storage_proto::{CommitHeadOutcome, ResponseHead, Timestamps};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let bucket = Bucket::new(
@@ -221,49 +213,16 @@
 //! # )?;
 //! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! # let now = Timestamps::from_unix(1_787_400_000);
-//! # let objects = Objects::new(bucket, credentials, SHA256);
-//! let create = PhysicalCreateUpload::new("large.bin");
-//! let size = layered::s3::create_upload_requirements(&objects, &create, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_create_upload(&mut buffer, &mut headers, &create, &now)?;
-//! assert_eq!(
-//!     request.url(),
-//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploads="
-//! );
-//! let mut body = Vec::from(
-//!     b"<InitiateMultipartUploadResult><Bucket>objects</Bucket><Key>large.bin</Key>\
-//!       <UploadId>VXBsb2FkSUQ</UploadId></InitiateMultipartUploadResult>"
-//!         .as_slice(),
-//! );
-//! let upload_id = String::from(objects.read_upload_id(&mut body)?);
+//! let options = CommitOptions::default();
+//! let mut template = vec![0; 1024];
+//! let commits = s3::prepare_commit_parts(&bucket, &credentials, &options, &mut template)?;
 //!
-//! let stage = PhysicalStagePart::new("large.bin", &upload_id, 1);
-//! let part = Payload::Slice(b"the only part");
-//! let hash = PayloadHash::Compute;
-//! let size = layered::s3::stage_part_requirements(&objects, &stage, part, hash, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_stage_part(&mut buffer, &mut headers, &stage, part, hash, &now)?;
+//! let parts = [PartRef { number: 1, e_tag: b"\"e1\"" }];
+//! let commit = CommitItem::new("large.bin", "VXBsb2FkSUQ", &parts);
+//! let mut buffer = vec![0; 2048];
+//! let unsigned = s3::encode_commit_parts(&commits, &template, &commit, &now, &mut buffer)?;
 //! assert_eq!(
-//!     request.url(),
-//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?partNumber=1&uploadId=VXBsb2FkSUQ"
-//! );
-//! let head = ResponseHead::from_headers(200, [("ETag", b"\"e1\"".as_slice())]);
-//! let StageHeadOutcome::Staged { e_tag: Some(e_tag) } = objects.accept_stage_part_head(head)?
-//! else {
-//!     panic!("S3 staged no part");
-//! };
-//!
-//! let commit = PhysicalCommit::new("large.bin");
-//! let parts = [PartRef { number: 1, e_tag }];
-//! let size = layered::s3::commit_parts_requirements(&objects, &commit, &upload_id, &parts, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request =
-//!     objects.encode_commit_parts(&mut buffer, &mut headers, &commit, &upload_id, &parts, &now)?;
-//! assert_eq!(
-//!     request.payload().bytes(),
+//!     unsigned.body(&buffer),
 //!     Some(
 //!         b"<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 //!           <Part><PartNumber>1</PartNumber><ETag>\"e1\"</ETag></Part>\
@@ -271,16 +230,25 @@
 //!             .as_slice()
 //!     )
 //! );
+//! // `borink_object_storage_crypto::sigv4::sign` writes in the body's SHA-256
+//! // with `s3::set_body_hash`, and then signs.
+//! # s3::set_body_hash(&unsigned, &mut buffer, &[0; 32]);
+//! let request = s3::finish(&unsigned, &mut buffer, &[0; 32]);
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploadId=VXBsb2FkSUQ"
+//! );
+//!
 //! let head = ResponseHead::new(200);
-//! let outcome = objects.accept_commit_parts_head(commit.shape(), head)?;
+//! let shape = commit.shape(&options);
+//! let outcome = s3::accept_commit_parts_head(shape, head)?;
 //! assert!(matches!(outcome, CommitHeadOutcome::NeedResultBody { .. }));
 //! let mut body = Vec::from(
 //!     b"<CompleteMultipartUploadResult><Key>large.bin</Key>\
 //!       <ETag>&quot;c0-1&quot;</ETag></CompleteMultipartUploadResult>"
 //!         .as_slice(),
 //! );
-//! let CommitHeadOutcome::Committed { meta } =
-//!     objects.accept_commit_parts_body(commit.shape(), head, &mut body)?
+//! let CommitHeadOutcome::Committed { meta } = s3::accept_commit_parts_body(shape, head, &mut body)?
 //! else {
 //!     panic!("S3 committed no object");
 //! };
@@ -299,13 +267,14 @@
 //! It serves its objects to requests signed with the credentials of a
 //! session, which it hands out itself:
 //!
-//! 1. Encode a CreateSession with [`Objects::encode_create_session`], signed
-//!    with your own credentials, and send it.
-//! 2. Read the head with [`Objects::accept_create_session_head`], and the
-//!    body with [`Objects::read_session`].
-//! 3. Encode the requests to the objects with the client that
-//!    [`Objects::with_session`] returns. Each carries the token in
-//!    `x-amz-s3session-token`.
+//! 1. Write a CreateSession with [`prepare_create_session`] and
+//!    [`encode_create_session`], signed with your own credentials, and send
+//!    it.
+//! 2. Read the head with [`accept_create_session_head`], and the body with
+//!    [`read_session`].
+//! 3. Write the templates of the requests to the objects with the
+//!    credentials that [`Session::credentials`] returns. Each request
+//!    carries the token in `x-amz-s3session-token`.
 //!
 //! AWS ends a session five minutes after it creates it, so create the next
 //! one before [`Session::expires_at`].
@@ -323,15 +292,15 @@
 //!   than refused.
 //! - A commit of parts reports most errors under status 200, such as
 //!   `NoSuchUpload` and `PreconditionFailed`.
-//!   [`Objects::accept_commit_parts_body`] reads them as the outcomes that
+//!   [`accept_commit_parts_body`] reads them as the outcomes that
 //!   a general purpose bucket answers with. A directory bucket refuses a
 //!   commit whose part numbers are not consecutive, such as 1 and 3, with
 //!   `InvalidPartOrder`. The client sends such a commit as given.
-//! - A copy, [`Objects::encode_copy`] or [`Objects::encode_stage_part_copy`],
-//!   is authorized by your own credentials, not by a session's: AWS refuses
-//!   the credentials of a session for it. Encode it with the client that
-//!   you asked for the session, which signs it for `s3express` too. A
-//!   client that holds a session refuses it with [`InvalidPlan::Option`].
+//! - A copy, [`prepare_copy`] or [`prepare_stage_part_copy`], is authorized
+//!   by your own credentials, not by a session's: AWS refuses the
+//!   credentials of a session for it. Write its template with your own
+//!   credentials, which sign it for `s3express` too. A template written
+//!   with a session's credentials is refused with [`InvalidPlan::Option`].
 //!
 //! # Content that is not signed
 //!
@@ -375,25 +344,49 @@ mod template;
 use crate::checksum::BASE64_LEN;
 use crate::common::{
     checksum_text, validate_checksum_item, validate_delimiter, validate_get_item,
-    validate_get_options, validate_put_options, validate_revision_item, validate_revision_kind,
+    validate_get_options, validate_revision_item, validate_revision_kind,
+    validate_template_options,
 };
-use crate::template::ParamValue;
+use crate::template::{Body, ParamValue};
 use crate::template::{Hole, Values};
 use crate::url::QueryValue;
 use crate::{
-    DeleteItem, DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, PutItem, PutOptions,
+    DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
     Ranging, RevisionKind,
 };
-pub use batch::{DeleteResult, MAX_DELETE_KEYS};
-pub use copy::PhysicalStagePartCopy;
-pub use parts::{
-    CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
-    PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
+pub use batch::{
+    DeleteResult, MAX_DELETE_KEYS, accept_delete_many_error_body, accept_delete_many_head,
+    encode_delete_many, fill_delete_results, prepare_delete_many,
 };
-use template::{Describe, Detail, Field, S3Values, Value};
+pub use copy::{
+    PhysicalStagePartCopy, StagePartCopyItem, accept_copy_body, accept_copy_error_body,
+    accept_copy_head, accept_stage_part_copy_body, accept_stage_part_copy_head, encode_copy,
+    encode_stage_part_copy, prepare_copy, prepare_stage_part_copy,
+};
+pub use parts::{
+    CommitItem, CommitOptions, CreateUploadHeadOutcome, CreateUploadOptions, ListPartsItem,
+    MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef, PhysicalAbortUpload,
+    PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart, StagePartItem, UploadItem,
+    accept_abort_upload_error_body, accept_abort_upload_head, accept_commit_parts_body,
+    accept_commit_parts_error_body, accept_commit_parts_head, accept_create_upload_error_body,
+    accept_create_upload_head, accept_list_parts_error_body, accept_list_parts_head,
+    accept_stage_part_error_body, accept_stage_part_head, encode_abort_upload, encode_commit_parts,
+    encode_create_upload, encode_list_parts, encode_stage_part, fill_parts, prepare_abort_upload,
+    prepare_commit_parts, prepare_create_upload, prepare_list_parts, prepare_stage_part,
+    read_upload_id,
+};
+pub use restore::{
+    accept_restore_error_body, accept_restore_head, encode_restore, prepare_restore,
+};
+pub use tags::{
+    accept_get_tagging_error_body, accept_get_tagging_head, accept_put_tagging_head,
+    accept_update_error_body, encode_get_tagging, encode_put_tagging, fill_tags,
+    prepare_get_tagging, prepare_put_tagging,
+};
+use template::{Describe, Detail, Field, FieldList, S3Values, Value};
 pub use template::{
-    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, finish, signing_key,
-    string_to_sign_prefix,
+    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, finish, set_body_checksum,
+    set_body_hash, signing_key, string_to_sign_prefix,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
@@ -1260,13 +1253,7 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<SessionHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(SessionHeadOutcome::Session {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_create_session_head(head)
     }
 
     /// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response
@@ -1281,7 +1268,7 @@ impl<'a> Objects<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> SessionHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_create_session_error_body(failure, body)
     }
 
     /// Reads the credentials out of the response body of a CreateSession.
@@ -1298,8 +1285,7 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::Service`] if `body` is an error document, which S3
     /// can send under status 200.
     pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
-        refuse_error_document(body)?;
-        crate::xml::s3::read_session(body)
+        read_session(body)
     }
 
     /// Returns a client that signs its requests with the credentials of a
@@ -1719,6 +1705,7 @@ pub fn prepare_get(
         metadata: &[],
         content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
         unsigned: &[],
+        body: Body::None,
     };
     template::prepare(
         bucket,
@@ -1811,87 +1798,37 @@ pub fn prepare_put(
     buf: &mut [u8],
 ) -> Result<Template> {
     let service = bucket.service;
-    validate_put_options(options)?;
+    validate_template_options(&options.options)?;
     validate_metadata(options.metadata, service)?;
     validate_stored(&options.options, service)?;
     let aws = matches!(service, Service::Aws | Service::AwsDirectory);
     if aws && options.condition.is_date() {
         return Err(InvalidPlan::Condition.into());
     }
-    let mut signed = [Field::new("", Value::Formatted(b"")); 10];
-    let mut count = 0;
-    let mut push = |field| {
-        signed[count] = field;
-        count += 1;
-    };
-    for (name, value) in options.options.properties.iter() {
-        push(Field::new(name, Value::Bytes(value.as_bytes())));
-    }
-    if let Some(class) = options.options.storage_class {
-        push(Field::new(
-            "x-amz-storage-class",
-            Value::Bytes(class.as_bytes()),
-        ));
-    }
-    if !options.options.tags.is_empty() {
-        push(Field::new(
-            "x-amz-tagging",
-            Value::Tags(options.options.tags),
-        ));
-    }
-    if let Some(name) = condition_header(options.condition) {
-        push(Field::new(
-            name,
-            Value::Hole(Hole::Condition, Hole::SignedCondition),
-        ));
-    }
-    let mut unsigned = [Field::new(
-        "content-length",
-        Value::Hole(Hole::ContentLength, Hole::ContentLength),
-    ); 2];
-    let mut unsigned_count = 1;
-    match options.checksum {
-        None => {}
-        // S3 reads an MD5 from `Content-MD5`, which is not signed.
-        Some(ChecksumKind::Md5) => {
-            unsigned[1] = Field::new("content-md5", Value::Hole(Hole::Checksum, Hole::Checksum));
-            unsigned_count = 2;
-        }
-        Some(ChecksumKind::Crc64) => {
-            push(Field::new(
-                CRC64_HEADER,
-                Value::Hole(Hole::Checksum, Hole::Checksum),
-            ));
-        }
-        Some(kind) => push(Field::new(
-            kind.header(),
-            Value::Hole(Hole::Checksum, Hole::Checksum),
-        )),
-    }
-    let describe = Describe {
-        method: Method::Put,
-        key: true,
-        query: &[],
-        signed: &signed[..count],
-        metadata: options.metadata,
-        content_sha256: match signing {
-            PayloadSigning::Unsigned => Value::Formatted(UNSIGNED_PAYLOAD.as_bytes()),
-            PayloadSigning::Signed => Value::Hole(Hole::PayloadHash, Hole::PayloadHash),
-        },
-        unsigned: &unsigned[..unsigned_count],
-    };
-    template::prepare(
-        bucket,
-        credentials,
-        &describe,
+    let mut request = Request::new(
         Operation::Put,
+        Method::Put,
         Detail::Put {
             condition: options.condition,
             checksum: options.checksum,
             signing,
         },
-        buf,
-    )
+    );
+    push_stored(&mut request.signed, &options.options);
+    request.condition(options.condition);
+    request.unsigned.push(Field::new(
+        "content-length",
+        Value::Hole(Hole::ContentLength, Hole::ContentLength),
+    ));
+    if let Some(kind) = options.checksum {
+        request.checksum(kind, Hole::Checksum);
+    }
+    request.metadata = options.metadata;
+    request.content_sha256 = match signing {
+        PayloadSigning::Unsigned => Value::Formatted(UNSIGNED_PAYLOAD.as_bytes()),
+        PayloadSigning::Signed => Value::Hole(Hole::PayloadHash, Hole::PayloadHash),
+    };
+    prepare_request(bucket, credentials, &request, buf)
 }
 
 /// Writes the whole-object write `item` at `now` from `template` into
@@ -2013,9 +1950,8 @@ pub fn prepare_delete(
     if options.kind != DeleteKind::Object {
         return Err(InvalidPlan::Option.into());
     }
-    validate_revision_kind(options.revision, false)?;
-    let if_match_only = bucket.service.is_aws();
-    if if_match_only
+    // AWS removes on `If-Match` alone.
+    if bucket.service.is_aws()
         && !matches!(
             options.condition,
             ConditionKind::None | ConditionKind::IfMatch
@@ -2023,31 +1959,10 @@ pub fn prepare_delete(
     {
         return Err(InvalidPlan::Condition.into());
     }
-    let query = [match options.revision {
-        RevisionKind::Version => Some(("versionId", ParamValue::Hole(Hole::Revision))),
-        RevisionKind::Current | RevisionKind::Snapshot => None,
-    }];
-    let condition = condition_header(options.condition)
-        .map(|name| Field::new(name, Value::Hole(Hole::Condition, Hole::SignedCondition)));
-    let describe = Describe {
-        method: Method::Delete,
-        key: true,
-        query: &query,
-        signed: condition.as_slice(),
-        metadata: &[],
-        content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
-        unsigned: &[],
-    };
-    template::prepare(
-        bucket,
-        credentials,
-        &describe,
-        Operation::Delete,
-        Detail::Delete(*options),
-        buf,
-    )
+    let mut request = Request::object(Operation::Delete, Method::Delete, options.revision)?;
+    request.condition(options.condition);
+    prepare_request(bucket, credentials, &request, buf)
 }
-
 /// Writes the removal `item` at `now` from `template` into `buf`, ready
 /// to sign.
 ///
@@ -2070,26 +1985,12 @@ pub fn prepare_delete(
 pub fn encode_delete(
     template: &Template,
     bytes: &[u8],
-    item: &DeleteItem<'_>,
+    item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
-    let Detail::Delete(options) = template.detail else {
-        return Err(InvalidPlan::Template.into());
-    };
-    validate_key(item.key)?;
-    validate_revision_item(options.revision, item.revision)?;
-    validate_condition(options.condition, item.condition_value)?;
-    let values = S3Values(Values {
-        now: Some(now),
-        key: Some(item.key),
-        condition: item.condition_value,
-        revision: item.revision,
-        ..Values::default()
-    });
-    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+    encode_object(template, bytes, Operation::Delete, item, now, buf)
 }
-
 /// Reads the response head of a removal and reports what S3 did.
 ///
 /// Pass the service of the template and the [`DeleteShape`] of the
@@ -2214,6 +2115,7 @@ pub fn prepare_list(
         metadata: &[],
         content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
         unsigned: &[],
+        body: Body::None,
     };
     template::prepare(
         bucket,
@@ -2974,6 +2876,282 @@ fn write_metadata_value(out: &mut dyn ByteSink, value: &str, service: Service) {
 // name.
 fn token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+// One S3 request, described for its template: the shared form of every
+// template's request, which `prepare_request` writes.
+pub(in crate::s3) struct Request<'d> {
+    pub(in crate::s3) operation: Operation,
+    pub(in crate::s3) method: Method,
+    // Whether the path ends in the request's key, or names the bucket.
+    pub(in crate::s3) key: bool,
+    // The query, in the order of the parameters' names.
+    pub(in crate::s3) query: [crate::template::Param<'d>; 4],
+    pub(in crate::s3) signed: FieldList<'d>,
+    pub(in crate::s3) unsigned: FieldList<'d>,
+    pub(in crate::s3) metadata: &'d [MetadataPair<'d>],
+    pub(in crate::s3) content_sha256: Value<'d>,
+    pub(in crate::s3) body: Body<'d>,
+    pub(in crate::s3) detail: Detail,
+}
+
+impl<'d> Request<'d> {
+    // A request of `operation` with no content.
+    pub(in crate::s3) const fn new(operation: Operation, method: Method, detail: Detail) -> Self {
+        Self {
+            operation,
+            method,
+            key: true,
+            query: [None; 4],
+            signed: FieldList::new(),
+            unsigned: FieldList::new(),
+            metadata: &[],
+            content_sha256: Value::Formatted(EMPTY_SHA256.as_bytes()),
+            body: Body::None,
+            detail,
+        }
+    }
+
+    // A request of `operation` that names one object, and a version of it
+    // when `revision` says so. S3 keeps no snapshots.
+    pub(in crate::s3) fn object(
+        operation: Operation,
+        method: Method,
+        revision: RevisionKind,
+    ) -> Result<Self> {
+        validate_revision_kind(revision, false)?;
+        let mut request = Self::new(
+            operation,
+            method,
+            Detail::Object {
+                condition: ConditionKind::None,
+                revision,
+                checksum: None,
+            },
+        );
+        request.query[3] = match revision {
+            RevisionKind::Version => Some(("versionId", ParamValue::Hole(Hole::Revision))),
+            RevisionKind::Current | RevisionKind::Snapshot => None,
+        };
+        Ok(request)
+    }
+
+    // Adds the condition of the kind `condition` on the target, which each
+    // request fills.
+    pub(in crate::s3) fn condition(&mut self, condition: ConditionKind) {
+        if let Some(name) = condition_header(condition) {
+            self.signed.push(Field::new(
+                name,
+                Value::Hole(Hole::Condition, Hole::SignedCondition),
+            ));
+        }
+        if let Detail::Object {
+            condition: kind, ..
+        } = &mut self.detail
+        {
+            *kind = condition;
+        }
+    }
+
+    // Adds the field of a checksum of `kind` that `hole` fills. S3 reads an
+    // MD5 from `Content-MD5`, which it does not sign, and every other kind
+    // from its own `x-amz-checksum-` field, which it signs.
+    pub(in crate::s3) fn checksum(&mut self, kind: ChecksumKind, hole: Hole) {
+        let name = match kind {
+            ChecksumKind::Md5 => "content-md5",
+            ChecksumKind::Crc64 => CRC64_HEADER,
+            kind => kind.header(),
+        };
+        let field = Field::new(name, Value::Hole(hole, hole));
+        match kind {
+            ChecksumKind::Md5 => self.unsigned.push(field),
+            _ => self.signed.push(field),
+        }
+    }
+
+    // Gives the request a body that this crate writes: its length, its
+    // SHA-256, which the request signs, and a checksum of `checksum`'s kind.
+    pub(in crate::s3) fn with_body(&mut self, body: Body<'d>, checksum: Option<ChecksumKind>) {
+        self.body = body;
+        self.content_sha256 = Value::Hole(Hole::BodyHash, Hole::BodyHash);
+        self.unsigned.push(Field::new(
+            "content-length",
+            Value::Hole(Hole::BodyLength, Hole::BodyLength),
+        ));
+        if let Some(kind) = checksum {
+            self.checksum(kind, Hole::BodyChecksum);
+        }
+        if let Detail::Object { checksum: kind, .. } = &mut self.detail {
+            *kind = checksum;
+        }
+    }
+}
+
+// Writes the template of `request` into `buf`.
+pub(in crate::s3) fn prepare_request(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    request: &Request<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let describe = Describe {
+        method: request.method,
+        key: request.key,
+        query: &request.query,
+        signed: request.signed.as_slice(),
+        metadata: request.metadata,
+        content_sha256: request.content_sha256,
+        unsigned: request.unsigned.as_slice(),
+        body: request.body,
+    };
+    template::prepare(
+        bucket,
+        credentials,
+        &describe,
+        request.operation,
+        request.detail,
+        buf,
+    )
+}
+
+// Adds the fields of what a write stores beside its content and its
+// metadata: the content properties, the storage class and the tags.
+pub(in crate::s3) fn push_stored<'d>(fields: &mut FieldList<'d>, options: &WriteOptions<'d>) {
+    for (name, value) in options.properties.iter() {
+        fields.push(Field::new(name, Value::Bytes(value.as_bytes())));
+    }
+    if let Some(class) = options.storage_class {
+        fields.push(Field::new(
+            "x-amz-storage-class",
+            Value::Bytes(class.as_bytes()),
+        ));
+    }
+    if !options.tags.is_empty() {
+        fields.push(Field::new("x-amz-tagging", Value::Tags(options.tags)));
+    }
+}
+
+// Writes the request of `operation` that names the one object `item`, from
+// a template of that operation.
+pub(in crate::s3) fn encode_object(
+    template: &Template,
+    bytes: &[u8],
+    operation: Operation,
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let Detail::Object {
+        condition,
+        revision,
+        checksum,
+    } = template.detail
+    else {
+        return Err(InvalidPlan::Template.into());
+    };
+    if template.operation != operation {
+        return Err(InvalidPlan::Template.into());
+    }
+    validate_key(item.key)?;
+    validate_revision_item(revision, item.revision)?;
+    validate_condition(condition, item.condition_value)?;
+    let values = S3Values(Values {
+        now: Some(now),
+        key: Some(item.key),
+        condition: item.condition_value,
+        revision: item.revision,
+        body_checksum: checksum,
+        ..Values::default()
+    });
+    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+}
+
+/// Writes the template of CreateSessions into `buf`, signed with
+/// `credentials`, which ask the [directory bucket](self#directory-buckets)
+/// `bucket` for the credentials of a session.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Option`] unless the bucket is of
+/// [`Service::AwsDirectory`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_create_session(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if bucket.service != Service::AwsDirectory {
+        return Err(InvalidPlan::Option.into());
+    }
+    let mut request =
+        Request::object(Operation::CreateSession, Method::Get, RevisionKind::Current)?;
+    request.key = false;
+    request.query[0] = Some(("session", ParamValue::Fixed(QueryValue::Literal(""))));
+    prepare_request(bucket, credentials, &request, buf)
+}
+
+/// Writes a CreateSession at `now` from `template` into `buf`, ready to
+/// sign.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Template`] for a template of another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_create_session(
+    template: &Template,
+    bytes: &[u8],
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    if template.operation != Operation::CreateSession {
+        return Err(InvalidPlan::Template.into());
+    }
+    let values = S3Values(Values {
+        now: Some(now),
+        ..Values::default()
+    });
+    template::encode(template, bytes, &values, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of a CreateSession and reports what to do next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_create_session_head<'h>(head: ResponseHead<'h>) -> Result<SessionHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(SessionHeadOutcome::Session {
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_create_session_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> SessionHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads the credentials of a session out of the response body of a
+/// CreateSession. Sign the requests to the directory bucket with
+/// [`Session::credentials`].
+///
+/// # Errors
+///
+/// Returns [`Error::Service`] if `body` is an error document, and
+/// [`Error::Response`] if it holds no session.
+pub fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
+    refuse_error_document(body)?;
+    crate::xml::s3::read_session(body)
 }
 
 #[cfg(test)]

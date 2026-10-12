@@ -3,27 +3,27 @@
 //! The service compares a checksum in the request head against the bytes it
 //! receives, and refuses the write if the two differ. Azure takes an MD5 or
 //! a CRC-64/NVME. S3 takes those, a CRC-32, a CRC-32C, a SHA-1 or a SHA-256:
-//! see [`ChecksumKind`]. To send one:
+//! see [`ChecksumKind`]. To send one with a request from a template:
 //!
-//! 1. Compute the checksum of the content.
-//! 2. Write its base64. [`Digest::base64`] does this for a [`Digest`].
-//! 3. Put the text in [`WriteOptions::checksum`](crate::WriteOptions::checksum)
-//!    as the [`TransactionalChecksum`](crate::TransactionalChecksum) of its
-//!    kind.
+//! 1. Name its kind in the template's options, such as
+//!    [`PutOptions::checksum`](crate::PutOptions::checksum).
+//! 2. Compute the checksum of each request's content, and pass it in the
+//!    request's item, such as [`PutItem::checksum`](crate::PutItem::checksum):
+//!    as its base64 text, or as the [`Digest`] itself, which the request
+//!    writes in the byte order of its service.
+//! 3. For a body that this crate writes, compute the checksum over
+//!    [`s3::Unsigned::body`](crate::s3::Unsigned::body) and write it in with
+//!    [`s3::set_body_checksum`](crate::s3::set_body_checksum).
 //!
-//! To have the encoder compute it instead:
-//!
-//! 1. Register a [`ChecksumProvider`] of that kind with
-//!    [`Blobs::with_checksum`](crate::Blobs::with_checksum) or
-//!    [`s3::Objects::with_checksum`](crate::s3::Objects::with_checksum).
-//! 2. Put [`TransactionalChecksum::Compute`](crate::TransactionalChecksum::Compute)
-//!    of that kind in `WriteOptions::checksum`.
-//!
-//! The encoder then sums the content of the request and writes the header.
-//! It can only sum content that it holds: a
-//! [`Payload::Slice`](crate::Payload::Slice), or the block list of a commit.
-//! For a streamed payload, compute the checksum yourself before you encode
-//! and pass the text.
+//! The clients [`Blobs`](crate::Blobs) and [`s3::Objects`](crate::s3::Objects)
+//! take a checksum in [`WriteOptions::checksum`](crate::WriteOptions::checksum)
+//! as the [`TransactionalChecksum`](crate::TransactionalChecksum) of its kind,
+//! or compute it with a [`ChecksumProvider`] that you register with
+//! [`Blobs::with_checksum`](crate::Blobs::with_checksum) or
+//! [`s3::Objects::with_checksum`](crate::s3::Objects::with_checksum) when you
+//! ask for [`TransactionalChecksum::Compute`](crate::TransactionalChecksum::Compute).
+//! They can only sum content that they hold: a
+//! [`Payload::Slice`](crate::Payload::Slice), or a body that they write.
 //!
 //! # Providers
 //!

@@ -4,6 +4,18 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ## Unreleased
 
+### Added
+
+- Templates. Every request can be written from a template: the part that is the same for each object, written once into a buffer you own. `azure::prepare_*` and `s3::prepare_*` write a template from options (`GetOptions`, `PutOptions`, `DeleteOptions`, `ListOptions`, `CopyOptions`, `RestoreOptions`, `StageOptions`, and each service's own), and `encode_*` writes each request from it and an item (`GetItem`, `PutItem`, `ObjectItem`, `ListItem`, `CopyItem`, and each service's own) into a second buffer: the URL, the HTTP/1.1 head and, for S3, the canonical request. A template holds no borrow. The response of each operation is read with free functions, `accept_*_head` and `accept_*_error_body`.
+- An S3 request from a template is an `s3::Unsigned` until it is signed: `s3::signing_key` once a day, `s3::string_to_sign_prefix` once a second, the HMAC of each request's canonical request, and `s3::finish`. `borink_object_storage_crypto::sigv4` does these with any SHA-256, for one request (`sign`) or many (`sign_batch`).
+- A request whose body the crate writes, such as a list of blocks or parts, a set of tags, a restore or a removal of many objects, holds the body after its head. On S3 its SHA-256 and its checksum are placeholders until `s3::set_body_hash` and `s3::set_body_checksum` write them in; `sigv4::sign` writes the SHA-256 itself.
+- `WireRequest` names its URL, its HTTP/1.1 head, its field lines and a body it holds by offset, and a host that writes HTTP/1.1 itself sends `WireRequest::head` as it is.
+- `ChecksumValue` passes a checksum that the caller computed as base64 text or as a `Digest`, which a request writes in its service's byte order.
+
+### Removed
+
+- `Blobs` and `s3::Objects` no longer write reads, whole-object writes, removals and listings, and `PhysicalGet`, `PhysicalPut`, `PhysicalDelete`, `PhysicalList`, `ListShape` and their `layered` requirement functions are gone: use templates. The clients still write every other request beside the templates, and read every response with the functions that templates use. The request type of the clients is `LegacyRequest`.
+
 ### Changed
 
 - `sigv4::Sha256Provider::new` takes three functions, `start`, `update` and `finish`, and no longer an `hmac`: a client builds HMAC-SHA256 from SHA-256 itself, and `Sha256Provider::hmac` does the same. A client copies a provider's state between calls, so the state must hold no pointer and nothing it must release; `Sha256State` states this.

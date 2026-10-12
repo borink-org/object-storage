@@ -8,8 +8,8 @@ use borink_object_storage_crypto::{Sha256RustCrypto, sigv4};
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Template};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteItem, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
-    ListEntry, ListHeadOutcome, ListItem, Listing, Payload, PutHeadOutcome, PutItem, PutOptions,
+    DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions, ListEntry,
+    ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem, PutOptions,
     Timestamps,
 };
 
@@ -118,7 +118,7 @@ pub fn delete(
     let prepare = |buf: &mut [u8]| s3::prepare_delete(bucket, credentials, &options, buf);
     let (template, bytes) = crate::template(prepare)?;
     let stamp = stamp(&template, &bytes, credentials, &now)?;
-    let item = DeleteItem::new(key);
+    let item = ObjectItem::new(key);
     let encode = |buf: &mut [u8]| s3::encode_delete(&template, &bytes, &item, &now, buf).map(drop);
     let mut buf = vec![0; crate::required(encode)?];
     let unsigned = s3::encode_delete(&template, &bytes, &item, &now, &mut buf)?;
@@ -126,7 +126,7 @@ pub fn delete(
 
     let (parts, mut body) = crate::send(&request, None)?;
     let head = crate::head(&parts);
-    match s3::accept_delete_head(template.service(), item.shape(&options), head)? {
+    match s3::accept_delete_head(template.service(), options.shape(), head)? {
         DeleteHeadOutcome::Accepted => Ok(()),
         DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(
             s3::accept_delete_error_body(failure, &crate::error_body(&mut body)),

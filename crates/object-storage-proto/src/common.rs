@@ -757,12 +757,38 @@ pub(crate) fn checksum_text<'a>(
     }
 }
 
-// Checks what every write of a whole object from a template does alike,
-// apart from what each service takes: the old checksum fields of
-// `WriteOptions`, which a template replaces with `PutOptions::checksum`, are
-// unset.
-pub(crate) fn validate_put_options(options: &crate::PutOptions<'_>) -> Result<()> {
-    if options.options.checksum.is_some() || options.options.declared_md5.is_some() {
+// Checks the bytes of a source that a staged copy names: a bounded range,
+// not empty, exactly when its template names one.
+pub(crate) fn validate_source_range(ranging: crate::Ranging, range: RequestedRange) -> Result<()> {
+    match (ranging, range) {
+        (crate::Ranging::Whole, RequestedRange::Whole) => Ok(()),
+        (crate::Ranging::Ranged, RequestedRange::Bounded { start, end }) if start < end => Ok(()),
+        (crate::Ranging::Ranged, RequestedRange::Suffix(_) | RequestedRange::Offset(_)) => {
+            Err(InvalidPlan::UnsupportedRange.into())
+        }
+        _ => Err(InvalidPlan::Range.into()),
+    }
+}
+
+// Checks the container or bucket that holds a copy's sources: it goes into
+// a URL or a header as it is, so it may not be empty or hold what would
+// change their structure.
+pub(crate) fn validate_source_container(container: Option<&str>) -> Result<()> {
+    if let Some(container) = container
+        && (container.is_empty()
+            || container
+                .bytes()
+                .any(|byte| matches!(byte, b'/' | b'?' | b'#') || byte.is_ascii_control()))
+    {
+        return Err(InvalidPlan::CopySource.into());
+    }
+    Ok(())
+}
+
+// Checks that the options of a template name no checksum: a template
+// names the kind of its checksum apart, and each request its value.
+pub(crate) fn validate_template_options(options: &WriteOptions<'_>) -> Result<()> {
+    if options.checksum.is_some() || options.declared_md5.is_some() {
         return Err(InvalidPlan::Option.into());
     }
     Ok(())

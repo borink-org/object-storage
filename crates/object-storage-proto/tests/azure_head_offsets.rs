@@ -2,9 +2,9 @@
 
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::{
-    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteItem, DeleteKind,
-    DeleteOptions, GetItem, GetOptions, Payload, PutItem, PutOptions, RequestedRange, Result, Span,
-    Timestamps, WireRequest,
+    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteKind, DeleteOptions, GetItem,
+    GetOptions, ObjectItem, Payload, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps,
+    WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -120,12 +120,12 @@ fn a_request_names_every_part_of_it_by_offset() {
         ..DeleteOptions::new()
     };
     for (options, delete) in [
-        (DeleteOptions::new(), DeleteItem::new("object.bin")),
+        (DeleteOptions::new(), ObjectItem::new("object.bin")),
         (
             with_snapshots,
-            DeleteItem {
+            ObjectItem {
                 condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-                ..DeleteItem::new("object.bin")
+                ..ObjectItem::new("object.bin")
             },
         ),
     ] {

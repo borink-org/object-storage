@@ -8,8 +8,8 @@
 use super::{AzureNamespace, Bearer, Container, MAX_URL_LEN, METADATA_PREFIX, VERSION};
 use crate::common::write_tags;
 use crate::request::{HeaderValue, Writer};
-use crate::template::{self, Builder, Fill, Hole, Param, Section, Table, WireRequest};
-use crate::{InvalidPlan, MetadataPair, Method, Payload, Result, Span, Tag};
+use crate::template::{self, Body, Builder, Fill, Hole, Param, Section, Table, WireRequest};
+use crate::{InvalidPlan, MetadataPair, Method, Payload, Result, Tag};
 
 /// The operation that a template writes requests for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,38 @@ pub enum Operation {
     Put,
     /// A Delete Blob, which removes a blob, its snapshots, or both.
     Delete,
+    /// A Set Blob Tier, which moves a blob to another access tier.
+    SetTier,
+    /// A Set Blob Metadata, which replaces a blob's metadata.
+    SetMetadata,
+    /// A Set Blob Properties, which replaces a blob's content properties.
+    SetProperties,
+    /// A Set Blob Tags, which replaces a blob's tags.
+    SetTags,
+    /// A Get Blob Tags, which reads a blob's tags.
+    GetTags,
+    /// A Snapshot Blob, which takes a read-only snapshot of a blob.
+    Snapshot,
+    /// A Put Block, which stages one block of a blob.
+    StageBlock,
+    /// A Put Block List, which commits a blob from its blocks.
+    CommitBlocks,
+    /// A Get Block List, which reads the blocks of a blob.
+    ListBlocks,
+    /// A Copy Blob, which copies a blob and may finish later.
+    Copy,
+    /// A Copy Blob From URL, which copies a blob and answers once it has.
+    CopyFromUrl,
+    /// A Put Blob From URL, which writes a blob from the bytes at a URL.
+    PutFromUrl,
+    /// A Put Block From URL, which stages a block from the bytes at a URL.
+    StageBlockFromUrl,
+    /// An Abort Copy Blob, which stops a copy that is pending.
+    AbortCopy,
+    /// A Set Blob Tier that rehydrates a blob out of the `Archive` tier.
+    Restore,
+    /// A Blob Batch of Delete Blobs, which removes many blobs at once.
+    DeleteMany,
     /// A List Blobs, which reads one page of a listing.
     List,
 }
@@ -47,8 +79,30 @@ pub(super) enum Detail {
         condition: crate::ConditionKind,
         checksum: Option<crate::checksum::ChecksumKind>,
     },
-    Delete(crate::DeleteOptions),
+    // A request that names one object: the condition it carries, and the
+    // kind of revision it names.
+    Object {
+        condition: crate::ConditionKind,
+        revision: crate::RevisionKind,
+    },
     List,
+    Stage(Option<crate::checksum::ChecksumKind>),
+    Commit {
+        condition: crate::ConditionKind,
+        content_md5: bool,
+    },
+    // A batch: where the template holds the start of each part's path, and
+    // the fields that end each part.
+    Batch {
+        path: crate::Span,
+        tail: crate::Span,
+    },
+    Copy {
+        condition: crate::ConditionKind,
+        source_revision: crate::RevisionKind,
+        source_condition: crate::ConditionKind,
+        source_ranging: crate::Ranging,
+    },
 }
 
 impl Template {
@@ -69,6 +123,16 @@ pub(super) enum Value<'p> {
     Bytes(&'p [u8]),
     Tags(&'p [Tag<'p>]),
     Hole(Hole),
+    // `Bearer` and a token, as the field of a copy that reads its source
+    // as a client would sends it.
+    Bearer(&'p str),
+    // The URL of a copy's source: the origin and the container, fixed, then
+    // the key and the revision of each request.
+    CopySource {
+        origin: &'p str,
+        container: &'p str,
+        revision: crate::RevisionKind,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -116,13 +180,15 @@ pub(super) struct Describe<'p> {
     pub(super) query: &'p [Param<'p>],
     pub(super) fields: &'p [Field<'p>],
     pub(super) metadata: &'p [MetadataPair<'p>],
+    pub(super) body: Body<'p>,
 }
 
 fn write_value(out: &mut Writer<'_>, value: Value<'_>) {
     match value {
         Value::Bytes(bytes) => out.push(bytes),
         Value::Tags(tags) => write_tags(out, tags),
-        Value::Hole(_) => {}
+        Value::Bearer(token) => Bearer(token).write_to(out),
+        Value::Hole(_) | Value::CopySource { .. } => {}
     }
 }
 
@@ -136,6 +202,32 @@ pub(super) fn prepare(
     detail: Detail,
     buf: &mut [u8],
 ) -> Result<Template> {
+    let mut template = prepare_with(
+        container,
+        token,
+        namespace,
+        describe,
+        operation,
+        buf,
+        |_| {},
+    )?;
+    template.detail = detail;
+    Ok(template)
+}
+
+/// Writes the template of `describe` into `buf`, and lets `stash` write
+/// text that no section holds before the table. Its detail is `List`
+/// until the caller sets it.
+pub(super) fn prepare_with(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    describe: &Describe<'_>,
+    operation: Operation,
+    buf: &mut [u8],
+    stash: impl FnOnce(&mut Builder<'_>),
+) -> Result<Template> {
+    let detail = Detail::List;
     if !crate::common::valid_header(token.as_bytes()) {
         return Err(crate::Error::InvalidToken);
     }
@@ -181,7 +273,7 @@ pub(super) fn prepare(
         out.push(b"\r\n");
     });
     for field in describe.fields {
-        if !matches!(field.value, Value::Hole(_)) {
+        if !matches!(field.value, Value::Hole(_) | Value::CopySource { .. }) {
             b.with(|out| {
                 out.push(field.name.as_bytes());
                 out.push(b": ");
@@ -203,16 +295,44 @@ pub(super) fn prepare(
     b.hole(Hole::HttpTime);
     b.text(b"\r\n");
     for field in describe.fields {
-        if let Value::Hole(hole) = field.value {
-            b.with(|out| {
-                out.push(field.name.as_bytes());
-                out.push(b": ");
-            });
-            b.hole(hole);
-            b.text(b"\r\n");
+        match field.value {
+            Value::Hole(hole) => {
+                b.with(|out| {
+                    out.push(field.name.as_bytes());
+                    out.push(b": ");
+                });
+                b.hole(hole);
+            }
+            Value::CopySource {
+                origin,
+                container,
+                revision,
+            } => {
+                b.with(|out| {
+                    out.push(field.name.as_bytes());
+                    out.push(b": ");
+                    out.push(origin.as_bytes());
+                    out.push(b"/");
+                    out.push(container.as_bytes());
+                    out.push(b"/");
+                });
+                b.hole(Hole::SourceKey);
+                match revision {
+                    crate::RevisionKind::Current => {}
+                    crate::RevisionKind::Snapshot => b.text(b"?snapshot="),
+                    crate::RevisionKind::Version => b.text(b"?versionid="),
+                }
+                if revision != crate::RevisionKind::Current {
+                    b.hole(Hole::SourceRevision);
+                }
+            }
+            Value::Bytes(_) | Value::Tags(_) | Value::Bearer(_) => continue,
         }
+        b.text(b"\r\n");
     }
     b.text(b"\r\n");
+    b.body(describe.body);
+    stash(&mut b);
     let table = b.finish()?;
     Ok(Template {
         table,
@@ -230,22 +350,16 @@ pub(super) fn encode<'r>(
     bytes: &[u8],
     fill: &impl Fill,
     payload: Payload<'r>,
-    body: Option<Span>,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
-    // The URL is counted first, so that a URL that Azure would refuse is
-    // refused before any byte is written.
-    if template::url_len(&template.table, bytes, fill)? > MAX_URL_LEN {
+    // A URL that Azure would refuse is refused before any byte is written.
+    // It is counted only when its values could make it too long.
+    let surely_short = template.table.url_fixed().saturating_add(fill.url_bound()) <= MAX_URL_LEN;
+    if !surely_short && template::url_len(&template.table, bytes, fill)? > MAX_URL_LEN {
         return Err(InvalidPlan::UrlTooLong.into());
     }
     let mut out = Writer::new(buf);
     let written = template::write(&template.table, bytes, fill, &mut out)?;
     let bytes: &'r [u8] = buf;
-    Ok(WireRequest::new(
-        bytes,
-        template.method,
-        &written,
-        payload,
-        body,
-    ))
+    Ok(WireRequest::new(bytes, template.method, &written, payload))
 }

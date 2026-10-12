@@ -9,16 +9,33 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
+use crate::azure::template::{
+    Describe, Detail, Field, FieldList, Operation, Template, Value, encode as encode_template,
+    prepare as prepare_template,
+};
 use crate::azure::{
     AzureNamespace, Blobs, Write, body_kind, failed, named, names_failed_condition, push_metadata,
     push_stored, validate_key, validate_metadata, validate_options,
+};
+use crate::azure::{
+    Container, ObjectRequest, azure_tag_char, encode_object, prepare_object, revision_param,
+    stored_fields, utf8_properties,
+};
+use crate::checksum::{BASE64_LEN, ChecksumKind};
+use crate::common::{
+    checksum_text, validate_checksum_item, validate_properties, validate_tags,
+    validate_template_options,
 };
 use crate::common::{
     decimal_header, encoded, encoded_with_body, finish_with_body, meta_of, push_checksum,
     push_condition, text_header, validate_condition,
 };
+use crate::request::Writer;
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
+use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
 use crate::url;
+use crate::url::QueryValue;
+use crate::{ChecksumValue, ConditionValue, MetadataPair, ObjectItem, RevisionKind, StageOptions};
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest,
     ListPartsHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalCommit, RequestedRange,
@@ -345,16 +362,13 @@ impl<'a> Blobs<'a> {
         if plan.size.is_some() {
             return Err(InvalidPlan::Option.into());
         }
-        let mut length = COMMIT_OPEN.len() + COMMIT_CLOSE.len();
-        for (index, (id, source)) in blocks.clone().enumerate() {
+        for (index, (id, _)) in blocks.clone().enumerate() {
             if index >= MAX_BLOCKS {
                 return Err(InvalidPlan::Parts.into());
             }
             validate_block_id(id.as_ref())?;
-            // At most 50,000 IDs of 88 bytes and tags of 11 bytes: < 6 MiB,
-            // including the wrapper, so this fits usize on our 32-bit targets.
-            length += 5 + 2 * source.tag().len() + id.as_ref().len();
         }
+        let length = block_list_len(blocks.clone());
         let mut head = HeadWriter::new(buf, headers);
         self.build(
             &mut head,
@@ -399,7 +413,7 @@ impl<'a> Blobs<'a> {
         body: &'b mut [u8],
         into: &mut [E],
     ) -> Result<Listing<'b>> {
-        crate::xml::azure::blocks::fill_blocks(body, into)
+        fill_blocks(body, into)
     }
 
     /// Reads the head that answers a stage.
@@ -417,11 +431,7 @@ impl<'a> Blobs<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<StageHeadOutcome<'h>> {
-        match head.status {
-            201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
-            200..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_stage_block_head(head)
     }
 
     /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response
@@ -434,7 +444,7 @@ impl<'a> Blobs<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> StageHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_stage_block_error_body(failure, body)
     }
 
     /// Reads the head that answers a commit.
@@ -459,18 +469,7 @@ impl<'a> Blobs<'a> {
         shape: CommitShape,
         head: ResponseHead<'h>,
     ) -> Result<CommitHeadOutcome<'h>> {
-        match head.status {
-            201 => Ok(CommitHeadOutcome::Committed {
-                meta: multipart_meta(head)?,
-            }),
-            412 if shape.condition != ConditionKind::None
-                && named(&head) == Some(ServiceErrorKind::Precondition) =>
-            {
-                Ok(CommitHeadOutcome::PreconditionFailed)
-            }
-            200..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_commit_blocks_head(shape, head)
     }
 
     /// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the
@@ -484,11 +483,7 @@ impl<'a> Blobs<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> CommitHeadOutcome<'h> {
-        let kind = body_kind(body);
-        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
-            return CommitHeadOutcome::PreconditionFailed;
-        }
-        finish_with_body(failure, kind)
+        accept_commit_blocks_error_body(shape, failure, body)
     }
 
     /// Reads the head that answers a block listing.
@@ -507,14 +502,7 @@ impl<'a> Blobs<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<ListPartsHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(ListPartsHeadOutcome::Parts {
-                meta: multipart_meta(head)?,
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            _ => Ok(failed(&head)),
-        }
+        accept_list_blocks_head(head)
     }
 
     /// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
@@ -527,7 +515,7 @@ impl<'a> Blobs<'a> {
         failure: Failure<'h>,
         body: &[u8],
     ) -> ListPartsHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+        accept_list_blocks_error_body(failure, body)
     }
 }
 
@@ -577,6 +565,17 @@ pub(super) fn validate_block_id(id: &str) -> Result<()> {
 // checksum writes it twice: first into the checksum, then into the buffer
 // as the body. Both writes go through this function, so they write the same
 // bytes.
+// The length of the block list that `write_block_list` writes. At most
+// 50,000 IDs of 88 bytes and tags of 11 bytes: under 6 MiB with the
+// wrapper, so it fits a 32-bit usize.
+fn block_list_len<I: AsRef<str>>(blocks: impl Iterator<Item = (I, BlockSource)>) -> usize {
+    COMMIT_OPEN.len()
+        + COMMIT_CLOSE.len()
+        + blocks
+            .map(|(id, source)| 5 + 2 * source.tag().len() + id.as_ref().len())
+            .sum::<usize>()
+}
+
 fn write_block_list<I: AsRef<str>>(
     out: &mut dyn ByteSink,
     blocks: impl Iterator<Item = (I, BlockSource)>,
@@ -659,4 +658,497 @@ impl<'a> BlockResponseHead<'a> {
             *slot = Some(value);
         }
     }
+}
+
+/// One Put Block, which stages one block of a blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageBlockItem<'i> {
+    /// The key of the blob, under the rules of
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// The block ID, under the rules of [`BlockRef::id`].
+    pub id: &'i str,
+    /// The block's bytes, or the length of those you send yourself. At most
+    /// [`MAX_STAGE_LEN`].
+    pub content: Payload<'i>,
+    /// The checksum of the block, of the template's kind. Present exactly
+    /// when the template names a kind.
+    pub checksum: Option<ChecksumValue<'i>>,
+}
+
+impl<'i> StageBlockItem<'i> {
+    /// Creates a Put Block of `content` as the block `id` of `key`.
+    pub const fn new(key: &'i str, id: &'i str, content: Payload<'i>) -> Self {
+        Self {
+            key,
+            id,
+            content,
+            checksum: None,
+        }
+    }
+}
+
+/// What every Put Block List of a template does alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitOptions<'o> {
+    /// The condition that each commit carries, on the blob that the key
+    /// holds before. [`ConditionKind::IfNoneMatch`] with `*` commits only
+    /// if the key holds none.
+    pub condition: ConditionKind,
+    /// The metadata pairs to store with each blob, under the rules of
+    /// [`PutOptions::metadata`](crate::PutOptions::metadata).
+    pub metadata: &'o [MetadataPair<'o>],
+    /// The content properties, the tags and the access tier to store with
+    /// each blob. [`WriteOptions::checksum`] and
+    /// [`WriteOptions::declared_md5`] are refused: a commit declares the
+    /// blob's MD5 in [`CommitItem::content_md5`].
+    pub options: WriteOptions<'o>,
+    /// Whether each commit declares the MD5 of the blob it commits, which
+    /// Azure stores and returns on a read but does not check.
+    pub content_md5: bool,
+}
+
+/// One Put Block List, which commits a blob from its blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitItem<'i> {
+    /// The key of the blob, under the rules of
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// What the template's condition compares against. Present exactly when
+    /// the template carries one.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// The ordered blocks of the blob, at most 50,000.
+    pub blocks: &'i [BlockRef<'i>],
+    /// The base64 MD5 of the whole blob. Present exactly when the template's
+    /// [`CommitOptions::content_md5`] is set.
+    pub content_md5: Option<&'i str>,
+}
+
+impl<'i> CommitItem<'i> {
+    /// Creates a commit of `blocks` as the blob `key`.
+    pub const fn new(key: &'i str, blocks: &'i [BlockRef<'i>]) -> Self {
+        Self {
+            key,
+            condition_value: None,
+            blocks,
+            content_md5: None,
+        }
+    }
+
+    /// Returns the part of this commit that holds no borrows, for a
+    /// template with `options`.
+    pub const fn shape(&self, options: &CommitOptions<'_>) -> CommitShape {
+        CommitShape {
+            condition: options.condition,
+        }
+    }
+}
+
+/// Writes the template of Put Blocks with `options` into `buf`.
+///
+/// # Errors
+///
+/// Returns [`InvalidPlan::Option`] for a checksum other than an MD5 or a
+/// CRC64.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_stage_block(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &StageOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
+        return Err(InvalidPlan::Option.into());
+    }
+    let query = [
+        Some(("comp", ParamValue::Fixed(QueryValue::Literal("block")))),
+        Some(("blockid", ParamValue::Hole(Hole::BlockId))),
+    ];
+    let mut fields = FieldList::new();
+    fields.push(Field::new(
+        "content-length",
+        Value::Hole(Hole::ContentLength),
+    ));
+    if let Some(kind) = options.checksum {
+        fields.push(Field::new(kind.header(), Value::Hole(Hole::Checksum)));
+    }
+    let describe = Describe {
+        method: Method::Put,
+        key: true,
+        query: &query,
+        fields: fields.as_slice(),
+        metadata: &[],
+        body: Body::None,
+    };
+    prepare_template(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::StageBlock,
+        Detail::Stage(options.checksum),
+        buf,
+    )
+}
+
+/// Writes the Put Block `item` at `now` from `template` into `buf`, and
+/// returns it.
+///
+/// The head states the length of the content, which stays where you put it:
+/// the request borrows it, or leaves it to you to send.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), for a block ID that breaks the rules
+/// of [`BlockRef::id`], for content longer than [`MAX_STAGE_LEN`], for a
+/// checksum that is not the template's, and for a template of another
+/// operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_stage_block<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &StageBlockItem<'r>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Stage(checksum) = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_block_key(item.key, template.namespace)?;
+    validate_block_id(item.id)?;
+    if item.content.len() > MAX_STAGE_LEN {
+        return Err(InvalidPlan::PayloadTooLarge.into());
+    }
+    validate_checksum_item(checksum, item.checksum)?;
+    let mut text = [0; BASE64_LEN];
+    let values = Values {
+        now: Some(now),
+        key: Some(item.key),
+        block_id: Some(item.id),
+        content_length: Some(item.content.len()),
+        checksum: checksum_text(item.checksum, &mut text, false),
+        ..Values::default()
+    };
+    encode_template(template, bytes, &values, item.content, buf)
+}
+
+/// Reads the response head of a Put Block and reports what Azure did.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 201 is [`ResponseFault::Status`].
+pub fn accept_stage_block_head<'h>(head: ResponseHead<'h>) -> Result<StageHeadOutcome<'h>> {
+    match head.status {
+        201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_stage_block_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> StageHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Writes the template of Put Block Lists with `options` into `buf`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a metadata pair, a content property,
+/// a tag or a storage class that [`prepare_put`](crate::azure::prepare_put)
+/// refuses, and [`InvalidPlan::Option`] for a checksum or a declared MD5 in
+/// [`CommitOptions::options`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_commit_blocks(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &CommitOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_template_options(&options.options)?;
+    validate_metadata(options.metadata)?;
+    validate_properties(&options.options, utf8_properties(namespace))?;
+    validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
+    let mut request = ObjectRequest {
+        comp: Some("blocklist"),
+        condition: options.condition,
+        metadata: options.metadata,
+        body: Body::Each,
+        ..ObjectRequest::new(Operation::CommitBlocks, Method::Put)
+    };
+    request
+        .fields
+        .push(Field::new("content-length", Value::Hole(Hole::BodyLength)));
+    // The object's own MD5 is a property of the blob, which Azure stores
+    // as it is declared.
+    if options.content_md5 {
+        request.fields.push(Field::new(
+            "x-ms-blob-content-md5",
+            Value::Hole(Hole::Checksum),
+        ));
+    }
+    stored_fields(&mut request.fields, &options.options);
+    let mut template = prepare_object(container, token, namespace, request, buf)?;
+    template.detail = Detail::Commit {
+        condition: options.condition,
+        content_md5: options.content_md5,
+    };
+    Ok(template)
+}
+
+// Writes the block list of a commit as the body of its request.
+struct CommitFill<'i> {
+    values: Values<'i>,
+    blocks: &'i [BlockRef<'i>],
+}
+
+impl Fill for CommitFill<'_> {
+    fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
+        match hole {
+            Hole::Body => {
+                write_block_list(
+                    out,
+                    self.blocks.iter().map(|block| (block.id, block.source)),
+                );
+                true
+            }
+            hole => self.values.write(hole, out),
+        }
+    }
+
+    fn body_len(&self) -> Option<usize> {
+        Some(block_list_len(
+            self.blocks.iter().map(|block| (block.id, block.source)),
+        ))
+    }
+
+    fn url_bound(&self) -> usize {
+        self.values.url_bound()
+    }
+}
+
+/// Writes the Put Block List `item` at `now` from `template` into `buf`,
+/// with its block list as the body after the head, and returns it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), for a condition value or an MD5 that
+/// the template does not take, [`InvalidPlan::Parts`] for more than 50,000
+/// blocks, a block ID that breaks the rules of [`BlockRef::id`], and a
+/// template of another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_commit_blocks<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &CommitItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Commit {
+        condition,
+        content_md5,
+    } = template.detail
+    else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_block_key(item.key, template.namespace)?;
+    validate_condition(condition, item.condition_value)?;
+    match (content_md5, item.content_md5) {
+        (false, None) => {}
+        (true, Some(text)) => ChecksumKind::Md5.check_base64(text)?,
+        _ => return Err(InvalidPlan::Checksum.into()),
+    }
+    if item.blocks.len() > MAX_BLOCKS {
+        return Err(InvalidPlan::Parts.into());
+    }
+    for block in item.blocks {
+        validate_block_id(block.id)?;
+    }
+    let fill = CommitFill {
+        values: Values {
+            now: Some(now),
+            key: Some(item.key),
+            condition: item.condition_value,
+            checksum: item.content_md5,
+            ..Values::default()
+        },
+        blocks: item.blocks,
+    };
+    encode_template(template, bytes, &fill, Payload::Slice(&[]), buf)
+}
+
+/// Reads the response head of a Put Block List and reports what Azure did.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 201 is [`ResponseFault::Status`].
+///
+/// A 412 is [`CommitHeadOutcome::PreconditionFailed`] only if the commit
+/// carried a condition and Azure names a failed condition.
+pub fn accept_commit_blocks_head<'h>(
+    shape: CommitShape,
+    head: ResponseHead<'h>,
+) -> Result<CommitHeadOutcome<'h>> {
+    match head.status {
+        201 => Ok(CommitHeadOutcome::Committed {
+            meta: multipart_meta(head)?,
+        }),
+        412 if shape.condition != ConditionKind::None
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(CommitHeadOutcome::PreconditionFailed)
+        }
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_commit_blocks_error_body<'h>(
+    shape: CommitShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> CommitHeadOutcome<'h> {
+    let kind = body_kind(body);
+    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+        return CommitHeadOutcome::PreconditionFailed;
+    }
+    finish_with_body(failure, kind)
+}
+
+/// Writes the template of Get Block Lists of `kind` into `buf`. Each request
+/// names a snapshot or a version of the kind `revision`, or the blob as it
+/// is now.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_list_blocks(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    kind: BlockListKind,
+    revision: RevisionKind,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let kind = match kind {
+        BlockListKind::Committed => "committed",
+        BlockListKind::Staged => "uncommitted",
+        BlockListKind::All => "all",
+    };
+    let query = [
+        Some(("comp", ParamValue::Fixed(QueryValue::Literal("blocklist")))),
+        Some((
+            "blocklisttype",
+            ParamValue::Fixed(QueryValue::Literal(kind)),
+        )),
+        revision_param(revision),
+    ];
+    let describe = Describe {
+        method: Method::Get,
+        key: true,
+        query: &query,
+        fields: &[],
+        metadata: &[],
+        body: Body::None,
+    };
+    prepare_template(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::ListBlocks,
+        Detail::Object {
+            condition: ConditionKind::None,
+            revision,
+        },
+        buf,
+    )
+}
+
+/// Writes the Get Block List of `item` at `now` from `template` into `buf`,
+/// and returns it. Read the whole response body and pass it to
+/// [`fill_blocks`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), for a revision that is not the
+/// template's kind, for a condition value, and for a template of another
+/// operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_list_blocks<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    encode_object(template, bytes, Operation::ListBlocks, item, now, buf)
+}
+
+/// Reads the response head of a Get Block List and reports what to do
+/// next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_list_blocks_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(ListPartsHeadOutcome::Parts {
+            meta: multipart_meta(head)?,
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
+/// body.
+pub fn accept_list_blocks_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> ListPartsHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads the blocks out of the response body of a Get Block List into
+/// `into`, and returns how many it read.
+///
+/// The body is decoded in place, and the blocks borrow it.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`] if the body holds more blocks than the
+/// array, with `required` set to the number it holds.
+///
+/// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is not
+/// a block list.
+pub fn fill_blocks<'b, E: From<Block<'b>>>(
+    body: &'b mut [u8],
+    into: &mut [E],
+) -> Result<Listing<'b>> {
+    crate::xml::azure::blocks::fill_blocks(body, into)
 }
