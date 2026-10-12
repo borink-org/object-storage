@@ -1,168 +1,146 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
+use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::{
-    Blobs, Condition, Container, DeleteKind, GetKind, HeaderSpan, Payload, PhysicalDelete,
-    PhysicalGet, PhysicalPut, RequestedRange, Span, Timestamps, WireRequest, layered,
+    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteItem, DeleteKind,
+    DeleteOptions, GetItem, GetOptions, Payload, PutItem, PutOptions, RequestedRange, Result, Span,
+    Timestamps, WireRequest,
 };
 
-fn blobs() -> Blobs<'static> {
-    Blobs::new(
-        Container::new("https://account.blob.core.windows.net", "container").unwrap(),
-        "access-token",
-    )
-    .unwrap()
+fn container() -> Container<'static> {
+    Container::new("https://account.blob.core.windows.net", "container").unwrap()
 }
 
 fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
-// A request head, kept after the request that named it is dropped. The request
+fn template(prepare: impl Fn(&mut [u8]) -> Result<Template>) -> (Template, Vec<u8>) {
+    let mut bytes = vec![0; 512];
+    (prepare(&mut bytes).unwrap(), bytes)
+}
+
+// The parts of a request, kept after the request is dropped. The request
 // borrows the buffer, so the parts are read back once it is gone.
-struct Head {
+struct Parts {
     url: (Span, String),
-    headers: Vec<((Span, String), (Span, String))>,
+    head: (Span, Vec<u8>),
+    fields: (Span, usize),
 }
 
-fn record(request: &WireRequest<'_>) -> Head {
-    assert_eq!(request.header_spans().len(), request.headers().len());
-    Head {
+fn parts(request: &WireRequest<'_>) -> Parts {
+    Parts {
         url: (request.url_span(), request.url().to_owned()),
-        headers: request
-            .headers()
-            .zip(request.header_spans())
-            .map(|((name, value), (name_span, value_span))| {
-                ((name_span, name.to_owned()), (value_span, value.to_owned()))
-            })
-            .collect(),
+        head: (request.head_span(), request.head().to_vec()),
+        fields: (request.fields_span(), request.headers().count()),
     }
 }
 
-// The offsets name the same bytes that the slices did, and no part of the head
-// falls outside the buffer.
-fn check(head: &Head, buf: &[u8]) {
-    let at = |span: Span| {
-        assert!(span.start + span.len <= buf.len());
-        std::str::from_utf8(&buf[span.start..span.start + span.len])
-            .unwrap()
-            .to_owned()
+// Each offset names the bytes that the slice did.
+fn check_offsets(parts: &Parts, buf: &[u8]) {
+    let at = |span: Span| &buf[span.start..span.start + span.len];
+    let (head, fields) = (parts.head.0, parts.fields.0);
+    assert_eq!(at(parts.url.0), parts.url.1.as_bytes());
+    assert_eq!(at(head), parts.head.1.as_slice());
+    assert!(head.start <= fields.start && fields.start + fields.len + 2 == head.start + head.len);
+    let lines = std::str::from_utf8(at(fields)).unwrap();
+    assert_eq!(lines.lines().count(), parts.fields.1);
+}
+
+// A request from a template names its URL, its head and its fields by
+// offset, and each offset names the bytes that the slice does.
+#[test]
+fn a_request_names_every_part_of_it_by_offset() {
+    let ranged = GetOptions {
+        condition: ConditionKind::IfNoneMatch,
+        ..GetOptions::new().ranged()
     };
-    assert_eq!(at(head.url.0), head.url.1);
-    for ((name_span, name), (value_span, value)) in &head.headers {
-        assert_eq!(at(*name_span), *name);
-        assert_eq!(at(*value_span), *value);
-    }
-}
-
-#[test]
-fn a_read_names_every_part_of_its_head_by_offset() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    for get in [
-        PhysicalGet::new("directory/a key+é"),
-        PhysicalGet {
-            range: RequestedRange::Bounded { start: 2, end: 6 },
-            ..PhysicalGet::new("object.bin")
-        }
-        .with_condition(Condition::IfNoneMatch(b"\"etag\"")),
-        PhysicalGet {
-            range: RequestedRange::Offset(4),
-            ..PhysicalGet::new("object.bin")
-        },
-        PhysicalGet {
-            kind: GetKind::Head,
-            ..PhysicalGet::new("object.bin")
-        },
+    for (options, get) in [
+        (GetOptions::new(), GetItem::new("directory/a key+é")),
+        (
+            ranged,
+            GetItem {
+                condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
+                ..GetItem::new("object.bin")
+                    .with_range(RequestedRange::Bounded { start: 2, end: 6 })
+            },
+        ),
+        (GetOptions::head(), GetItem::new("object.bin")),
     ] {
-        let mut buf = vec![
-            0;
-            layered::get_requirements(&blobs, &get, &now())
-                .map(|size| size.bytes)
-                .unwrap()
-        ];
-        let head = record(
-            &blobs
-                .encode_get(&mut buf, &mut request_headers, &get, &now())
-                .unwrap(),
-        );
-        check(&head, &buf);
+        let (template, bytes) = template(|buf| {
+            azure::prepare_get(
+                &container(),
+                "access-token",
+                AzureNamespace::Unknown,
+                &options,
+                buf,
+            )
+        });
+        let mut buf = vec![0; 512];
+        let request = azure::encode_get(&template, &bytes, &get, &now(), &mut buf).unwrap();
+        let parts = parts(&request);
+        check_offsets(&parts, &buf);
     }
-}
 
-#[test]
-fn a_write_names_every_part_of_its_head_by_offset() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let content = Payload::Slice(b"contents");
-    for put in [
-        PhysicalPut::new("object.bin"),
-        PhysicalPut::new("object.bin").with_condition(Condition::IfNoneMatch(b"*")),
+    let create = PutOptions {
+        condition: ConditionKind::IfNoneMatch,
+        ..PutOptions::default()
+    };
+    for (options, put) in [
+        (
+            PutOptions::default(),
+            PutItem::new("object.bin", Payload::Slice(b"contents")),
+        ),
+        (
+            create,
+            PutItem {
+                condition_value: Some(ConditionValue::ETag(b"*")),
+                ..PutItem::new("object.bin", Payload::Streamed { len: 1024 })
+            },
+        ),
     ] {
-        let mut buf = vec![
-            0;
-            layered::put_requirements(&blobs, &put, content, &now())
-                .map(|size| size.bytes)
-                .unwrap()
-        ];
-        let head = record(
-            &blobs
-                .encode_put(&mut buf, &mut request_headers, &put, content, &now())
-                .unwrap(),
-        );
-        check(&head, &buf);
+        let (template, bytes) = template(|buf| {
+            azure::prepare_put(
+                &container(),
+                "access-token",
+                AzureNamespace::Unknown,
+                &options,
+                buf,
+            )
+        });
+        let mut buf = vec![0; 512];
+        let request = azure::encode_put(&template, &bytes, &put, &now(), &mut buf).unwrap();
+        let parts = parts(&request);
+        check_offsets(&parts, &buf);
     }
-}
 
-#[test]
-fn a_removal_names_every_part_of_its_head_by_offset() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    for delete in [
-        PhysicalDelete::new("object.bin"),
-        PhysicalDelete {
-            kind: DeleteKind::ObjectAndSnapshots,
-            ..PhysicalDelete::new("object.bin")
-        }
-        .with_condition(Condition::IfMatch(b"\"etag\"")),
+    let with_snapshots = DeleteOptions {
+        kind: DeleteKind::ObjectAndSnapshots,
+        condition: ConditionKind::IfMatch,
+        ..DeleteOptions::new()
+    };
+    for (options, delete) in [
+        (DeleteOptions::new(), DeleteItem::new("object.bin")),
+        (
+            with_snapshots,
+            DeleteItem {
+                condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
+                ..DeleteItem::new("object.bin")
+            },
+        ),
     ] {
-        let mut buf = vec![
-            0;
-            layered::delete_requirements(&blobs, &delete, &now())
-                .map(|size| size.bytes)
-                .unwrap()
-        ];
-        let head = record(
-            &blobs
-                .encode_delete(&mut buf, &mut request_headers, &delete, &now())
-                .unwrap(),
-        );
-        check(&head, &buf);
+        let (template, bytes) = template(|buf| {
+            azure::prepare_delete(
+                &container(),
+                "access-token",
+                AzureNamespace::Unknown,
+                &options,
+                buf,
+            )
+        });
+        let mut buf = vec![0; 512];
+        let request = azure::encode_delete(&template, &bytes, &delete, &now(), &mut buf).unwrap();
+        let parts = parts(&request);
+        check_offsets(&parts, &buf);
     }
-}
-
-// The requirement covers the whole head, so an exactly sized buffer holds
-// every byte that the request names and no byte more.
-#[test]
-fn the_requirement_is_the_end_of_the_last_part() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let put = PhysicalPut::new("object.bin").with_condition(Condition::IfMatch(b"\"etag\""));
-    let content = Payload::Streamed { len: 1024 };
-    let required = layered::put_requirements(&blobs, &put, content, &now())
-        .map(|size| size.bytes)
-        .unwrap();
-    let mut buf = vec![0; required];
-    let head = record(
-        &blobs
-            .encode_put(&mut buf, &mut request_headers, &put, content, &now())
-            .unwrap(),
-    );
-
-    let end = head
-        .headers
-        .iter()
-        .map(|(_, (span, _))| span.start + span.len)
-        .max()
-        .unwrap();
-    assert_eq!(end, required);
 }

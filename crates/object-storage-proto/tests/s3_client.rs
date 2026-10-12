@@ -2,30 +2,24 @@
 //!
 //! The signatures themselves are checked against known answers in
 //! `crates/object-storage-crypto/tests/sigv4.rs`, which has SHA-256
-//! implementations. The providers here compute nothing, and `REFUSES` panics
-//! if it is asked to.
+//! implementations. The provider here computes nothing.
 
-use borink_object_storage_proto::s3::{Bucket, MAX_METADATA_LEN, Objects, PayloadHash, Service};
+use borink_object_storage_proto::s3::{
+    self, Bucket, MAX_METADATA_LEN, Objects, PayloadSigning, Service,
+};
 use borink_object_storage_proto::sigv4::{
     Credentials, Sha256Provider, Sha256State, wipe_best_effort,
 };
 use borink_object_storage_proto::{
-    BodyWindow, CapacityError, Condition, DeleteHeadOutcome, Error, GetHeadOutcome, HeaderSpan,
-    InvalidPlan, MetadataPair, Payload, PhysicalDelete, PhysicalGet, PhysicalPut, RequestedRange,
-    ResponseFault, ResponseHead, Timestamps, layered,
+    BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteItem, DeleteKind,
+    DeleteOptions, Error, GetHeadOutcome, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions,
+    ResponseFault, ResponseHead, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TOKEN: &str = "session-token";
 
 const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
-
-// A provider that fails the test if the encoder hashes anything.
-const REFUSES: Sha256Provider = Sha256Provider::new(
-    Sha256State::uninit,
-    |_, _| panic!("the encoder hashed content"),
-    |_| panic!("the encoder finished a hash"),
-);
 
 fn bucket() -> Bucket<'static> {
     Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws).unwrap()
@@ -40,17 +34,6 @@ fn credentials() -> Credentials<'static> {
 
 fn objects() -> Objects<'static> {
     Objects::new(bucket(), credentials(), ZEROS)
-}
-
-fn compatible() -> Objects<'static> {
-    let bucket = Bucket::new(
-        "https://s3.example.com",
-        "bucket",
-        "auto",
-        Service::Compatible,
-    )
-    .unwrap();
-    Objects::new(bucket, credentials(), ZEROS)
 }
 
 fn now() -> Timestamps {
@@ -131,70 +114,6 @@ fn debug_output_hides_the_secret_and_the_token() {
 }
 
 #[test]
-fn requirements_are_exact_and_compute_no_signature() {
-    let objects = Objects::new(bucket(), credentials(), REFUSES);
-    let now = now();
-    let get = PhysicalGet {
-        range: RequestedRange::Suffix(9),
-        ..PhysicalGet::new("a key")
-    };
-    let metadata = [MetadataPair {
-        name: "Colour",
-        value: "red",
-    }];
-    let put = PhysicalPut {
-        metadata: &metadata,
-        ..PhysicalPut::new("a key")
-    };
-    let content = Payload::Slice(b"0123456789");
-    let delete = PhysicalDelete::new("a key");
-    let sizes = [
-        layered::s3::get_requirements(&objects, &get, &now).unwrap(),
-        layered::s3::put_requirements(&objects, &put, content, PayloadHash::Compute, &now).unwrap(),
-        layered::s3::delete_requirements(&objects, &delete, &now).unwrap(),
-    ];
-    // Every S3 request carries the authorization, the date and the content
-    // hash, and this one a session token too.
-    assert_eq!(
-        [sizes[0].headers, sizes[1].headers, sizes[2].headers],
-        [5, 6, 4]
-    );
-
-    let objects = Objects::new(bucket(), credentials(), ZEROS);
-    for (index, size) in sizes.into_iter().enumerate() {
-        let encode = |bytes: usize, headers: usize| {
-            let mut buf = vec![0; bytes];
-            let mut slots = vec![HeaderSpan::default(); headers];
-            match index {
-                0 => objects
-                    .encode_get(&mut buf, &mut slots, &get, &now)
-                    .map(drop),
-                1 => objects
-                    .encode_put(
-                        &mut buf,
-                        &mut slots,
-                        &put,
-                        content,
-                        PayloadHash::Compute,
-                        &now,
-                    )
-                    .map(drop),
-                _ => objects
-                    .encode_delete(&mut buf, &mut slots, &delete, &now)
-                    .map(drop),
-            }
-        };
-        let short = Err(Error::Capacity(CapacityError {
-            required: size.bytes,
-            required_headers: size.headers,
-        }));
-        assert_eq!(encode(size.bytes, size.headers), Ok(()), "{index}");
-        assert_eq!(encode(size.bytes - 1, size.headers), short, "{index}");
-        assert_eq!(encode(size.bytes, size.headers - 1), short, "{index}");
-    }
-}
-
-#[test]
 fn an_aws_bucket_name_follows_the_rules_that_aws_documents() {
     let long = "a".repeat(64);
     for name in [
@@ -243,9 +162,10 @@ fn an_aws_bucket_name_follows_the_rules_that_aws_documents() {
 #[test]
 fn a_compatible_client_sends_what_aws_would_refuse() {
     let now = now();
-    let content = Payload::Slice(b"0");
-    let etag_create = PhysicalPut::new("k").with_condition(Condition::IfNoneMatch(b"\"etag\""));
-    let delete = PhysicalDelete::new("k").with_condition(Condition::IfNoneMatch(b"\"etag\""));
+    let delete = DeleteOptions {
+        condition: ConditionKind::IfNoneMatch,
+        ..DeleteOptions::new()
+    };
     // AWS counts the name and the value: one byte and the rest.
     let fits = "v".repeat(MAX_METADATA_LEN - 1);
     let fits = [MetadataPair {
@@ -257,44 +177,77 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
         name: "a",
         value: &over,
     }];
-    let fits = PhysicalPut {
-        metadata: &fits,
-        ..PhysicalPut::new("k")
+    let content = Payload::Slice(b"0");
+    let etag = PutItem {
+        condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
+        ..PutItem::new("k", content)
     };
-    let over = PhysicalPut {
-        metadata: &over,
-        ..PhysicalPut::new("k")
+    let create = PutOptions {
+        condition: ConditionKind::IfNoneMatch,
+        ..PutOptions::default()
     };
-    let put = |objects: &Objects<'_>, put: &PhysicalPut<'_>| {
-        layered::s3::put_requirements(objects, put, content, PayloadHash::Compute, &now).map(drop)
+    let put = |service, options: &PutOptions<'_>, item: &PutItem<'_>| {
+        let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();
+        let mut bytes = vec![0; 16384];
+        let template = s3::prepare_put(
+            &bucket,
+            &credentials(),
+            options,
+            PayloadSigning::Unsigned,
+            &mut bytes,
+        )?;
+        s3::encode_put(&template, &bytes, item, None, &now, &mut vec![0; 16384]).map(drop)
     };
-    let remove =
-        |objects: &Objects<'_>| layered::s3::delete_requirements(objects, &delete, &now).map(drop);
+    let remove = |service, options: &DeleteOptions| {
+        let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();
+        s3::prepare_delete(&bucket, &credentials(), options, &mut [0; 1024]).map(drop)
+    };
+    let with = |metadata| PutOptions {
+        metadata,
+        ..PutOptions::default()
+    };
+    let plain = PutItem::new("k", content);
 
-    let aws = objects();
-    assert_eq!(put(&aws, &etag_create), Err(InvalidPlan::Condition.into()));
-    assert_eq!(remove(&aws), Err(InvalidPlan::Condition.into()));
-    assert_eq!(put(&aws, &fits), Ok(()));
-    assert_eq!(put(&aws, &over), Err(InvalidPlan::MetadataTooLarge.into()));
+    assert_eq!(
+        put(Service::Aws, &create, &etag),
+        Err(InvalidPlan::Condition.into())
+    );
+    assert_eq!(
+        remove(Service::Aws, &delete),
+        Err(InvalidPlan::Condition.into())
+    );
+    assert_eq!(put(Service::Aws, &with(&fits), &plain), Ok(()));
+    assert_eq!(
+        put(Service::Aws, &with(&over), &plain),
+        Err(InvalidPlan::MetadataTooLarge.into())
+    );
 
-    let compatible = compatible();
-    assert_eq!(put(&compatible, &etag_create), Ok(()));
-    assert_eq!(remove(&compatible), Ok(()));
-    assert_eq!(put(&compatible, &over), Ok(()));
+    assert_eq!(put(Service::Compatible, &create, &etag), Ok(()));
+    assert_eq!(remove(Service::Compatible, &delete), Ok(()));
+    // S3 keeps no snapshots, whatever the service.
+    let snapshots = DeleteOptions {
+        kind: DeleteKind::ObjectAndSnapshots,
+        ..DeleteOptions::new()
+    };
+    assert_eq!(
+        remove(Service::Compatible, &snapshots),
+        Err(InvalidPlan::Option.into())
+    );
+    assert_eq!(put(Service::Compatible, &with(&over), &plain), Ok(()));
 }
 
 #[test]
 fn an_aws_client_accepts_only_what_aws_answers() {
-    let get = PhysicalGet::new("k").shape();
-    let delete = PhysicalDelete::new("k").shape();
-    let (aws, compatible) = (objects(), compatible());
+    let get = borink_object_storage_proto::GetItem::new("k")
+        .shape(&borink_object_storage_proto::GetOptions::new());
+    let delete = DeleteItem::new("k").shape(&DeleteOptions::new());
     // AWS states the length of every response it serves.
     assert_eq!(
-        aws.accept_get_head(get, head(200, &[])),
+        s3::accept_get_head(Service::Aws, get, head(200, &[])),
         Err(ResponseFault::Head.into())
     );
     assert!(matches!(
-        compatible.accept_get_head(get, head(200, &[])),
+        s3::accept_get_head(Service::Compatible, get, head(200, &[])),
         Ok(GetHeadOutcome::Body {
             body: BodyWindow {
                 expected_len: None,
@@ -305,11 +258,11 @@ fn an_aws_client_accepts_only_what_aws_answers() {
     ));
     // AWS answers a removal with 204 and nothing else.
     assert_eq!(
-        aws.accept_delete_head(delete, head(200, &[])),
+        s3::accept_delete_head(Service::Aws, delete, head(200, &[])),
         Err(ResponseFault::Status.into())
     );
     assert_eq!(
-        compatible.accept_delete_head(delete, head(200, &[])),
+        s3::accept_delete_head(Service::Compatible, delete, head(200, &[])),
         Ok(DeleteHeadOutcome::Accepted)
     );
 }

@@ -5,9 +5,9 @@ use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
 use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
 use crate::{
     BodyWindow, ConditionKind, ConditionValue, Error, Failure, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, HeaderSpan, InvalidPlan, Method, ObjectMeta, Payload, RequestedRange,
-    ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag, Timestamps,
-    TransactionalChecksum, WireRequest, WriteOptions,
+    GetKind, GetShape, HeaderSpan, InvalidPlan, LegacyRequest, Method, ObjectMeta, Payload,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
+    Timestamps, TransactionalChecksum, WriteOptions,
 };
 
 // Checks the snapshot or version that a plan names: an identifier that is
@@ -45,6 +45,7 @@ pub(crate) fn failure<'h>(
 // listing, has no `NotFound`: its 404 can only mean a missing container,
 // so `not_found` returns the failure.
 pub(crate) trait FailureOutcome<'h> {
+    fn need_error_body(failure: Failure<'h>) -> Self;
     fn not_found(failure: Failure<'h>) -> Self;
     fn service_failure(failure: Failure<'h>) -> Self;
 }
@@ -68,6 +69,10 @@ pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
 macro_rules! failure_outcome {
     ($($outcome:ident),*) => {$(
         impl<'h> FailureOutcome<'h> for crate::$outcome<'h> {
+            fn need_error_body(failure: Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
             fn not_found(failure: Failure<'h>) -> Self {
                 Self::NotFound { kind: failure.kind }
             }
@@ -84,6 +89,10 @@ macro_rules! failure_outcome {
 macro_rules! container_failure_outcome {
     ($($outcome:ty),*) => {$(
         impl<'h> FailureOutcome<'h> for $outcome {
+            fn need_error_body(failure: Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
             fn not_found(failure: Failure<'h>) -> Self {
                 Self::ServiceFailure(failure)
             }
@@ -428,7 +437,7 @@ pub(crate) fn encoded<'r>(
     head: HeadWriter<'r>,
     method: Method,
     payload: Payload<'r>,
-) -> Result<WireRequest<'r>> {
+) -> Result<LegacyRequest<'r>> {
     let capacity = head.capacity();
     head.finish(method, payload)
         .ok_or_else(|| capacity_error(capacity))
@@ -545,7 +554,7 @@ pub(crate) fn encoded_with_body<'r>(
     mut head: HeadWriter<'r>,
     method: Method,
     write: impl FnOnce(&mut Writer<'r>),
-) -> Result<WireRequest<'r>> {
+) -> Result<LegacyRequest<'r>> {
     let body = head.body(write);
     let capacity = head.capacity();
     head.finish_with_body(method, Payload::Slice(&[]), Some(body))
@@ -646,4 +655,115 @@ pub(crate) fn write_tag_set(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
         out.push(b"</Value></Tag>");
     }
     out.push(b"</TagSet>");
+}
+
+// Checks what every read of a template does alike: a HEAD reads no range,
+// and a service that keeps no snapshots names none.
+// Checks that a template names a snapshot only for a service that keeps
+// them: S3 keeps none.
+pub(crate) fn validate_revision_kind(
+    kind: crate::RevisionKind,
+    keeps_snapshots: bool,
+) -> Result<()> {
+    if kind == crate::RevisionKind::Snapshot && !keeps_snapshots {
+        return Err(InvalidPlan::Revision.into());
+    }
+    Ok(())
+}
+
+// Checks the text at which a listing groups its keys: never empty, and `/`
+// alone where the service groups at nothing else, as on a hierarchical
+// Azure account and an S3 directory bucket.
+pub(crate) fn validate_delimiter(delimiter: Option<&str>, slash_only: bool) -> Result<()> {
+    match delimiter {
+        Some(text) if text.is_empty() || (slash_only && text != "/") => {
+            Err(InvalidPlan::Delimiter.into())
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn validate_get_options(
+    options: &crate::GetOptions,
+    keeps_snapshots: bool,
+) -> Result<()> {
+    if options.kind == GetKind::Head && options.ranging == crate::Ranging::Ranged {
+        return Err(InvalidPlan::RangedHead.into());
+    }
+    validate_revision_kind(options.revision, keeps_snapshots)
+}
+
+// Checks one read against its template's options: a range exactly when the
+// template sends one, and not empty; a condition value and a revision
+// exactly when the template carries them.
+pub(crate) fn validate_get_item(
+    options: &crate::GetOptions,
+    item: &crate::GetItem<'_>,
+) -> Result<()> {
+    let ranged = item.range != RequestedRange::Whole;
+    if ranged != (options.ranging == crate::Ranging::Ranged) {
+        return Err(InvalidPlan::Range.into());
+    }
+    match item.range {
+        RequestedRange::Bounded { start, end } if start >= end => {
+            return Err(InvalidPlan::Range.into());
+        }
+        RequestedRange::Suffix(0) => return Err(InvalidPlan::Range.into()),
+        _ => {}
+    }
+    validate_revision_item(options.revision, item.revision)?;
+    validate_condition(options.condition, item.condition_value)
+}
+
+// Checks that a request names a snapshot or a version exactly when its
+// template does, and that it is not empty.
+pub(crate) fn validate_revision_item(
+    kind: crate::RevisionKind,
+    revision: Option<&str>,
+) -> Result<()> {
+    match (kind, revision) {
+        (crate::RevisionKind::Current, None) => Ok(()),
+        (crate::RevisionKind::Current, Some(_)) | (_, None) => Err(InvalidPlan::Revision.into()),
+        (_, Some("")) => Err(InvalidPlan::Revision.into()),
+        (_, Some(_)) => Ok(()),
+    }
+}
+
+// Checks one write's checksum against its template: present exactly when
+// the template sends one, of the template's kind, and base64 text of a
+// digest of that kind.
+pub(crate) fn validate_checksum_item(
+    kind: Option<ChecksumKind>,
+    value: Option<crate::ChecksumValue<'_>>,
+) -> Result<()> {
+    match (kind, value) {
+        (None, None) => Ok(()),
+        (Some(kind), Some(crate::ChecksumValue::Base64(text))) => kind.check_base64(text),
+        (Some(kind), Some(crate::ChecksumValue::Digest(digest))) if digest.kind() == kind => Ok(()),
+        _ => Err(InvalidPlan::Checksum.into()),
+    }
+}
+
+// The base64 text of a write's checksum, written into `into` from a digest.
+// S3 reads a CRC64 in big-endian order, Azure in little-endian order.
+pub(crate) fn checksum_text<'a>(
+    value: Option<crate::ChecksumValue<'a>>,
+    into: &'a mut [u8; crate::checksum::BASE64_LEN],
+    crc64_big_endian: bool,
+) -> Option<&'a str> {
+    match value? {
+        crate::ChecksumValue::Base64(text) => Some(text),
+        crate::ChecksumValue::Digest(digest) => Some(digest.base64_for(into, crc64_big_endian)),
+    }
+}
+
+// Checks what every write of a whole object from a template does alike,
+// apart from what each service takes: the old checksum fields of
+// `WriteOptions`, which a template replaces with `PutOptions::checksum`, are
+// unset.
+pub(crate) fn validate_put_options(options: &crate::PutOptions<'_>) -> Result<()> {
+    if options.options.checksum.is_some() || options.options.declared_md5.is_some() {
+        return Err(InvalidPlan::Option.into());
+    }
+    Ok(())
 }

@@ -88,7 +88,7 @@ pub enum RequestedRange {
     /// The last `n` bytes, written `Range: bytes=-N`.
     ///
     /// Azure Blob Storage does not accept this form.
-    /// [`Blobs::encode_get`](crate::Blobs::encode_get) refuses it.
+    /// [`azure::encode_get`](crate::azure::encode_get) refuses it.
     Suffix(u64),
 }
 
@@ -239,14 +239,11 @@ impl ConditionKind {
     }
 }
 
-/// The part of a plan that holds no borrows.
+/// The part of a read that holds no borrows.
 ///
-/// [`PhysicalGet::shape`] returns this, and [`PhysicalGet::from_shape`] takes
-/// it back. Between those two calls you can store it: it is [`Copy`] and has
-/// no lifetime, so it outlives the key and ETag bytes that the plan borrows.
-///
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) needs only this
-/// part, so you can read a response without rebuilding the whole plan.
+/// [`GetItem::shape`] returns this. Keep it while the request is in flight:
+/// it is [`Copy`] and has no lifetime. The `accept_get_head` of each service
+/// needs only this part to read the response.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetShape {
     /// Whether the plan asks for bytes or for metadata.
@@ -275,112 +272,135 @@ pub enum Revision<'h> {
     Version(&'h str),
 }
 
-/// A complete plan for one read.
+/// Whether every request of a template reads a byte range, or none does.
 ///
-/// Build this immediately before each call and let it go afterwards. It
-/// borrows the key and the ETag, so it cannot be stored across a request. To
-/// keep a plan while a request is in flight, store [`PhysicalGet::shape`] and
-/// your own copy of the bytes.
-///
-/// Because the fields are public and unchecked,
-/// [`Blobs::encode_get`](crate::Blobs::encode_get) validates the plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalGet<'h> {
-    /// The object key, before percent-encoding.
-    ///
-    /// No control character: Azure refuses those. A flat-namespace account
-    /// also refuses more than 1024 UTF-16 code units, where a character outside
-    /// the basic plane counts twice; a client told it is on one refuses such a
-    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    ///
-    /// A segment that ends in `.` is refused as well, because Azure stores the
-    /// name without that dot, and so is a `.` or `..` segment, because a host
-    /// resolves those out of the URL before it sends the request. Each would
-    /// name an object other than the one asked for.
-    ///
-    /// An S3 client refuses a `.` or `..` segment for the same reason, and a
-    /// key longer than [`s3::MAX_KEY_LEN`](crate::s3::MAX_KEY_LEN) bytes. S3
-    /// takes every other key of UTF-8.
-    pub key: &'h str,
-    /// Whether the plan asks for bytes or for metadata.
-    pub kind: GetKind,
-    /// The byte range that the plan requests. An empty range is refused:
-    /// see [`RequestedRange::Bounded`].
-    pub range: RequestedRange,
-    /// The precondition that the plan carries.
-    pub condition: ConditionKind,
-    /// What the precondition compares against: see [`ConditionKind`].
-    ///
-    /// This must be present if `condition` is not [`ConditionKind::None`], and
-    /// absent if it is.
-    pub condition_value: Option<ConditionValue<'h>>,
-    /// The snapshot or version to read, or [`None`] for the object as it
-    /// is now. An empty identifier is refused with
-    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), and so is a
-    /// snapshot on S3.
-    pub revision: Option<Revision<'h>>,
+/// A template fixes which fields its requests send, so a read with a range
+/// and a read without one come from two templates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u16)]
+pub enum Ranging {
+    /// No request sends a range.
+    #[default]
+    Whole = 1,
+    /// Every request sends a range.
+    Ranged = 2,
 }
 
-impl<'h> PhysicalGet<'h> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
+/// Whether every request of a template names an earlier state of its
+/// object, and which kind.
+///
+/// Each request names its own snapshot or version: see
+/// [`GetItem::revision`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RevisionKind {
+    /// Every request names the object as it is now.
+    #[default]
+    Current = 1,
+    /// Every request names a snapshot, sent as `snapshot`. Azure only.
+    Snapshot = 2,
+    /// Every request names a version, sent as `versionid` on Azure and
+    /// `versionId` on S3.
+    Version = 3,
+}
+
+/// What every read of a template does alike.
+///
+/// Pass it to `prepare_get` of [`azure`](crate::azure) or
+/// [`s3`](crate::s3) to write the template, and describe each read with a
+/// [`GetItem`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GetOptions {
+    /// Whether the reads ask for bytes or for metadata.
+    pub kind: GetKind,
+    /// Whether every read sends a range.
+    pub ranging: Ranging,
+    /// The precondition every read carries. Each read names what it
+    /// compares against.
+    pub condition: ConditionKind,
+    /// Whether every read names a snapshot or a version.
+    pub revision: RevisionKind,
+}
+
+impl GetOptions {
+    /// Creates options for reads of every byte of the object as it is now,
+    /// with no precondition.
+    pub const fn new() -> Self {
+        Self {
+            kind: GetKind::Bytes,
+            ranging: Ranging::Whole,
+            condition: ConditionKind::None,
+            revision: RevisionKind::Current,
+        }
     }
 
-    /// Creates a plan that reads every byte of `key` with no precondition.
-    pub fn new(key: &'h str) -> Self {
+    /// Creates options for reads of the properties and the metadata of an
+    /// object, without its bytes.
+    pub const fn head() -> Self {
+        Self {
+            kind: GetKind::Head,
+            ..Self::new()
+        }
+    }
+
+    /// Returns these options for reads that each send a range.
+    pub const fn ranged(mut self) -> Self {
+        self.ranging = Ranging::Ranged;
+        self
+    }
+}
+
+/// What one read of a template reads.
+///
+/// Build this for each request and let it go afterwards: it borrows the key
+/// and the values it names. To read the response, keep [`Self::shape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetItem<'i> {
+    /// The object key, before percent-encoding.
+    ///
+    /// Each service refuses some keys: see
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// The bytes to read: [`RequestedRange::Whole`] exactly when the
+    /// template's [`GetOptions::ranging`] is [`Ranging::Whole`]. An empty
+    /// range is refused: see [`RequestedRange::Bounded`].
+    pub range: RequestedRange,
+    /// What the template's precondition compares against: see
+    /// [`ConditionKind`]. Present exactly when the template carries one.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// The snapshot or version to read, as the service wrote it. Present
+    /// exactly when the template's [`GetOptions::revision`] names one, and
+    /// never empty.
+    pub revision: Option<&'i str>,
+}
+
+impl<'i> GetItem<'i> {
+    /// Creates a read of every byte of `key`, as it is now.
+    pub const fn new(key: &'i str) -> Self {
         Self {
             key,
-            kind: GetKind::default(),
-            range: RequestedRange::default(),
-            condition: ConditionKind::default(),
+            range: RequestedRange::Whole,
             condition_value: None,
             revision: None,
         }
     }
 
-    /// Creates a plan that reads the properties and the metadata of `key`,
-    /// without its bytes, with no precondition.
-    pub fn head(key: &'h str) -> Self {
-        Self {
-            kind: GetKind::Head,
-            ..Self::new(key)
-        }
+    /// Returns this read of the bytes in `range`.
+    pub const fn with_range(mut self, range: RequestedRange) -> Self {
+        self.range = range;
+        self
     }
 
-    /// Rebuilds a plan from a stored [`GetShape`] and the bytes it needs.
+    /// Returns the part of this read that holds no borrows, for a template
+    /// with `options`.
     ///
-    /// The plan reads the object as it is now. Set [`Self::revision`] on the
-    /// result to read a snapshot or a version.
-    pub fn from_shape(
-        shape: GetShape,
-        key: &'h str,
-        condition_value: Option<ConditionValue<'h>>,
-    ) -> Self {
-        Self {
-            key,
-            kind: shape.kind,
-            range: shape.range,
-            condition: shape.condition,
-            condition_value,
-            revision: None,
-        }
-    }
-
-    /// Returns the part of this plan that you can store.
-    ///
-    /// Pass the result to
-    /// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) when the
-    /// response arrives.
-    pub fn shape(&self) -> GetShape {
+    /// Keep it while the request is in flight, and pass it to the service's
+    /// `accept_get_head` when the response arrives.
+    pub const fn shape(&self, options: &GetOptions) -> GetShape {
         GetShape {
-            kind: self.kind,
+            kind: options.kind,
             range: self.range,
-            condition: self.condition,
+            condition: options.condition,
         }
     }
 }
@@ -545,7 +565,7 @@ pub struct Tag<'h> {
 /// an S3 PutObjectTagging.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhysicalSetTags<'h> {
-    /// The object key, under the rules of [`PhysicalGet::key`].
+    /// The object key, under the rules of [Object keys](crate#object-keys).
     pub key: &'h str,
     /// The tags that the object then holds, and no others. An empty list
     /// removes every tag.
@@ -577,7 +597,7 @@ impl<'h> PhysicalSetTags<'h> {
 /// to remove.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeleteTarget<'h> {
-    /// The object key, under the rules of [`PhysicalGet::key`].
+    /// The object key, under the rules of [Object keys](crate#object-keys).
     pub key: &'h str,
     /// The snapshot or version to remove, or [`None`] for the object as it
     /// is now. Azure sends it in the path of the object's Delete Blob, and
@@ -630,7 +650,7 @@ impl<'h> PhysicalDeleteMany<'h> {
 
 /// The options of a write.
 ///
-/// [`PhysicalPut::options`], [`PhysicalCommit::options`],
+/// [`PutOptions::options`](crate::PutOptions::options), [`PhysicalCommit::options`],
 /// [`azure::PhysicalStageBlock::options`](crate::azure::PhysicalStageBlock::options)
 /// and [`s3::PhysicalStagePart::options`](crate::s3::PhysicalStagePart::options)
 /// each hold one. Build it with `..Default::default()` or [`Self::new`], so
@@ -692,7 +712,7 @@ impl<'h> WriteOptions<'h> {
 /// object.
 ///
 /// Combine the constants with `|` and put the set in
-/// [`PhysicalList::include`]. An empty set asks for nothing beyond the
+/// [`ListOptions::include`]. An empty set asks for nothing beyond the
 /// object's own properties. Each constant says which service writes it, and
 /// a client refuses a listing that asks the other service for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -752,102 +772,102 @@ impl core::ops::BitOr for ListInclude {
     }
 }
 
-/// The part of a write plan that holds no borrows.
+/// What every write of a whole object from a template does alike.
 ///
-/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
-/// [`Blobs::accept_put_head`](crate::Blobs::accept_put_head) to read the
-/// response that answers the write.
+/// Pass it to `prepare_put` of [`azure`](crate::azure) or [`s3`](crate::s3)
+/// to write the template, and describe each write with a [`PutItem`].
+///
+/// # Writing only if the object is absent
+///
+/// Set [`Self::condition`] to [`ConditionKind::IfNoneMatch`] and give each
+/// write the value `*`. The service then refuses a write that would replace
+/// an object.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PutOptions<'o> {
+    /// The precondition every write carries. Each write names what it
+    /// compares against.
+    pub condition: ConditionKind,
+    /// The metadata pairs to store with each object.
+    ///
+    /// The object then holds these pairs and no others: a write replaces the
+    /// whole set.
+    pub metadata: &'o [MetadataPair<'o>],
+    /// The content properties, the tags and the storage class to store with
+    /// each object. Its `checksum` and `declared_md5` must be [`None`]: set
+    /// [`Self::checksum`] instead.
+    pub options: WriteOptions<'o>,
+    /// The kind of checksum every write sends, or [`None`] for none. Each
+    /// write names its value: see [`PutItem::checksum`].
+    ///
+    /// Azure takes an MD5 and a CRC64. S3 takes every kind.
+    pub checksum: Option<crate::checksum::ChecksumKind>,
+}
+
+/// The value of one checksum: its base64 as the service takes it, or its
+/// digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumValue<'i> {
+    /// The base64 text, sent as it is.
+    ///
+    /// A CRC64 is the base64 of eight bytes in little-endian order for
+    /// Azure, and in big-endian order for S3.
+    Base64(&'i str),
+    /// The digest, which the encoder writes in base64 in the byte order of
+    /// the service.
+    Digest(crate::checksum::Digest),
+}
+
+/// What one write of a whole object from a template writes.
+///
+/// Build this for each request and let it go afterwards: it borrows the key,
+/// the content and the values it names. To read the response, keep
+/// [`Self::shape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PutItem<'i> {
+    /// The object key, before percent-encoding: see
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// The content. The head states its length. A request lends a
+    /// [`Payload::Slice`] to your HTTP client, and leaves a
+    /// [`Payload::Streamed`] for you to send.
+    pub content: Payload<'i>,
+    /// What the template's precondition compares against: see
+    /// [`ConditionKind`]. Present exactly when the template carries one.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// The checksum of the content, of the template's kind. Present exactly
+    /// when the template sends one.
+    pub checksum: Option<ChecksumValue<'i>>,
+}
+
+impl<'i> PutItem<'i> {
+    /// Creates a write of `content` to `key`.
+    pub const fn new(key: &'i str, content: Payload<'i>) -> Self {
+        Self {
+            key,
+            content,
+            condition_value: None,
+            checksum: None,
+        }
+    }
+
+    /// Returns the part of this write that holds no borrows, for a template
+    /// with `options`.
+    pub const fn shape(&self, options: &PutOptions<'_>) -> PutShape {
+        PutShape {
+            condition: options.condition,
+        }
+    }
+}
+
+/// The part of a write that holds no borrows.
+///
+/// [`PutItem::shape`] returns this. It is [`Copy`] and has no lifetime, so
+/// you can keep it while the request is in flight, and pass it to the
+/// service's `accept_put_head`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PutShape {
     /// The condition that the write carries.
     pub condition: ConditionKind,
-}
-
-/// One write of one object.
-///
-/// The write sends the whole object in one request. Pass the content to
-/// [`Blobs::encode_put`](crate::Blobs::encode_put), which states its length in
-/// the request head and borrows the bytes.
-///
-/// # Writing only if the object is absent
-///
-/// Give the plan [`Condition::IfNoneMatch`] with `*`, through
-/// [`PhysicalPut::with_condition`]. Azure then refuses a write that would
-/// replace an object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalPut<'h> {
-    /// The object key, within the container.
-    ///
-    /// No control character: Azure refuses those. A flat-namespace account
-    /// also refuses more than 1024 UTF-16 code units, where a character outside
-    /// the basic plane counts twice; a client told it is on one refuses such a
-    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    ///
-    /// A segment that ends in `.` is refused as well, because Azure stores the
-    /// name without that dot, and so is a `.` or `..` segment, because a host
-    /// resolves those out of the URL before it sends the request. Each would
-    /// name an object other than the one asked for.
-    pub key: &'h str,
-    /// The condition that the write carries.
-    pub condition: ConditionKind,
-    /// What `condition` compares against: see [`ConditionValue`].
-    pub condition_value: Option<ConditionValue<'h>>,
-    /// The metadata pairs to store with the object.
-    ///
-    /// The object then holds these pairs and no others: a write replaces the
-    /// whole set.
-    pub metadata: &'h [MetadataPair<'h>],
-    /// The options of the write, such as a checksum of the content.
-    ///
-    /// [`WriteOptions::new`] adds nothing to the request.
-    pub options: WriteOptions<'h>,
-}
-
-impl<'h> PhysicalPut<'h> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Creates a plan that writes this object with no condition, no metadata
-    /// and no options.
-    pub fn new(key: &'h str) -> Self {
-        Self {
-            key,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            options: WriteOptions::new(),
-        }
-    }
-
-    /// Creates a plan from a stored shape and the bytes that it needs.
-    ///
-    /// The plan has no metadata and no options, because a shape holds no
-    /// borrows and both of those borrow. Set those two fields after this
-    /// call if the write needs them.
-    pub fn from_shape(
-        shape: PutShape,
-        key: &'h str,
-        condition_value: Option<ConditionValue<'h>>,
-    ) -> Self {
-        Self {
-            condition: shape.condition,
-            condition_value,
-            ..Self::new(key)
-        }
-    }
-
-    /// Returns the part of this plan that holds no borrows.
-    pub fn shape(&self) -> PutShape {
-        PutShape {
-            condition: self.condition,
-        }
-    }
 }
 
 /// The part of a [`PhysicalCommit`] that holds no borrows.
@@ -874,7 +894,7 @@ pub struct CommitShape {
 /// long, and a binding produces it rather than holding it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalCommit<'a> {
-    /// The object key, as for [`PhysicalPut::key`].
+    /// The object key, as for [Object keys](crate#object-keys).
     ///
     /// On S3 it is also the key the upload was created for.
     pub key: &'a str,
@@ -888,7 +908,7 @@ pub struct PhysicalCommit<'a> {
     pub condition_value: Option<ConditionValue<'a>>,
     /// The metadata pairs to store with the object.
     ///
-    /// A commit replaces the whole set, as [`PhysicalPut::metadata`] does.
+    /// A commit replaces the whole set, as [`PutOptions::metadata`](crate::PutOptions::metadata) does.
     /// Azure takes them here. S3 takes them when the upload is created, and
     /// refuses a commit that carries any with [`InvalidPlan::Option`].
     ///
@@ -1032,11 +1052,11 @@ impl DeleteKind {
     }
 }
 
-/// The part of a removal plan that holds no borrows.
+/// The part of a removal that holds no borrows.
 ///
 /// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
-/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) to read the
-/// response that answers the removal.
+/// the service's `accept_delete_head` to read the response that answers
+/// the removal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeleteShape {
     /// What the removal takes with it.
@@ -1045,82 +1065,72 @@ pub struct DeleteShape {
     pub condition: ConditionKind,
 }
 
-/// One removal of one object.
+/// What every removal of a template does alike.
 ///
-/// A removal takes only what [`DeleteKind`] names. The default takes the
-/// object alone, and Azure refuses it if that would leave snapshots behind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalDelete<'h> {
-    /// The object key, within the container.
-    ///
-    /// No control character: Azure refuses those. A flat-namespace account
-    /// also refuses more than 1024 UTF-16 code units, where a character outside
-    /// the basic plane counts twice; a client told it is on one refuses such a
-    /// key itself, see [`Blobs::with_namespace`](crate::Blobs::with_namespace).
-    ///
-    /// A segment that ends in `.` is refused as well, because Azure stores the
-    /// name without that dot, and so is a `.` or `..` segment, because a host
-    /// resolves those out of the URL before it sends the request. Each would
-    /// name an object other than the one asked for.
-    pub key: &'h str,
-    /// What the removal takes with it.
+/// Pass it to `prepare_delete` of [`azure`](crate::azure) or
+/// [`s3`](crate::s3) to write the template, and describe each removal with
+/// a [`DeleteItem`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteOptions {
+    /// What each removal takes with it. Azure refuses to remove an object
+    /// with snapshots unless this names them, and S3 keeps none.
     pub kind: DeleteKind,
-    /// The condition that the removal carries.
+    /// The precondition every removal carries. Each removal names what it
+    /// compares against.
     pub condition: ConditionKind,
-    /// The entity tag that `condition` compares against.
-    pub condition_value: Option<ConditionValue<'h>>,
-    /// The snapshot or version to remove, or [`None`] for the object as it
-    /// is now. A plan that names one takes [`DeleteKind::Object`], and a
-    /// client refuses any other kind with
-    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision), as it does
-    /// an empty identifier and a snapshot on S3.
-    pub revision: Option<Revision<'h>>,
+    /// Whether every removal names a snapshot or a version, which takes
+    /// [`DeleteKind::Object`].
+    pub revision: RevisionKind,
 }
 
-impl<'h> PhysicalDelete<'h> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'h>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Creates a plan that removes this object alone, with no condition.
-    pub fn new(key: &'h str) -> Self {
+impl DeleteOptions {
+    /// Creates options for removals of the object alone, as it is now, with
+    /// no precondition.
+    pub const fn new() -> Self {
         Self {
-            key,
             kind: DeleteKind::Object,
             condition: ConditionKind::None,
+            revision: RevisionKind::Current,
+        }
+    }
+}
+
+/// What one removal of a template removes.
+///
+/// Build this for each request and let it go afterwards: it borrows the key
+/// and the values it names. To read the response, keep [`Self::shape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteItem<'i> {
+    /// The object key, before percent-encoding.
+    ///
+    /// Each service refuses some keys: see
+    /// [Object keys](crate#object-keys).
+    pub key: &'i str,
+    /// What the template's precondition compares against: see
+    /// [`ConditionKind`]. Present exactly when the template carries one.
+    pub condition_value: Option<ConditionValue<'i>>,
+    /// The snapshot or version to remove, as the service wrote it. Present
+    /// exactly when the template's [`DeleteOptions::revision`] names one,
+    /// and never empty.
+    pub revision: Option<&'i str>,
+}
+
+impl<'i> DeleteItem<'i> {
+    /// Creates a removal of `key`.
+    pub const fn new(key: &'i str) -> Self {
+        Self {
+            key,
             condition_value: None,
             revision: None,
         }
     }
 
-    /// Creates a plan from a stored shape and the bytes that it needs.
-    ///
-    /// The plan removes the object as it is now. Set [`Self::revision`] on
-    /// the result to remove a snapshot or a version.
-    pub fn from_shape(
-        shape: DeleteShape,
-        key: &'h str,
-        condition_value: Option<ConditionValue<'h>>,
-    ) -> Self {
-        Self {
-            key,
-            kind: shape.kind,
-            condition: shape.condition,
-            condition_value,
-            revision: None,
-        }
-    }
-
-    /// Returns the part of this plan that holds no borrows.
-    pub fn shape(&self) -> DeleteShape {
+    /// Returns the part of this removal that holds no borrows, for a
+    /// template with `options`.
+    pub const fn shape(&self, options: &DeleteOptions) -> DeleteShape {
         DeleteShape {
-            kind: self.kind,
-            condition: self.condition,
+            kind: options.kind,
+            condition: options.condition,
         }
     }
 }
@@ -1148,7 +1158,7 @@ pub struct CopySource<'a> {
     /// a client refuses it with
     /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
     pub container: Option<&'a str>,
-    /// The key of the source, under the rules of [`PhysicalGet::key`].
+    /// The key of the source, under the rules of [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The snapshot or version to copy, or [`None`] for the object as it is
     /// now. S3 copies a version, and no snapshot.
@@ -1204,7 +1214,7 @@ pub struct CopyShape {
 /// names new ones in [`Self::metadata`] and [`Self::tags`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalCopy<'a> {
-    /// The key that the copy writes, under the rules of [`PhysicalGet::key`].
+    /// The key that the copy writes, under the rules of [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The object that the copy reads.
     pub source: CopySource<'a>,
@@ -1213,7 +1223,7 @@ pub struct PhysicalCopy<'a> {
     /// What `condition` compares against: see [`ConditionKind`].
     pub condition_value: Option<ConditionValue<'a>>,
     /// The metadata of the target: [`None`] for the source's, or these pairs
-    /// alone. The rules of [`PhysicalPut::metadata`] apply.
+    /// alone. The rules of [`PutOptions::metadata`](crate::PutOptions::metadata) apply.
     ///
     /// S3 replaces the source's metadata with `x-amz-metadata-directive:
     /// REPLACE`, which replaces its content properties too: see
@@ -1314,7 +1324,7 @@ impl RestorePriority {
 /// HEAD, in [`ObjectMeta::restore_status`](crate::ObjectMeta::restore_status).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhysicalRestore<'h> {
-    /// The object key, under the rules of [`PhysicalGet::key`].
+    /// The object key, under the rules of [Object keys](crate#object-keys).
     pub key: &'h str,
     /// The version to restore, or [`None`] for the object as it is now.
     /// Azure also rehydrates a snapshot, and S3 refuses one with
@@ -1431,69 +1441,21 @@ impl<'a> ListMarker<'a> {
     }
 }
 
-/// The part of a listing plan that holds no borrows.
+/// What every page of a template's listings reports alike.
 ///
-/// Store it while the request is in flight, then pass it back to
-/// [`PhysicalList::from_shape`] with the prefix and the marker to plan the
-/// next page.
+/// Pass it to `prepare_list` of [`azure`](crate::azure) or
+/// [`s3`](crate::s3) to write the template, and describe each page with a
+/// [`ListItem`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ListShape {
-    /// Whether the listing groups keys at a delimiter after the prefix.
-    ///
-    /// The shape holds no delimiter text. [`PhysicalList::from_shape`] plans
-    /// `/`.
-    pub delimited: bool,
-    /// The most entries that one page reports.
-    pub max_results: Option<u32>,
-    /// The extra elements that each page reports beside each object.
-    pub include: ListInclude,
-}
-
-/// One page of a listing.
-///
-/// A page is one request. The response names where the next page starts, and
-/// you plan that page with the same shape and that marker.
-///
-/// Because the fields are public and unchecked,
-/// [`Blobs::encode_list`](crate::Blobs::encode_list) and
-/// [`s3::Objects::encode_list`](crate::s3::Objects::encode_list) validate the
-/// plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalList<'h> {
-    /// The keys to list under. An empty prefix lists the whole container.
-    ///
-    /// The prefix is matched byte for byte and is not a path: this crate adds
-    /// no `/` to it. To list one directory of a delimited listing, end the
-    /// prefix with the delimiter yourself.
-    ///
-    /// A prefix may be longer than a name.
-    pub prefix: &'h str,
-    /// Where the previous page ended.
-    ///
-    /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
-    /// previous page reported. The first page carries [`None`]. The text is
-    /// the service's, and means nothing to this crate.
-    ///
-    /// A listing continues from the kind of marker that its pages hand out:
-    /// [`ListMarker::Version`] for an S3 listing of
-    /// [`ListInclude::VERSIONS`], and [`ListMarker::Text`] for every other.
-    /// A client refuses the other kind, and an empty text, with
-    /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
-    pub marker: Option<ListMarker<'h>>,
-    /// The text after which the listing starts. S3 only.
-    ///
-    /// The listing reports only the keys and groups of keys that sort after
-    /// this text, which need not be a key. An empty text is the same as
-    /// [`None`]. A later page starts at its marker instead.
-    pub start_after: Option<&'h str>,
+pub struct ListOptions<'o> {
     /// The text at which to group the keys after the prefix, usually `/`, or
     /// [`None`] to report every key.
     ///
     /// A delimited listing reports each group once, as an
     /// [`EntryKind::Prefix`] entry, instead of reporting every key in it. This
     /// is how a listing walks one level of a hierarchy at a time.
-    pub delimiter: Option<&'h str>,
-    /// The most entries that this page reports.
+    pub delimiter: Option<&'o str>,
+    /// The most entries that one page reports.
     ///
     /// [`None`] asks for the service's maximum, which the service also
     /// applies to any larger number: 5,000 on Azure and 1,000 on AWS. The
@@ -1505,50 +1467,63 @@ pub struct PhysicalList<'h> {
     pub include: ListInclude,
 }
 
-impl<'h> PhysicalList<'h> {
-    /// Creates a plan for the first page of an undelimited listing.
-    pub fn new(prefix: &'h str) -> Self {
+/// One page of a listing, which is one request.
+///
+/// The response names where the next page starts: describe that page with
+/// the same prefix and that marker. Build this for each request and let it
+/// go afterwards: it borrows the text it names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListItem<'i> {
+    /// The keys to list under. An empty prefix lists the whole container.
+    ///
+    /// The prefix is matched byte for byte and is not a path: this crate adds
+    /// no `/` to it. To list one directory of a delimited listing, end the
+    /// prefix with the delimiter yourself.
+    ///
+    /// A prefix may be longer than a name.
+    pub prefix: &'i str,
+    /// Where the previous page ended.
+    ///
+    /// Pass the [`Listing::next_marker`](crate::Listing::next_marker) that the
+    /// previous page reported. The first page carries [`None`]. The text is
+    /// the service's, and means nothing to this crate.
+    ///
+    /// A listing continues from the kind of marker that its pages hand out:
+    /// [`ListMarker::Version`] for an S3 listing of
+    /// [`ListInclude::VERSIONS`], and [`ListMarker::Text`] for every other.
+    /// The other kind, and an empty text, are refused with
+    /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
+    pub marker: Option<ListMarker<'i>>,
+    /// The text after which the listing starts. S3 only.
+    ///
+    /// The listing reports only the keys and groups of keys that sort after
+    /// this text, which need not be a key. An empty text is the same as
+    /// [`None`]. A later page starts at its marker instead.
+    pub start_after: Option<&'i str>,
+}
+
+impl<'i> ListItem<'i> {
+    /// Creates the first page of a listing of the keys under `prefix`.
+    pub const fn new(prefix: &'i str) -> Self {
         Self {
             prefix,
             marker: None,
             start_after: None,
-            delimiter: None,
-            max_results: None,
-            include: ListInclude::default(),
         }
     }
 
-    /// Creates a plan from a stored shape and the text that it needs.
-    ///
-    /// The plan has no [`Self::start_after`], which a later page does not
-    /// need. A delimited shape groups the keys at `/`: set
-    /// [`Self::delimiter`] on the plan for another delimiter.
-    pub fn from_shape(shape: ListShape, prefix: &'h str, marker: Option<ListMarker<'h>>) -> Self {
-        Self {
-            prefix,
-            marker,
-            start_after: None,
-            delimiter: shape.delimited.then_some("/"),
-            max_results: shape.max_results,
-            include: shape.include,
-        }
-    }
-
-    /// Returns the part of this plan that holds no borrows.
-    pub fn shape(&self) -> ListShape {
-        ListShape {
-            delimited: self.delimiter.is_some(),
-            max_results: self.max_results,
-            include: self.include,
-        }
+    /// Returns this page, continued from `marker`.
+    pub const fn after(mut self, marker: ListMarker<'i>) -> Self {
+        self.marker = Some(marker);
+        self
     }
 }
 
 /// One entry of a listing page.
 ///
 /// Every slice points into the body that
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
-/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) read, and
+/// [`azure::fill_listing`](crate::azure::fill_listing) or
+/// [`s3::fill_listing`](crate::s3::fill_listing) read, and
 /// stays valid until you reuse that buffer.
 ///
 /// The fields hold the text that the service wrote, decoded.
@@ -1556,7 +1531,7 @@ impl<'h> PhysicalList<'h> {
 /// Azure version and snapshot fields are available through
 /// `entry.property("VersionId")`, `entry.property("IsCurrentVersion")` and
 /// `entry.property("Snapshot")`. To select these while reading the page, use
-/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with) and
+/// [`azure::fill_listing_with`](crate::azure::fill_listing_with) and
 /// [`BlobProperty`](crate::BlobProperty).
 ///
 /// [`ObjectMeta`]: crate::ObjectMeta
@@ -1817,7 +1792,7 @@ mod tests {
 /// every [`ListEntry`] carries.
 ///
 /// Name the ones you want in a [`PropertySet`] and read a page with
-/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with), which
+/// [`azure::fill_listing_with`](crate::azure::fill_listing_with), which
 /// hands you their values as it goes. Most are written under the properties
 /// element; the ones marked otherwise stand beside it. Read anything that is
 /// not listed here with [`ListEntry::properties`].
@@ -2051,7 +2026,7 @@ impl BlobProperty {
 /// The properties that one page read is asked for.
 ///
 /// Build one with [`Self::of`] and pass it to
-/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with). The values
+/// [`azure::fill_listing_with`](crate::azure::fill_listing_with). The values
 /// come back in the order that [`BlobProperty`] lists them, whatever order
 /// the set was built in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -2108,7 +2083,7 @@ impl PropertySet {
 
 /// The values that one entry gave for the properties of a set.
 ///
-/// [`Blobs::fill_listing_with`](crate::Blobs::fill_listing_with) hands one
+/// [`azure::fill_listing_with`](crate::azure::fill_listing_with) hands one
 /// to the closure that builds each entry. Each value is the bytes between
 /// the element's tags, as the service wrote them, under the rules that
 /// [`ListEntry::property`] states. A group of keys gives no values.

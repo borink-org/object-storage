@@ -15,7 +15,7 @@ use crate::{
 
 use crate::ptr::SessionValues;
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{Blobs, Container, Error, ListMarker, ResponseHead, WireRequest};
+use borink_object_storage_proto::{Blobs, Container, Error, ListMarker, ResponseHead, LegacyRequest};
 
 // What every call needs before the core crate sees it: a session that was
 // passed, whose three values name a container that can be addressed.
@@ -136,7 +136,7 @@ pub(crate) fn head_of<'a>(
 
 // The written head, or the exact size that it needed, or why the plan was
 // refused. All three are one status and one `required`.
-pub(crate) fn written(request: proto::Result<WireRequest<'_>>) -> RequestHead {
+pub(crate) fn written(request: proto::Result<LegacyRequest<'_>>) -> RequestHead {
     let request = match request {
         Ok(request) => request,
         Err(error) => return refused(&error),

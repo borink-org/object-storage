@@ -529,7 +529,7 @@ impl FailureClass {
 /// The three head-reading methods return this in the two outcomes that carry a
 /// failure. Pass it back to the `accept_*_error_body` method of the same
 /// operation, such as
-/// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+/// [`azure::accept_get_error_body`](crate::azure::accept_get_error_body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure<'h> {
     /// The HTTP status code.
@@ -565,7 +565,7 @@ impl fmt::Display for Failure<'_> {
 /// Every head that the service sends becomes one of these values, including
 /// the heads that report a failure. Branch on this value to drive the request.
 ///
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns an
+/// [`azure::accept_get_head`](crate::azure::accept_get_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -621,7 +621,7 @@ pub enum GetHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body). That
+    /// [`azure::accept_get_error_body`](crate::azure::accept_get_error_body). That
     /// call returns the final outcome. If you cannot read the body, pass an
     /// empty one and the error stays unnamed.
     ///
@@ -639,7 +639,7 @@ pub enum GetHeadOutcome<'h> {
 /// Every head that Azure sends becomes one of these values, including the
 /// heads that report a failure.
 ///
-/// [`Blobs::accept_put_head`](crate::Blobs::accept_put_head) returns an
+/// [`azure::accept_put_head`](crate::azure::accept_put_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -663,7 +663,7 @@ pub enum PutHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body).
+    /// [`azure::accept_put_error_body`](crate::azure::accept_put_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -681,7 +681,7 @@ pub enum PutHeadOutcome<'h> {
 /// Every head that Azure sends becomes one of these values, including the
 /// heads that report a failure.
 ///
-/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) returns an
+/// [`azure::accept_delete_head`](crate::azure::accept_delete_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -706,7 +706,7 @@ pub enum DeleteHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body).
+    /// [`azure::accept_delete_error_body`](crate::azure::accept_delete_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -722,8 +722,8 @@ pub enum DeleteHeadOutcome<'h> {
 /// The result of reading the response head of a listing.
 ///
 /// A head that reports a failure is one of these too;
-/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) and
-/// [`s3::Objects::accept_list_head`](crate::s3::Objects::accept_list_head)
+/// [`azure::accept_list_head`](crate::azure::accept_list_head) and
+/// [`s3::accept_list_head`](crate::s3::accept_list_head)
 /// return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -731,8 +731,8 @@ pub enum ListHeadOutcome<'h> {
     /// The page follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
-    /// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing),
+    /// [`azure::fill_listing`](crate::azure::fill_listing) or
+    /// [`s3::fill_listing`](crate::s3::fill_listing),
     /// which reads the entries out of it.
     Page {
         /// The exact length of the response body, if the head states it.
@@ -744,7 +744,7 @@ pub enum ListHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
+    /// [`azure::accept_list_error_body`](crate::azure::accept_list_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -760,8 +760,8 @@ pub enum ListHeadOutcome<'h> {
 
 /// What one page of a listing held.
 ///
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) and
-/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) return
+/// [`azure::fill_listing`](crate::azure::fill_listing) and
+/// [`s3::fill_listing`](crate::s3::fill_listing) return
 /// this once the page has been read to its end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Listing<'b> {
@@ -772,7 +772,7 @@ pub struct Listing<'b> {
     /// Where the next page starts, or [`None`] when the listing is complete.
     ///
     /// Copy this text into your own storage and pass it as
-    /// [`PhysicalList::marker`](crate::PhysicalList::marker); the next page
+    /// [`ListItem::marker`](crate::ListItem::marker); the next page
     /// overwrites the body it borrows.
     ///
     /// A page names a next one whenever more keys follow, even if it reported

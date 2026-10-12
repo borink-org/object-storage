@@ -1,12 +1,12 @@
-//! Lists every key under one prefix, one page at a time.
+//! Lists every key under one prefix, one page at a time, from one template.
 //!
 //! Set `S3_COMPATIBLE` to any value for a service other than AWS.
 
 use std::env;
 
-use borink_object_storage_proto::s3::{Bucket, Objects, Service};
+use borink_object_storage_proto::s3::{self as proto, Bucket, Service};
 use borink_object_storage_proto::sigv4::Credentials;
-use borink_object_storage_proto::{ListEntry, ListMarker, PhysicalList};
+use borink_object_storage_proto::{Error, ListEntry, ListItem, ListMarker, ListOptions};
 use borink_object_storage_ureq::s3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,24 +27,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(token) = &session_token {
         credentials = credentials.with_session_token(token)?;
     }
-    let objects = Objects::new(
-        bucket,
-        credentials,
-        borink_object_storage_crypto::SHA256_RUSTCRYPTO,
-    );
+
+    // Every page shares the template: an empty buffer is refused with the
+    // size it needs.
+    let options = ListOptions {
+        max_results: Some(1000),
+        ..ListOptions::default()
+    };
+    let prepare = |buf: &mut [u8]| proto::prepare_list(&bucket, &credentials, &options, buf);
+    let size = match prepare(&mut []) {
+        Err(Error::Capacity(capacity)) => capacity.required,
+        other => return Err(format!("{other:?}").into()),
+    };
+    let mut bytes = vec![0; size];
+    let template = prepare(&mut bytes)?;
 
     let mut marker: Option<String> = None;
     let mut body = Vec::new();
     loop {
-        // The array is as long as the page the plan asks for. It borrows the
-        // body, so each round has its own.
+        // The array is as long as the page the template asks for. It borrows
+        // the body, so each round has its own.
         let mut entries = vec![ListEntry::default(); 1000];
-        let plan = PhysicalList {
+        let item = ListItem {
             marker: marker.as_deref().map(ListMarker::Text),
-            max_results: Some(1000),
-            ..PhysicalList::new(&prefix)
+            ..ListItem::new(&prefix)
         };
-        let page = s3::list(&objects, &plan, &mut body, &mut entries)?;
+        let page = s3::list(
+            &template,
+            &bytes,
+            &credentials,
+            &item,
+            &mut body,
+            &mut entries,
+        )?;
         for entry in &entries[..page.filled] {
             println!("{}", entry.key);
         }

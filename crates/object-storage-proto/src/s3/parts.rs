@@ -13,7 +13,7 @@ use crate::common::{
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
-    Objects, PayloadHash, Service, Signed, Stores, body_kind, is_error_document,
+    Objects, PayloadHash, Service, Signed, Stores, body_kind, failed, is_error_document,
     refuse_error_document, stored_headers, validate_content, validate_key, validate_metadata,
     validate_write_condition,
 };
@@ -21,9 +21,9 @@ use crate::sigv4::EMPTY_SHA256;
 use crate::url;
 use crate::{
     CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, HeaderSpan,
-    InvalidPlan, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta, Payload,
-    PhysicalCommit, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind,
-    StageHeadOutcome, Timestamps, WireRequest, WriteOptions,
+    InvalidPlan, LegacyRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta,
+    Payload, PhysicalCommit, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind,
+    StageHeadOutcome, Timestamps, WriteOptions,
 };
 
 /// The most bytes that S3 takes in one part.
@@ -54,16 +54,16 @@ pub const MAX_PARTS: u32 = 10_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalCreateUpload<'a> {
     /// The object key, under the rules of
-    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    /// [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The metadata pairs to store with the object that the upload commits.
     ///
-    /// The rules of [`PhysicalPut::metadata`](crate::PhysicalPut::metadata)
+    /// The rules of [`PutOptions::metadata`](crate::PutOptions::metadata)
     /// apply. An S3 commit takes no metadata of its own.
     pub metadata: &'a [MetadataPair<'a>],
     /// The content properties, the tags and the storage class of the object
     /// that the upload commits, under the rules of
-    /// [`PhysicalPut::options`](crate::PhysicalPut::options). The upload
+    /// [`PutOptions::options`](crate::PutOptions::options). The upload
     /// takes no checksum here: each part carries its own.
     pub options: WriteOptions<'a>,
 }
@@ -245,7 +245,7 @@ impl<'a> Objects<'a> {
     ///
     /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `plan`
     /// cannot become an S3 request, for the reasons of the key, the metadata
-    /// and the options that [`Self::encode_put`] states. A plan whose options
+    /// and the options that [`encode_put`](crate::s3::encode_put) states. A plan whose options
     /// carry a checksum is refused with [`InvalidPlan::Option`].
     ///
     /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` or
@@ -258,7 +258,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCreateUpload<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_metadata(plan.metadata, self.bucket.service)?;
         if plan.options.checksum.is_some() {
@@ -314,18 +314,14 @@ impl<'a> Objects<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(CreateUploadHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`CreateUploadHeadOutcome::NeedErrorBody`] with the
     /// response body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a CreateMultipartUpload,
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for a CreateMultipartUpload,
     /// and reads the body the same way. A missing bucket is a
     /// [`CreateUploadHeadOutcome::ServiceFailure`] with
     /// [`ServiceErrorKind::NoSuchContainer`].
@@ -360,7 +356,7 @@ impl<'a> Objects<'a> {
     ///
     /// The head states the length of `content`, which stays where you put
     /// it, and `hash` says how the request signs it, as for
-    /// [`Self::encode_put`]. Keep the entity tag that the answer carries: the
+    /// [`encode_put`](crate::s3::encode_put). Keep the entity tag that the answer carries: the
     /// commit names the part by it.
     ///
     /// # Errors
@@ -374,10 +370,10 @@ impl<'a> Objects<'a> {
     /// - [`InvalidPlan::PayloadTooLarge`] if `content` is longer than
     ///   [`MAX_PART_LEN`].
     /// - [`InvalidPlan::Option`] for the options and the hash that
-    ///   [`Self::encode_put`] refuses.
+    ///   [`encode_put`](crate::s3::encode_put) refuses.
     ///
     /// Returns [`Error::Capacity`](crate::Error::Capacity) as
-    /// [`Self::encode_put`] does, or call
+    /// [`encode_put`](crate::s3::encode_put) does, or call
     /// [`layered::s3::stage_part_requirements`](crate::layered::s3::stage_part_requirements)
     /// first.
     pub fn encode_stage_part<'r>(
@@ -388,7 +384,7 @@ impl<'a> Objects<'a> {
         content: Payload<'r>,
         hash: PayloadHash,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_upload_id(plan.upload_id)?;
         validate_part_number(plan.number, self.bucket.service)?;
@@ -440,18 +436,14 @@ impl<'a> Objects<'a> {
             200 if head.e_tag.is_none() => Err(ResponseFault::Head.into()),
             200 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(StageHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_get_error_body`] for an UploadPart, and reads
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for an UploadPart, and reads
     /// the body the same way. A missing upload is
     /// [`StageHeadOutcome::NotFound`] with
     /// [`ServiceErrorKind::NoSuchUpload`].
@@ -467,8 +459,8 @@ impl<'a> Objects<'a> {
     /// XML body after it.
     ///
     /// `parts` become the object in this order. The body is written into
-    /// `buf` after the head, so [`WireRequest::body_span`] names it and
-    /// [`WireRequest::payload`] borrows it; send both before reusing `buf`.
+    /// `buf` after the head, so [`LegacyRequest::body_span`] names it and
+    /// [`LegacyRequest::payload`] borrows it; send both before reusing `buf`.
     /// The request signs the SHA-256 of the body.
     ///
     /// The commit ends the upload. The parts it does not name are dropped.
@@ -485,7 +477,7 @@ impl<'a> Objects<'a> {
     ///   when it creates the upload, or a declared MD5, or a checksum other
     ///   than an MD5.
     /// - [`InvalidPlan::Condition`] for the conditions that
-    ///   [`Self::encode_put`] refuses.
+    ///   [`encode_put`](crate::s3::encode_put) refuses.
     /// - [`InvalidPlan::PartId`] for a part number that
     ///   [`Self::encode_stage_part`] refuses, or an entity tag that is not
     ///   one header value.
@@ -506,7 +498,7 @@ impl<'a> Objects<'a> {
         upload_id: &str,
         parts: &[PartRef<'_>],
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.encode_commit_parts_from_iter(
             buf,
             headers,
@@ -535,7 +527,7 @@ impl<'a> Objects<'a> {
         upload_id: &str,
         parts: impl Iterator<Item = (u32, E)> + Clone,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>>
+    ) -> Result<LegacyRequest<'r>>
     where
         E: AsRef<[u8]>,
     {
@@ -627,11 +619,7 @@ impl<'a> Objects<'a> {
             412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
             412 => Ok(CommitHeadOutcome::PreconditionFailed),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(CommitHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -696,7 +684,7 @@ impl<'a> Objects<'a> {
     /// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a commit, and reads the
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for a commit, and reads the
     /// body the same way. A missing upload is [`CommitHeadOutcome::NotFound`]
     /// with [`ServiceErrorKind::NoSuchUpload`], and a list of parts that S3
     /// cannot commit is a service failure with
@@ -730,7 +718,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalAbortUpload<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_upload_id(plan.upload_id)?;
         let query = [url::encoded("uploadId", plan.upload_id)];
@@ -768,26 +756,19 @@ impl<'a> Objects<'a> {
         &self,
         head: ResponseHead<'h>,
     ) -> Result<DeleteHeadOutcome<'h>> {
-        let accepts_200 = match self.bucket.service {
-            Service::Compatible => true,
-            Service::Aws | Service::AwsDirectory => false,
-        };
+        let accepts_200 = !self.bucket.service.is_aws();
         match head.status {
             204 => Ok(DeleteHeadOutcome::Accepted),
             200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
             200..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] of an abort with the
     /// response body.
     ///
-    /// This is [`Self::accept_get_error_body`] for an abort, and reads the
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for an abort, and reads the
     /// body the same way. An upload that is gone is
     /// [`DeleteHeadOutcome::NotFound`] with
     /// [`ServiceErrorKind::NoSuchUpload`].
@@ -820,7 +801,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalListParts<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_upload_id(plan.upload_id)?;
         if plan.marker.is_some_and(str::is_empty) {
@@ -873,18 +854,14 @@ impl<'a> Objects<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(ListPartsHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a ListParts, and reads the
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for a ListParts, and reads the
     /// body the same way. A missing upload is
     /// [`ListPartsHeadOutcome::NotFound`] with
     /// [`ServiceErrorKind::NoSuchUpload`].
@@ -932,10 +909,7 @@ impl<'a> Objects<'a> {
 // Part number 0 is not a part anywhere. AWS numbers parts up to
 // `MAX_PARTS`.
 pub(super) fn validate_part_number(number: u32, service: Service) -> Result<()> {
-    let limited = match service {
-        Service::Aws | Service::AwsDirectory => true,
-        Service::Compatible => false,
-    };
+    let limited = service.is_aws();
     if number == 0 || (limited && number > MAX_PARTS) {
         return Err(InvalidPlan::PartId.into());
     }
@@ -956,10 +930,7 @@ fn validate_parts<E: AsRef<[u8]>>(
     parts: impl Iterator<Item = (u32, E)>,
     service: Service,
 ) -> Result<()> {
-    let ordered = match service {
-        Service::Aws | Service::AwsDirectory => true,
-        Service::Compatible => false,
-    };
+    let ordered = service.is_aws();
     let mut previous = None;
     for (number, e_tag) in parts {
         validate_part_number(number, service)?;

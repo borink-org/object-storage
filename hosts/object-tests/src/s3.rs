@@ -11,32 +11,35 @@ use crate::listing::{
     list_page,
 };
 use crate::{
-    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, current_timestamps,
-    decode_base64_field, failed_result, optional_text, read_body_fields, read_meta_fields,
-    request_buffers, requested_checksum, requested_condition, requested_keys, requested_metadata,
-    requested_properties, requested_range, requested_restore, requested_revision, requested_source,
-    requested_source_range, requested_tags, restore_value, send_request, send_request_with,
-    served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
+    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, checksum_value,
+    current_timestamps, decode_base64_field, failed_result, optional_text, owned, read_body_fields,
+    read_meta_fields, request_buffers, requested_checksum_kind, requested_condition,
+    requested_delete, requested_get, requested_keys, requested_metadata, requested_properties,
+    requested_restore, requested_revision, requested_source, requested_source_range,
+    requested_tags, required, restore_value, send_request, send_request_with, served_range,
+    successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
     unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{
     CRC32, CRC32C, CRC64, MD5_RUSTCRYPTO, SHA1_RUSTCRYPTO, SHA256_CHECKSUM_RUSTCRYPTO,
-    SHA256_RUSTCRYPTO, wipe,
+    SHA256_RUSTCRYPTO, Sha256RustCrypto, sigv4, wipe,
 };
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Objects, Part,
-    PartRef, PayloadHash, PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts,
-    PhysicalStagePart, PhysicalStagePartCopy, PropertySet, Service, Session, SessionHeadOutcome,
+    PartRef, PayloadHash, PayloadSigning, PhysicalAbortUpload, PhysicalCreateUpload,
+    PhysicalListParts, PhysicalStagePart, PhysicalStagePartCopy, PropertySet, Service, Session,
+    SessionHeadOutcome, Template, Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
-    DeleteKind, DeleteManyHeadOutcome, EntryKind, GetHeadOutcome, GetKind, ListEntry,
-    ListHeadOutcome, ListInclude, ListMarker, ListPartsHeadOutcome, Metadata, Payload,
-    PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet, PhysicalList,
-    PhysicalPut, PhysicalSetTags, PutHeadOutcome, RequestedRange, RestoreHeadOutcome, Revision,
-    StageHeadOutcome, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WriteOptions, layered,
+    DeleteItem, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
+    GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
+    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, Payload, PhysicalCommit,
+    PhysicalCopy, PhysicalDeleteMany, PhysicalSetTags, PutHeadOutcome, PutItem, PutOptions,
+    Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind, StageHeadOutcome, Tag,
+    TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WireRequest, WriteOptions, layered,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -73,8 +76,11 @@ fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
 struct Client<'a> {
     context: AdapterContext,
     objects: Objects<'a>,
+    bucket: Bucket<'a>,
+    credentials: Credentials<'a>,
     directory: bool,
     session: OnceCell<Objects<'a>>,
+    session_credentials: OnceCell<Credentials<'static>>,
 }
 
 impl<'a> Client<'a> {
@@ -110,8 +116,95 @@ impl<'a> Client<'a> {
             Ok(objects) => objects.with_signing_key(&current_timestamps()),
             Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
         };
+        if let Ok(credentials) = session.credentials(wipe) {
+            self.session_credentials.get_or_init(|| credentials);
+        }
         Ok(Ok(*self.session.get_or_init(|| objects)))
     }
+
+    /// Returns the credentials that sign requests to the objects: the
+    /// case's own, or a session's for a directory bucket.
+    fn signing_credentials(&self) -> Result<Result<Credentials<'_>, Value>, AdapterError> {
+        if !self.directory {
+            return Ok(Ok(self.credentials));
+        }
+        if let Err(result) = self.signer()? {
+            return Ok(Err(result));
+        }
+        Ok(self.session_credentials.get().copied().ok_or_else(
+            || json!({"outcome": "error", "kind": "other", "reason": "no session credentials"}),
+        ))
+    }
+
+    /// Writes, signs and sends one request from the template that
+    /// `prepare` writes and the request that `encode` writes from it.
+    ///
+    /// The crate checks the request against the case's own credentials
+    /// first, so that a refused request sends nothing, not even a
+    /// CreateSession.
+    fn send<'c>(
+        &self,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        body: Option<&CallBody>,
+        read: BodyRead<'_>,
+    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+        let now = current_timestamps();
+        let mut scratch = Vec::new();
+        let checked = signed(
+            &self.bucket,
+            &self.credentials,
+            &now,
+            &prepare,
+            &encode,
+            &mut scratch,
+        )
+        .map(drop);
+        if let Err(error) = checked {
+            return Ok(Err(crate::result_for_crate_error(error)));
+        }
+        let credentials = match self.signing_credentials()? {
+            Ok(credentials) => credentials,
+            Err(result) => return Ok(Err(result)),
+        };
+        let mut buf = Vec::new();
+        let (template, request) = match signed(
+            &self.bucket,
+            &credentials,
+            &now,
+            &prepare,
+            &encode,
+            &mut buf,
+        ) {
+            Ok(signed) => signed,
+            Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
+        };
+        match send_request_with(&self.context, &request, body, read) {
+            Ok(exchange) => Ok(Ok((template, exchange))),
+            Err(error) => Ok(Err(transport_failure(&error))),
+        }
+    }
+}
+
+/// Writes the template that `prepare` writes, and the request that
+/// `encode` writes from it into `buf`, signed with `credentials` at
+/// `now`.
+fn signed<'b, 'c: 'b>(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    now: &Timestamps,
+    prepare: &impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
+    encode: &impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+    buf: &'b mut Vec<u8>,
+) -> Result<(Template, WireRequest<'b>), CrateError> {
+    let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
+    let mut bytes = vec![0; required(write)?];
+    let template = write(&mut bytes)?;
+    let key = sigv4::signing_key::<Sha256RustCrypto>(&template, &bytes, credentials, now)?;
+    let stamp = sigv4::stamp(&key, &template, &bytes, now)?;
+    *buf = vec![0; required(|out| encode(&template, &bytes, out))?];
+    let unsigned = encode(&template, &bytes, buf)?;
+    Ok((template, sigv4::sign(&stamp, &unsigned, buf)))
 }
 
 /// Sends a CreateSession and reads the credentials of the session, or
@@ -164,48 +257,29 @@ macro_rules! signer_step {
 }
 
 fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate("PhysicalGet carries one precondition"));
+    let Some((options, item)) = requested_get(call, kind)? else {
+        return Ok(unsupported_by_crate("a read carries one precondition"));
     };
-    let key = optional_text(call, "key").unwrap_or_default();
-    let range = if kind == GetKind::Head {
-        RequestedRange::Whole
-    } else {
-        requested_range(call)?
-    };
-    let get_plan = PhysicalGet {
-        key,
-        kind,
-        range,
-        condition,
-        condition_value,
-        revision: requested_revision(call),
-    };
-
     let now = current_timestamps();
-    crate_step!(layered::s3::get_requirements(
-        &client.objects,
-        &get_plan,
-        &now
-    ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::get_requirements(objects, &get_plan, &now)
-    ));
-    let request =
-        crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
-    let exchange = transport_step!(send_request_with(
-        &client.context,
-        &request,
+    let (template, exchange) = match client.send(
+        |bucket, credentials, buf| s3::prepare_get(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_get(template, bytes, &item, &now, buf),
         None,
-        BodyRead::of(call)
+        BodyRead::of(call),
+    )? {
+        Ok(sent) => sent,
+        Err(result) => return Ok(result),
+    };
+    let shape = item.shape(&options);
+    let range = item.range;
+    let head_outcome = crate_step!(s3::accept_get_head(
+        template.service(),
+        shape,
+        exchange.response_head()
     ));
-
-    let head_outcome =
-        crate_step!(objects.accept_get_head(get_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         GetHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
+            s3::accept_get_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -253,73 +327,63 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         return Ok(two_checksums_refused());
     }
     let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
+        return Ok(unsupported_by_crate("a write carries one precondition"));
     };
-    // S3 takes every checksum that the crate has, as text or computed.
-    let checksum = match requested_checksum(call) {
-        None => None,
-        Some(Some(checksum)) => Some(checksum),
+    let body = CallBody::of(call)?;
+    // S3 takes every checksum that the crate has.
+    let (checksum_kind, checksum) = match requested_checksum_kind(call) {
+        None => (None, None),
+        Some(Some((kind, text))) => match checksum_value(kind, text, &body) {
+            Ok(value) => (Some(kind), Some(value)),
+            Err(result) => return Ok(result),
+        },
         Some(None) => return Ok(unsupported_by_adapter("checksum algorithm not mapped")),
     };
-
     let metadata_pairs = requested_metadata(call);
-
-    let key = optional_text(call, "key").unwrap_or_default();
-    let body = CallBody::of(call)?;
     let tags = requested_tags(call);
-    let put_plan = PhysicalPut {
-        key,
+    let options = PutOptions {
         condition,
-        condition_value,
         metadata: &metadata_pairs,
         options: WriteOptions {
-            checksum,
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "storage_class"),
             ..WriteOptions::default()
         },
+        checksum: checksum_kind,
     };
-    let payload = body.payload();
-    // The encoder hashes content that it holds, and a generated body goes
-    // unsigned, as the adapter writes it only as it sends it.
-    let payload_hash = match body {
-        CallBody::Held(_) => PayloadHash::Compute,
-        CallBody::Generated { .. } => PayloadHash::Unsigned,
+    let item = PutItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        content: body.payload(),
+        condition_value,
+        checksum,
+    };
+    // A held body is signed, and a generated one goes unsigned, as the
+    // adapter writes it only as it sends it.
+    let (signing, digest) = match &body {
+        CallBody::Held(bytes) => (
+            PayloadSigning::Signed,
+            Some(sigv4::sha256::<Sha256RustCrypto>(bytes)),
+        ),
+        CallBody::Generated { .. } => (PayloadSigning::Unsigned, None),
     };
 
     let now = current_timestamps();
-    crate_step!(layered::s3::put_requirements(
-        &client.objects,
-        &put_plan,
-        payload,
-        payload_hash,
-        &now
-    ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::put_requirements(objects, &put_plan, payload, payload_hash, &now)
-    ));
-    let request = crate_step!(objects.encode_put(
-        &mut request_bytes,
-        &mut header_spans,
-        &put_plan,
-        payload,
-        payload_hash,
-        &now
-    ));
-    let exchange = transport_step!(send_request_with(
-        &client.context,
-        &request,
+    let (_, exchange) = match client.send(
+        |bucket, credentials, buf| s3::prepare_put(bucket, credentials, &options, signing, buf),
+        |template, bytes, buf| s3::encode_put(template, bytes, &item, digest.as_ref(), &now, buf),
         Some(&body),
-        BodyRead::Hold
-    ));
+        BodyRead::Hold,
+    )? {
+        Ok(sent) => sent,
+        Err(result) => return Ok(result),
+    };
 
-    let head_outcome =
-        crate_step!(objects.accept_put_head(put_plan.shape(), exchange.response_head()));
+    let shape = item.shape(&options);
+    let head_outcome = crate_step!(s3::accept_put_head(shape, exchange.response_head()));
     let outcome = match head_outcome {
         PutHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
+            s3::accept_put_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -341,43 +405,28 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
 }
 
 fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate(
-            "PhysicalDelete carries one precondition",
-        ));
+    let Some((options, item)) = requested_delete(call)? else {
+        return Ok(unsupported_by_crate("a removal carries one precondition"));
     };
-    let key = optional_text(call, "key").unwrap_or_default();
-    let delete_plan = PhysicalDelete {
-        key,
-        kind: DeleteKind::Object,
-        condition,
-        condition_value,
-        revision: requested_revision(call),
-    };
-
     let now = current_timestamps();
-    crate_step!(layered::s3::delete_requirements(
-        &client.objects,
-        &delete_plan,
-        &now
+    let (template, exchange) = match client.send(
+        |bucket, credentials, buf| s3::prepare_delete(bucket, credentials, &options, buf),
+        |template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
+    )? {
+        Ok(sent) => sent,
+        Err(result) => return Ok(result),
+    };
+    let shape = item.shape(&options);
+    let head_outcome = crate_step!(s3::accept_delete_head(
+        template.service(),
+        shape,
+        exchange.response_head()
     ));
-    let objects = &signer_step!(client);
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::s3::delete_requirements(objects, &delete_plan, &now)
-    ));
-    let request = crate_step!(objects.encode_delete(
-        &mut request_bytes,
-        &mut header_spans,
-        &delete_plan,
-        &now
-    ));
-    let exchange = transport_step!(send_request(&client.context, &request));
-
-    let head_outcome =
-        crate_step!(objects.accept_delete_head(delete_plan.shape(), exchange.response_head()));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            objects.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
+            s3::accept_delete_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -829,32 +878,22 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
 
 /// The pages of the bucket's listings.
 impl PageSource for Client<'_> {
-    fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
+    fn read_page(&self, options: &ListOptions<'_>, item: &ListItem<'_>) -> PageRead {
         let now = current_timestamps();
-        page_step!(layered::s3::list_requirements(
-            &self.objects,
-            list_plan,
-            &now
-        ));
-        let objects = &match self.signer()? {
-            Ok(objects) => objects,
+        let (_, mut exchange) = match self.send(
+            |bucket, credentials, buf| s3::prepare_list(bucket, credentials, options, buf),
+            |template, bytes, buf| s3::encode_list(template, bytes, item, &now, buf),
+            None,
+            BodyRead::Hold,
+        )? {
+            Ok(sent) => sent,
             Err(result) => return Ok(Err(result)),
         };
-        let context = &self.context;
-        let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
-            layered::s3::list_requirements(objects, list_plan, &now)
-        ));
-        let request =
-            page_step!(objects.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
-        let mut exchange = match send_request(context, &request) {
-            Ok(exchange) => exchange,
-            Err(error) => return Ok(Err(transport_failure(&error))),
-        };
 
-        let head_outcome = page_step!(objects.accept_list_head(exchange.response_head()));
+        let head_outcome = page_step!(s3::accept_list_head(exchange.response_head()));
         let outcome = match head_outcome {
             ListHeadOutcome::NeedErrorBody(failure) => {
-                objects.accept_list_error_body(failure, &exchange.body)
+                s3::accept_list_error_body(failure, &exchange.body)
             }
             outcome => outcome,
         };
@@ -869,14 +908,14 @@ impl PageSource for Client<'_> {
             return Ok(Err(error_result(&exchange, status)));
         }
 
-        let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
+        let mut slots: Vec<ObjectWithProperties<'_>> = entry_slots(options, MAX_PAGE_ENTRIES);
         // These properties are read in the same pass as the page.
         let wanted = PropertySet::of(&[
             ObjectProperty::StorageClass,
             ObjectProperty::ChecksumAlgorithm,
             ObjectProperty::Owner,
         ]);
-        let listing = page_step!(objects.fill_listing_with(
+        let listing = page_step!(s3::fill_listing_with(
             &mut exchange.body,
             &mut slots,
             wanted,
@@ -1165,19 +1204,34 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
 
     let method = optional_text(call, "method").unwrap_or("GET");
     let (mut request_bytes, mut header_spans);
-    let request = match method {
+    let mut get_buf = Vec::new();
+    // The credentials of the case are those of a session that CreateSession
+    // returned.
+    let signing_credentials = match session_token {
+        Some(token) if service == Service::AwsDirectory => crate_step!(
+            Session {
+                key_id,
+                secret,
+                token,
+                expires_at: None,
+            }
+            .credentials(wipe)
+        ),
+        _ => credentials,
+    };
+    let request: (String, Vec<(String, String)>) = match method {
         // A GetObjectTagging, of the object or of a version of it.
         "GET" if param("tagging").is_some() && only(&["tagging", "versionId"]) => {
             (request_bytes, header_spans) = request_buffers(crate_step!(
                 layered::s3::get_tagging_requirements(&objects, key, version, &now)
             ));
-            crate_step!(objects.encode_get_tagging(
+            owned(&crate_step!(objects.encode_get_tagging(
                 &mut request_bytes,
                 &mut header_spans,
                 key,
                 version,
                 &now
-            ))
+            )))
         }
         // A ListObjectsV2, which asks for URL-encoded keys every time.
         "GET" if key.is_empty() && param("list-type").is_some() => {
@@ -1207,80 +1261,118 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 Some("true") => ListInclude::OWNER,
                 Some(_) => return Ok(unsupported_by_adapter("fetch-owner not mapped")),
             };
-            let list_plan = PhysicalList {
-                marker: param("continuation-token").map(ListMarker::Text),
-                start_after: param("start-after"),
+            let options = ListOptions {
                 delimiter: param("delimiter"),
                 max_results,
                 include,
-                ..PhysicalList::new(param("prefix").unwrap_or_default())
             };
-            (request_bytes, header_spans) = request_buffers(crate_step!(
-                layered::s3::list_requirements(&objects, &list_plan, &now)
+            let item = ListItem {
+                marker: param("continuation-token").map(ListMarker::Text),
+                start_after: param("start-after"),
+                ..ListItem::new(param("prefix").unwrap_or_default())
+            };
+            let (_, request) = crate_step!(signed(
+                &bucket,
+                &signing_credentials,
+                &now,
+                &|bucket, credentials, buf| s3::prepare_list(bucket, credentials, &options, buf),
+                &|template, bytes, buf| s3::encode_list(template, bytes, &item, &now, buf),
+                &mut get_buf
             ));
-            crate_step!(objects.encode_list(
-                &mut request_bytes,
-                &mut header_spans,
-                &list_plan,
-                &now
-            ))
+            owned(&request)
         }
         _ if !only(&["versionId"]) => {
             return Ok(unsupported_by_adapter("query not mapped"));
         }
         "GET" | "HEAD" => {
-            let get_plan = PhysicalGet {
+            let options = GetOptions {
                 kind: if method == "GET" {
                     GetKind::Bytes
                 } else {
                     GetKind::Head
                 },
-                range,
-                revision: version,
-                ..PhysicalGet::new(key)
+                ranging: if range == RequestedRange::Whole {
+                    Ranging::Whole
+                } else {
+                    Ranging::Ranged
+                },
+                revision: if version.is_some() {
+                    RevisionKind::Version
+                } else {
+                    RevisionKind::Current
+                },
+                ..GetOptions::new()
             };
-            (request_bytes, header_spans) = request_buffers(crate_step!(
-                layered::s3::get_requirements(&objects, &get_plan, &now)
+            let item = GetItem {
+                key,
+                range,
+                condition_value: None,
+                revision: param("versionId"),
+            };
+            let (_, request) = crate_step!(signed(
+                &bucket,
+                &signing_credentials,
+                &now,
+                &|bucket, credentials, buf| s3::prepare_get(bucket, credentials, &options, buf),
+                &|template, bytes, buf| s3::encode_get(template, bytes, &item, &now, buf),
+                &mut get_buf
             ));
-            crate_step!(objects.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now))
+            owned(&request)
         }
         "PUT" if range == RequestedRange::Whole && version.is_none() => {
-            let put_plan = PhysicalPut::new(key);
-            let payload = Payload::Slice(&body);
-            (request_bytes, header_spans) = request_buffers(crate_step!(
-                layered::s3::put_requirements(&objects, &put_plan, payload, hash, &now)
+            let options = PutOptions::default();
+            let item = PutItem::new(key, Payload::Slice(&body));
+            let (signing, digest) = match hash {
+                PayloadHash::Unsigned => (PayloadSigning::Unsigned, None),
+                _ => (
+                    PayloadSigning::Signed,
+                    Some(sigv4::sha256::<Sha256RustCrypto>(&body)),
+                ),
+            };
+            let (_, request) = crate_step!(signed(
+                &bucket,
+                &signing_credentials,
+                &now,
+                &|bucket, credentials, buf| {
+                    s3::prepare_put(bucket, credentials, &options, signing, buf)
+                },
+                &|template, bytes, buf| {
+                    s3::encode_put(template, bytes, &item, digest.as_ref(), &now, buf)
+                },
+                &mut get_buf
             ));
-            crate_step!(objects.encode_put(
-                &mut request_bytes,
-                &mut header_spans,
-                &put_plan,
-                payload,
-                hash,
-                &now
-            ))
+            owned(&request)
         }
         "DELETE" if range == RequestedRange::Whole => {
-            let delete_plan = PhysicalDelete {
-                revision: version,
-                ..PhysicalDelete::new(key)
+            let options = DeleteOptions {
+                revision: if version.is_some() {
+                    RevisionKind::Version
+                } else {
+                    RevisionKind::Current
+                },
+                ..DeleteOptions::new()
             };
-            (request_bytes, header_spans) = request_buffers(crate_step!(
-                layered::s3::delete_requirements(&objects, &delete_plan, &now)
+            let item = DeleteItem {
+                revision: param("versionId"),
+                ..DeleteItem::new(key)
+            };
+            let (_, request) = crate_step!(signed(
+                &bucket,
+                &signing_credentials,
+                &now,
+                &|bucket, credentials, buf| s3::prepare_delete(bucket, credentials, &options, buf),
+                &|template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
+                &mut get_buf
             ));
-            crate_step!(objects.encode_delete(
-                &mut request_bytes,
-                &mut header_spans,
-                &delete_plan,
-                &now
-            ))
+            owned(&request)
         }
         _ => return Ok(unsupported_by_adapter("method not mapped")),
     };
+    let (url, fields) = request;
 
     // The crate encodes the key itself. A URL whose path it would write
     // otherwise names a request that the crate does not send.
-    let written_path = request
-        .url()
+    let written_path = url
         .split_once("://")
         .and_then(|(_, rest)| rest.split_once('/'))
         .map_or("", |(_, target)| {
@@ -1291,8 +1383,8 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
             "the crate encodes this path otherwise",
         ));
     }
-    let headers: Map<String, Value> = request
-        .headers()
+    let headers: Map<String, Value> = fields
+        .iter()
         .map(|(name, value)| (name.to_ascii_lowercase(), json!(value)))
         .collect();
     let authorization = headers.get("authorization").cloned().unwrap_or_default();
@@ -1529,8 +1621,11 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let client = Client {
         context,
         objects,
+        bucket,
+        credentials,
         directory: service == Service::AwsDirectory,
         session: OnceCell::new(),
+        session_credentials: OnceCell::new(),
     };
     match operation {
         "get" => read_object(&client, call, GetKind::Bytes),

@@ -4,8 +4,8 @@
 
 use borink_object_storage_proto::azure::{BlockRef, BlockSource, PhysicalStageBlock};
 use borink_object_storage_proto::{
-    Blobs, ChecksumKind, Container, Error, HeaderSpan, InvalidPlan, Payload, PhysicalCommit,
-    PhysicalPut, Timestamps, TransactionalChecksum, WriteOptions, layered,
+    Blobs, ChecksumKind, Container, HeaderSpan, Payload, PhysicalCommit, Timestamps,
+    TransactionalChecksum, WriteOptions, layered,
 };
 
 fn blobs() -> Blobs<'static> {
@@ -20,93 +20,6 @@ fn blobs() -> Blobs<'static> {
 
 fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
-}
-
-#[test]
-fn the_encoder_computes_a_checksum_of_content_it_holds() {
-    let blobs = blobs();
-    for (kind, name, expected) in [
-        (ChecksumKind::Md5, "content-md5", "eB5eJF1ptWaXm4bijSPyxw=="),
-        (ChecksumKind::Crc64, "x-ms-content-crc64", "HZz9TO6x+RU="),
-    ] {
-        let put = PhysicalPut {
-            options: WriteOptions {
-                checksum: Some(TransactionalChecksum::Compute(kind)),
-                ..Default::default()
-            },
-            ..PhysicalPut::new("object.bin")
-        };
-        let content = Payload::Slice(b"0123456789");
-        let size = layered::put_requirements(&blobs, &put, content, &now()).unwrap();
-        let mut buf = vec![0; size.bytes];
-        let mut request_headers = vec![HeaderSpan::default(); size.headers];
-        let request = blobs
-            .encode_put(&mut buf, &mut request_headers, &put, content, &now())
-            .unwrap();
-        let headers: Vec<_> = request.headers().collect();
-        assert!(headers.contains(&(name, expected)), "{kind:?}: {headers:?}");
-        // The bytes are not here to sum, so a streamed payload is refused.
-        assert_eq!(
-            blobs
-                .encode_put(
-                    &mut buf,
-                    &mut request_headers,
-                    &put,
-                    Payload::Streamed { len: 10 },
-                    &now()
-                )
-                .map(drop),
-            Err(Error::InvalidPlan(InvalidPlan::Option))
-        );
-    }
-}
-
-#[test]
-fn a_client_registers_the_kinds_it_computes() {
-    let put = |blobs: &Blobs<'_>, kind| {
-        let options = WriteOptions {
-            checksum: Some(TransactionalChecksum::Compute(kind)),
-            ..Default::default()
-        };
-        blobs
-            .encode_put(
-                &mut [0; 1024],
-                &mut [HeaderSpan::default(); 8],
-                &PhysicalPut {
-                    options,
-                    ..PhysicalPut::new("object.bin")
-                },
-                Payload::Slice(b"0123456789"),
-                &now(),
-            )
-            .map(|request| {
-                request
-                    .headers()
-                    .find(|(name, _)| *name == kind_header(kind))
-                    .map(|(_, value)| value.to_owned())
-                    .unwrap()
-            })
-    };
-    let one = Blobs::new(
-        Container::new("https://account.blob.core.windows.net", "container").unwrap(),
-        "token",
-    )
-    .unwrap()
-    .with_checksum(borink_object_storage_crypto::CRC64);
-    // A client is the value that carries the providers, so registering one
-    // kind leaves the other refused.
-    assert_eq!(put(&one, ChecksumKind::Crc64).unwrap(), "HZz9TO6x+RU=");
-    assert_eq!(
-        put(&one, ChecksumKind::Md5),
-        Err(Error::InvalidPlan(InvalidPlan::Option))
-    );
-}
-
-fn kind_header(kind: ChecksumKind) -> &'static str {
-    match kind {
-        ChecksumKind::Md5 => "content-md5",
-        _ => "x-ms-content-crc64",
-    }
 }
 
 #[test]

@@ -1,20 +1,15 @@
-//! S3 GET and HEAD: the URL, the plans the client refuses, and the response
+//! S3 GET and HEAD: the URL, the reads the client refuses, and the response
 //! heads it reads.
 
-use borink_object_storage_proto::s3::{Addressing, Bucket, MAX_KEY_LEN, Objects, Service};
-use borink_object_storage_proto::sigv4::{
-    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
-};
+use borink_object_storage_proto::s3::{self, Addressing, Bucket, MAX_KEY_LEN, Service};
+use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    BodyWindow, ConditionKind, ConditionValue, Error, FailureClass, GetHeadOutcome, GetKind,
-    HeaderSpan, InvalidPlan, PhysicalGet, RequestedRange, ResponseFault, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+    BodyWindow, ConditionKind, Error, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
+    InvalidPlan, RequestedRange, ResponseFault, ResponseHead, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TOKEN: &str = "session-token";
-
-const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
 
 fn bucket() -> Bucket<'static> {
     Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws).unwrap()
@@ -27,38 +22,25 @@ fn credentials() -> Credentials<'static> {
         .unwrap()
 }
 
-fn objects() -> Objects<'static> {
-    Objects::new(bucket(), credentials(), ZEROS)
-}
-
-fn compatible() -> Objects<'static> {
-    let bucket = Bucket::new(
-        "https://s3.example.com",
-        "bucket",
-        "auto",
-        Service::Compatible,
-    )
-    .unwrap();
-    Objects::new(bucket, credentials(), ZEROS)
-}
-
 fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_061)
 }
 
-fn url(bucket: Bucket<'_>, key: &str) -> String {
-    let objects = Objects::new(bucket, credentials(), ZEROS);
-    let get = PhysicalGet::new(key);
-    let size = layered::s3::get_requirements(&objects, &get, &now()).unwrap();
-    let mut buf = vec![0; size.bytes];
-    let mut slots = vec![HeaderSpan::default(); size.headers];
-    let request = objects
-        .encode_get(&mut buf, &mut slots, &get, &now())
-        .unwrap();
-    request.url().to_owned()
+// Writes `item` from a template of `options` for `bucket`, and signs it
+// with a signature of zeros.
+fn encode(bucket: &Bucket<'_>, options: GetOptions, item: &GetItem<'_>) -> Result<String, Error> {
+    let mut bytes = vec![0; 1024];
+    let template = s3::prepare_get(bucket, &credentials(), &options, &mut bytes)?;
+    let mut buf = vec![0; 3 * MAX_KEY_LEN + 2048];
+    let unsigned = s3::encode_get(&template, &bytes, item, &now(), &mut buf)?;
+    Ok(s3::finish(&unsigned, &mut buf, &[0; 32]).url().to_owned())
 }
 
-fn refusal(result: Result<(), Error>) -> InvalidPlan {
+fn url(bucket: Bucket<'_>, key: &str) -> String {
+    encode(&bucket, GetOptions::new(), &GetItem::new(key)).unwrap()
+}
+
+fn refusal(result: Result<String, Error>) -> InvalidPlan {
     match result {
         Err(Error::InvalidPlan(reason)) => reason,
         other => panic!("expected an invalid plan, got {other:?}"),
@@ -67,6 +49,14 @@ fn refusal(result: Result<(), Error>) -> InvalidPlan {
 
 fn head<'h>(status: u16, headers: &[(&'h str, &'h [u8])]) -> ResponseHead<'h> {
     ResponseHead::from_headers(status, headers.iter().copied())
+}
+
+fn shape(kind: GetKind, range: RequestedRange, condition: ConditionKind) -> GetShape {
+    GetShape {
+        kind,
+        range,
+        condition,
+    }
 }
 
 #[test]
@@ -115,132 +105,79 @@ fn the_url_names_the_bucket_where_the_addressing_says() {
 
 #[test]
 fn a_read_that_s3_cannot_take_is_refused() {
-    let objects = objects();
-    let get = |get: PhysicalGet<'_>| {
-        refusal(
-            objects
-                .encode_get(
-                    &mut [0; 1024],
-                    &mut [HeaderSpan::default(); 8],
-                    &get,
-                    &now(),
-                )
-                .map(drop),
-        )
-    };
+    let bucket = bucket();
+    let get = |options, item: GetItem<'_>| refusal(encode(&bucket, options, &item));
+    let plain = GetOptions::new();
     let long = "k".repeat(MAX_KEY_LEN + 1);
-    assert_eq!(get(PhysicalGet::new("")), InvalidPlan::EmptyKey);
-    assert_eq!(get(PhysicalGet::new(&long)), InvalidPlan::KeyTooLong);
+    assert_eq!(get(plain, GetItem::new("")), InvalidPlan::EmptyKey);
+    assert_eq!(get(plain, GetItem::new(&long)), InvalidPlan::KeyTooLong);
     assert_eq!(
-        get(PhysicalGet::new("a/../b")),
+        get(plain, GetItem::new("a/../b")),
         InvalidPlan::KeyWouldBeNormalized
     );
     assert_eq!(
-        get(PhysicalGet::new("./b")),
+        get(plain, GetItem::new("./b")),
         InvalidPlan::KeyWouldBeNormalized
     );
     assert_eq!(
-        get(PhysicalGet {
-            range: RequestedRange::Suffix(0),
-            ..PhysicalGet::new("k")
-        }),
+        get(
+            plain.ranged(),
+            GetItem::new("k").with_range(RequestedRange::Suffix(0))
+        ),
         InvalidPlan::Range
     );
     assert_eq!(
-        get(PhysicalGet {
-            kind: GetKind::Head,
-            range: RequestedRange::Suffix(4),
-            ..PhysicalGet::new("k")
-        }),
-        InvalidPlan::RangedHead
-    );
-    assert_eq!(
-        get(PhysicalGet {
-            condition: ConditionKind::IfMatch,
-            ..PhysicalGet::new("k")
-        }),
+        get(
+            GetOptions {
+                condition: ConditionKind::IfMatch,
+                ..plain
+            },
+            GetItem::new("k")
+        ),
         InvalidPlan::Condition
     );
+    // A template of ranged HEADs, or of snapshots, is never written.
+    let mut bytes = [0; 1024];
+    for (options, reason) in [
+        (GetOptions::head().ranged(), InvalidPlan::RangedHead),
+        (
+            GetOptions {
+                revision: borink_object_storage_proto::RevisionKind::Snapshot,
+                ..plain
+            },
+            InvalidPlan::Revision,
+        ),
+    ] {
+        assert_eq!(
+            s3::prepare_get(&bucket, &credentials(), &options, &mut bytes).err(),
+            Some(Error::InvalidPlan(reason))
+        );
+    }
     // A key of exactly the limit is sent.
-    let exact = "k".repeat(MAX_KEY_LEN);
-    assert!(layered::s3::get_requirements(&objects, &PhysicalGet::new(&exact), &now()).is_ok());
-}
-
-#[test]
-fn a_read_names_its_error_from_the_body_unless_it_is_a_head() {
-    let objects = objects();
-    let get = PhysicalGet::new("k").shape();
-    let id: &[u8] = b"4442587FB7D0A2F9";
-
-    let GetHeadOutcome::NeedErrorBody(failure) = objects
-        .accept_get_head(get, head(404, &[("x-amz-request-id", id)]))
-        .unwrap()
-    else {
-        panic!("a GET names its error in the body");
-    };
-    assert_eq!(
-        (failure.status, failure.kind, failure.request_id),
-        (404, None, Some(id))
-    );
-    let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchBucket</Code>\
-        <Message>The specified bucket does not exist</Message></Error>";
-    // A missing bucket is a failure, never a missing object.
-    assert!(matches!(
-        objects.accept_get_error_body(get, failure, body),
-        GetHeadOutcome::ServiceFailure(failure)
-            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
-    ));
-
-    // A redirect names the region in its body, and is reported as one.
-    let GetHeadOutcome::NeedErrorBody(failure) =
-        objects.accept_get_head(get, head(301, &[])).unwrap()
-    else {
-        panic!("a redirect has a body");
-    };
-    assert_eq!(failure.class, FailureClass::Redirect);
-
-    // A HEAD response has no body, so its outcome is final, and a missing
-    // bucket cannot be told from a missing key.
-    let head_shape = PhysicalGet::head("k").shape();
-    assert_eq!(
-        objects.accept_get_head(head_shape, head(404, &[])),
-        Ok(GetHeadOutcome::NotFound { kind: None })
-    );
-    let Ok(GetHeadOutcome::ServiceFailure(failure)) =
-        objects.accept_get_head(head_shape, head(403, &[]))
-    else {
-        panic!("a HEAD refusal is final");
-    };
-    assert_eq!((failure.class, failure.kind), (FailureClass::Auth, None));
-    let Ok(GetHeadOutcome::Complete { meta }) =
-        objects.accept_get_head(head_shape, head(200, &[("content-length", b"12")]))
-    else {
-        panic!("a HEAD success is complete");
-    };
-    assert_eq!(meta.size, Some(12));
+    assert!(encode(&bucket, plain, &GetItem::new(&"k".repeat(MAX_KEY_LEN))).is_ok());
 }
 
 #[test]
 fn a_read_checks_the_range_and_the_condition_it_asked_for() {
     // A compatible client reads a range as an AWS one does, without needing
     // `Content-Length` beside it.
-    let objects = compatible();
+    const SERVICE: Service = Service::Compatible;
     let suffix = |n| {
-        PhysicalGet {
-            range: RequestedRange::Suffix(n),
-            ..PhysicalGet::new("k")
-        }
-        .shape()
+        shape(
+            GetKind::Bytes,
+            RequestedRange::Suffix(n),
+            ConditionKind::None,
+        )
     };
     let ranged = |status, range: &'static [u8]| head(status, &[("content-range", range)]);
 
     assert_eq!(
-        objects
-            .accept_get_head(suffix(5), ranged(206, b"bytes 95-99/100"))
-            .map(|outcome| match outcome {
+        s3::accept_get_head(SERVICE, suffix(5), ranged(206, b"bytes 95-99/100")).map(|outcome| {
+            match outcome {
                 GetHeadOutcome::Body { body, meta } => (body, meta.size),
                 other => panic!("{other:?}"),
-            }),
+            }
+        }),
         Ok((
             BodyWindow {
                 object_offset: 95,
@@ -252,7 +189,7 @@ fn a_read_checks_the_range_and_the_condition_it_asked_for() {
     );
     // A suffix longer than the object is the whole object.
     assert!(matches!(
-        objects.accept_get_head(suffix(500), ranged(206, b"bytes 0-99/100")),
+        s3::accept_get_head(SERVICE, suffix(500), ranged(206, b"bytes 0-99/100")),
         Ok(GetHeadOutcome::Body {
             body: BodyWindow {
                 object_offset: 0,
@@ -267,36 +204,30 @@ fn a_read_checks_the_range_and_the_condition_it_asked_for() {
         (suffix(5), ranged(206, b"bytes 95-99/*")),
         (suffix(5), ResponseHead::new(200)),
         (
-            PhysicalGet::new("k").shape(),
+            shape(GetKind::Bytes, RequestedRange::Whole, ConditionKind::None),
             ranged(206, b"bytes 0-99/100"),
         ),
     ] {
         assert_eq!(
-            objects.accept_get_head(shape, head),
+            s3::accept_get_head(SERVICE, shape, head),
             Err(ResponseFault::Range.into()),
             "{head:?}"
         );
     }
     assert_eq!(
-        objects.accept_get_head(suffix(5), ResponseHead::new(206)),
+        s3::accept_get_head(SERVICE, suffix(5), ResponseHead::new(206)),
         Err(ResponseFault::Head.into())
     );
     assert_eq!(
-        objects.accept_get_head(suffix(5), head(416, &[])),
+        s3::accept_get_head(SERVICE, suffix(5), head(416, &[])),
         Ok(GetHeadOutcome::RangeNotSatisfiable { object_size: None })
     );
 
-    let conditional = |condition| {
-        PhysicalGet {
-            condition,
-            condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-            ..PhysicalGet::new("k")
-        }
-        .shape()
-    };
-    let unconditional = PhysicalGet::new("k").shape();
+    let conditional = |condition| shape(GetKind::Bytes, RequestedRange::Whole, condition);
+    let unconditional = shape(GetKind::Bytes, RequestedRange::Whole, ConditionKind::None);
     assert_eq!(
-        objects.accept_get_head(
+        s3::accept_get_head(
+            SERVICE,
             conditional(ConditionKind::IfNoneMatch),
             head(304, &[("etag", b"\"etag\"")])
         ),
@@ -305,15 +236,15 @@ fn a_read_checks_the_range_and_the_condition_it_asked_for() {
         })
     );
     assert_eq!(
-        objects.accept_get_head(conditional(ConditionKind::IfMatch), head(412, &[])),
+        s3::accept_get_head(SERVICE, conditional(ConditionKind::IfMatch), head(412, &[])),
         Ok(GetHeadOutcome::PreconditionFailed)
     );
     assert_eq!(
-        objects.accept_get_head(unconditional, head(304, &[])),
+        s3::accept_get_head(SERVICE, unconditional, head(304, &[])),
         Err(ResponseFault::Status.into())
     );
     assert_eq!(
-        objects.accept_get_head(unconditional, head(412, &[])),
+        s3::accept_get_head(SERVICE, unconditional, head(412, &[])),
         Err(ResponseFault::Status.into())
     );
 }

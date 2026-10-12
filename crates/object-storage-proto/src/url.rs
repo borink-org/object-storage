@@ -287,11 +287,6 @@ pub(crate) fn number<'q>(name: &'q str, value: impl Into<Option<u32>>) -> Parame
     value.into().map(|value| (name, QueryValue::Number(value)))
 }
 
-// Constants of this crate joined by commas, or no parameter without any.
-pub(crate) fn words<'q>(name: &'q str, words: &'q [&'q str]) -> Parameter<'q> {
-    (!words.is_empty()).then_some((name, QueryValue::Words(words)))
-}
-
 // Writes the parameters that `query` holds, without the `?` that begins a
 // query in a URL.
 pub(crate) fn write_query(out: &mut dyn ByteSink, query: &[Parameter<'_>]) {
@@ -301,21 +296,26 @@ pub(crate) fn write_query(out: &mut dyn ByteSink, query: &[Parameter<'_>]) {
         }
         out.push(name.as_bytes());
         out.push(b"=");
-        match *value {
-            QueryValue::Literal(value) => out.push(value.as_bytes()),
-            QueryValue::Encoded(value) => {
-                for part in encode_query_value(value) {
-                    out.push(part);
-                }
+        write_query_value(out, *value);
+    }
+}
+
+// Writes one parameter's value.
+pub(crate) fn write_query_value(out: &mut dyn ByteSink, value: QueryValue<'_>) {
+    match value {
+        QueryValue::Literal(value) => out.push(value.as_bytes()),
+        QueryValue::Encoded(value) => {
+            for part in encode_query_value(value) {
+                out.push(part);
             }
-            QueryValue::Number(value) => out.push(U64Decimal::new(value.into()).as_bytes()),
-            QueryValue::Words(words) => {
-                for (index, word) in words.iter().enumerate() {
-                    if index != 0 {
-                        out.push(b",");
-                    }
-                    out.push(word.as_bytes());
+        }
+        QueryValue::Number(value) => out.push(U64Decimal::new(value.into()).as_bytes()),
+        QueryValue::Words(words) => {
+            for (index, word) in words.iter().enumerate() {
+                if index != 0 {
+                    out.push(b",");
                 }
+                out.push(word.as_bytes());
             }
         }
     }

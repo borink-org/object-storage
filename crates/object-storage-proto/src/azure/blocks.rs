@@ -10,20 +10,20 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    AzureNamespace, Blobs, Write, body_kind, named, names_failed_condition, push_metadata,
+    AzureNamespace, Blobs, Write, body_kind, failed, named, names_failed_condition, push_metadata,
     push_stored, validate_key, validate_metadata, validate_options,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, missing,
-    push_checksum, push_condition, text_header, validate_condition,
+    decimal_header, encoded, encoded_with_body, finish_with_body, meta_of, push_checksum,
+    push_condition, text_header, validate_condition,
 };
 use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::url;
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, Failure, HeaderSpan, InvalidPlan,
+    CommitHeadOutcome, CommitShape, ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest,
     ListPartsHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalCommit, RequestedRange,
     ResponseFault, ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
-    WireRequest, WriteOptions,
+    WriteOptions,
 };
 
 /// Which stored version of a block Put Block List must use.
@@ -194,14 +194,14 @@ impl<'a> Blobs<'a> {
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
     /// or if it names both a snapshot and a version. Returns
-    /// [`Error::Capacity`] as [`Blobs::encode_get`] does.
+    /// [`Error::Capacity`] as [`encode_get`](crate::azure::encode_get) does.
     pub fn encode_list_blocks<'r>(
         &self,
         buf: &'r mut [u8],
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalListBlocks<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_block_key(plan.key, self.namespace)?;
         if (plan.snapshot.is_some() && plan.version.is_some())
             || plan.snapshot.is_some_and(str::is_empty)
@@ -233,13 +233,13 @@ impl<'a> Blobs<'a> {
     /// Writes the request head for an Azure Put Block into `buf`.
     ///
     /// The head states the length of `content`, which stays where you put it,
-    /// as for [`Blobs::encode_put`].
+    /// as for [`encode_put`](crate::azure::encode_put).
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
     /// or if `content` is longer than one block may be. Returns
-    /// [`Error::Capacity`] as [`Blobs::encode_put`] does, or call
+    /// [`Error::Capacity`] as [`encode_put`](crate::azure::encode_put) does, or call
     /// [`layered::stage_block_requirements`](crate::layered::stage_block_requirements)
     /// first.
     pub fn encode_stage_block<'r>(
@@ -249,7 +249,7 @@ impl<'a> Blobs<'a> {
         plan: &PhysicalStageBlock<'_>,
         content: Payload<'r>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_block_key(plan.key, self.namespace)?;
         validate_block_id(plan.id)?;
         if content.len() > MAX_STAGE_LEN {
@@ -280,7 +280,7 @@ impl<'a> Blobs<'a> {
     ///
     /// `blocks` become the object in this order, each looked up where its
     /// [`BlockSource`] says. The body is written into `buf` after the head,
-    /// so [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// so [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it; send both before reusing `buf`.
     ///
     /// # Errors
@@ -300,7 +300,7 @@ impl<'a> Blobs<'a> {
         plan: &PhysicalCommit<'_>,
         blocks: &[BlockRef<'_>],
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.encode_commit_blocks_from_iter(
             buf,
             headers,
@@ -333,7 +333,7 @@ impl<'a> Blobs<'a> {
         plan: &PhysicalCommit<'_>,
         blocks: impl Iterator<Item = (I, BlockSource)> + Clone,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>>
+    ) -> Result<LegacyRequest<'r>>
     where
         I: AsRef<str>,
     {
@@ -419,23 +419,8 @@ impl<'a> Blobs<'a> {
     ) -> Result<StageHeadOutcome<'h>> {
         match head.status {
             201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
-            404 if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(StageHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(StageHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -483,23 +468,8 @@ impl<'a> Blobs<'a> {
             {
                 Ok(CommitHeadOutcome::PreconditionFailed)
             }
-            404 if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(CommitHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(CommitHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -542,22 +512,8 @@ impl<'a> Blobs<'a> {
                 meta: multipart_meta(head)?,
                 expected_len: decimal_header(head.content_length)?,
             }),
-
-            404 if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
             201..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(ListPartsHeadOutcome::NeedErrorBody(
-                failure(status, None, head.request_id),
-            )),
-            status => Ok(ListPartsHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 

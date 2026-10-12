@@ -16,16 +16,16 @@ use crate::common::{
 };
 use crate::request::{HeadWriter, Pass};
 use crate::s3::{
-    Objects, PayloadHash, Service, Signed, SignedCopy, Stores, body_kind, is_error_document,
-    s3_tag_char, stored_headers, validate_content, validate_key, validate_metadata,
-    validate_write_condition,
+    Objects, PayloadHash, Service, Signed, SignedCopy, Stores, body_kind, failed,
+    is_error_document, s3_tag_char, stored_headers, validate_content, validate_key,
+    validate_metadata, validate_write_condition,
 };
 use crate::sigv4::{EMPTY_SHA256, Token};
 use crate::url;
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
-    Method, ObjectMeta, Payload, PhysicalCopy, RequestedRange, ResponseFault, ResponseHead, Result,
-    ServiceErrorKind, StageHeadOutcome, Timestamps, WireRequest,
+    LegacyRequest, Method, ObjectMeta, Payload, PhysicalCopy, RequestedRange, ResponseFault,
+    ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
 };
 
 /// One UploadPartCopy: a part of an upload staged from the bytes of another
@@ -37,7 +37,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalStagePartCopy<'a> {
     /// The key of the upload, under the rules of
-    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    /// [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The ID of the upload, as
     /// [`Objects::read_upload_id`](crate::s3::Objects::read_upload_id) read
@@ -90,7 +90,7 @@ impl<'a> Objects<'a> {
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an S3 request:
     ///
     /// - A key, a metadata pair, a content property, a tag, a storage class
-    ///   or a condition on the target that [`Self::encode_put`] refuses.
+    ///   or a condition on the target that [`encode_put`](crate::s3::encode_put) refuses.
     /// - [`InvalidPlan::Option`] for a checksum or a declared MD5, and for
     ///   a client that holds the credentials of a session: see
     ///   [directory buckets](crate::s3#directory-buckets).
@@ -109,7 +109,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCopy<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.validate_copy_credentials()?;
         validate_key(plan.key)?;
         validate_source(&plan.source)?;
@@ -202,11 +202,7 @@ impl<'a> Objects<'a> {
             412 if !carries_condition(shape) => Err(ResponseFault::Status.into()),
             412 => Ok(CopyHeadOutcome::PreconditionFailed),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(CopyHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -258,7 +254,7 @@ impl<'a> Objects<'a> {
 
     /// Finishes a [`CopyHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a copy, and reads the body
+    /// This is [`accept_get_error_body`](crate::s3::accept_get_error_body) for a copy, and reads the body
     /// the same way. A source that does not exist is
     /// [`CopyHeadOutcome::NotFound`].
     pub fn accept_copy_error_body<'h>(
@@ -291,7 +287,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalStagePartCopy<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.validate_copy_credentials()?;
         validate_key(plan.key)?;
         super::parts::validate_upload_id(plan.upload_id)?;
@@ -354,11 +350,7 @@ impl<'a> Objects<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(StageHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 

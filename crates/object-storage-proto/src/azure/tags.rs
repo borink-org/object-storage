@@ -8,21 +8,21 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    Blobs, azure_tag_char, body_kind, named, push_metadata, push_stored, revision_parameter,
-    utf8_properties, validate_azure_checksum, validate_key, validate_metadata,
+    Blobs, azure_tag_char, body_kind, failed, named, push_metadata, push_stored,
+    revision_parameter, utf8_properties, validate_azure_checksum, validate_key, validate_metadata,
 };
 use crate::common::{
-    decimal_header, encoded, encoded_with_body, failure, finish_with_body, meta_of, missing,
-    push_checksum, push_condition, text_header, valid_header, validate_condition,
-    validate_properties, validate_revision, validate_tags, write_tag_set,
+    decimal_header, encoded, encoded_with_body, finish_with_body, meta_of, push_checksum,
+    push_condition, text_header, valid_header, validate_condition, validate_properties,
+    validate_revision, validate_tags, write_tag_set,
 };
 use crate::request::{HeadWriter, U64Decimal, Writer};
 use crate::url;
 use crate::{
     Condition, ConditionKind, ConditionValue, ContentProperties, Failure, HeaderSpan, InvalidPlan,
-    MetadataPair, Method, ObjectMeta, Payload, PhysicalSetTags, RequestedRange, ResponseFault,
-    ResponseHead, Result, Revision, ServiceErrorKind, Tag, TagsHeadOutcome, Timestamps,
-    TransactionalChecksum, UpdateHeadOutcome, WireRequest, WriteOptions,
+    LegacyRequest, MetadataPair, Method, ObjectMeta, Payload, PhysicalSetTags, RequestedRange,
+    ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag, TagsHeadOutcome,
+    Timestamps, TransactionalChecksum, UpdateHeadOutcome, WriteOptions,
 };
 
 /// A Set Blob Metadata: the metadata pairs that an object then holds, and no
@@ -30,10 +30,10 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSetMetadata<'a> {
     /// The object key, under the rules of
-    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    /// [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The metadata pairs, under the rules of
-    /// [`PhysicalPut::metadata`](crate::PhysicalPut::metadata). None removes
+    /// [`PutOptions::metadata`](crate::PutOptions::metadata). None removes
     /// every pair.
     pub metadata: &'a [MetadataPair<'a>],
     /// The condition on the object, as a write carries it.
@@ -69,7 +69,7 @@ impl<'a> PhysicalSetMetadata<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSetProperties<'a> {
     /// The object key, under the rules of
-    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    /// [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The content properties, under the rules of [`ContentProperties`].
     /// Azure clears every one that this leaves out.
@@ -115,7 +115,7 @@ impl<'a> Blobs<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
+    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`](crate::azure::encode_get)
     /// refuses, and [`InvalidPlan::ContentProperty`] for a tier that is not
     /// one header value.
     ///
@@ -130,7 +130,7 @@ impl<'a> Blobs<'a> {
         key: &str,
         tier: &str,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(key, self.namespace)?;
         if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
             return Err(InvalidPlan::ContentProperty.into());
@@ -169,7 +169,7 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key, a metadata pair or a
-    /// condition that [`Self::encode_put`] refuses.
+    /// condition that [`encode_put`](crate::azure::encode_put) refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -181,7 +181,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalSetMetadata<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         validate_metadata(plan.metadata)?;
         validate_condition(plan.condition, plan.condition_value)?;
@@ -221,7 +221,7 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key, a content property or a
-    /// condition that [`Self::encode_put`] refuses.
+    /// condition that [`encode_put`](crate::azure::encode_put) refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -233,7 +233,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalSetProperties<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         let options = WriteOptions {
             properties: plan.properties,
@@ -285,12 +285,12 @@ impl<'a> Blobs<'a> {
     /// it. The object then holds these tags and no others.
     ///
     /// The body is written into `buf` after the head, so
-    /// [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
+    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`](crate::azure::encode_get)
     /// refuses, [`InvalidPlan::Tag`] for a tag that breaks the rules of
     /// [`Tag`], and [`InvalidPlan::Option`] for a checksum whose provider
     /// the client has not registered.
@@ -305,7 +305,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalSetTags<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         validate_revision(plan.revision, true)?;
         validate_tags(plan.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -354,7 +354,7 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key or a revision that
-    /// [`Self::encode_get`] refuses.
+    /// [`encode_get`](crate::azure::encode_get) refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -367,7 +367,7 @@ impl<'a> Blobs<'a> {
         key: &str,
         revision: Option<Revision<'_>>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(key, self.namespace)?;
         validate_revision(revision, true)?;
         let mut head = HeadWriter::new(buf, headers);
@@ -394,17 +394,7 @@ impl<'a> Blobs<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
-            status if head.error_code.is_none() => Ok(TagsHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(TagsHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -462,16 +452,6 @@ pub(super) fn accept_update<'h>(
             Ok(UpdateHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
-        status if head.error_code.is_none() => Ok(UpdateHeadOutcome::NeedErrorBody(failure(
-            status,
-            None,
-            head.request_id,
-        ))),
-        status => Ok(UpdateHeadOutcome::ServiceFailure(failure(
-            status,
-            named(&head),
-            head.request_id,
-        ))),
+        _ => Ok(failed(&head)),
     }
 }

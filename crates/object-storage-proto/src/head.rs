@@ -13,7 +13,7 @@
 ///
 /// The header values must stay valid for as long as you use the
 /// [`GetHeadOutcome`](crate::GetHeadOutcome) that
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns from
+/// [`azure::accept_get_head`](crate::azure::accept_get_head) returns from
 /// them. The type is [`Copy`], so you can keep the head after you read the
 /// response body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

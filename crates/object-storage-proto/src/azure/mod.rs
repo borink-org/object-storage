@@ -7,25 +7,41 @@ use core::fmt;
 use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
 use crate::common::{
     ContentRange, FailureOutcome, accept_success, decimal_header, encoded, failure,
-    finish_with_body, meta_of, missing, parse_content_range, push_checksum, push_condition,
-    text_header, trim_ascii, valid_header, validate_checksum, validate_condition,
-    validate_properties, validate_revision, validate_tags,
+    finish_with_body, meta_of, missing, parse_content_range, push_condition, text_header,
+    trim_ascii, valid_header, validate_checksum, validate_condition, validate_properties,
+    validate_tags,
 };
 use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
+use crate::request::{ByteSink, HeadWriter, HeaderValue, Writer};
 use crate::url::{self, Parameter};
 use crate::{
     Classification, Condition, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind,
     DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
-    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PropertySet, PropertyValues,
-    PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
-    ServiceErrorKind, Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
+    LegacyRequest, ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair,
+    Method, ObjectMeta, Payload, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
+    TransactionalChecksum, WriteOptions,
 };
 
 mod batch;
 mod blocks;
 mod copy;
+mod template;
+
+use crate::checksum::BASE64_LEN;
+use crate::common::{
+    checksum_text, condition_header, validate_checksum_item, validate_delimiter, validate_get_item,
+    validate_get_options, validate_put_options, validate_revision_item,
+};
+use crate::template::{Hole, Values};
+use crate::template::{Param, ParamValue};
+use crate::url::QueryValue;
+use crate::{
+    DeleteItem, DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, PutItem, PutOptions,
+    Ranging, RevisionKind, WireRequest,
+};
+use template::{Describe, Detail, Field, FieldList, Value};
+pub use template::{Operation, Template};
 mod restore;
 mod tags;
 
@@ -276,82 +292,6 @@ impl<'a> Blobs<'a> {
         self
     }
 
-    /// Writes the request head for `get` into `buf`.
-    ///
-    /// This method allocates nothing. It writes the URL and the header values
-    /// into `buf`, records their spans in `headers`, and returns a
-    /// [`WireRequest`] that borrows both buffers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure
-    /// request. This method validates the plan before it writes any byte, so
-    /// it never reports an invalid plan as a capacity error.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or call
-    /// [`layered::get_requirements`](crate::layered::get_requirements) first.
-    pub fn encode_get<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        get: &PhysicalGet<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_get(get, self.namespace)?;
-        let mut head = HeadWriter::new(buf, headers);
-        let query = [revision_parameter(get.revision)];
-        self.build(&mut head, Some(get.key), &query, get.range, now)?;
-        push_condition(&mut head, get.condition, get.condition_value);
-        let method = match get.kind {
-            GetKind::Bytes => Method::Get,
-            GetKind::Head => Method::Head,
-        };
-        encoded(head, method, Payload::Slice(&[]))
-    }
-
-    /// Writes the request head for `put` into `buf`.
-    ///
-    /// The head states the length of `content`. If you pass
-    /// [`Payload::Slice`], the returned request borrows those bytes and copies
-    /// none of them. If you pass [`Payload::Streamed`], the request carries no
-    /// content and you send the stated number of bytes yourself.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `put` cannot become an Azure request,
-    /// or if `content` is longer than Azure writes in one request. This method
-    /// validates the plan before it writes any byte, so it never reports an
-    /// invalid plan as a capacity error.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or call
-    /// [`layered::put_requirements`](crate::layered::put_requirements) first.
-    pub fn encode_put<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        put: &PhysicalPut<'_>,
-        content: Payload<'r>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_put(put, content, self)?;
-        let length = content.len();
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, Some(put.key), &[], RequestedRange::Whole, now)?;
-        head.header("x-ms-blob-type", b"BlockBlob");
-        // The content length is head bytes like any other, so it is written
-        // into the caller's buffer rather than formatted at send time.
-        head.header("content-length", U64Decimal::new(length).as_bytes());
-        push_checksum(&mut head, put.options.checksum, &self.checksums, |sum| {
-            sum.update(content.bytes().unwrap_or(&[]));
-        });
-        push_stored(&mut head, &put.options);
-        push_metadata(&mut head, put.metadata);
-        push_condition(&mut head, put.condition, put.condition_value);
-        encoded(head, Method::Put, content)
-    }
-
     // The parts that every request head carries, in the order that they are
     // written into the caller's buffer. Each part is one range of that buffer.
     // `key` is `None` for a request that names the container alone, and the
@@ -402,231 +342,13 @@ impl<'a> Blobs<'a> {
         }
     }
 
-    /// Reads a response head and reports what to do next.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_get`]. This
-    /// method checks the head against that plan, so you never restate what the
-    /// plan already holds.
-    ///
-    /// Every head that Azure sends becomes a [`GetHeadOutcome`], including the
-    /// heads that report a failure. Azure names its errors in the
-    /// `x-ms-error-code` header, so this method needs no part of the response
-    /// body and returns the named error with the outcome. If Azure sent no
-    /// such header, the outcome names no error: call [`classify_error`] with
-    /// the response body to read the error code from there.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
-    /// A `Content-Range` whose end is before its start is
-    /// [`ResponseFault::Head`]. A ranged plan that Azure answers with status
-    /// 200 is [`ResponseFault::Range`].
-    ///
-    /// A 412 is [`GetHeadOutcome::PreconditionFailed`] only if the plan
-    /// carried `If-Match` and Azure names a failed condition. Any other 412 is
-    /// a service failure that names its code.
-    pub fn accept_get_head<'h>(
-        &self,
-        shape: GetShape,
-        head: ResponseHead<'h>,
-    ) -> Result<GetHeadOutcome<'h>> {
-        let ranged = shape.range != RequestedRange::Whole;
-        match head.status {
-            206 if !ranged => Err(ResponseFault::Range.into()),
-            200 if ranged => Err(ResponseFault::Range.into()),
-            // Azure serves no suffix, so this shape did not pass through
-            // encode_get.
-            206 if matches!(shape.range, RequestedRange::Suffix(_)) => {
-                Err(ResponseFault::Range.into())
-            }
-            200 | 206 => accept_success(shape, head),
-            // A conditional status the plan did not ask for is a contradiction,
-            // not an outcome: nothing in the plan explains it.
-            304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
-            304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            // A 412 is the plan's failed condition only if the plan carried
-            // one and Azure names it. Azure also answers 412 for other
-            // reasons, which reach the caller as the service failure they are.
-            412 if shape.condition != ConditionKind::None
-                && !shape.condition.fails_as_not_modified()
-                && named(&head) == Some(ServiceErrorKind::Precondition) =>
-            {
-                Ok(GetHeadOutcome::PreconditionFailed)
-            }
-            // Azure repeats the header's code in the body, so only a
-            // missing header is worth a body read. A header naming a code
-            // this crate does not know is already decisive.
-            404 if head.error_code.is_none() => Ok(GetHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
-            416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
-                object_size: match head.content_range.map(parse_content_range) {
-                    None => None,
-                    // `bytes */N` is the only form 416 may carry.
-                    Some(Some(ContentRange::Unsatisfied { total })) => total,
-                    Some(_) => return Err(ResponseFault::Head.into()),
-                },
-            }),
-            200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(GetHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(GetHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
-    /// [`Failure`] of that outcome, and the body that you
-    /// read. The body names the error, exactly as the `x-ms-error-code`
-    /// header would have. Pass an empty body if you could not read one: the
-    /// outcome is then final with the error unnamed.
-    ///
-    /// To tell a body that your read limit cut short from a body that names an
-    /// error this crate does not recognize, call [`classify_error`] instead.
-    pub fn accept_get_error_body<'h>(
-        &self,
-        shape: GetShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> GetHeadOutcome<'h> {
-        let kind = body_kind(body);
-        // A read fails `If-None-Match` and `If-Modified-Since` with 304, so
-        // only `If-Match` and `If-Unmodified-Since` fail with 412.
-        if names_failed_condition(
-            failure.status,
-            shape.condition != ConditionKind::None && !shape.condition.fails_as_not_modified(),
-            kind,
-        ) {
-            return GetHeadOutcome::PreconditionFailed;
-        }
-        finish_with_body(failure, kind)
-    }
-
-    /// Writes the request head for `delete` into `buf`.
-    ///
-    /// The request has no content. Azure removes the object it names and
-    /// nothing else: see [`PhysicalDelete`] for what that excludes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure
-    /// request. This method validates the plan before it writes any byte, so
-    /// it never reports an invalid plan as a capacity error.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or call
-    /// [`layered::delete_requirements`](crate::layered::delete_requirements)
-    /// first.
-    pub fn encode_delete<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        delete: &PhysicalDelete<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_delete(delete, self.namespace)?;
-        let mut head = HeadWriter::new(buf, headers);
-        let query = [revision_parameter(delete.revision)];
-        self.build(
-            &mut head,
-            Some(delete.key),
-            &query,
-            RequestedRange::Whole,
-            now,
-        )?;
-        if let Some(value) = delete_snapshots(delete.kind) {
-            head.header("x-ms-delete-snapshots", value.as_bytes());
-        }
-        push_condition(&mut head, delete.condition, delete.condition_value);
-        encoded(head, Method::Delete, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a removal and reports what Azure did.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_delete`]. This
-    /// method checks the head against that plan, so you never restate what the
-    /// plan already holds.
-    ///
-    /// Every head that Azure sends becomes a [`DeleteHeadOutcome`], including
-    /// the heads that report a failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
-    /// A success status that a removal never returns is
-    /// [`ResponseFault::Status`].
-    ///
-    /// A 412 is [`DeleteHeadOutcome::PreconditionFailed`] only if the plan
-    /// carried a condition and Azure names a failed condition. Azure answers
-    /// 412 for other reasons too, such as `LeaseIdMissing` on a leased blob,
-    /// and those are service failures that name their code.
-    pub fn accept_delete_head<'h>(
-        &self,
-        shape: DeleteShape,
-        head: ResponseHead<'h>,
-    ) -> Result<DeleteHeadOutcome<'h>> {
-        match head.status {
-            202 => Ok(DeleteHeadOutcome::Accepted),
-            412 if shape.condition != ConditionKind::None
-                && named(&head) == Some(ServiceErrorKind::Precondition) =>
-            {
-                Ok(DeleteHeadOutcome::PreconditionFailed)
-            }
-            404 if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
-            200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(DeleteHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a removal, and reads the
-    /// body the same way.
-    pub fn accept_delete_error_body<'h>(
-        &self,
-        shape: DeleteShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> DeleteHeadOutcome<'h> {
-        let kind = body_kind(body);
-        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
-            return DeleteHeadOutcome::PreconditionFailed;
-        }
-        finish_with_body(failure, kind)
-    }
-
     /// Writes the request head of a Snapshot Blob into `buf`, which takes a
     /// read-only snapshot of the object as it is now.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
-    /// refuses, a metadata pair that [`Self::encode_put`] refuses, or an
+    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`]
+    /// refuses, a metadata pair that [`encode_put`] refuses, or an
     /// invalid condition.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
@@ -639,7 +361,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalSnapshot<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         validate_metadata(plan.metadata)?;
         validate_condition(plan.condition, plan.condition_value)?;
@@ -687,25 +409,15 @@ impl<'a> Blobs<'a> {
             {
                 Ok(SnapshotHeadOutcome::PreconditionFailed)
             }
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(SnapshotHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(SnapshotHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`SnapshotHeadOutcome::NeedErrorBody`] with the response
     /// body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a Snapshot Blob, and reads
+    /// This is [`accept_get_error_body`] for a Snapshot Blob, and reads
     /// the body the same way.
     pub fn accept_snapshot_error_body<'h>(
         &self,
@@ -719,267 +431,22 @@ impl<'a> Blobs<'a> {
         }
         finish_with_body(failure, kind)
     }
-
-    /// Reads the response head of a write and reports what Azure did.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_put`]. This
-    /// method checks the head against that plan, so you never restate what the
-    /// plan already holds.
-    ///
-    /// Every head that Azure sends becomes a [`PutHeadOutcome`], including the
-    /// heads that report a failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against `shape`.
-    /// A success status that a write never returns is
-    /// [`ResponseFault::Status`].
-    ///
-    /// A 412 is [`PutHeadOutcome::PreconditionFailed`] only if the plan carried
-    /// a condition and Azure names a failed condition. Azure answers 412 for
-    /// other reasons too, such as `LeaseIdMissing` on a leased blob, and those
-    /// are service failures that name their code.
-    pub fn accept_put_head<'h>(
-        &self,
-        shape: PutShape,
-        head: ResponseHead<'h>,
-    ) -> Result<PutHeadOutcome<'h>> {
-        match head.status {
-            201 => Ok(PutHeadOutcome::Created {
-                meta: ObjectMeta {
-                    last_modified: text_header(head.last_modified)?,
-                    ..meta_of(head)
-                },
-            }),
-            412 if shape.condition != ConditionKind::None
-                && named(&head) == Some(ServiceErrorKind::Precondition) =>
-            {
-                Ok(PutHeadOutcome::PreconditionFailed)
-            }
-            404 if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
-            200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(PutHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a write, and reads the
-    /// body the same way.
-    pub fn accept_put_error_body<'h>(
-        &self,
-        shape: PutShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> PutHeadOutcome<'h> {
-        let kind = body_kind(body);
-        if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
-            return PutHeadOutcome::PreconditionFailed;
-        }
-        finish_with_body(failure, kind)
-    }
-
-    /// Writes the request head for one page of `list` into `buf`.
-    ///
-    /// The response carries the page as a document in its body: read it whole
-    /// and pass it to [`Self::fill_listing`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure
-    /// request. Azure lists from no key and names no owner, so a plan that
-    /// sets [`PhysicalList::start_after`] or [`ListInclude::OWNER`] is refused
-    /// with [`InvalidPlan::Option`]. This method validates the plan before it
-    /// writes any byte, so it never reports an invalid plan as a capacity
-    /// error.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or call
-    /// [`layered::list_requirements`](crate::layered::list_requirements)
-    /// first.
-    pub fn encode_list<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        list: &PhysicalList<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_list(list, self.namespace)?;
-        let mut words = [""; INCLUDE_WORDS.len()];
-        let mut word_count = 0;
-        for (flag, word) in INCLUDE_WORDS {
-            if list.include.contains(flag) {
-                words[word_count] = word;
-                word_count += 1;
-            }
-        }
-        // The query is written in this order every time, so a caller can
-        // compare the URL byte for byte. Azure signs none of it.
-        // An empty prefix is no parameter at all.
-        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
-        let query = [
-            url::literal("restype", "container"),
-            url::literal("comp", "list"),
-            url::encoded("prefix", prefix),
-            url::encoded("delimiter", list.delimiter),
-            url::encoded("marker", list.marker.and_then(ListMarker::text)),
-            url::number("maxresults", list.max_results),
-            url::words("include", &words[..word_count]),
-        ];
-
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(&mut head, None, &query, RequestedRange::Whole, now)?;
-        encoded(head, Method::Get, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a listing and reports what Azure did.
-    ///
-    /// A head that reports a failure is an outcome too, so it returns [`Ok`].
-    /// Only a head that cannot be read is an [`Err`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status that a listing never returns is [`ResponseFault::Status`].
-    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(ListHeadOutcome::Page {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            404 if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
-                404,
-                None,
-                head.request_id,
-            ))),
-            404 => Ok(missing(&head, named(&head))),
-            201..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(ListHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(ListHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a listing, and reads the
-    /// body the same way.
-    pub fn accept_list_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> ListHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
-    }
-
-    /// Reads a page out of the response body of a listing.
-    ///
-    /// Pass the whole body that [`ListHeadOutcome::Page`] announced and an
-    /// array to write the entries into. Reading is destructive: a body that
-    /// has been read is no longer a document.
-    ///
-    /// Your array must hold the whole page. An array of `max_results` entries
-    /// always does, because the service never writes more than it asked for.
-    /// The entries are written as [`ListEntry`], or as any type built from
-    /// one, so a binding fills its own array directly.
-    ///
-    /// For fields not carried by `ListEntry`, use [`ListEntry::property`] or
-    /// [`Self::fill_listing_with`], selecting [`BlobProperty`](crate::BlobProperty)
-    /// values such as `VersionId`, `IsCurrentVersion` and `Snapshot`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Capacity`] if the page holds more entries than the
-    /// array, with `required` set to the number it holds. The body has been
-    /// decoded by then and cannot be read again: ask the service for the page
-    /// again, with a larger array.
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a listing page. This reads the grammar that Azure writes, not XML
-    /// at large: a namespace prefix, a reference to an entity no listing
-    /// declares, an entry tag spelled with an attribute, and anything else
-    /// Azure does not write are refused rather than guessed at.
-    pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [E],
-    ) -> Result<Listing<'b>> {
-        crate::xml::azure::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
-    }
-
-    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
-    /// values of the properties in `wanted` as it goes.
-    ///
-    /// `build` is called once per entry, with the entry and its values, and
-    /// what it returns is written into your array. So your entry type can
-    /// hold the two or three properties you care about, read in the same
-    /// pass as everything else. The values point into `body`, like the
-    /// entry. A group of keys gives no values.
-    ///
-    /// Reading the page costs the same whatever the set holds, and the same
-    /// as reading it without one.
-    ///
-    /// ```
-    /// # use borink_object_storage_proto::{
-    /// #     Blobs, ListEntry, PropertySet, BlobProperty, Result,
-    /// # };
-    /// # fn read(blobs: &Blobs<'_>, body: &mut [u8]) -> Result<()> {
-    /// let wanted = PropertySet::of(&[
-    ///     BlobProperty::VersionId, BlobProperty::IsCurrentVersion,
-    /// ]);
-    /// let mut entries = [(ListEntry::default(), None, None); 100];
-    /// blobs.fill_listing_with(body, &mut entries, wanted, |entry, values| {
-    ///     (entry, values.get(BlobProperty::VersionId),
-    ///         values.get(BlobProperty::IsCurrentVersion))
-    /// })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn fill_listing_with<'b, E>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [E],
-        wanted: PropertySet,
-        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
-    ) -> Result<Listing<'b>> {
-        crate::xml::azure::fill_listing(body, into, wanted, build)
-    }
 }
 
 /// One Snapshot Blob: a read-only copy of an object as it is now, which
 /// Azure keeps beside the object until the snapshot is removed.
 ///
-/// Read a snapshot with [`Revision::Snapshot`] in [`PhysicalGet::revision`],
-/// and remove it with one in [`PhysicalDelete::revision`]. A hierarchical
+/// Read a snapshot from a template of [`RevisionKind::Snapshot`],
+/// and remove it with a template of [`DeleteOptions::revision`]. A hierarchical
 /// account takes no snapshot: Azure refuses with 409
 /// `FeatureNotYetSupportedForHierarchicalNamespaceAccounts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSnapshot<'a> {
-    /// The object key, under the rules of [`PhysicalGet::key`].
+    /// The object key, under the rules of [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The metadata of the snapshot. With no pair, the snapshot has the
     /// object's metadata; with any, it has these pairs alone. The rules of
-    /// [`PhysicalPut::metadata`] apply.
+    /// [`PutOptions::metadata`](crate::PutOptions::metadata) apply.
     pub metadata: &'a [MetadataPair<'a>],
     /// The condition on the object, as a read carries it.
     pub condition: ConditionKind,
@@ -1060,6 +527,10 @@ impl fmt::Display for SnapshotHeadOutcome<'_> {
 }
 
 impl<'h> FailureOutcome<'h> for SnapshotHeadOutcome<'h> {
+    fn need_error_body(failure: Failure<'h>) -> Self {
+        Self::NeedErrorBody(failure)
+    }
+
     fn not_found(failure: Failure<'h>) -> Self {
         Self::NotFound { kind: failure.kind }
     }
@@ -1083,6 +554,19 @@ pub(crate) fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_
     match revision? {
         Revision::Snapshot(id) => url::encoded("snapshot", id),
         Revision::Version(id) => url::encoded("versionid", id),
+    }
+}
+
+// Reads a head that reports a failure. Azure names its error in the
+// `x-ms-error-code` header and repeats it in the body, so only a head
+// without the header leaves the error to the body. A header that names a
+// code this crate does not know is already decisive. A 404 that names its
+// error is a missing object, or a missing container.
+pub(crate) fn failed<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
+    match head.error_code {
+        None => O::need_error_body(failure(head.status, None, head.request_id)),
+        Some(_) if head.status == 404 => missing(head, named(head)),
+        Some(_) => O::service_failure(failure(head.status, named(head), head.request_id)),
     }
 }
 
@@ -1156,19 +640,776 @@ pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
     crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
-fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
-    match kind {
-        // Azure refuses an object with snapshots when the header is absent,
-        // which is the outcome a plan that names the object alone asks for.
-        DeleteKind::Object => None,
-        DeleteKind::ObjectAndSnapshots => Some("include"),
-        DeleteKind::SnapshotsOnly => Some("only"),
-    }
-}
-
 // The length of a name as Azure counts it.
 fn name_units(value: &str) -> usize {
     value.chars().map(char::len_utf16).sum()
+}
+
+/// Writes the template of reads with `options` from `container`, sent with
+/// the bearer `token`, into `buf`.
+///
+/// `namespace` is the kind of account the reads go to. Pass
+/// [`AzureNamespace::Unknown`] if you do not know it: the encoder then
+/// refuses only the keys that both kinds refuse.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
+/// header value, and [`InvalidPlan::RangedHead`] for ranged HEADs.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_get(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &GetOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_get_options(options, true)?;
+    let method = match options.kind {
+        GetKind::Bytes => Method::Get,
+        GetKind::Head => Method::Head,
+    };
+    let query = [revision_param(options.revision)];
+    let condition = condition_header(options.condition)
+        .map(|name| Field::new(name, Value::Hole(Hole::Condition)));
+    let range =
+        (options.ranging == Ranging::Ranged).then(|| Field::new("range", Value::Hole(Hole::Range)));
+    let mut fields = [Field::new("", Value::Bytes(b"")); 2];
+    let mut count = 0;
+    for field in [range, condition].into_iter().flatten() {
+        fields[count] = field;
+        count += 1;
+    }
+    let describe = Describe {
+        method,
+        key: true,
+        query: &query,
+        fields: &fields[..count],
+        metadata: &[],
+    };
+    template::prepare(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::Get,
+        Detail::Get(*options),
+        buf,
+    )
+}
+
+/// Writes the read `item` at `now` from `template` into `buf`, and returns
+/// it.
+///
+/// `bytes` are the template's own, as [`prepare_get`] wrote them.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `item` is not a read that the template
+/// writes, or not a key that Azure takes: see [Object keys](crate#object-keys).
+/// Azure serves no suffix range, which is [`InvalidPlan::UnsupportedRange`].
+/// A URL longer than [`MAX_URL_LEN`] is [`InvalidPlan::UrlTooLong`]. A
+/// template for another operation, or bytes that are not its own, is
+/// [`InvalidPlan::Template`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_get<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &GetItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Get(options) = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_key(item.key, template.namespace)?;
+    if let RequestedRange::Suffix(_) = item.range {
+        return Err(InvalidPlan::UnsupportedRange.into());
+    }
+    validate_get_item(&options, item)?;
+    let values = Values {
+        now: Some(now),
+        key: Some(item.key),
+        range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
+        condition: item.condition_value,
+        revision: item.revision,
+        ..Values::default()
+    };
+    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+}
+
+/// Reads the response head of a read and reports what to do next.
+///
+/// Pass the [`GetShape`] of the read. Every head that Azure sends becomes a
+/// [`GetHeadOutcome`], including the heads that report a failure. Azure
+/// names its errors in the `x-ms-error-code` header, so a failure needs the
+/// body only when that header is missing: the outcome is then
+/// [`GetHeadOutcome::NeedErrorBody`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against `shape`.
+/// A `Content-Range` whose end is before its start is
+/// [`ResponseFault::Head`]. A ranged read that Azure answers with status 200
+/// is [`ResponseFault::Range`].
+///
+/// A 412 is [`GetHeadOutcome::PreconditionFailed`] only if the read carried
+/// `If-Match` or `If-Unmodified-Since` and Azure names a failed condition.
+/// Any other 412 is a service failure that names its code.
+pub fn accept_get_head<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>> {
+    accept_get(shape, head)
+}
+
+/// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// Pass the [`GetShape`] of the read, the [`Failure`] of that outcome, and
+/// the body that you read. Pass an empty body if you could not read one: the
+/// outcome is then final with the error unnamed.
+///
+/// To tell a body that your read limit cut short from a body that names an
+/// error this crate does not recognize, call [`classify_error`] instead.
+pub fn accept_get_error_body<'h>(
+    shape: GetShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> GetHeadOutcome<'h> {
+    let kind = body_kind(body);
+    // A read fails `If-None-Match` and `If-Modified-Since` with 304, so only
+    // `If-Match` and `If-Unmodified-Since` fail with 412.
+    if names_failed_condition(
+        failure.status,
+        shape.condition != ConditionKind::None && !shape.condition.fails_as_not_modified(),
+        kind,
+    ) {
+        return GetHeadOutcome::PreconditionFailed;
+    }
+    finish_with_body(failure, kind)
+}
+
+/// Writes the template of whole-object writes with `options` into
+/// `container`, sent with the bearer `token`, into `buf`.
+///
+/// Every write sends `x-ms-blob-type: BlockBlob`, and the metadata, the
+/// content properties, the tags and the access tier of `options`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
+/// header value. Returns [`Error::InvalidPlan`] for a metadata pair, a
+/// content property or a tag that Azure would not store as given, or a
+/// checksum other than an MD5 or a CRC64, which is [`InvalidPlan::Option`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_put(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &PutOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_put_options(options)?;
+    validate_metadata(options.metadata)?;
+    validate_properties(&options.options, utf8_properties(namespace))?;
+    validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
+    if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
+        return Err(InvalidPlan::Option.into());
+    }
+    let mut fields = FieldList::new();
+    fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")));
+    stored_fields(&mut fields, &options.options);
+    fields.push(Field::new(
+        "content-length",
+        Value::Hole(Hole::ContentLength),
+    ));
+    if let Some(kind) = options.checksum {
+        fields.push(Field::new(kind.header(), Value::Hole(Hole::Checksum)));
+    }
+    if let Some(name) = condition_header(options.condition) {
+        fields.push(Field::new(name, Value::Hole(Hole::Condition)));
+    }
+    let describe = Describe {
+        method: Method::Put,
+        key: true,
+        query: &[],
+        fields: fields.as_slice(),
+        metadata: options.metadata,
+    };
+    template::prepare(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::Put,
+        Detail::Put {
+            condition: options.condition,
+            checksum: options.checksum,
+        },
+        buf,
+    )
+}
+
+/// Writes the whole-object write `item` at `now` from `template` into `buf`,
+/// and returns it.
+///
+/// `bytes` are the template's own, as [`prepare_put`] wrote them. The
+/// request lends a [`Payload::Slice`] to your HTTP client, and leaves a
+/// [`Payload::Streamed`] for you to send.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `item` is not a write that the template
+/// writes, not a key that Azure takes, or content longer than
+/// [`MAX_PUT_LEN`], which is [`InvalidPlan::PayloadTooLarge`]. A checksum
+/// that is not the base64 of a digest of the template's kind is
+/// [`InvalidPlan::Checksum`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_put<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &PutItem<'r>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Put {
+        condition,
+        checksum,
+    } = template.detail
+    else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_key(item.key, template.namespace)?;
+    if item.content.len() > MAX_PUT_LEN {
+        return Err(InvalidPlan::PayloadTooLarge.into());
+    }
+    validate_condition(condition, item.condition_value)?;
+    validate_checksum_item(checksum, item.checksum)?;
+    let mut text = [0; BASE64_LEN];
+    let values = Values {
+        now: Some(now),
+        key: Some(item.key),
+        condition: item.condition_value,
+        content_length: Some(item.content.len()),
+        checksum: checksum_text(item.checksum, &mut text, false),
+        ..Values::default()
+    };
+    template::encode(template, bytes, &values, item.content, None, buf)
+}
+
+/// Reads the response head of a write and reports what Azure did.
+///
+/// Pass the [`PutShape`] of the write. Every head that Azure sends becomes
+/// a [`PutHeadOutcome`], including the heads that report a failure.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against `shape`.
+/// A success status that a write never returns is
+/// [`ResponseFault::Status`].
+///
+/// A 412 is [`PutHeadOutcome::PreconditionFailed`] only if the write
+/// carried a condition and Azure names a failed condition. Azure answers 412
+/// for other reasons too, such as `LeaseIdMissing` on a leased blob, and
+/// those are service failures that name their code.
+pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<PutHeadOutcome<'h>> {
+    match head.status {
+        201 => Ok(PutHeadOutcome::Created {
+            meta: ObjectMeta {
+                last_modified: text_header(head.last_modified)?,
+                ..meta_of(head)
+            },
+        }),
+        412 if shape.condition != ConditionKind::None
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(PutHeadOutcome::PreconditionFailed)
+        }
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// This reads the body as [`accept_get_error_body`] does.
+pub fn accept_put_error_body<'h>(
+    shape: PutShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> PutHeadOutcome<'h> {
+    let kind = body_kind(body);
+    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+        return PutHeadOutcome::PreconditionFailed;
+    }
+    finish_with_body(failure, kind)
+}
+
+/// Writes the template of removals with `options` from `container`, sent
+/// with the bearer `token`, into `buf`.
+///
+/// `namespace` is the kind of account the removals go to: see
+/// [`prepare_get`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
+/// header value. A removal of a snapshot or a version that takes more than
+/// the object is [`InvalidPlan::Revision`]: it has no snapshots of its
+/// own, and Azure refuses `x-ms-delete-snapshots` beside one.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_delete(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &DeleteOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if options.revision != RevisionKind::Current && options.kind != DeleteKind::Object {
+        return Err(InvalidPlan::Revision.into());
+    }
+    let query = [revision_param(options.revision)];
+    let mut fields = FieldList::new();
+    // Azure refuses an object with snapshots when the header is absent,
+    // which is the outcome a removal of the object alone asks for.
+    match options.kind {
+        DeleteKind::Object => {}
+        DeleteKind::ObjectAndSnapshots => {
+            fields.push(Field::new(
+                "x-ms-delete-snapshots",
+                Value::Bytes(b"include"),
+            ));
+        }
+        DeleteKind::SnapshotsOnly => {
+            fields.push(Field::new("x-ms-delete-snapshots", Value::Bytes(b"only")));
+        }
+    }
+    if let Some(name) = condition_header(options.condition) {
+        fields.push(Field::new(name, Value::Hole(Hole::Condition)));
+    }
+    let describe = Describe {
+        method: Method::Delete,
+        key: true,
+        query: &query,
+        fields: fields.as_slice(),
+        metadata: &[],
+    };
+    template::prepare(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::Delete,
+        Detail::Delete(*options),
+        buf,
+    )
+}
+
+/// Writes the removal `item` at `now` from `template` into `buf`, and
+/// returns it.
+///
+/// `bytes` are the template's own, as [`prepare_delete`] wrote them. The
+/// request has no content.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `item` is not a removal that the
+/// template writes, or not a key that Azure takes: see
+/// [Object keys](crate#object-keys). A URL longer than [`MAX_URL_LEN`] is
+/// [`InvalidPlan::UrlTooLong`]. A template for another operation is
+/// [`InvalidPlan::Template`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_delete<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &DeleteItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::Delete(options) = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    validate_key(item.key, template.namespace)?;
+    validate_revision_item(options.revision, item.revision)?;
+    validate_condition(options.condition, item.condition_value)?;
+    let values = Values {
+        now: Some(now),
+        key: Some(item.key),
+        condition: item.condition_value,
+        revision: item.revision,
+        ..Values::default()
+    };
+    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+}
+
+/// Reads the response head of a removal and reports what Azure did.
+///
+/// Pass the [`DeleteShape`] of the removal. Every head that Azure sends
+/// becomes a [`DeleteHeadOutcome`], including the heads that report a
+/// failure.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against `shape`.
+/// A success status that a removal never returns is
+/// [`ResponseFault::Status`].
+///
+/// A 412 is [`DeleteHeadOutcome::PreconditionFailed`] only if the removal
+/// carried a condition and Azure names a failed condition. Azure answers
+/// 412 for other reasons too, such as `LeaseIdMissing` on a leased blob,
+/// and those are service failures that name their code.
+pub fn accept_delete_head<'h>(
+    shape: DeleteShape,
+    head: ResponseHead<'h>,
+) -> Result<DeleteHeadOutcome<'h>> {
+    match head.status {
+        202 => Ok(DeleteHeadOutcome::Accepted),
+        412 if shape.condition != ConditionKind::None
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(DeleteHeadOutcome::PreconditionFailed)
+        }
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// This is [`accept_get_error_body`] for a removal, and reads the body the
+/// same way.
+pub fn accept_delete_error_body<'h>(
+    shape: DeleteShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> DeleteHeadOutcome<'h> {
+    let kind = body_kind(body);
+    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+        return DeleteHeadOutcome::PreconditionFailed;
+    }
+    finish_with_body(failure, kind)
+}
+
+/// Writes the template of listings with `options` of `container`, sent
+/// with the bearer `token`, into `buf`.
+///
+/// `namespace` is the kind of account the listings go to: see
+/// [`prepare_get`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
+/// header value. Returns [`Error::InvalidPlan`] if `options` cannot become
+/// an Azure request:
+///
+/// - [`InvalidPlan::MaxResults`] for a page of no entries.
+/// - [`InvalidPlan::Delimiter`] for an empty delimiter, and for any but `/`
+///   on a [`AzureNamespace::Hierarchical`] account.
+/// - [`InvalidPlan::Option`] for [`ListInclude::OWNER`]: Azure names no
+///   owner.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_list(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &ListOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if options.max_results == Some(0) {
+        return Err(InvalidPlan::MaxResults.into());
+    }
+    // A flat account groups names at any text. A hierarchical one groups
+    // them at `/` alone, and answers any other with 400
+    // `DelimiterIsInvalidForHNS`.
+    validate_delimiter(options.delimiter, namespace == AzureNamespace::Hierarchical)?;
+    if options.include.contains(ListInclude::OWNER) {
+        return Err(InvalidPlan::Option.into());
+    }
+    let mut words = [""; INCLUDE_WORDS.len()];
+    let mut word_count = 0;
+    for (flag, word) in INCLUDE_WORDS {
+        if options.include.contains(flag) {
+            words[word_count] = word;
+            word_count += 1;
+        }
+    }
+    // The query is written in this order every time, so a caller can
+    // compare the URL byte for byte. Azure signs none of it.
+    let query = [
+        Some((
+            "restype",
+            ParamValue::Fixed(QueryValue::Literal("container")),
+        )),
+        Some(("comp", ParamValue::Fixed(QueryValue::Literal("list")))),
+        Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+        options.delimiter.map(|text| {
+            (
+                "delimiter",
+                ParamValue::Fixed(QueryValue::Encoded(text.as_bytes())),
+            )
+        }),
+        Some(("marker", ParamValue::Optional(Hole::Marker))),
+        options
+            .max_results
+            .map(|count| ("maxresults", ParamValue::Fixed(QueryValue::Number(count)))),
+        (word_count > 0).then(|| {
+            (
+                "include",
+                ParamValue::Fixed(QueryValue::Words(&words[..word_count])),
+            )
+        }),
+    ];
+    let describe = Describe {
+        method: Method::Get,
+        key: false,
+        query: &query,
+        fields: &[],
+        metadata: &[],
+    };
+    template::prepare(
+        container,
+        token,
+        namespace,
+        &describe,
+        Operation::List,
+        Detail::List,
+        buf,
+    )
+}
+
+/// Writes the page `item` at `now` from `template` into `buf`, and
+/// returns it.
+///
+/// `bytes` are the template's own, as [`prepare_list`] wrote them. The
+/// response carries the page as a document in its body: read it whole and
+/// pass it to [`fill_listing`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPlan`] if `item` cannot become an Azure request:
+///
+/// - [`InvalidPlan::Marker`] for a marker that is not
+///   [`ListMarker::Text`], or is empty.
+/// - [`InvalidPlan::Option`] for [`ListItem::start_after`]: Azure starts a
+///   listing only at its own marker.
+/// - [`InvalidPlan::UrlTooLong`] for a URL longer than [`MAX_URL_LEN`].
+///   A prefix is bounded by the URL alone.
+/// - [`InvalidPlan::Template`] for a template for another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_list<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &ListItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    let Detail::List = template.detail else {
+        return Err(InvalidPlan::Template.into());
+    };
+    // No rule of `validate_key` applies to a prefix. It is written into the
+    // query, where nothing resolves a `..` and nothing drops a trailing dot,
+    // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
+    // name: a flat account answered a prefix of 32,657 units, far past the
+    // 1,024 it allows a name. What bounds a prefix is the URL. Measured
+    // against the live service.
+    //
+    // Azure continues every listing from one marker, and hands out no empty
+    // one.
+    let marker = match item.marker {
+        None => None,
+        Some(ListMarker::Text(marker)) if !marker.is_empty() => Some(marker),
+        Some(_) => return Err(InvalidPlan::Marker.into()),
+    };
+    if item.start_after.is_some() {
+        return Err(InvalidPlan::Option.into());
+    }
+    let values = Values {
+        now: Some(now),
+        prefix: Some(item.prefix),
+        marker,
+        ..Values::default()
+    };
+    template::encode(template, bytes, &values, Payload::Slice(&[]), None, buf)
+}
+
+/// Reads the response head of a listing and reports what Azure did.
+///
+/// A head that reports a failure is an outcome too, so it returns [`Ok`].
+/// Only a head that cannot be read is an [`Err`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success
+/// status that a listing never returns is [`ResponseFault::Status`].
+pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(ListHeadOutcome::Page {
+            expected_len: decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
+}
+
+/// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// This is [`accept_get_error_body`] for a listing, and reads the
+/// body the same way.
+pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHeadOutcome<'h> {
+    finish_with_body(failure, body_kind(body))
+}
+
+/// Reads a page out of the response body of a listing.
+///
+/// Pass the whole body that [`ListHeadOutcome::Page`] announced and an
+/// array to write the entries into. Reading is destructive: a body that
+/// has been read is no longer a document.
+///
+/// Your array must hold the whole page. An array of `max_results` entries
+/// always does, because the service never writes more than it asked for.
+/// The entries are written as [`ListEntry`], or as any type built from
+/// one, so a binding fills its own array directly.
+///
+/// For fields not carried by `ListEntry`, use [`ListEntry::property`] or
+/// [`fill_listing_with`], selecting [`BlobProperty`](crate::BlobProperty)
+/// values such as `VersionId`, `IsCurrentVersion` and `Snapshot`.
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`] if the page holds more entries than the
+/// array, with `required` set to the number it holds. The body has been
+/// decoded by then and cannot be read again: ask the service for the page
+/// again, with a larger array.
+///
+/// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+/// not a listing page. This reads the grammar that Azure writes, not XML
+/// at large: a namespace prefix, a reference to an entity no listing
+/// declares, an entry tag spelled with an attribute, and anything else
+/// Azure does not write are refused rather than guessed at.
+pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
+    body: &'b mut [u8],
+    into: &mut [E],
+) -> Result<Listing<'b>> {
+    crate::xml::azure::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+}
+
+/// Reads a page the way [`fill_listing`] does, and hands you the
+/// values of the properties in `wanted` as it goes.
+///
+/// `build` is called once per entry, with the entry and its values, and
+/// what it returns is written into your array. So your entry type can
+/// hold the two or three properties you care about, read in the same
+/// pass as everything else. The values point into `body`, like the
+/// entry. A group of keys gives no values.
+///
+/// Reading the page costs the same whatever the set holds, and the same
+/// as reading it without one.
+///
+/// ```
+/// # use borink_object_storage_proto::{
+/// #     ListEntry, PropertySet, BlobProperty, Result, azure,
+/// # };
+/// # fn read(body: &mut [u8]) -> Result<()> {
+/// let wanted = PropertySet::of(&[
+///     BlobProperty::VersionId, BlobProperty::IsCurrentVersion,
+/// ]);
+/// let mut entries = [(ListEntry::default(), None, None); 100];
+/// azure::fill_listing_with(body, &mut entries, wanted, |entry, values| {
+///     (entry, values.get(BlobProperty::VersionId),
+///         values.get(BlobProperty::IsCurrentVersion))
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn fill_listing_with<'b, E>(
+    body: &'b mut [u8],
+    into: &mut [E],
+    wanted: PropertySet,
+    build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+) -> Result<Listing<'b>> {
+    crate::xml::azure::fill_listing(body, into, wanted, build)
+}
+
+// The fields that store the content properties, the tags and the access
+// tier of a write with the object.
+fn stored_fields<'p>(fields: &mut FieldList<'p>, options: &WriteOptions<'p>) {
+    for (name, value) in options.properties.iter() {
+        let header = match name {
+            "cache-control" => "x-ms-blob-cache-control",
+            "content-disposition" => "x-ms-blob-content-disposition",
+            "content-encoding" => "x-ms-blob-content-encoding",
+            "content-language" => "x-ms-blob-content-language",
+            _ => "x-ms-blob-content-type",
+        };
+        fields.push(Field::new(header, Value::Bytes(value.as_bytes())));
+    }
+    if !options.tags.is_empty() {
+        fields.push(Field::new("x-ms-tags", Value::Tags(options.tags)));
+    }
+    if let Some(tier) = options.storage_class {
+        fields.push(Field::new(
+            "x-ms-access-tier",
+            Value::Bytes(tier.as_bytes()),
+        ));
+    }
+}
+
+// The query parameter that names a template's snapshot or version.
+fn revision_param(kind: RevisionKind) -> Param<'static> {
+    match kind {
+        RevisionKind::Current => None,
+        RevisionKind::Snapshot => Some(("snapshot", ParamValue::Hole(Hole::Revision))),
+        RevisionKind::Version => Some(("versionid", ParamValue::Hole(Hole::Revision))),
+    }
+}
+
+// Reads the response head of a GET or a HEAD.
+fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>> {
+    let ranged = shape.range != RequestedRange::Whole;
+    match head.status {
+        206 if !ranged => Err(ResponseFault::Range.into()),
+        200 if ranged => Err(ResponseFault::Range.into()),
+        // Azure serves no suffix, so this shape did not pass through
+        // encode_get.
+        206 if matches!(shape.range, RequestedRange::Suffix(_)) => Err(ResponseFault::Range.into()),
+        200 | 206 => accept_success(shape, head),
+        // A conditional status the plan did not ask for is a contradiction,
+        // not an outcome: nothing in the plan explains it.
+        304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
+        304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
+        // A 412 is the plan's failed condition only if the plan carried
+        // one and Azure names it. Azure also answers 412 for other
+        // reasons, which reach the caller as the service failure they are.
+        412 if shape.condition != ConditionKind::None
+            && !shape.condition.fails_as_not_modified()
+            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
+            Ok(GetHeadOutcome::PreconditionFailed)
+        }
+        416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
+            object_size: match head.content_range.map(parse_content_range) {
+                None => None,
+                // `bytes */N` is the only form 416 may carry.
+                Some(Some(ContentRange::Unsatisfied { total })) => total,
+                Some(_) => return Err(ResponseFault::Head.into()),
+            },
+        }),
+        200..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(failed(&head)),
+    }
 }
 
 // Reject unsupported names before encoding, without losing the reason.
@@ -1219,44 +1460,12 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     Ok(())
 }
 
-fn validate_get(get: &PhysicalGet<'_>, namespace: AzureNamespace) -> Result<()> {
-    validate_key(get.key, namespace)?;
-    match get.range {
-        RequestedRange::Bounded { start, end } if start >= end => {
-            return Err(InvalidPlan::Range.into());
-        }
-        RequestedRange::Suffix(_) => return Err(InvalidPlan::UnsupportedRange.into()),
-        RequestedRange::Whole => {}
-        _ if get.kind == GetKind::Head => {
-            return Err(InvalidPlan::RangedHead.into());
-        }
-        _ => {}
-    }
-    validate_revision(get.revision, true)?;
-    validate_condition(get.condition, get.condition_value)
-}
-
 /// The most bytes that Azure writes in one `Put Blob` request.
 ///
-/// [`Blobs::encode_put`] refuses a longer payload with
+/// [`encode_put`] refuses a longer payload with
 /// [`InvalidPlan::PayloadTooLarge`]. Write a longer object in blocks. This
 /// is a `u64` because it does not fit a 32-bit `usize`.
 pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
-
-fn validate_put(put: &PhysicalPut<'_>, content: Payload<'_>, client: &Blobs<'_>) -> Result<()> {
-    validate_key(put.key, client.namespace)?;
-    if content.len() > MAX_PUT_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
-    }
-    validate_metadata(put.metadata)?;
-    validate_options(
-        &put.options,
-        Write::Whole,
-        content.bytes().is_some(),
-        client,
-    )?;
-    validate_condition(put.condition, put.condition_value)
-}
 
 // Checks a checksum that Azure takes: an MD5 or a CRC64, as text or
 // computed.
@@ -1366,7 +1575,6 @@ pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static s
 // Blob From URL, which takes the plan's.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Write {
-    Whole,
     Stage,
     Commit,
     Copy,
@@ -1415,47 +1623,4 @@ pub(crate) fn validate_options(
         ChecksumKind::Md5.check_base64(text)?;
     }
     Ok(())
-}
-
-fn validate_list(list: &PhysicalList<'_>, namespace: AzureNamespace) -> Result<()> {
-    // No rule of `validate_key` applies to a prefix. It is written into the
-    // query, where nothing resolves a `..` and nothing drops a trailing dot,
-    // and `dir.` is an honest prefix of `dir.txt`. Nor is it bounded like a
-    // name: a flat account answered a prefix of 32,657 units, far past the
-    // 1,024 it allows a name. What bounds a prefix is the URL, which `build`
-    // checks. Measured against the live service.
-    // Azure continues every listing from one marker, and hands out no empty
-    // one.
-    match list.marker {
-        None => {}
-        Some(ListMarker::Text(marker)) if !marker.is_empty() => {}
-        Some(_) => return Err(InvalidPlan::Marker.into()),
-    }
-    if list.max_results == Some(0) {
-        return Err(InvalidPlan::MaxResults.into());
-    }
-    // A flat account groups names at any text. A hierarchical one groups
-    // them at `/` alone, and answers any other with 400
-    // `DelimiterIsInvalidForHNS`.
-    if let Some(delimiter) = list.delimiter
-        && (delimiter.is_empty() || (namespace == AzureNamespace::Hierarchical && delimiter != "/"))
-    {
-        return Err(InvalidPlan::Delimiter.into());
-    }
-    // Azure starts a listing only at its own marker, and lists no owner.
-    if list.start_after.is_some() || list.include.contains(ListInclude::OWNER) {
-        return Err(InvalidPlan::Option.into());
-    }
-    Ok(())
-}
-
-fn validate_delete(delete: &PhysicalDelete<'_>, namespace: AzureNamespace) -> Result<()> {
-    validate_key(delete.key, namespace)?;
-    validate_revision(delete.revision, true)?;
-    // A snapshot or a version has no snapshots of its own, and Azure refuses
-    // `x-ms-delete-snapshots` beside one.
-    if delete.revision.is_some() && delete.kind != DeleteKind::Object {
-        return Err(InvalidPlan::Revision.into());
-    }
-    validate_condition(delete.condition, delete.condition_value)
 }

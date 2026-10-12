@@ -1,21 +1,13 @@
 //! Azure response interpretation fixtures.
 
+use borink_object_storage_proto::azure;
 use borink_object_storage_proto::{
-    Blobs, BodyWindow, Classification, ConditionKind, Container, Error, Failure, FailureClass,
-    GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
-    ServiceErrorKind, classify_error, layered,
+    Classification, ConditionKind, Error, GetHeadOutcome, GetShape, RequestedRange, ResponseFault,
+    ResponseHead, ServiceErrorKind, classify_error,
 };
 
-fn blobs() -> Blobs<'static> {
-    Blobs::new(
-        Container::new("https://account", "container").unwrap(),
-        "token",
-    )
-    .unwrap()
-}
-
 fn accept<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>, Error> {
-    blobs().accept_get_head(shape, head)
+    azure::accept_get_head(shape, head)
 }
 
 fn ranged(range: RequestedRange) -> GetShape {
@@ -30,67 +22,6 @@ fn conditional(condition: ConditionKind) -> GetShape {
         condition,
         ..GetShape::default()
     }
-}
-
-#[test]
-fn accepts_a_whole_object_read() {
-    let head = ResponseHead::from_headers(
-        200,
-        [
-            ("Content-Length", b"8".as_slice()),
-            ("ETag", b"\"etag\""),
-            ("Last-Modified", b"Fri, 24 May 2013 00:00:00 GMT"),
-            ("Content-Encoding", b"gzip"),
-            ("Content-Type", b"text/plain; charset=utf-8"),
-        ],
-    );
-    let GetHeadOutcome::Body { meta, body, .. } = accept(GetShape::default(), head).unwrap() else {
-        panic!("expected a body");
-    };
-    assert_eq!(
-        meta,
-        ObjectMeta {
-            size: Some(8),
-            e_tag: Some(b"\"etag\""),
-            last_modified: Some("Fri, 24 May 2013 00:00:00 GMT"),
-            version: None,
-            // Ranges cover the stored representation, so an encoding is
-            // surfaced rather than rejected.
-            content_encoding: Some(b"gzip"),
-            content_type: Some(b"text/plain; charset=utf-8"),
-            ..ObjectMeta::default()
-        }
-    );
-    assert_eq!(
-        body,
-        BodyWindow {
-            object_offset: 0,
-            expected_len: Some(8),
-            object_size: Some(8),
-        }
-    );
-    assert_eq!(
-        meta.last_modified.and_then(layered::http_date_ms),
-        Some(1_369_353_600_000)
-    );
-}
-
-#[test]
-fn a_metadata_plan_completes_without_a_body() {
-    let shape = GetShape {
-        kind: GetKind::Head,
-        ..GetShape::default()
-    };
-    let head = ResponseHead::from_headers(200, [("Content-Length", b"8".as_slice())]);
-    assert_eq!(
-        accept(shape, head),
-        Ok(GetHeadOutcome::Complete {
-            meta: ObjectMeta {
-                size: Some(8),
-                ..ObjectMeta::default()
-            }
-        })
-    );
 }
 
 #[test]
@@ -131,7 +62,7 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
         panic!("unexpected outcome: {unnamed:?}");
     };
     assert_eq!(
-        blobs().accept_get_error_body(
+        azure::accept_get_error_body(
             conditional(ConditionKind::IfMatch),
             failure,
             b"<Error><Code>ConditionNotMet</Code></Error>"
@@ -223,83 +154,6 @@ fn rejects_content_ranges_that_are_not_arithmetically_sound() {
 }
 
 #[test]
-fn a_416_carries_the_object_size_when_azure_states_it() {
-    let shape = ranged(RequestedRange::Offset(40));
-    assert_eq!(
-        accept(
-            shape,
-            ResponseHead::from_headers(416, [("Content-Range", b"bytes */10".as_slice())]),
-        ),
-        Ok(GetHeadOutcome::RangeNotSatisfiable {
-            object_size: Some(10)
-        })
-    );
-    assert_eq!(
-        accept(shape, ResponseHead::new(416)),
-        Ok(GetHeadOutcome::RangeNotSatisfiable { object_size: None })
-    );
-}
-
-#[test]
-fn every_other_status_is_a_service_failure_a_scheduler_can_branch_on() {
-    // A 404 that names the container is a failure, never a missing object.
-    let mut missing = ResponseHead::new(404);
-    missing.error_code = Some(b"ContainerNotFound");
-    assert!(matches!(
-        accept(GetShape::default(), missing),
-        Ok(GetHeadOutcome::ServiceFailure(failure))
-            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
-    ));
-    // A code this crate does not know is still decisive: Azure repeats the
-    // header in the body, so there is nothing more to read.
-    missing.error_code = Some(b"FutureAzureCode");
-    assert_eq!(
-        accept(GetShape::default(), missing),
-        Ok(GetHeadOutcome::NotFound { kind: None })
-    );
-    for (status, code, class, kind) in [
-        (
-            403,
-            b"AuthenticationFailed".as_slice(),
-            FailureClass::Auth,
-            Some(ServiceErrorKind::Unauthorized),
-        ),
-        (
-            500,
-            b"InternalError",
-            FailureClass::Server,
-            Some(ServiceErrorKind::Service),
-        ),
-        (302, b"FutureAzureCode", FailureClass::Redirect, None),
-        (400, b"FutureAzureCode", FailureClass::Other, None),
-        // Azure's own code refines an otherwise unhelpful status, and the
-        // outcome keeps it so that no caller classifies the response twice.
-        (
-            400,
-            b"ServerBusy",
-            FailureClass::Throttled,
-            Some(ServiceErrorKind::Throttled),
-        ),
-    ] {
-        let mut head =
-            ResponseHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
-        head.error_code = Some(code);
-        assert!(
-            matches!(
-                accept(GetShape::default(), head),
-                Ok(GetHeadOutcome::ServiceFailure(Failure {
-                    status: got_status,
-                    class: got_class,
-                    kind: got_kind,
-                    request_id: Some(b"request-123"),
-                })) if got_status == status && got_class == class && got_kind == kind
-            ),
-            "{status} {code:?}"
-        );
-    }
-}
-
-#[test]
 fn classifies_the_offline_azure_response_corpus() {
     let cases = [
         ("BlobNotFound", ServiceErrorKind::NotFound),
@@ -327,108 +181,5 @@ fn classifies_the_offline_azure_response_corpus() {
             Classification::Classified(expected),
             "{code}"
         );
-    }
-}
-
-#[test]
-fn falls_back_to_the_xml_error_body() {
-    let head = ResponseHead::new(404);
-    assert_eq!(
-        classify_error(&head, b"<Error><Code>BlobNotFound</Code></Error>", false),
-        Classification::Classified(ServiceErrorKind::NotFound)
-    );
-    // A complete body naming a code this crate does not know, and a body the
-    // host's cap cut short, are different answers.
-    assert_eq!(
-        classify_error(&head, b"<Error><Code>FutureAzureCode</Code>", false),
-        Classification::Unknown
-    );
-    assert_eq!(
-        classify_error(&head, b"<Error><Cod", true),
-        Classification::Incomplete
-    );
-}
-
-#[test]
-fn a_head_without_a_code_asks_for_the_error_body() {
-    let blobs = blobs();
-    for status in [404u16, 403, 500] {
-        let head =
-            ResponseHead::from_headers(status, [("x-ms-request-id", b"request-123".as_slice())]);
-        let expected = match status {
-            404 => FailureClass::Other,
-            403 => FailureClass::Auth,
-            _ => FailureClass::Server,
-        };
-        assert!(
-            matches!(
-                blobs.accept_get_head(GetShape::default(), head),
-                Ok(GetHeadOutcome::NeedErrorBody(Failure {
-                    status: got_status,
-                    class,
-                    kind: None,
-                    request_id: Some(b"request-123"),
-                })) if got_status == status && class == expected
-            ),
-            "{status}"
-        );
-    }
-}
-
-#[test]
-fn the_error_body_names_an_error_the_head_left_out() {
-    let blobs = blobs();
-    let missing = need_error_body(&blobs, 404);
-    assert!(matches!(
-        blobs.accept_get_error_body(
-            GetShape::default(),
-            missing,
-            b"<Error><Code>ContainerNotFound</Code></Error>"
-        ),
-        GetHeadOutcome::ServiceFailure(failure)
-            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
-    ));
-
-    // A code that arrives in the body refines the category, as a code in the
-    // header would have.
-    let refused = need_error_body(&blobs, 400);
-    assert!(matches!(
-        blobs.accept_get_error_body(
-            GetShape::default(),
-            refused,
-            b"<Error><Code>ServerBusy</Code></Error>"
-        ),
-        GetHeadOutcome::ServiceFailure(Failure {
-            class: FailureClass::Throttled,
-            kind: Some(ServiceErrorKind::Throttled),
-            ..
-        })
-    ));
-
-    // A host that could read no body still gets a final outcome, with the
-    // error unnamed.
-    assert_eq!(
-        blobs.accept_get_error_body(GetShape::default(), missing, b""),
-        GetHeadOutcome::NotFound { kind: None }
-    );
-
-    // A head that named the error is final without a body read.
-    assert_eq!(
-        blobs.accept_get_head(
-            GetShape::default(),
-            ResponseHead::from_headers(404, [("x-ms-error-code", b"BlobNotFound".as_slice())]),
-        ),
-        Ok(GetHeadOutcome::NotFound {
-            kind: Some(ServiceErrorKind::NotFound)
-        })
-    );
-}
-
-// The failure of a head that asks for the error body, which the finisher takes
-// apart rather than the outcome itself.
-fn need_error_body<'h>(blobs: &Blobs<'_>, status: u16) -> Failure<'h> {
-    match blobs.accept_get_head(GetShape::default(), ResponseHead::new(status)) {
-        Ok(GetHeadOutcome::NeedErrorBody(failure)) => failure,
-        other => panic!("unexpected outcome: {other:?}"),
     }
 }

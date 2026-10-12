@@ -1,7 +1,7 @@
 /// An instant that you supply, formatted for request headers.
 ///
 /// This crate performs no I/O and cannot read the clock, so pass one of these
-/// to [`Blobs::encode_get`](crate::Blobs::encode_get) and every other
+/// to [`azure::encode_get`](crate::azure::encode_get) and every other
 /// encoding method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamps {

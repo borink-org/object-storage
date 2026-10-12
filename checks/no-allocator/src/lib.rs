@@ -2,12 +2,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use borink_object_storage_proto::s3::{Bucket, Objects, PayloadHash, Service};
+use borink_object_storage_crypto::sigv4;
+use borink_object_storage_proto::azure;
+use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    BlobProperty, Blobs, ChecksumKind, Container, GetHeadOutcome, HeaderSpan, ListEntry,
-    ListHeadOutcome, ListMarker, MetadataPair, Payload, PhysicalGet, PhysicalList, PhysicalPut,
-    PropertySet, ResponseHead, Timestamps, TransactionalChecksum, WriteOptions, layered,
+    AzureNamespace, BlobProperty, ChecksumKind, ChecksumValue, Container, GetHeadOutcome, GetItem,
+    GetOptions, ListEntry, ListHeadOutcome, ListItem, ListMarker, ListOptions, MetadataPair,
+    Payload, PropertySet, PutItem, PutOptions, ResponseHead, Timestamps, layered,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -22,38 +24,43 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 /// Exercises request construction and response interpretation in a reachable symbol.
 #[unsafe(no_mangle)]
 pub extern "C" fn object_storage_without_an_allocator() -> usize {
-    let mut request_headers = [HeaderSpan::default(); 8];
     let Ok(container) = Container::new("https://account", "container") else {
         return 1;
     };
-    let Ok(blobs) = Blobs::new(container, "token") else {
-        return 2;
-    };
-    let blobs = blobs
-        .with_checksum(borink_object_storage_crypto::CRC64)
-        .with_checksum(borink_object_storage_crypto::MD5_RUSTCRYPTO);
-    let mut buf = [0; 256];
     let now = Timestamps::from_unix(1_787_400_000);
-    let get = PhysicalGet::new("object");
-    let Ok(request) = blobs.encode_get(&mut buf, &mut request_headers, &get, &now) else {
+    let options = GetOptions::new();
+    let mut bytes = [0; 256];
+    let Ok(template) = azure::prepare_get(
+        &container,
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut bytes,
+    ) else {
+        return 3;
+    };
+    let get = GetItem::new("object");
+    let mut buf = [0; 512];
+    let Ok(request) = azure::encode_get(&template, &bytes, &get, &now, &mut buf) else {
         return 3;
     };
     let headers = [("content-length", b"4".as_slice())];
-    let Ok(GetHeadOutcome::Body { body, .. }) =
-        blobs.accept_get_head(get.shape(), ResponseHead::from_headers(200, headers))
-    else {
+    let Ok(GetHeadOutcome::Body { body, .. }) = azure::accept_get_head(
+        get.shape(&options),
+        ResponseHead::from_headers(200, headers),
+    ) else {
         return 4;
     };
     request.url().len()
         + body.expected_len.unwrap_or_default() as usize
-        + listing(&blobs, &now)
-        + computed_checksums(&blobs, &now)
+        + listing(&container, &now)
+        + computed_checksums(&container, &now)
         + signed_requests(&now)
 }
 
-// A signed request hashes its canonical form as it is written, and derives
-// its key from the secret in a fixed array on the stack. Neither provider
-// asks for memory either.
+// A signed request derives its key from the secret in a fixed array on the
+// stack, and hashes its canonical request where it was written. Neither
+// provider asks for memory either.
 fn signed_requests(now: &Timestamps) -> usize {
     let Ok(bucket) = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws) else {
         return 10;
@@ -65,79 +72,124 @@ fn signed_requests(now: &Timestamps) -> usize {
     ) else {
         return 11;
     };
-    let mut written = 0;
-    for sha256 in [
-        borink_object_storage_crypto::SHA256_RUSTCRYPTO,
-        borink_object_storage_crypto::SHA256_MINIMAL,
-    ] {
-        let objects = Objects::new(bucket, credentials, sha256)
-            .with_signing_key(now)
-            .with_checksum(borink_object_storage_crypto::MD5_RUSTCRYPTO);
-        let mut request_headers = [HeaderSpan::default(); 12];
-        let mut buf = [0; 768];
-        let get = PhysicalGet::new("object");
-        let Ok(request) = objects.encode_get(&mut buf, &mut request_headers, &get, now) else {
-            return 12;
-        };
-        written += request.url().len();
-        let headers = [("content-length", b"4".as_slice())];
-        let Ok(GetHeadOutcome::Body { .. }) =
-            objects.accept_get_head(get.shape(), ResponseHead::from_headers(200, headers))
-        else {
-            return 13;
-        };
-        let metadata = [MetadataPair {
-            name: "Colour",
-            value: "dark  red",
-        }];
-        let put = PhysicalPut {
-            metadata: &metadata,
-            options: WriteOptions {
-                checksum: Some(TransactionalChecksum::Compute(ChecksumKind::Md5)),
-                ..WriteOptions::default()
-            },
-            ..PhysicalPut::new("object")
-        };
-        let mut request_headers = [HeaderSpan::default(); 12];
-        let mut buf = [0; 768];
-        let Ok(request) = objects.encode_put(
-            &mut buf,
-            &mut request_headers,
-            &put,
-            Payload::Slice(b"0123456789"),
-            PayloadHash::Compute,
-            now,
-        ) else {
-            return 14;
-        };
-        written += request.url().len();
-    }
+    let headers = [("content-length", b"4".as_slice())];
+    let options = GetOptions::new();
+    let Ok(GetHeadOutcome::Body { .. }) = s3::accept_get_head(
+        Service::Aws,
+        GetItem::new("object").shape(&options),
+        ResponseHead::from_headers(200, headers),
+    ) else {
+        return 13;
+    };
+    signed::<borink_object_storage_crypto::Sha256RustCrypto>(&bucket, &credentials, now)
+        + signed::<borink_object_storage_crypto::Sha256Minimal>(&bucket, &credentials, now)
+}
+
+// A read and a write from templates, signed. The templates, the requests and
+// every hash state are on this stack frame.
+fn signed<S: borink_object_storage_crypto::Sha256>(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    now: &Timestamps,
+) -> usize {
+    let options = GetOptions::new();
+    let mut bytes = [0; 768];
+    let Ok(template) = s3::prepare_get(bucket, credentials, &options, &mut bytes) else {
+        return 15;
+    };
+    let Ok(key) = sigv4::signing_key::<S>(&template, &bytes, credentials, now) else {
+        return 16;
+    };
+    let Ok(stamp) = sigv4::stamp(&key, &template, &bytes, now) else {
+        return 17;
+    };
+    let mut buf = [0; 1024];
+    let Ok(unsigned) = s3::encode_get(&template, &bytes, &GetItem::new("object"), now, &mut buf)
+    else {
+        return 12;
+    };
+    let mut written = sigv4::sign(&stamp, &unsigned, &mut buf).url().len();
+
+    let metadata = [MetadataPair {
+        name: "Colour",
+        value: "dark  red",
+    }];
+    let options = PutOptions {
+        metadata: &metadata,
+        checksum: Some(ChecksumKind::Md5),
+        ..PutOptions::default()
+    };
+    let mut bytes = [0; 1024];
+    let Ok(template) = s3::prepare_put(
+        bucket,
+        credentials,
+        &options,
+        PayloadSigning::Signed,
+        &mut bytes,
+    ) else {
+        return 18;
+    };
+    let content = b"0123456789";
+    let item = PutItem {
+        checksum: Some(ChecksumValue::Digest(digest::<
+            borink_object_storage_crypto::Md5RustCrypto,
+        >(content))),
+        ..PutItem::new("object", Payload::Slice(content))
+    };
+    let sha256 = sigv4::sha256::<S>(content);
+    let mut buf = [0; 1024];
+    let Ok(unsigned) = s3::encode_put(&template, &bytes, &item, Some(&sha256), now, &mut buf)
+    else {
+        return 14;
+    };
+    written += sigv4::sign(&stamp, &unsigned, &mut buf).url().len();
     written
 }
 
-// A computed checksum runs a provider over the content while the head is
-// written. The state is a slot on this stack frame, so neither the encoder
-// nor either implementation asks for memory.
-fn computed_checksums(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
+// A checksum of content, computed into a value on this stack frame.
+fn digest<C: borink_object_storage_crypto::Checksum>(
+    content: &[u8],
+) -> borink_object_storage_proto::Digest {
+    let mut checksum = C::default();
+    checksum.update(content);
+    checksum.finish()
+}
+
+// A write sends the checksum that a provider computed over its content.
+// Neither the encoder nor either implementation asks for memory.
+fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
     let mut written = 0;
-    for kind in [ChecksumKind::Crc64, ChecksumKind::Md5] {
-        let mut request_headers = [HeaderSpan::default(); 8];
-        let mut buf = [0; 256];
-        let options = WriteOptions {
-            checksum: Some(TransactionalChecksum::Compute(kind)),
-            ..WriteOptions::default()
+    let content = b"0123456789";
+    for (kind, value) in [
+        (
+            ChecksumKind::Crc64,
+            digest::<borink_object_storage_crypto::Crc64>(content),
+        ),
+        (
+            ChecksumKind::Md5,
+            digest::<borink_object_storage_crypto::Md5RustCrypto>(content),
+        ),
+    ] {
+        let options = PutOptions {
+            checksum: Some(kind),
+            ..PutOptions::default()
         };
-        let put = PhysicalPut {
-            options,
-            ..PhysicalPut::new("object")
-        };
-        let Ok(request) = blobs.encode_put(
-            &mut buf,
-            &mut request_headers,
-            &put,
-            Payload::Slice(b"0123456789"),
-            now,
+        let mut bytes = [0; 256];
+        let Ok(template) = azure::prepare_put(
+            container,
+            "token",
+            AzureNamespace::Unknown,
+            &options,
+            &mut bytes,
         ) else {
+            return 9;
+        };
+        let item = PutItem {
+            checksum: Some(ChecksumValue::Digest(value)),
+            ..PutItem::new("object", Payload::Slice(content))
+        };
+        let mut buf = [0; 512];
+        let Ok(request) = azure::encode_put(&template, &bytes, &item, now, &mut buf) else {
             return 9;
         };
         written += request.url().len();
@@ -147,19 +199,29 @@ fn computed_checksums(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
 
 // A listing reads a document out of a buffer and decodes the text in it where
 // it stands, so it is the one operation that could want scratch. It does not.
-fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let mut buf = [0; 256];
-    let list = PhysicalList {
+fn listing(container: &Container<'_>, now: &Timestamps) -> usize {
+    let options = ListOptions {
         delimiter: Some("/"),
         max_results: Some(2),
-        ..PhysicalList::new("directory/")
+        ..ListOptions::default()
     };
-    let Ok(request) = blobs.encode_list(&mut buf, &mut request_headers, &list, now) else {
+    let mut bytes = [0; 256];
+    let Ok(template) = azure::prepare_list(
+        container,
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut bytes,
+    ) else {
+        return 5;
+    };
+    let mut buf = [0; 512];
+    let item = ListItem::new("directory/").after(ListMarker::Text("marker"));
+    let Ok(request) = azure::encode_list(&template, &bytes, &item, now, &mut buf) else {
         return 5;
     };
     let url = request.url().len();
-    let Ok(ListHeadOutcome::Page { .. }) = blobs.accept_list_head(ResponseHead::new(200)) else {
+    let Ok(ListHeadOutcome::Page { .. }) = azure::accept_list_head(ResponseHead::new(200)) else {
         return 6;
     };
     let mut body = *b"<EnumerationResults><Blobs><Blob><Name>a&amp;b</Name><Properties>\
@@ -169,7 +231,7 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
     // The entries borrow the body, so the array that holds them belongs to
     // the read.
     let mut first = [ListEntry::default(); 2];
-    let Ok(page) = blobs.fill_listing(&mut body, &mut first) else {
+    let Ok(page) = azure::fill_listing(&mut body, &mut first) else {
         return 7;
     };
     // A property that the entry does not carry is read out of its own bytes,
@@ -189,7 +251,7 @@ fn listing(blobs: &Blobs<'_>, now: &Timestamps) -> usize {
 <NextMarker /></EnumerationResults>";
     let wanted = PropertySet::of(&[BlobProperty::AccessTier]);
     let mut picked = [(0usize, None); 1];
-    let Ok(again) = blobs.fill_listing_with(&mut body, &mut picked, wanted, |entry, values| {
+    let Ok(again) = azure::fill_listing_with(&mut body, &mut picked, wanted, |entry, values| {
         (entry.key.len(), values.get(BlobProperty::AccessTier))
     }) else {
         return 8;

@@ -11,15 +11,13 @@
 ))]
 
 use borink_object_storage_crypto::{
-    CRC32, CRC32C, CRC64, Checksum, Crc32, Crc32c, SHA1_RUSTCRYPTO, SHA256_CHECKSUM_RUSTCRYPTO,
-    SHA256_RUSTCRYPTO, Sha1RustCrypto, Sha256Minimal, Sha256RustCrypto, wipe,
+    Checksum, Crc32, Crc32c, Crc64, Sha1RustCrypto, Sha256Minimal, Sha256RustCrypto, wipe,
 };
 use borink_object_storage_proto::checksum::BASE64_LEN;
-use borink_object_storage_proto::s3::{Bucket, Objects, PayloadHash, Service};
+use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, HeaderSpan, Payload, PhysicalPut, Timestamps, TransactionalChecksum,
-    WriteOptions, layered,
+    ChecksumKind, ChecksumValue, Digest, Payload, PutItem, PutOptions, Timestamps,
 };
 
 fn base64<C: Checksum>(pieces: &[&[u8]]) -> String {
@@ -56,51 +54,76 @@ fn the_hashes_are_the_reference_hashes() {
 }
 
 #[test]
-fn an_s3_write_signs_the_checksum_it_computes() {
+fn an_s3_write_signs_the_checksum_of_each_kind() {
     let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws).unwrap();
     let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe).unwrap();
-    let objects = Objects::new(bucket, credentials, SHA256_RUSTCRYPTO)
-        .with_checksum(CRC32)
-        .with_checksum(CRC32C)
-        .with_checksum(CRC64)
-        .with_checksum(SHA1_RUSTCRYPTO)
-        .with_checksum(SHA256_CHECKSUM_RUSTCRYPTO);
     let now = Timestamps::from_unix(1_787_400_000);
-    for (kind, name) in [
-        (ChecksumKind::Crc32, "x-amz-checksum-crc32"),
-        (ChecksumKind::Crc32c, "x-amz-checksum-crc32c"),
-        (ChecksumKind::Crc64, "x-amz-checksum-crc64nvme"),
-        (ChecksumKind::Sha1, "x-amz-checksum-sha1"),
-        (ChecksumKind::Sha256, "x-amz-checksum-sha256"),
+    let content = b"checksum\n";
+    fn digest<C: Checksum>(content: &[u8]) -> Digest {
+        let mut sum = C::default();
+        sum.update(content);
+        sum.finish()
+    }
+    for (kind, name, value) in [
+        (
+            ChecksumKind::Crc32,
+            "x-amz-checksum-crc32",
+            digest::<Crc32>(content),
+        ),
+        (
+            ChecksumKind::Crc32c,
+            "x-amz-checksum-crc32c",
+            digest::<Crc32c>(content),
+        ),
+        (
+            ChecksumKind::Crc64,
+            "x-amz-checksum-crc64nvme",
+            digest::<Crc64>(content),
+        ),
+        (
+            ChecksumKind::Sha1,
+            "x-amz-checksum-sha1",
+            digest::<Sha1RustCrypto>(content),
+        ),
+        (
+            ChecksumKind::Sha256,
+            "x-amz-checksum-sha256",
+            digest::<Sha256RustCrypto>(content),
+        ),
     ] {
-        let put = PhysicalPut {
-            options: WriteOptions {
-                checksum: Some(TransactionalChecksum::Compute(kind)),
-                ..WriteOptions::new()
-            },
-            ..PhysicalPut::new("object")
+        let options = PutOptions {
+            checksum: Some(kind),
+            ..PutOptions::default()
         };
-        let content = Payload::Slice(b"checksum\n");
-        let hash = PayloadHash::Compute;
-        let size = layered::s3::put_requirements(&objects, &put, content, hash, &now).unwrap();
-        let mut buf = vec![0; size.bytes];
-        let mut headers = vec![HeaderSpan::default(); size.headers];
-        let request = objects
-            .encode_put(&mut buf, &mut headers, &put, content, hash, &now)
-            .unwrap();
-        let value = request
+        let mut bytes = vec![0; 1024];
+        let template = s3::prepare_put(
+            &bucket,
+            &credentials,
+            &options,
+            PayloadSigning::Unsigned,
+            &mut bytes,
+        )
+        .unwrap();
+        let item = PutItem {
+            checksum: Some(ChecksumValue::Digest(value)),
+            ..PutItem::new("object", Payload::Slice(content))
+        };
+        let mut buf = vec![0; 2048];
+        let unsigned = s3::encode_put(&template, &bytes, &item, None, &now, &mut buf).unwrap();
+        let request = s3::finish(&unsigned, &mut buf, &[0; 32]);
+        let found = request
             .headers()
             .find(|(found, _)| *found == name)
-            .map(|(_, value)| value);
+            .map(|(_, value)| value.to_owned());
         let expected = match kind {
-            ChecksumKind::Crc32 => base64::<Crc32>(&[b"checksum\n"]),
-            ChecksumKind::Crc32c => base64::<Crc32c>(&[b"checksum\n"]),
-            ChecksumKind::Sha1 => base64::<Sha1RustCrypto>(&[b"checksum\n"]),
-            ChecksumKind::Sha256 => base64::<Sha256RustCrypto>(&[b"checksum\n"]),
+            ChecksumKind::Crc32 => base64::<Crc32>(&[content]),
+            ChecksumKind::Crc32c => base64::<Crc32c>(&[content]),
+            ChecksumKind::Sha1 => base64::<Sha1RustCrypto>(&[content]),
+            ChecksumKind::Sha256 => base64::<Sha256RustCrypto>(&[content]),
             // S3 reads a CRC-64 big-endian, the reverse of the digest's bytes.
-            _ => base64_of(&borink_object_storage_crypto::Crc64::of(b"checksum\n").to_be_bytes()),
+            _ => base64_of(&Crc64::of(content).to_be_bytes()),
         };
-        assert_eq!(value, Some(expected.as_str()), "{kind:?}");
+        assert_eq!(found, Some(expected), "{kind:?}");
         let authorization = request
             .headers()
             .find(|(found, _)| *found == "authorization")

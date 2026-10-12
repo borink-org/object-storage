@@ -1,8 +1,11 @@
-//! Lists every key under one prefix, one page at a time.
+//! Lists every key under one prefix, one page at a time, from one template.
 
 use std::env;
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry, ListMarker, PhysicalList};
+use borink_object_storage_proto::azure as proto;
+use borink_object_storage_proto::{
+    AzureNamespace, Container, Error, ListEntry, ListItem, ListMarker, ListOptions,
+};
 use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,21 +13,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let container = env::var("AZURE_STORAGE_CONTAINER")?;
     let token = env::var("AZURE_STORAGE_ACCESS_TOKEN")?;
     let prefix = env::args().nth(1).unwrap_or_default();
-    let blobs = Blobs::new(Container::new(&endpoint, &container)?, &token)?;
+    let container = Container::new(&endpoint, &container)?;
+
+    // Every page shares the template: an empty buffer is refused with the
+    // size it needs.
+    let options = ListOptions {
+        max_results: Some(1000),
+        ..ListOptions::default()
+    };
+    let prepare = |buf: &mut [u8]| {
+        proto::prepare_list(&container, &token, AzureNamespace::Unknown, &options, buf)
+    };
+    let size = match prepare(&mut []) {
+        Err(Error::Capacity(capacity)) => capacity.required,
+        other => return Err(format!("{other:?}").into()),
+    };
+    let mut bytes = vec![0; size];
+    let template = prepare(&mut bytes)?;
 
     let mut marker: Option<String> = None;
     let mut body = Vec::new();
     loop {
         // The array holds a whole page, because it is as long as the page the
-        // plan asks for. It borrows the body, so it belongs to the round that
-        // reads it.
+        // template asks for. It borrows the body, so it belongs to the round
+        // that reads it.
         let mut entries = vec![ListEntry::default(); 1000];
-        let plan = PhysicalList {
+        let item = ListItem {
             marker: marker.as_deref().map(ListMarker::Text),
-            max_results: Some(1000),
-            ..PhysicalList::new(&prefix)
+            ..ListItem::new(&prefix)
         };
-        let page = azure::list(&blobs, &plan, &mut body, &mut entries)?;
+        let page = azure::list(&template, &bytes, &item, &mut body, &mut entries)?;
         for entry in &entries[..page.filled] {
             println!("{}", entry.key);
         }

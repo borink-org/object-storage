@@ -11,97 +11,18 @@ use crate::azure::{
     PhysicalStageBlock, PhysicalStageBlockFromUrl,
 };
 use crate::{
-    Blobs, Error, Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany,
-    PhysicalGet, PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result,
-    Revision, Timestamps,
+    Blobs, Error, Payload, PhysicalCommit, PhysicalCopy, PhysicalDeleteMany, PhysicalRestore,
+    PhysicalSetTags, RequestSize, Result, Revision, Timestamps,
 };
 
 const MONTHS: [&[u8; 3]; 12] = [
     b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
 ];
 
-/// Returns the byte and header-slot capacities that [`Blobs::encode_get`]
-/// needs for this plan.
-///
-/// Call this to size a buffer before you encode; the answer is exact.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPlan`] if `get` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_get`], which reports it again.
-pub fn get_requirements(
-    blobs: &Blobs<'_>,
-    get: &PhysicalGet<'_>,
-    now: &Timestamps,
-) -> Result<RequestSize> {
-    required(blobs.encode_get(&mut [], &mut [], get, now).map(drop))
-}
-
-/// Returns the byte and header-slot capacities that [`Blobs::encode_put`]
-/// needs for this plan.
-///
-/// Call this to size a buffer before you encode. The answer covers the request
-/// head only, and never the content. Only the length of `content` reaches the
-/// head, so a [`Payload::Streamed`] sizes a buffer without the bytes.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPlan`] if `put` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_put`], which reports it again.
-pub fn put_requirements(
-    blobs: &Blobs<'_>,
-    put: &PhysicalPut<'_>,
-    content: Payload<'_>,
-    now: &Timestamps,
-) -> Result<RequestSize> {
-    // The head states how long the content is, so the requirement depends on
-    // the length of `content`. Its bytes are never read.
-    required(
-        blobs
-            .encode_put(&mut [], &mut [], put, content, now)
-            .map(drop),
-    )
-}
-
-/// Returns the byte and header-slot capacities that [`Blobs::encode_delete`]
-/// needs for this plan.
-///
-/// Call this to size a buffer before you encode; the answer is exact.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPlan`] if `delete` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_delete`], which reports it again.
-pub fn delete_requirements(
-    blobs: &Blobs<'_>,
-    delete: &PhysicalDelete<'_>,
-    now: &Timestamps,
-) -> Result<RequestSize> {
-    required(blobs.encode_delete(&mut [], &mut [], delete, now).map(drop))
-}
-
-/// Returns the byte and header-slot capacities that [`Blobs::encode_list`]
-/// needs for this plan.
-///
-/// Call this to size a buffer before you encode; the answer is exact.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPlan`] if `list` cannot become an Azure request,
-/// unchanged from [`Blobs::encode_list`], which reports it again.
-pub fn list_requirements(
-    blobs: &Blobs<'_>,
-    list: &PhysicalList<'_>,
-    now: &Timestamps,
-) -> Result<RequestSize> {
-    required(blobs.encode_list(&mut [], &mut [], list, now).map(drop))
-}
-
 /// Returns the byte and header-slot capacities that
 /// [`Blobs::encode_stage_block`] needs for this plan.
 ///
-/// As [`put_requirements`]: the answer covers the head, and only the length
-/// of `content` reaches it.
+/// The answer covers the head, and only the length of `content` reaches it.
 ///
 /// # Errors
 ///
@@ -441,7 +362,7 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
 ///
 /// Use it on [`ListEntry::e_tag`](crate::ListEntry::e_tag) to turn an entry of
 /// a listing into a
-/// [`PhysicalGet::condition_value`](crate::PhysicalGet::condition_value).
+/// [`GetItem::condition_value`](crate::GetItem::condition_value).
 pub fn quoted_etag<'a>(listed: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
     let quoted = listed.starts_with(b"\"") && listed.ends_with(b"\"") && listed.len() >= 2;
     if quoted || listed.starts_with(b"W/") {
@@ -623,9 +544,8 @@ pub mod s3 {
         PhysicalListParts, PhysicalStagePart, PhysicalStagePartCopy,
     };
     use crate::{
-        Payload, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
-        PhysicalList, PhysicalPut, PhysicalRestore, PhysicalSetTags, RequestSize, Result, Revision,
-        Timestamps,
+        Payload, PhysicalCommit, PhysicalCopy, PhysicalDeleteMany, PhysicalRestore,
+        PhysicalSetTags, RequestSize, Result, Revision, Timestamps,
     };
 
     /// Returns the byte and header-slot capacities that
@@ -693,92 +613,6 @@ pub mod s3 {
     }
 
     /// Returns the byte and header-slot capacities that
-    /// [`Objects::encode_get`] needs for this plan.
-    ///
-    /// Call this to size a buffer before you encode; the answer is exact.
-    /// This function computes no signature.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `get`
-    /// cannot become an S3 request, unchanged from [`Objects::encode_get`],
-    /// which reports it again.
-    pub fn get_requirements(
-        objects: &Objects<'_>,
-        get: &PhysicalGet<'_>,
-        now: &Timestamps,
-    ) -> Result<RequestSize> {
-        required(objects.encode_get(&mut [], &mut [], get, now).map(drop))
-    }
-
-    /// Returns the byte and header-slot capacities that
-    /// [`Objects::encode_put`] needs for this plan.
-    ///
-    /// The answer covers the request head only, and never the content. This
-    /// function reads no byte of `content` and computes no signature.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `put`
-    /// cannot become an S3 request, unchanged from [`Objects::encode_put`],
-    /// which reports it again.
-    pub fn put_requirements(
-        objects: &Objects<'_>,
-        put: &PhysicalPut<'_>,
-        content: Payload<'_>,
-        hash: PayloadHash,
-        now: &Timestamps,
-    ) -> Result<RequestSize> {
-        required(
-            objects
-                .encode_put(&mut [], &mut [], put, content, hash, now)
-                .map(drop),
-        )
-    }
-
-    /// Returns the byte and header-slot capacities that
-    /// [`Objects::encode_delete`] needs for this plan.
-    ///
-    /// Call this to size a buffer before you encode; the answer is exact.
-    /// This function computes no signature.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `delete`
-    /// cannot become an S3 request, unchanged from
-    /// [`Objects::encode_delete`], which reports it again.
-    pub fn delete_requirements(
-        objects: &Objects<'_>,
-        delete: &PhysicalDelete<'_>,
-        now: &Timestamps,
-    ) -> Result<RequestSize> {
-        required(
-            objects
-                .encode_delete(&mut [], &mut [], delete, now)
-                .map(drop),
-        )
-    }
-
-    /// Returns the byte and header-slot capacities that
-    /// [`Objects::encode_list`] needs for this plan.
-    ///
-    /// Call this to size a buffer before you encode; the answer is exact.
-    /// This function computes no signature.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) if `list`
-    /// cannot become an S3 request, unchanged from [`Objects::encode_list`],
-    /// which reports it again.
-    pub fn list_requirements(
-        objects: &Objects<'_>,
-        list: &PhysicalList<'_>,
-        now: &Timestamps,
-    ) -> Result<RequestSize> {
-        required(objects.encode_list(&mut [], &mut [], list, now).map(drop))
-    }
-
-    /// Returns the byte and header-slot capacities that
     /// [`Objects::encode_create_session`] needs.
     ///
     /// Call this to size a buffer before you encode; the answer is exact.
@@ -826,8 +660,8 @@ pub mod s3 {
     /// Returns the byte and header-slot capacities that
     /// [`Objects::encode_stage_part`] needs for this plan.
     ///
-    /// As [`put_requirements`]: the answer covers the head, and this
-    /// function reads no byte of `content` and computes no signature.
+    /// The answer covers the head, and this function reads no byte of
+    /// `content` and computes no signature.
     ///
     /// # Errors
     ///

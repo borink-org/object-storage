@@ -13,12 +13,12 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::{
-    AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind, named,
+    AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind, failed, named,
     names_failed_condition, push_metadata, push_stored, revision_parameter, validate_key,
     validate_metadata, validate_options,
 };
 use crate::common::{
-    encoded, failure, finish_with_body, meta_of, missing, push_condition, text_header, trim_ascii,
+    encoded, finish_with_body, meta_of, push_condition, text_header, trim_ascii,
     validate_condition, validate_revision, validate_tags,
 };
 use crate::http::PlainHttp;
@@ -26,8 +26,8 @@ use crate::request::{ByteSink, HeadWriter, HeaderValue};
 use crate::url;
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyShape, CopySource, Failure, HeaderSpan, InvalidPlan,
-    Method, ObjectMeta, Payload, PhysicalCopy, PutHeadOutcome, RequestedRange, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, Timestamps, UpdateHeadOutcome, WireRequest,
+    LegacyRequest, Method, ObjectMeta, Payload, PhysicalCopy, PutHeadOutcome, RequestedRange,
+    ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps, UpdateHeadOutcome,
 };
 
 /// One Put Block From URL: a block staged from the bytes of another blob,
@@ -38,7 +38,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalStageBlockFromUrl<'a> {
     /// The blob that the block belongs to, under the rules of
-    /// [`PhysicalGet::key`](crate::PhysicalGet::key).
+    /// [Object keys](crate#object-keys).
     pub key: &'a str,
     /// The block ID, under the rules of
     /// [`PhysicalStageBlock::id`](crate::azure::PhysicalStageBlock::id).
@@ -80,7 +80,7 @@ impl<'a> Blobs<'a> {
     /// request:
     ///
     /// - A key, a metadata pair, a tag or a storage class that
-    ///   [`Self::encode_put`] refuses, for the target or the source.
+    ///   [`encode_put`](crate::azure::encode_put) refuses, for the target or the source.
     /// - [`InvalidPlan::ContentProperty`] for a content property: a copy
     ///   takes the source's.
     /// - [`InvalidPlan::Option`] for an empty list of metadata, which Azure
@@ -101,7 +101,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCopy<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.validate_copy(plan, Write::Copy)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(plan.key), &[], RequestedRange::Whole, now)?;
@@ -129,7 +129,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCopy<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.validate_copy(plan, Write::Copy)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(plan.key), &[], RequestedRange::Whole, now)?;
@@ -179,24 +179,14 @@ impl<'a> Blobs<'a> {
             {
                 Ok(CopyHeadOutcome::PreconditionFailed)
             }
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(CopyHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(CopyHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
     /// Finishes a [`CopyHeadOutcome::NeedErrorBody`] with the response body.
     ///
-    /// This is [`Self::accept_get_error_body`] for a copy, and reads the body
+    /// This is [`accept_get_error_body`](crate::azure::accept_get_error_body) for a copy, and reads the body
     /// the same way.
     pub fn accept_copy_error_body<'h>(
         &self,
@@ -232,7 +222,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalCopy<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         self.validate_copy(plan, Write::FromUrl)?;
         let mut head = HeadWriter::new(buf, headers);
         self.build(&mut head, Some(plan.key), &[], RequestedRange::Whole, now)?;
@@ -245,7 +235,7 @@ impl<'a> Blobs<'a> {
     /// Reads the response head of a Put Blob From URL and reports what Azure
     /// did.
     ///
-    /// This is [`Self::accept_put_head`] for a write from a URL: a 412 is
+    /// This is [`accept_put_head`](crate::azure::accept_put_head) for a write from a URL: a 412 is
     /// [`PutHeadOutcome::PreconditionFailed`] if the plan carried a condition
     /// on the target or on the source and Azure names a failed one. A source
     /// that does not exist is a [`PutHeadOutcome::ServiceFailure`] with
@@ -273,16 +263,7 @@ impl<'a> Blobs<'a> {
                 Ok(PutHeadOutcome::PreconditionFailed)
             }
             200..=299 => Err(ResponseFault::Status.into()),
-            status if head.error_code.is_none() => Ok(PutHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(PutHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -329,7 +310,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalStageBlockFromUrl<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         super::blocks::validate_block_id(plan.id)?;
         validate_source(&plan.source, self.namespace)?;
@@ -368,7 +349,7 @@ impl<'a> Blobs<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
+    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`](crate::azure::encode_get)
     /// refuses, and [`InvalidPlan::Option`] for an empty copy ID.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
@@ -382,7 +363,7 @@ impl<'a> Blobs<'a> {
         key: &str,
         copy_id: &str,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(key, self.namespace)?;
         if copy_id.is_empty() {
             return Err(InvalidPlan::Option.into());

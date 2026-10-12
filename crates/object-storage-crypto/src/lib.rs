@@ -105,6 +105,7 @@ mod sha1_rustcrypto;
 mod sha256_minimal;
 #[cfg(feature = "sha256-rustcrypto")]
 mod sha256_rustcrypto;
+pub mod sigv4;
 
 #[cfg(feature = "crc32")]
 pub use crc32::Crc32;

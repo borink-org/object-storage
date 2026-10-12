@@ -23,7 +23,7 @@ pub struct HeaderSpan {
 
 /// A range of bytes, as an offset from the start of a buffer.
 ///
-/// [`WireRequest::url_span`] and [`WireRequest::header_spans`] return these,
+/// [`LegacyRequest::url_span`] and [`LegacyRequest::header_spans`] return these,
 /// for a host that addresses the request head by range instead of by slice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
@@ -95,7 +95,7 @@ impl core::fmt::Display for Method {
 /// The request borrows both storage regions until transport consumption ends.
 /// Drop the request before reusing either region.
 #[derive(Debug, Clone, Copy)]
-pub struct WireRequest<'r> {
+pub struct LegacyRequest<'r> {
     bytes: &'r [u8],
     method: Method,
     url: Span,
@@ -104,7 +104,7 @@ pub struct WireRequest<'r> {
     body: Option<Span>,
 }
 
-impl<'r> WireRequest<'r> {
+impl<'r> LegacyRequest<'r> {
     /// Returns the caller-owned descriptor array used by this request.
     pub fn header_descriptors(&self) -> &'r [HeaderSpan] {
         self.headers
@@ -211,8 +211,19 @@ impl<'a> Writer<'a> {
         }
     }
 
+    // Writes again the bytes of `span`, which this writer wrote before. If
+    // they did not fit, it only counts them.
+    pub(crate) fn repeat(&mut self, span: Span) {
+        let end = self.position.saturating_add(span.len);
+        if end <= self.bytes.len() {
+            self.bytes
+                .copy_within(span.start..span.start + span.len, self.position);
+        }
+        self.position = end;
+    }
+
     // Whether every byte pushed so far is in the buffer.
-    fn fits(&self) -> bool {
+    pub(crate) fn fits(&self) -> bool {
         self.position <= self.bytes.len()
     }
 
@@ -333,7 +344,7 @@ impl<'a> HeadWriter<'a> {
         self.count = self.count.saturating_add(1);
     }
 
-    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
+    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<LegacyRequest<'a>> {
         self.finish_with_body(method, payload, None)
     }
 
@@ -346,7 +357,7 @@ impl<'a> HeadWriter<'a> {
         method: Method,
         payload: Payload<'a>,
         body: Option<Span>,
-    ) -> Option<WireRequest<'a>> {
+    ) -> Option<LegacyRequest<'a>> {
         if self.count > self.headers.len() {
             return None;
         }
@@ -357,7 +368,7 @@ impl<'a> HeadWriter<'a> {
         let payload = body.map_or(payload, |span| {
             Payload::Slice(&bytes[span.start..span.start + span.len])
         });
-        Some(WireRequest {
+        Some(LegacyRequest {
             bytes: &bytes[..head_end],
             method,
             url,

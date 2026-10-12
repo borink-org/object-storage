@@ -11,11 +11,11 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
 use borink_object_storage_proto::{
-    BodyWindow, ChecksumKind, ConditionKind, ConditionValue, ContentProperties, CopySource,
-    DeleteTarget, Error as CrateError, HeaderSpan, MetadataPair, ObjectMeta, Payload,
-    PhysicalRestore, RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome,
-    RestorePriority, Revision, ServiceErrorKind, Tag, Timestamps, TransactionalChecksum,
-    WireRequest,
+    BodyWindow, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties,
+    CopySource, DeleteItem, DeleteKind, DeleteOptions, DeleteTarget, Error as CrateError, GetItem,
+    GetKind, GetOptions, HeaderSpan, LegacyRequest, MetadataPair, ObjectMeta, Payload,
+    PhysicalRestore, Ranging, RequestSize, RequestedRange, ResponseHead, RestoreHeadOutcome,
+    RestorePriority, Revision, RevisionKind, ServiceErrorKind, Tag, Timestamps, WireRequest,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -345,6 +345,77 @@ fn requested_revision(call: &Value) -> Option<Revision<'_>> {
         .or_else(|| optional_text(call, "version").map(Revision::Version))
 }
 
+/// The kind of revision that a call names, and its identifier.
+fn requested_revision_parts(call: &Value) -> (RevisionKind, Option<&str>) {
+    match requested_revision(call) {
+        Some(Revision::Snapshot(id)) => (RevisionKind::Snapshot, Some(id)),
+        Some(Revision::Version(id)) => (RevisionKind::Version, Some(id)),
+        _ => (RevisionKind::Current, None),
+    }
+}
+
+/// The options and the item of the removal that a call names, or `None`
+/// if it names more than the one condition that the crate takes.
+pub(crate) fn requested_delete(
+    call: &Value,
+) -> Result<Option<(DeleteOptions, DeleteItem<'_>)>, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(None);
+    };
+    let kind = match optional_text(call, "snapshots") {
+        None => DeleteKind::Object,
+        Some("only") => DeleteKind::SnapshotsOnly,
+        Some("include") => DeleteKind::ObjectAndSnapshots,
+        Some(_) => return Err("unknown snapshots mode".into()),
+    };
+    let (revision_kind, revision) = requested_revision_parts(call);
+    let options = DeleteOptions {
+        kind,
+        condition,
+        revision: revision_kind,
+    };
+    let item = DeleteItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        condition_value,
+        revision,
+    };
+    Ok(Some((options, item)))
+}
+
+/// The options and the item of the read that a call names, or `None` if it
+/// names more than the one condition that the crate takes.
+pub(crate) fn requested_get(
+    call: &Value,
+    kind: GetKind,
+) -> Result<Option<(GetOptions, GetItem<'_>)>, AdapterError> {
+    let Some((condition, condition_value)) = requested_condition(call) else {
+        return Ok(None);
+    };
+    let range = if kind == GetKind::Head {
+        RequestedRange::Whole
+    } else {
+        requested_range(call)?
+    };
+    let (revision_kind, revision) = requested_revision_parts(call);
+    let options = GetOptions {
+        kind,
+        ranging: if range == RequestedRange::Whole {
+            Ranging::Whole
+        } else {
+            Ranging::Ranged
+        },
+        condition,
+        revision: revision_kind,
+    };
+    let item = GetItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        range,
+        condition_value,
+        revision,
+    };
+    Ok(Some((options, item)))
+}
+
 /// The tags that a call names: a list of keys and values, which may name a
 /// key twice, or an object of them.
 fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
@@ -367,10 +438,11 @@ fn requested_tags(call: &Value) -> Vec<Tag<'_>> {
     }
 }
 
-/// The checksum that a write call names: its value, or the algorithm alone
-/// for the crate to compute. `None` inside is an algorithm this adapter does
-/// not map.
-fn requested_checksum(call: &Value) -> Option<Option<TransactionalChecksum<'_>>> {
+/// The kind of checksum that a write call names, and its value if the call
+/// gives one. `None` inside is an algorithm this adapter does not map.
+pub(crate) fn requested_checksum_kind(
+    call: &Value,
+) -> Option<Option<(ChecksumKind, Option<&str>)>> {
     let algorithm = call
         .pointer("/checksum/algorithm")
         .and_then(Value::as_str)?;
@@ -386,16 +458,42 @@ fn requested_checksum(call: &Value) -> Option<Option<TransactionalChecksum<'_>>>
         "sha256" => ChecksumKind::Sha256,
         _ => return Some(None),
     };
-    Some(Some(match value {
-        None => TransactionalChecksum::Compute(kind),
-        Some(text) => match kind {
-            ChecksumKind::Md5 => TransactionalChecksum::Md5(text),
-            ChecksumKind::Crc64 => TransactionalChecksum::Crc64(text),
-            ChecksumKind::Crc32 => TransactionalChecksum::Crc32(text),
-            ChecksumKind::Crc32c => TransactionalChecksum::Crc32c(text),
-            ChecksumKind::Sha1 => TransactionalChecksum::Sha1(text),
-            _ => TransactionalChecksum::Sha256(text),
-        },
+    Some(Some((kind, value)))
+}
+
+/// The checksum value of a write: the text the call gives, or the digest of
+/// the body, which the crypto crate computes. The result to report is the
+/// error for a generated body, which the adapter does not hold whole.
+pub(crate) fn checksum_value<'a>(
+    kind: ChecksumKind,
+    text: Option<&'a str>,
+    body: &CallBody,
+) -> Result<ChecksumValue<'a>, Value> {
+    if let Some(text) = text {
+        return Ok(ChecksumValue::Base64(text));
+    }
+    let CallBody::Held(bytes) = body else {
+        return Err(unsupported_by_adapter(
+            "the adapter computes a checksum only over a body it holds",
+        ));
+    };
+    fn digest<C: borink_object_storage_crypto::Checksum>(
+        bytes: &[u8],
+    ) -> borink_object_storage_proto::Digest {
+        let mut checksum = C::default();
+        checksum.update(bytes);
+        checksum.finish()
+    }
+    use borink_object_storage_crypto::{
+        Crc32, Crc32c, Crc64, Md5RustCrypto, Sha1RustCrypto, Sha256RustCrypto,
+    };
+    Ok(ChecksumValue::Digest(match kind {
+        ChecksumKind::Md5 => digest::<Md5RustCrypto>(bytes),
+        ChecksumKind::Crc64 => digest::<Crc64>(bytes),
+        ChecksumKind::Crc32 => digest::<Crc32>(bytes),
+        ChecksumKind::Crc32c => digest::<Crc32c>(bytes),
+        ChecksumKind::Sha1 => digest::<Sha1RustCrypto>(bytes),
+        _ => digest::<Sha256RustCrypto>(bytes),
     }))
 }
 
@@ -612,16 +710,79 @@ fn request_buffers(size: RequestSize) -> (Vec<u8>, Vec<HeaderSpan>) {
 
 fn send_request(
     context: &AdapterContext,
-    request: &WireRequest<'_>,
+    request: &impl Outgoing,
 ) -> Result<HttpExchange, ureq::Error> {
     send_request_with(context, request, None, BodyRead::Hold)
+}
+
+/// What the adapter sends of a request: its method, URL, fields and
+/// content.
+pub(crate) trait Outgoing {
+    fn method(&self) -> borink_object_storage_proto::Method;
+    fn url(&self) -> &str;
+    fn fields(&self) -> Vec<(&str, &str)>;
+    fn payload(&self) -> Payload<'_>;
+}
+
+impl Outgoing for LegacyRequest<'_> {
+    fn method(&self) -> borink_object_storage_proto::Method {
+        LegacyRequest::method(self)
+    }
+    fn url(&self) -> &str {
+        LegacyRequest::url(self)
+    }
+    fn fields(&self) -> Vec<(&str, &str)> {
+        self.headers().collect()
+    }
+    fn payload(&self) -> Payload<'_> {
+        LegacyRequest::payload(self)
+    }
+}
+
+impl Outgoing for WireRequest<'_> {
+    fn method(&self) -> borink_object_storage_proto::Method {
+        WireRequest::method(self)
+    }
+    fn url(&self) -> &str {
+        WireRequest::url(self)
+    }
+    fn fields(&self) -> Vec<(&str, &str)> {
+        self.headers().collect()
+    }
+    fn payload(&self) -> Payload<'_> {
+        WireRequest::payload(self)
+    }
+}
+
+/// The URL and the fields of a request, owned.
+pub(crate) fn owned(request: &impl Outgoing) -> (String, Vec<(String, String)>) {
+    (
+        request.url().to_owned(),
+        request
+            .fields()
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+    )
+}
+
+/// The bytes that `encode` needs: it refuses an empty buffer with the
+/// number.
+pub(crate) fn required<T>(
+    encode: impl FnOnce(&mut [u8]) -> Result<T, CrateError>,
+) -> Result<usize, CrateError> {
+    match encode(&mut []) {
+        Err(CrateError::Capacity(capacity)) => Ok(capacity.required),
+        Err(error) => Err(error),
+        Ok(_) => Ok(0),
+    }
 }
 
 /// Sends a request whose streamed payload, if any, is `body`, and reads its
 /// response as `read` says.
 fn send_request_with(
     context: &AdapterContext,
-    request: &WireRequest<'_>,
+    request: &impl Outgoing,
     body: Option<&CallBody>,
     read: BodyRead<'_>,
 ) -> Result<HttpExchange, ureq::Error> {
@@ -643,7 +804,7 @@ fn send_request_with(
             &context.http_agent
         }
     };
-    for (name, value) in request.headers() {
+    for (name, value) in request.fields() {
         builder = builder.header(name, value);
     }
 

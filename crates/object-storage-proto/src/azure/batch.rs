@@ -14,10 +14,9 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::{Blobs, body_kind, named, revision_parameter, validate_key};
+use crate::azure::{Blobs, body_kind, failed, revision_parameter, validate_key};
 use crate::common::{
-    decimal, decimal_header, encoded_with_body, failure, finish_with_body, missing,
-    validate_revision,
+    decimal, decimal_header, encoded_with_body, finish_with_body, validate_revision,
 };
 use crate::http_message::Response;
 use crate::multipart::{self, Part};
@@ -25,8 +24,8 @@ use crate::request::{ByteSink, HeadWriter, U64Decimal, Writer};
 use crate::url;
 use crate::{
     DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, HeaderSpan,
-    InvalidPlan, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
-    Timestamps, WireRequest,
+    InvalidPlan, LegacyRequest, Method, PhysicalDeleteMany, RequestedRange, ResponseFault,
+    ResponseHead, Result, Timestamps,
 };
 
 /// The most blobs that one Blob Batch removes.
@@ -71,14 +70,14 @@ impl<'a> Blobs<'a> {
     ///
     /// Each removal in the batch carries the date and the token of this
     /// client. The body is written into `buf` after the head, so
-    /// [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure
     /// request: [`InvalidPlan::Keys`] if it names no key or more than
-    /// [`MAX_BATCH_KEYS`], a key that [`Self::encode_get`] refuses, or
+    /// [`MAX_BATCH_KEYS`], a key that [`encode_get`](crate::azure::encode_get) refuses, or
     /// [`InvalidPlan::Option`] for a checksum, which a batch does not take.
     ///
     /// Returns [`Error::Capacity`] with the bytes that the head and the body
@@ -91,7 +90,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalDeleteMany<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         if plan.objects.is_empty() || plan.objects.len() > MAX_BATCH_KEYS {
             return Err(InvalidPlan::Keys.into());
         }
@@ -169,15 +168,7 @@ impl<'a> Blobs<'a> {
                 })
             }
             200..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
-            status if head.error_code.is_none() => Ok(DeleteManyHeadOutcome::NeedErrorBody(
-                failure(status, None, head.request_id),
-            )),
-            status => Ok(DeleteManyHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -212,7 +203,7 @@ impl<'a> Blobs<'a> {
     /// if `body` is not a batch answer: a `multipart/mixed` body whose parts
     /// each carry an HTTP/1.1 response and the `Content-ID` of a request,
     /// with every request answered once. A response that a single Delete
-    /// Blob could not answer is the error that [`Self::accept_delete_head`]
+    /// Blob could not answer is the error that [`accept_delete_head`](super::accept_delete_head)
     /// returns for it.
     pub fn fill_delete_results<'b>(
         &self,
@@ -258,9 +249,9 @@ impl<'a> Blobs<'a> {
         let response = Response::parse(message)?;
         let head = response.head();
         let shape = DeleteShape::default();
-        let outcome = match self.accept_delete_head(shape, head)? {
+        let outcome = match super::accept_delete_head(shape, head)? {
             DeleteHeadOutcome::NeedErrorBody(failure) => {
-                self.accept_delete_error_body(shape, failure, response.content)
+                super::accept_delete_error_body(shape, failure, response.content)
             }
             outcome => outcome,
         };

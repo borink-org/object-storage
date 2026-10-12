@@ -7,14 +7,14 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::{Blobs, body_kind, named, revision_parameter, validate_key};
-use crate::common::{encoded, failure, finish_with_body, missing, valid_header, validate_revision};
+use crate::azure::{Blobs, body_kind, failed, revision_parameter, validate_key};
+use crate::common::{encoded, finish_with_body, valid_header, validate_revision};
 use crate::request::HeadWriter;
 use crate::url;
 use crate::{
-    Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalRestore, RequestedRange,
-    ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result, Timestamps,
-    WireRequest,
+    Failure, HeaderSpan, InvalidPlan, LegacyRequest, Method, Payload, PhysicalRestore,
+    RequestedRange, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
+    Timestamps,
 };
 
 impl<'a> Blobs<'a> {
@@ -24,7 +24,7 @@ impl<'a> Blobs<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key or a revision that
-    /// [`Self::encode_get`] refuses, [`InvalidPlan::ContentProperty`] for a
+    /// [`encode_get`](crate::azure::encode_get) refuses, [`InvalidPlan::ContentProperty`] for a
     /// tier that is not one header value, and [`InvalidPlan::Option`] for a
     /// plan without a tier, or with a number of days, a checksum or
     /// [`RestorePriority::Bulk`].
@@ -39,7 +39,7 @@ impl<'a> Blobs<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalRestore<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key, self.namespace)?;
         validate_revision(plan.revision, true)?;
         let priority = match plan.priority {
@@ -94,17 +94,7 @@ impl<'a> Blobs<'a> {
             202 => Ok(RestoreHeadOutcome::Started),
             200 => Ok(RestoreHeadOutcome::Readable),
             201..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
-            status if head.error_code.is_none() => Ok(RestoreHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(RestoreHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 

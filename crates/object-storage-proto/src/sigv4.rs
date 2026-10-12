@@ -308,6 +308,10 @@ impl<'a> Credentials<'a> {
     pub(crate) fn wipe(&self) -> fn(&mut [u8]) {
         self.wipe
     }
+
+    pub(crate) fn secret(&self) -> &'a str {
+        self.secret
+    }
 }
 
 /// Sets every byte of `bytes` to zero, on a best-effort basis.

@@ -1,68 +1,183 @@
 //! S3 listing: the query that the request carries, and page reading.
 
-use borink_object_storage_proto::s3::{Addressing, Bucket, Objects, Service};
-use borink_object_storage_proto::sigv4::{
-    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
-};
+use borink_object_storage_proto::s3::{self, Addressing, Bucket, Service};
+use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    EntryKind, Error, HeaderSpan, ListEntry, ListInclude, ListMarker, Listing, PhysicalList,
-    ResponseFault, Timestamps, layered,
+    EntryKind, Error, InvalidPlan, ListEntry, ListInclude, ListItem, ListMarker, ListOptions,
+    Listing, ResponseFault, Timestamps,
 };
 
-const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
-
-fn objects(addressing: Addressing) -> Objects<'static> {
-    let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws)
+// The URL of the page `item` of a listing with `options` of a bucket of
+// `service`, or the reason it is refused.
+fn encode(
+    service: Service,
+    addressing: Addressing,
+    options: &ListOptions<'_>,
+    item: &ListItem<'_>,
+) -> Result<String, Error> {
+    // A directory bucket is named for its zone.
+    let (endpoint, name) = match service {
+        Service::AwsDirectory => (
+            "https://s3express-euc1-az1.eu-central-1.amazonaws.com",
+            "bucket--euc1-az1--x-s3",
+        ),
+        _ => ("https://s3.example.com", "bucket"),
+    };
+    let bucket = Bucket::new(endpoint, name, "auto", service)
         .unwrap()
         .with_addressing(addressing);
     let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort).unwrap();
-    Objects::new(bucket, credentials, ZEROS)
+    let mut bytes = vec![0; 2048];
+    let template = s3::prepare_list(&bucket, &credentials, options, &mut bytes)?;
+    let now = Timestamps::from_unix(1_787_400_061);
+    let mut buf = vec![0; 4096];
+    let unsigned = s3::encode_list(&template, &bytes, item, &now, &mut buf)?;
+    let request = s3::finish(&unsigned, &mut buf, &[0; 32]);
+    Ok(request.url().to_owned())
 }
 
-fn url(objects: &Objects<'_>, list: &PhysicalList<'_>) -> String {
-    let now = Timestamps::from_unix(1_787_400_061);
-    let size = layered::s3::list_requirements(objects, list, &now).unwrap();
-    let mut buf = vec![0; size.bytes];
-    let mut slots = vec![HeaderSpan::default(); size.headers];
-    let request = objects
-        .encode_list(&mut buf, &mut slots, list, &now)
-        .unwrap();
-    request.url().to_owned()
+fn url(addressing: Addressing, options: &ListOptions<'_>, item: &ListItem<'_>) -> String {
+    encode(Service::Aws, addressing, options, item).unwrap()
 }
 
 fn read(body: &str) -> Result<(Listing<'static>, Vec<ListEntry<'static>>), Error> {
     let body = Vec::leak(body.as_bytes().to_vec());
     let mut entries = vec![ListEntry::default(); 4];
-    let page = objects(Addressing::Path).fill_listing(body, &mut entries)?;
+    let page = s3::fill_listing(body, &mut entries)?;
     entries.truncate(page.filled);
     Ok((page, entries))
 }
 
 // The URL must carry the query exactly as SigV4 signs it: sorted by name,
-// with every byte but the unreserved ones encoded.
+// with every byte but the unreserved ones encoded. A parameter that a page
+// leaves out takes its separator along.
 #[test]
 fn the_query_is_written_in_its_canonical_form() {
-    let list = PhysicalList {
-        marker: Some(ListMarker::Text(
-            "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=",
-        )),
-        start_after: Some("a b/c"),
+    let options = ListOptions {
         delimiter: Some("/"),
         max_results: Some(2),
         include: ListInclude::OWNER,
-        ..PhysicalList::new("a b/é+")
+    };
+    let item = ListItem {
+        start_after: Some("a b/c"),
+        ..ListItem::new("a b/é+").after(ListMarker::Text(
+            "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=",
+        ))
     };
     assert_eq!(
-        url(&objects(Addressing::Path), &list),
+        url(Addressing::Path, &options, &item),
         "https://s3.example.com/bucket\
          ?continuation-token=1ueGcxLPRx1Tr%2FXYExHnhbYLgveDs2J%2Fwm36Hy4vbOwM%3D\
          &delimiter=%2F&encoding-type=url&fetch-owner=true&list-type=2&max-keys=2\
          &prefix=a%20b%2F%C3%A9%2B&start-after=a%20b%2Fc"
     );
     assert_eq!(
-        url(&objects(Addressing::VirtualHosted), &PhysicalList::new("")),
+        url(Addressing::Path, &options, &ListItem::new("")),
+        "https://s3.example.com/bucket\
+         ?delimiter=%2F&encoding-type=url&fetch-owner=true&list-type=2&max-keys=2"
+    );
+    assert_eq!(
+        url(
+            Addressing::VirtualHosted,
+            &ListOptions::default(),
+            &ListItem::new("")
+        ),
         "https://bucket.s3.example.com/?encoding-type=url&list-type=2"
     );
+
+    let versions = ListOptions {
+        include: ListInclude::VERSIONS,
+        ..ListOptions::default()
+    };
+    let after = ListItem::new("p").after(ListMarker::Version {
+        key: "k",
+        version: Some("v1"),
+    });
+    assert_eq!(
+        url(Addressing::Path, &versions, &after),
+        "https://s3.example.com/bucket\
+         ?encoding-type=url&key-marker=k&prefix=p&version-id-marker=v1&versions="
+    );
+    assert_eq!(
+        url(Addressing::Path, &versions, &ListItem::new("")),
+        "https://s3.example.com/bucket?encoding-type=url&versions="
+    );
+}
+
+#[test]
+fn a_listing_that_s3_cannot_take_is_refused() {
+    let refused = |service, options: &ListOptions<'_>, item: &ListItem<'_>| {
+        encode(service, Addressing::Path, options, item).unwrap_err()
+    };
+    let objects = ListOptions::default();
+    let versions = ListOptions {
+        include: ListInclude::VERSIONS,
+        ..objects
+    };
+    let text = ListItem::new("").after(ListMarker::Text("token"));
+    let version = ListItem::new("").after(ListMarker::Version {
+        key: "k",
+        version: None,
+    });
+    for (service, options, item, expected) in [
+        // A listing continues from the kind of marker its pages hand out.
+        (Service::Aws, objects, version, InvalidPlan::Marker),
+        (Service::Aws, versions, text, InvalidPlan::Marker),
+        (
+            Service::Aws,
+            objects,
+            ListItem::new("").after(ListMarker::Text("")),
+            InvalidPlan::Marker,
+        ),
+        // A listing of versions starts at its markers alone.
+        (
+            Service::Aws,
+            versions,
+            ListItem {
+                start_after: Some("k"),
+                ..ListItem::new("")
+            },
+            InvalidPlan::Option,
+        ),
+        (
+            Service::Aws,
+            ListOptions {
+                include: ListInclude::METADATA,
+                ..objects
+            },
+            ListItem::new(""),
+            InvalidPlan::Option,
+        ),
+        // A directory bucket groups keys at `/` alone, lists only at a
+        // prefix that ends in it, and keeps no versions.
+        (
+            Service::AwsDirectory,
+            ListOptions {
+                delimiter: Some("-"),
+                ..objects
+            },
+            ListItem::new(""),
+            InvalidPlan::Delimiter,
+        ),
+        (
+            Service::AwsDirectory,
+            objects,
+            ListItem::new("dir"),
+            InvalidPlan::Prefix,
+        ),
+        (
+            Service::AwsDirectory,
+            versions,
+            ListItem::new(""),
+            InvalidPlan::Option,
+        ),
+    ] {
+        assert_eq!(
+            refused(service, &options, &item),
+            Error::InvalidPlan(expected),
+            "{service:?} {options:?} {item:?}"
+        );
+    }
 }
 
 #[test]
@@ -169,16 +284,15 @@ fn wanted_properties_are_read_in_the_same_pass() {
             .to_vec(),
     );
     let mut entries = [("", None, None, None); 2];
-    let page = objects(Addressing::Path)
-        .fill_listing_with(body, &mut entries, wanted, |entry, values| {
-            (
-                entry.key,
-                values.get(ObjectProperty::StorageClass),
-                values.get(ObjectProperty::ChecksumAlgorithm),
-                values.get(ObjectProperty::Owner),
-            )
-        })
-        .unwrap();
+    let page = s3::fill_listing_with(body, &mut entries, wanted, |entry, values| {
+        (
+            entry.key,
+            values.get(ObjectProperty::StorageClass),
+            values.get(ObjectProperty::ChecksumAlgorithm),
+            values.get(ObjectProperty::Owner),
+        )
+    })
+    .unwrap();
     assert_eq!(page.filled, 2);
     assert_eq!(
         entries[0],

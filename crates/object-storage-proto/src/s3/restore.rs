@@ -7,20 +7,18 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::checksum::ChecksumKind;
-use crate::common::{
-    encoded_with_body, failure, finish_with_body, push_checksum, validate_revision,
-};
+use crate::common::{encoded_with_body, finish_with_body, push_checksum, validate_revision};
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
-    CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, validate_key, validate_s3_checksum,
-    version_parameter,
+    CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, failed, validate_key,
+    validate_s3_checksum, version_parameter,
 };
 use crate::url;
 use crate::{
-    ConditionKind, Failure, HeaderSpan, InvalidPlan, Method, PhysicalRestore, RequestedRange,
-    ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result, Timestamps,
-    TransactionalChecksum, WireRequest,
+    ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest, Method, PhysicalRestore,
+    RequestedRange, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
+    Timestamps, TransactionalChecksum,
 };
 
 const RESTORE_OPEN: &[u8] = b"<RestoreRequest xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
@@ -31,14 +29,14 @@ impl<'a> Objects<'a> {
     /// after it, which names the days and the retrieval tier.
     ///
     /// The body is written into `buf` after the head, so
-    /// [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it. The request signs the SHA-256 of the body, and sends the
     /// checksum that the plan asks for as [`Self::encode_put_tagging`] does.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key or a revision that
-    /// [`Self::encode_get`] refuses, and [`InvalidPlan::Option`] for a plan
+    /// [`encode_get`](crate::s3::encode_get) refuses, and [`InvalidPlan::Option`] for a plan
     /// that names a tier or zero days, for a checksum whose provider the
     /// client has not registered, and for a directory bucket, which keeps no
     /// archive.
@@ -53,7 +51,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalRestore<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_revision(plan.revision, false)?;
         // S3 restores a copy in the object's own storage class, for at least
@@ -129,11 +127,7 @@ impl<'a> Objects<'a> {
             202 => Ok(RestoreHeadOutcome::Started),
             200 => Ok(RestoreHeadOutcome::Readable),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(RestoreHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 

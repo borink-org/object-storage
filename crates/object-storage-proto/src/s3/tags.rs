@@ -3,20 +3,20 @@
 
 use crate::checksum::ChecksumKind;
 use crate::common::{
-    decimal_header, encoded_with_body, failure, finish_with_body, meta_of, push_checksum,
-    validate_revision, validate_tags, write_tag_set,
+    decimal_header, encoded_with_body, finish_with_body, meta_of, push_checksum, validate_revision,
+    validate_tags, write_tag_set,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
-    CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, s3_tag_char,
-    validate_key, validate_s3_checksum, version_parameter,
+    CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, failed, refuse_error_document,
+    s3_tag_char, validate_key, validate_s3_checksum, version_parameter,
 };
 use crate::url;
 use crate::{
-    ConditionKind, Failure, HeaderSpan, Method, PhysicalSetTags, RequestedRange, ResponseFault,
-    ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps, TransactionalChecksum,
-    UpdateHeadOutcome, WireRequest,
+    ConditionKind, Failure, HeaderSpan, LegacyRequest, Method, PhysicalSetTags, RequestedRange,
+    ResponseFault, ResponseHead, Result, Revision, Tag, TagsHeadOutcome, Timestamps,
+    TransactionalChecksum, UpdateHeadOutcome,
 };
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
@@ -32,14 +32,14 @@ impl<'a> Objects<'a> {
     /// body after it. The object then holds these tags and no others.
     ///
     /// The body is written into `buf` after the head, so
-    /// [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it. The request signs the SHA-256 of the body. A plan that
     /// asks for a CRC-64/NVME sends it as `x-amz-checksum-crc64nvme`, and one
     /// that asks for an MD5 as `Content-MD5`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`Self::encode_get`]
+    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`](crate::s3::encode_get)
     /// refuses, [`InvalidPlan::Tag`] for a tag that breaks the rules of
     /// [`Tag`], and [`InvalidPlan::Option`] for a checksum whose provider
     /// the client has not registered.
@@ -54,7 +54,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalSetTags<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(plan.key)?;
         validate_revision(plan.revision, false)?;
         let limits = match self.bucket.service {
@@ -127,11 +127,7 @@ impl<'a> Objects<'a> {
                 meta: meta_of(head),
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(UpdateHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
@@ -152,7 +148,7 @@ impl<'a> Objects<'a> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPlan`] for a key or a revision that
-    /// [`Self::encode_get`] refuses.
+    /// [`encode_get`](crate::s3::encode_get) refuses.
     ///
     /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
     /// the required bytes and header slots, or call
@@ -165,7 +161,7 @@ impl<'a> Objects<'a> {
         key: &str,
         revision: Option<Revision<'_>>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         validate_key(key)?;
         validate_revision(revision, false)?;
         let query = [url::literal("tagging", ""), version_parameter(revision)];
@@ -205,11 +201,7 @@ impl<'a> Objects<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(TagsHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 

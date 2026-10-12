@@ -1,36 +1,53 @@
 //! Azure bearer GET integration tests.
 
-use borink_object_storage_proto::azure::metadata_name;
+use borink_object_storage_proto::azure::{self, Template, metadata_name};
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, BodyWindow, Condition, ConditionKind, ConditionValue, Container, Error,
-    GetHeadOutcome, GetKind, HeaderSpan, InvalidPlan, Method, ObjectMeta, PhysicalGet,
-    RequestedRange, ResponseHead, Timestamps, VERSION, layered,
+    AzureNamespace, ConditionKind, ConditionValue, Container, Error, GetHeadOutcome, GetItem,
+    GetOptions, GetShape, InvalidPlan, Method, RequestedRange, ResponseHead, Timestamps, VERSION,
+    WireRequest,
 };
 
-fn blobs() -> Blobs<'static> {
-    Blobs::new(
-        Container::new("https://account.blob.core.windows.net", "objects").unwrap(),
-        "access-token",
-    )
-    .unwrap()
+fn container() -> Container<'static> {
+    Container::new("https://account.blob.core.windows.net", "objects").unwrap()
 }
 
 fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
+// The template of reads with `options`, in a buffer of its own.
+fn template(options: GetOptions, namespace: AzureNamespace) -> (Template, Vec<u8>) {
+    let mut bytes = vec![0; 512];
+    let template = azure::prepare_get(
+        &container(),
+        "access-token",
+        namespace,
+        &options,
+        &mut bytes,
+    )
+    .unwrap();
+    (template, bytes)
+}
+
+// Writes `item` from a template of `options` into `buf`.
+fn encode<'r>(
+    options: GetOptions,
+    item: &GetItem<'_>,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>, Error> {
+    let (template, bytes) = template(options, AzureNamespace::Unknown);
+    azure::encode_get(&template, &bytes, item, &now(), buf)
+}
+
+fn shape(range: RequestedRange) -> GetShape {
+    GetItem::new("key")
+        .with_range(range)
+        .shape(&GetOptions::new().ranged())
+}
+
 #[test]
 fn response_ranges_must_have_representable_exclusive_ends() {
-    let blobs = blobs();
-    let get = PhysicalGet {
-        range: RequestedRange::Offset(0),
-        ..PhysicalGet::new("key")
-    };
-    let mut bytes = [0; 512];
-    let mut headers = [borink_object_storage_proto::HeaderSpan::default(); 8];
-    blobs
-        .encode_get(&mut bytes, &mut headers, &get, &now())
-        .unwrap();
+    let shape = shape(RequestedRange::Offset(0));
     for value in [
         "bytes 0-18446744073709551615/*",
         "bytes 1-18446744073709551615/*",
@@ -38,7 +55,7 @@ fn response_ranges_must_have_representable_exclusive_ends() {
     ] {
         let head = ResponseHead::from_headers(206, [("content-range", value.as_bytes())]);
         assert_eq!(
-            blobs.accept_get_head(get.shape(), head),
+            azure::accept_get_head(shape, head),
             Err(Error::Response(
                 borink_object_storage_proto::ResponseFault::Head
             ))
@@ -49,8 +66,7 @@ fn response_ranges_must_have_representable_exclusive_ends() {
         "bytes 0-18446744073709551614/18446744073709551615",
     ] {
         let head = ResponseHead::from_headers(206, [("content-range", value.as_bytes())]);
-        let GetHeadOutcome::Body { body, .. } = blobs.accept_get_head(get.shape(), head).unwrap()
-        else {
+        let GetHeadOutcome::Body { body, .. } = azure::accept_get_head(shape, head).unwrap() else {
             panic!("expected a body");
         };
         assert_eq!(body.expected_len, Some(u64::MAX));
@@ -58,33 +74,14 @@ fn response_ranges_must_have_representable_exclusive_ends() {
 }
 
 #[test]
-fn an_unvalidated_suffix_shape_returns_an_error() {
-    let get = PhysicalGet {
-        range: RequestedRange::Suffix(1),
-        ..PhysicalGet::new("key")
-    };
-    let head = ResponseHead::from_headers(206, [("content-range", b"bytes 0-0/1".as_slice())]);
-    assert_eq!(
-        blobs().accept_get_head(get.shape(), head),
-        Err(Error::Response(
-            borink_object_storage_proto::ResponseFault::Range
-        ))
-    );
-}
-
-#[test]
 fn encodes_a_bearer_get_in_caller_memory() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let mut buf = [0; 256];
-    let request = blobs
-        .encode_get(
-            &mut buf,
-            &mut request_headers,
-            &PhysicalGet::new("directory/a key+é"),
-            &now(),
-        )
-        .unwrap();
+    let mut buf = [0; 512];
+    let request = encode(
+        GetOptions::new(),
+        &GetItem::new("directory/a key+é"),
+        &mut buf,
+    )
+    .unwrap();
 
     assert_eq!(request.method(), Method::Get);
     assert_eq!(
@@ -95,31 +92,46 @@ fn encodes_a_bearer_get_in_caller_memory() {
         request.headers().collect::<Vec<_>>(),
         [
             ("authorization", "Bearer access-token"),
-            ("x-ms-date", "Sat, 22 Aug 2026 12:00:00 GMT"),
             ("x-ms-version", VERSION),
+            ("x-ms-date", "Sat, 22 Aug 2026 12:00:00 GMT"),
         ]
+    );
+    assert_eq!(
+        request.head(),
+        format!(
+            "GET /objects/directory/a%20key%2B%C3%A9 HTTP/1.1\r\n\
+             host: account.blob.core.windows.net\r\n\
+             authorization: Bearer access-token\r\n\
+             x-ms-version: {VERSION}\r\n\
+             x-ms-date: Sat, 22 Aug 2026 12:00:00 GMT\r\n\r\n"
+        )
+        .as_bytes()
     );
 }
 
 #[test]
-fn the_head_borrows_nothing_the_caller_passed_in() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let mut buf = [0; 256];
-    // The key, the condition value and the timestamp are all temporaries.
-    let request = blobs
-        .encode_get(
-            &mut buf,
-            &mut request_headers,
-            &PhysicalGet {
-                key: &String::from("object"),
-                ..PhysicalGet::new("")
-            }
-            .with_condition(Condition::IfMatch(String::from("\"etag\"").as_bytes())),
-            &Timestamps::from_unix(1_787_400_000),
-        )
-        .unwrap();
-
+fn the_request_borrows_nothing_but_its_buffer() {
+    let mut buf = [0; 512];
+    let (template, bytes) = template(
+        GetOptions {
+            condition: ConditionKind::IfMatch,
+            ..GetOptions::new()
+        },
+        AzureNamespace::Unknown,
+    );
+    // The template's bytes, the key, the condition value and the timestamp
+    // are all temporaries.
+    let request = azure::encode_get(
+        &template,
+        &bytes.clone(),
+        &GetItem {
+            condition_value: Some(ConditionValue::ETag(String::from("\"etag\"").as_bytes())),
+            ..GetItem::new(&String::from("object"))
+        },
+        &Timestamps::from_unix(1_787_400_000),
+        &mut buf,
+    )
+    .unwrap();
     assert!(
         request
             .headers()
@@ -134,100 +146,41 @@ fn the_head_borrows_nothing_the_caller_passed_in() {
 
 #[test]
 fn reports_the_exact_required_capacity() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let get = PhysicalGet::new("object");
-    let error = blobs
-        .encode_get(&mut [], &mut request_headers, &get, &now())
-        .unwrap_err();
-    let Error::Capacity(capacity) = error else {
-        panic!("unexpected error: {error}");
+    let get = GetItem::new("object");
+    let Err(Error::Capacity(capacity)) = encode(GetOptions::new(), &get, &mut []) else {
+        panic!("an empty buffer is refused with its size");
     };
-    assert_eq!(
-        layered::get_requirements(&blobs, &get, &now()).map(|size| size.bytes),
-        Ok(capacity.required)
-    );
-
     let mut short = vec![0; capacity.required - 1];
     assert_eq!(
-        blobs
-            .encode_get(&mut short, &mut request_headers, &get, &now())
+        encode(GetOptions::new(), &get, &mut short)
             .unwrap_err()
             .capacity()
             .map(|capacity| capacity.required),
         Some(capacity.required)
     );
-
     let mut exact = vec![0; capacity.required];
-    blobs
-        .encode_get(&mut exact, &mut request_headers, &get, &now())
-        .unwrap();
-}
+    encode(GetOptions::new(), &get, &mut exact).unwrap();
 
-#[test]
-fn encodes_ranges_conditions_and_metadata_plans() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let mut buf = [0; 256];
-    let get = PhysicalGet {
-        range: RequestedRange::Bounded { start: 2, end: 6 },
-        ..PhysicalGet::new("object")
-    }
-    .with_condition(Condition::IfNoneMatch(b"\"etag\""));
-    let request = blobs
-        .encode_get(&mut buf, &mut request_headers, &get, &now())
-        .unwrap();
-    assert_eq!(request.method(), Method::Get);
-    assert!(
-        request
-            .headers()
-            .any(|header| header == ("range", "bytes=2-5"))
-    );
-    assert!(
-        request
-            .headers()
-            .any(|header| header == ("if-none-match", "\"etag\""))
-    );
-
-    let metadata = blobs
-        .encode_get(
-            &mut buf,
-            &mut request_headers,
-            &PhysicalGet::head("object"),
-            &now(),
-        )
-        .unwrap();
-    assert_eq!(metadata.method(), Method::Head);
-
-    let head = ResponseHead::from_headers(
-        206,
-        [
-            ("Content-Range", b"bytes 2-5/10".as_slice()),
-            ("ETag", b"\"etag\""),
-            ("x-ms-version-id", b"version-1"),
-        ],
-    );
-    let Ok(GetHeadOutcome::Body { meta, body, .. }) = blobs.accept_get_head(get.shape(), head)
-    else {
-        panic!("a ranged read returns a body");
+    // A template is sized the same way.
+    let options = GetOptions::new();
+    let Err(Error::Capacity(capacity)) = azure::prepare_get(
+        &container(),
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut [],
+    ) else {
+        panic!("an empty buffer is refused with its size");
     };
-    assert_eq!(
-        meta,
-        ObjectMeta {
-            size: Some(10),
-            e_tag: Some(b"\"etag\""),
-            version: Some(b"version-1"),
-            ..ObjectMeta::default()
-        }
-    );
-    assert_eq!(
-        body,
-        BodyWindow {
-            object_offset: 2,
-            expected_len: Some(4),
-            object_size: Some(10),
-        }
-    );
+    let mut exact = vec![0; capacity.required];
+    azure::prepare_get(
+        &container(),
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut exact,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -250,122 +203,123 @@ fn rejects_values_that_could_change_the_http_request() {
     ));
     let container = Container::new("https://account", "objects").unwrap();
     assert!(matches!(
-        Blobs::new(container, "token\r\nheader"),
+        azure::prepare_get(
+            &container,
+            "token\r\nheader",
+            AzureNamespace::Unknown,
+            &GetOptions::new(),
+            &mut [0; 512]
+        ),
         Err(Error::InvalidToken)
     ));
 }
 
 #[test]
-fn refuses_invalid_plans_before_writing_anything() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let condition = |condition, condition_value| PhysicalGet {
-        condition,
-        condition_value,
-        ..PhysicalGet::new("object")
+fn refuses_invalid_reads_before_writing_anything() {
+    let ranged = GetOptions::new().ranged();
+    let if_match = GetOptions {
+        condition: ConditionKind::IfMatch,
+        ..GetOptions::new()
     };
-    let ranged = |range| PhysicalGet {
-        range,
-        ..PhysicalGet::new("object")
+    let with_value = |value| GetItem {
+        condition_value: Some(value),
+        ..GetItem::new("object")
     };
     let cases = [
-        (PhysicalGet::new(""), InvalidPlan::EmptyKey),
+        (GetOptions::new(), GetItem::new(""), InvalidPlan::EmptyKey),
         (
-            ranged(RequestedRange::Bounded { start: 6, end: 2 }),
+            ranged,
+            GetItem::new("object").with_range(RequestedRange::Bounded { start: 6, end: 2 }),
             InvalidPlan::Range,
         ),
         (
-            ranged(RequestedRange::Suffix(4)),
+            ranged,
+            GetItem::new("object").with_range(RequestedRange::Suffix(4)),
             InvalidPlan::UnsupportedRange,
         ),
+        // A range where the template sends none, and none where it sends one.
         (
-            PhysicalGet {
-                kind: GetKind::Head,
-                range: RequestedRange::Offset(2),
-                ..PhysicalGet::new("object")
-            },
-            InvalidPlan::RangedHead,
+            GetOptions::new(),
+            GetItem::new("object").with_range(RequestedRange::Offset(2)),
+            InvalidPlan::Range,
         ),
+        (ranged, GetItem::new("object"), InvalidPlan::Range),
         // A kind without a value and a value without a kind are both invalid.
+        (if_match, GetItem::new("object"), InvalidPlan::Condition),
         (
-            condition(ConditionKind::IfMatch, None),
+            GetOptions::new(),
+            with_value(ConditionValue::ETag(b"\"etag\"")),
             InvalidPlan::Condition,
         ),
         (
-            condition(ConditionKind::None, Some(ConditionValue::ETag(b"\"etag\""))),
-            InvalidPlan::Condition,
-        ),
-        (
-            condition(
-                ConditionKind::IfMatch,
-                Some(ConditionValue::ETag(b"etag\r\nheader")),
-            ),
+            if_match,
+            with_value(ConditionValue::ETag(b"etag\r\nheader")),
             InvalidPlan::Condition,
         ),
     ];
-
-    let blobs = blobs();
-    let mut buf = [0; 256];
-    for (get, expected) in cases {
+    for (options, get, expected) in cases {
+        let mut untouched = [0xAA; 256];
         assert_eq!(
-            blobs
-                .encode_get(&mut buf, &mut request_headers, &get, &now())
-                .err(),
+            encode(options, &get, &mut untouched).err(),
             Some(Error::InvalidPlan(expected)),
             "{get:?}"
         );
-        // The layered requirement path reports the same refusal unchanged.
+        assert!(untouched.iter().all(|byte| *byte == 0xAA));
+        // An empty buffer reports the same refusal unchanged.
         assert_eq!(
-            layered::get_requirements(&blobs, &get, &now()).map(|size| size.bytes),
-            Err(Error::InvalidPlan(expected))
+            encode(options, &get, &mut []).err(),
+            Some(Error::InvalidPlan(expected))
         );
     }
+
+    // A HEAD reads no range, so no template of ranged HEADs is written.
+    assert_eq!(
+        azure::prepare_get(
+            &container(),
+            "token",
+            AzureNamespace::Unknown,
+            &GetOptions::head().ranged(),
+            &mut [0; 512]
+        )
+        .err(),
+        Some(Error::InvalidPlan(InvalidPlan::RangedHead))
+    );
 }
 
-/// The keys a plan may name, and the ones it may not because they would name
-/// something else by the time the request arrives.
-///
-/// Each refusal here was measured against the live service, not read off
-/// a specification: a name is refused where storing it would store it under a
-/// name the caller did not write.
 #[test]
 fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
     use borink_object_storage_proto::azure::MAX_URL_LEN;
 
-    let blobs = blobs();
     // The bytes of the URL that are not the key.
     let fixed = "https://account.blob.core.windows.net/objects/".len();
     // A space is one UTF-16 unit and three bytes of URL, so the bytes of the
     // URL and the units of the name are far apart here.
     let spaces = (MAX_URL_LEN - fixed - 1) / 3;
     let key = format!("{}k", " ".repeat(spaces));
-    let plan = PhysicalGet::new(&key);
-    let size = layered::get_requirements(&blobs, &plan, &now()).unwrap();
-    let mut buf = vec![0; size.bytes];
-    let mut request_headers = vec![HeaderSpan::default(); size.headers];
-    let request = blobs
-        .encode_get(&mut buf, &mut request_headers, &plan, &now())
-        .unwrap();
+    let mut buf = vec![0; 3 * MAX_URL_LEN];
+    let request = encode(GetOptions::new(), &GetItem::new(&key), &mut buf).unwrap();
     assert_eq!(request.url().len(), MAX_URL_LEN);
     assert!(key.encode_utf16().count() * 2 < MAX_URL_LEN);
 
-    // One more byte of URL, and the plan is refused before the buffer is
-    // touched, whatever the account.
+    // One more byte of URL, and the read is refused before the buffer is
+    // touched, whatever the account, and with a buffer too small as well.
     let over = format!(" {key}");
-    let mut untouched = [0xAA; 256];
-    for blobs in [blobs, blobs.with_namespace(AzureNamespace::Hierarchical)] {
+    for namespace in [AzureNamespace::Unknown, AzureNamespace::Hierarchical] {
+        let (template, bytes) = template(GetOptions::new(), namespace);
+        let mut untouched = [0xAA; 256];
         assert_eq!(
-            blobs
-                .encode_get(
-                    &mut untouched,
-                    &mut request_headers,
-                    &PhysicalGet::new(&over),
-                    &now()
-                )
-                .map(drop),
+            azure::encode_get(
+                &template,
+                &bytes,
+                &GetItem::new(&over),
+                &now(),
+                &mut untouched
+            )
+            .map(drop),
             Err(Error::InvalidPlan(InvalidPlan::UrlTooLong))
         );
+        assert!(untouched.iter().all(|byte| *byte == 0xAA));
     }
-    assert!(untouched.iter().all(|byte| *byte == 0xAA));
     assert_eq!(
         InvalidPlan::UrlTooLong.azure_rejection(AzureNamespace::Unknown),
         Some(borink_object_storage_proto::AzureRejection {
@@ -375,22 +329,32 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
     );
 }
 
+/// The keys a read may name, and the ones it may not because they would
+/// name something else by the time the request arrives.
+///
+/// Each refusal here was measured against the live service, not read off
+/// a specification: a name is refused where storing it would store it under a
+/// name the caller did not write.
 #[test]
 fn a_key_that_would_not_survive_the_journey_is_refused() {
-    let refused = |key: &str| {
-        borink_object_storage_proto::layered::get_requirements(
-            &blobs().with_namespace(AzureNamespace::Flat),
-            &PhysicalGet::new(key),
+    let (flat, flat_bytes) = template(GetOptions::new(), AzureNamespace::Flat);
+    let (unknown, unknown_bytes) = template(GetOptions::new(), AzureNamespace::Unknown);
+    let refused_by = |template: &Template, bytes: &[u8], key: &str| {
+        azure::encode_get(
+            template,
+            bytes,
+            &GetItem::new(key),
             &now(),
+            &mut vec![0; 40_000],
         )
-        .map(|size| size.bytes)
         .map(drop)
     };
+    let refused = |key: &str| refused_by(&flat, &flat_bytes, key);
 
     // A flat account counts a name in UTF-16 code units, so a character
     // outside the basic plane counts twice. 512 of them is the limit, and 1024
-    // of a character inside it is too. Only a client told it is on a flat
-    // account refuses the key itself; the default client sends it.
+    // of a character inside it is too. Only a template told it is for a flat
+    // account refuses the key itself; the default one sends it.
     assert!(refused(&"a".repeat(1024)).is_ok());
     assert!(refused(&"é".repeat(1024)).is_ok());
     assert!(refused(&"🦀".repeat(512)).is_ok());
@@ -401,14 +365,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
             "{} UTF-16 code units",
             over.encode_utf16().count()
         );
-        assert!(
-            borink_object_storage_proto::layered::get_requirements(
-                &blobs(),
-                &PhysicalGet::new(&over),
-                &now(),
-            )
-            .is_ok()
-        );
+        assert!(refused_by(&unknown, &unknown_bytes, &over).is_ok());
     }
 
     // Azure drops a dot from the end of every segment, so a key with one
@@ -472,13 +429,9 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
 
 #[test]
 fn a_metadata_read_reports_its_pairs_through_the_response_header_names() {
-    let blobs = blobs();
-    let get = PhysicalGet::head("object.bin");
-    let mut buf = [0; 256];
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let request = blobs
-        .encode_get(&mut buf, &mut request_headers, &get, &now())
-        .unwrap();
+    let mut buf = [0; 512];
+    let get = GetItem::new("object.bin");
+    let request = encode(GetOptions::head(), &get, &mut buf).unwrap();
     assert_eq!(request.method(), Method::Head);
 
     // The pairs are one header each, so the head this crate reads carries
@@ -502,9 +455,11 @@ fn a_metadata_read_reports_its_pairs_through_the_response_header_names() {
         ]
     );
 
-    match blobs
-        .accept_get_head(get.shape(), ResponseHead::from_headers(200, response))
-        .unwrap()
+    match azure::accept_get_head(
+        get.shape(&GetOptions::head()),
+        ResponseHead::from_headers(200, response),
+    )
+    .unwrap()
     {
         GetHeadOutcome::Complete { meta } => assert_eq!(meta.size, Some(8)),
         other => panic!("unexpected outcome {other:?}"),

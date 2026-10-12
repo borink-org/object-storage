@@ -8,11 +8,12 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// The exact capacity that your buffer needs.
 ///
 /// For encoding, grow the byte buffer to `required` and the descriptor array
-/// to `required_headers`, then retry. To size both before the first call, use
-/// [`layered::get_requirements`](crate::layered::get_requirements).
+/// to `required_headers`, then retry. Pass empty buffers to learn both
+/// before the first call. A function that writes a template or a request
+/// from one needs bytes only, and `required_headers` is zero.
 ///
-/// For [`Blobs::fill_listing`](crate::Blobs::fill_listing) and
-/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing),
+/// For [`azure::fill_listing`](crate::azure::fill_listing) and
+/// [`s3::fill_listing`](crate::s3::fill_listing),
 /// `required` counts entries, not bytes, and `required_headers` is zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapacityError {
@@ -179,6 +180,9 @@ pub enum InvalidPlan {
     ///
     /// See [`CopySource`](crate::CopySource).
     CopySource = 32,
+    /// The template is for another operation, or the bytes passed with it
+    /// are not the ones it was written into.
+    Template = 33,
 }
 
 impl InvalidPlan {
@@ -220,6 +224,7 @@ impl InvalidPlan {
             Self::Keys => "invalid list of keys",
             Self::Revision => "invalid snapshot or version",
             Self::CopySource => "invalid copy source",
+            Self::Template => "the template is for another operation or another buffer",
         }
     }
 
@@ -260,6 +265,7 @@ impl InvalidPlan {
             30 => Self::Keys,
             31 => Self::Revision,
             32 => Self::CopySource,
+            33 => Self::Template,
             _ => return None,
         })
     }
@@ -288,25 +294,21 @@ impl fmt::Display for InvalidPlan {
 ///
 /// ```
 /// use borink_object_storage_proto::{
-///     Blobs, Container, Error, GetShape, RequestedRange, ResponseFault, ResponseHead,
+///     Error, GetShape, RequestedRange, ResponseFault, ResponseHead, azure,
 /// };
 ///
-/// # fn main() -> borink_object_storage_proto::Result<()> {
-/// let blobs = Blobs::new(Container::new("https://account.blob.core.windows.net", "c")?, "t")?;
 /// let shape = GetShape {
 ///     range: RequestedRange::Bounded { start: 2, end: 6 },
 ///     ..GetShape::default()
 /// };
 /// let head = ResponseHead::from_headers(206, [("Content-Range", b"bytes 2-4/10".as_slice())]);
 ///
-/// let fault = blobs.accept_get_head(shape, head);
+/// let fault = azure::accept_get_head(shape, head);
 /// assert_eq!(fault, Err(Error::Response(ResponseFault::Range)));
 ///
 /// // The head is still yours, so the exact values are too.
 /// assert_eq!(head.content_range, Some(b"bytes 2-4/10".as_slice()));
 /// assert_eq!(shape.range, RequestedRange::Bounded { start: 2, end: 6 });
-/// # Ok(())
-/// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -458,7 +460,7 @@ pub enum Error {
     ///
     /// Grow a request buffer and encode again. An entry array cannot be
     /// refilled from the same body: see
-    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing).
+    /// [`azure::fill_listing`](crate::azure::fill_listing).
     Capacity(CapacityError),
     /// The response cannot be read.
     Response(ResponseFault),

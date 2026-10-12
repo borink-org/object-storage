@@ -234,11 +234,23 @@ impl Digest {
         &self.bytes[..self.kind.digest_len()]
     }
 
+    // Writes the base64 of the digest in the byte order a service reads.
+    pub(crate) fn base64_for<'a>(
+        &self,
+        into: &'a mut [u8; BASE64_LEN],
+        crc64_big_endian: bool,
+    ) -> &'a str {
+        let mut digest = *self;
+        if crc64_big_endian && self.kind == ChecksumKind::Crc64 {
+            digest.bytes[..8].reverse();
+        }
+        digest.base64(into)
+    }
+
     /// Writes the base64 of the digest into `into` and returns it as text.
     ///
     /// The text is 24 characters for an MD5 and 12 for a CRC64, for example.
-    /// Pass it as the [`TransactionalChecksum`](crate::TransactionalChecksum)
-    /// of its kind.
+    /// A CRC64 is written in the little-endian order that Azure reads.
     pub fn base64<'a>(&self, into: &'a mut [u8; BASE64_LEN]) -> &'a str {
         let (chars, padding) = self.kind.base64_shape();
         crate::encoding::base64_into(self.as_bytes(), &mut into[..chars + padding])

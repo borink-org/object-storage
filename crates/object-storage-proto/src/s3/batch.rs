@@ -3,19 +3,19 @@
 
 use crate::checksum::ChecksumKind;
 use crate::common::{
-    decimal_header, encoded_with_body, failure, finish_with_body, push_checksum, validate_revision,
+    decimal_header, encoded_with_body, finish_with_body, push_checksum, validate_revision,
 };
 use crate::encoding;
 use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
 use crate::s3::{
-    CHECKSUM_TEXT_LEN, Objects, Service, Signed, body_kind, refuse_error_document, validate_key,
+    CHECKSUM_TEXT_LEN, Objects, Signed, body_kind, failed, refuse_error_document, validate_key,
     validate_s3_checksum,
 };
 use crate::url;
 use crate::{
-    ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan, Method,
-    PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result, Revision, Timestamps,
-    TransactionalChecksum, WireRequest,
+    ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan,
+    LegacyRequest, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
+    Revision, Timestamps, TransactionalChecksum,
 };
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
@@ -58,7 +58,7 @@ impl<'a> Objects<'a> {
     /// after it.
     ///
     /// The body is written into `buf` after the head, so
-    /// [`WireRequest::body_span`] names it and [`WireRequest::payload`]
+    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
     /// borrows it. The request signs the SHA-256 of the body. A plan that
     /// asks for a CRC-64/NVME sends it as `x-amz-checksum-crc64nvme`, and one
     /// that asks for an MD5 as `Content-MD5`.
@@ -69,11 +69,11 @@ impl<'a> Objects<'a> {
     ///
     /// - [`InvalidPlan::Keys`] if it names no key, or more than
     ///   [`MAX_DELETE_KEYS`].
-    /// - A key that [`Self::encode_get`] refuses, and
+    /// - A key that [`encode_get`](crate::s3::encode_get) refuses, and
     ///   [`InvalidPlan::KeyControlCharacter`] for a key with a control
     ///   character other than a tab, which the XML body cannot carry.
     /// - [`InvalidPlan::Option`] for a checksum whose provider the client
-    ///   has not registered, or for no checksum, for [`Service::Aws`]. AWS
+    ///   has not registered, or for no checksum, for [`Service::Aws`](crate::s3::Service::Aws). AWS
     ///   refuses the request without one.
     ///
     /// Returns [`Error::Capacity`] with the bytes that the head and the body
@@ -86,7 +86,7 @@ impl<'a> Objects<'a> {
         headers: &'r mut [HeaderSpan],
         plan: &PhysicalDeleteMany<'_>,
         now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
+    ) -> Result<LegacyRequest<'r>> {
         if plan.objects.is_empty() || plan.objects.len() > MAX_DELETE_KEYS {
             return Err(InvalidPlan::Keys.into());
         }
@@ -101,10 +101,7 @@ impl<'a> Objects<'a> {
             }
             validate_revision(object.revision, false)?;
         }
-        let needs_checksum = match self.bucket.service {
-            Service::Aws | Service::AwsDirectory => true,
-            Service::Compatible => false,
-        };
+        let needs_checksum = self.bucket.service.is_aws();
         if needs_checksum && plan.checksum.is_none() {
             return Err(InvalidPlan::Option.into());
         }
@@ -169,11 +166,7 @@ impl<'a> Objects<'a> {
                 expected_len: decimal_header(head.content_length)?,
             }),
             201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(DeleteManyHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
+            _ => Ok(failed(&head)),
         }
     }
 
