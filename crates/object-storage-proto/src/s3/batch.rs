@@ -3,27 +3,20 @@
 
 use crate::Payload;
 use crate::checksum::ChecksumKind;
-use crate::common::{
-    decimal_header, encoded_with_body, finish_with_body, push_checksum, validate_revision,
-};
+use crate::common::{decimal_header, finish_with_body, validate_revision};
 use crate::encoding;
-use crate::request::{ByteSink, HeadWriter, Pass, U64Decimal, Writer};
+use crate::request::{ByteSink, Writer};
 use crate::s3::template::{
     self, Describe, Detail, Operation, Template, Unsigned, encode as encode_template,
 };
 use crate::s3::{Bucket, S3Values};
-use crate::s3::{
-    CHECKSUM_TEXT_LEN, Objects, Signed, body_kind, failed, refuse_error_document, validate_key,
-    validate_s3_checksum,
-};
+use crate::s3::{body_kind, failed, refuse_error_document, validate_key};
 use crate::sigv4::Credentials;
 use crate::template::{Body, Fill, Hole, ParamValue, Values};
-use crate::url;
 use crate::url::QueryValue;
 use crate::{
-    ConditionKind, DeleteManyHeadOutcome, DeleteTarget, Failure, HeaderSpan, InvalidPlan,
-    LegacyRequest, Method, PhysicalDeleteMany, RequestedRange, ResponseFault, ResponseHead, Result,
-    Revision, Timestamps, TransactionalChecksum,
+    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidPlan, Method, ResponseFault, ResponseHead,
+    Result, Revision, Timestamps,
 };
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
@@ -39,7 +32,7 @@ const DELETE_CLOSE: &[u8] = b"</Delete>";
 
 /// The result of the removal of one object in a DeleteObjects.
 ///
-/// [`Objects::fill_delete_results`] writes one for each object that the
+/// [`fill_delete_results`] writes one for each object that the
 /// request named. S3 reports a key that held no object as removed.
 ///
 /// S3 lists the results in an order of its own. Match each to the object it
@@ -59,151 +52,6 @@ pub struct DeleteResult<'b> {
     pub delete_marker: bool,
     /// The version of that delete marker.
     pub delete_marker_version: Option<&'b str>,
-}
-
-impl<'a> Objects<'a> {
-    /// Writes a DeleteObjects into `buf`: the signed head, then the XML body
-    /// after it.
-    ///
-    /// The body is written into `buf` after the head, so
-    /// [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
-    /// borrows it. The request signs the SHA-256 of the body. A plan that
-    /// asks for a CRC-64/NVME sends it as `x-amz-checksum-crc64nvme`, and one
-    /// that asks for an MD5 as `Content-MD5`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an S3 request:
-    ///
-    /// - [`InvalidPlan::Keys`] if it names no key, or more than
-    ///   [`MAX_DELETE_KEYS`].
-    /// - A key that [`encode_get`](crate::s3::encode_get) refuses, and
-    ///   [`InvalidPlan::KeyControlCharacter`] for a key with a control
-    ///   character other than a tab, which the XML body cannot carry.
-    /// - [`InvalidPlan::Option`] for a checksum whose provider the client
-    ///   has not registered, or for no checksum, for [`Service::Aws`](crate::s3::Service::Aws). AWS
-    ///   refuses the request without one.
-    ///
-    /// Returns [`Error::Capacity`] with the bytes that the head and the body
-    /// need together, or call
-    /// [`layered::s3::delete_many_requirements`](crate::layered::s3::delete_many_requirements)
-    /// first.
-    pub fn encode_delete_many<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalDeleteMany<'_>,
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        if plan.objects.is_empty() || plan.objects.len() > MAX_DELETE_KEYS {
-            return Err(InvalidPlan::Keys.into());
-        }
-        for object in plan.objects {
-            validate_key(object.key)?;
-            if object
-                .key
-                .bytes()
-                .any(|byte| byte.is_ascii_control() && byte != b'\t')
-            {
-                return Err(InvalidPlan::KeyControlCharacter.into());
-            }
-            validate_revision(object.revision, false)?;
-        }
-        let needs_checksum = self.bucket.service.is_aws();
-        if needs_checksum && plan.checksum.is_none() {
-            return Err(InvalidPlan::Option.into());
-        }
-        let checksum = plan.checksum.map(TransactionalChecksum::Compute);
-        validate_s3_checksum(checksum, true, &self.checksums)?;
-
-        let mut counted = Writer::new(&mut []);
-        write_delete(&mut counted, plan.objects);
-        let length = counted.position();
-        let pass = Pass::of(buf);
-        let content_sha256 = if pass == Pass::Measure {
-            [b'0'; 64]
-        } else {
-            let mut sum = self.sha256.start();
-            write_delete(&mut sum, plan.objects);
-            encoding::hex(&sum.finish())
-        };
-        let mut text = [0; CHECKSUM_TEXT_LEN];
-        let signed_checksum = self.signed_checksum(
-            checksum,
-            |sum| write_delete(sum, plan.objects),
-            pass,
-            &mut text,
-        );
-        let signed = Signed {
-            method: Method::Post,
-            key: None,
-            query: &[url::literal("delete", "")],
-            headers: signed_checksum.as_slice(),
-            range: RequestedRange::Whole,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            content_sha256: &content_sha256,
-            tags: &[],
-            copy: None,
-        };
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
-        let md5 = checksum.filter(|_| plan.checksum == Some(ChecksumKind::Md5));
-        push_checksum(&mut head, md5, &self.checksums, |sum| {
-            write_delete(sum, plan.objects);
-        });
-        encoded_with_body(head, Method::Post, |out| write_delete(out, plan.objects))
-    }
-
-    /// Reads the response head of a DeleteObjects and reports what to do
-    /// next. A failure is [`DeleteManyHeadOutcome::NeedErrorBody`]: read the
-    /// body and pass it to [`Self::accept_delete_many_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 200 is [`ResponseFault::Status`].
-    pub fn accept_delete_many_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<DeleteManyHeadOutcome<'h>> {
-        accept_delete_many_head(head)
-    }
-
-    /// Finishes a [`DeleteManyHeadOutcome::NeedErrorBody`] with the response
-    /// body. A missing bucket is a [`DeleteManyHeadOutcome::ServiceFailure`]
-    /// with [`ServiceErrorKind::NoSuchContainer`](crate::ServiceErrorKind::NoSuchContainer).
-    pub fn accept_delete_many_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> DeleteManyHeadOutcome<'h> {
-        accept_delete_many_error_body(failure, body)
-    }
-
-    /// Reads the result of each removal out of the response body of a
-    /// DeleteObjects into `into`, and returns how many it read.
-    ///
-    /// The body is decoded in place, and the results borrow it. An array as
-    /// long as the plan's keys holds every result.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Capacity`] if the body holds more results than the
-    /// array, with `required` set to the number it holds.
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a `DeleteResult`, and [`Error::Service`] if it is an error
-    /// document, which S3 can send under status 200.
-    pub fn fill_delete_results<'b>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [DeleteResult<'b>],
-    ) -> Result<usize> {
-        fill_delete_results(body, into)
-    }
 }
 
 fn write_delete(out: &mut dyn ByteSink, objects: &[DeleteTarget<'_>]) {

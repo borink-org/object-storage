@@ -1,4 +1,4 @@
-//! S3 requests signed with each SHA-256 provider, against known answers.
+//! S3 requests signed with each SHA-256 implementation, against known answers.
 //!
 //! The first answer is the GET Object example of the AWS Signature Version 4
 //! documentation for S3. The others were computed by a separate signer,
@@ -25,7 +25,7 @@ fn credentials() -> Credentials<'static> {
 }
 
 // A request from the template that `prepare` writes, signed with each
-// provider, as its URL, its sorted headers and its HTTP/1.1 head. The
+// implementation, as its URL, its sorted headers and its HTTP/1.1 head. The
 // template and the request are written into buffers of exactly the size
 // that an empty buffer reports.
 type Signed = (String, Vec<(String, String)>, String);
@@ -216,7 +216,7 @@ fn a_batch_is_signed_as_each_request_is() {
     sigv4::sign_batch(&stamp, &canonicals, &mut macs);
     for ((unsigned, mut buf), mac) in unsigned.iter().zip(bufs.clone()).zip(&macs) {
         let mut copy = buf.clone();
-        let batched: Vec<_> = s3::finish(unsigned, &mut buf, mac)
+        let batched: Vec<_> = s3::set_signature(unsigned, &mut buf, mac)
             .headers()
             .map(|(n, v)| (n.to_owned(), v.to_owned()))
             .collect();

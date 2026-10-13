@@ -916,9 +916,9 @@ fn write_signed_names(out: &mut Writer<'_>, fixed: &Fixed<'_>, holes: &Holes<'_>
 
 /// Writes the template of `describe` into `buf`.
 ///
-/// A bucket that names an object makes a template of that object: its key
-/// is the template's text, and an operation that names none refuses it with
-/// [`InvalidPlan::Option`].
+/// A bucket that names an object makes a template of that object, whose text
+/// holds the key. An operation that names no object refuses such a bucket
+/// with [`InvalidPlan::Option`].
 pub(super) fn prepare<const Q: usize>(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
@@ -973,7 +973,7 @@ pub(super) fn prepare<const Q: usize>(
 /// buffer it was written into.
 ///
 /// Hash [`Self::canonical`] with SHA-256, compute the HMAC-SHA256 of the
-/// string to sign under the day's signing key, and pass it to [`finish`].
+/// string to sign under the day's signing key, and pass it to [`set_signature`].
 ///
 /// Pass every function that takes a buffer the one that the request was
 /// written into. Another buffer gives a wrong request, but never a panic.
@@ -1185,7 +1185,11 @@ pub fn string_to_sign_prefix<'o>(
 /// `mac` is the HMAC-SHA256 of the string to sign: the prefix that
 /// [`string_to_sign_prefix`] writes, followed by the lowercase hexadecimal
 /// of the SHA-256 of [`Unsigned::canonical`].
-pub fn finish<'r>(unsigned: &Unsigned<'r>, buf: &'r mut [u8], mac: &[u8; 32]) -> WireRequest<'r> {
+pub fn set_signature<'r>(
+    unsigned: &Unsigned<'r>,
+    buf: &'r mut [u8],
+    mac: &[u8; 32],
+) -> WireRequest<'r> {
     if let Some(span) = unsigned.written.signature {
         put(buf, span, &encoding::hex(mac));
     }

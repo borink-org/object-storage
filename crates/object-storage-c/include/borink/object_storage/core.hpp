@@ -512,7 +512,7 @@ inline Property next(Properties &walk) { return borink_next_property(&walk); }
 // no more room than the value. The text is empty when `room` is shorter than
 // the value, and when the value holds a reference that no listing declares.
 inline std::string_view decoded(const Bytes &value, std::span<std::uint8_t> room) {
-    return text_of(borink_decode_into(value, into(room)));
+    return text_of(borink_decode_property(value, into(room)));
 }
 
 // What a describe call wrote into a room.

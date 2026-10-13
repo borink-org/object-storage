@@ -10,7 +10,7 @@
 // decimal `<Size>`, and refuses a repeated field or a section it does not
 // know. It does not check that a name is base64: the service decided what it
 // stored, and a listed ID is passed back to it unchanged. That is what fixes
-// the 43-byte minimum element that `layered::max_blocks_in` divides by.
+// the 43-byte minimum element that `azure::max_blocks_in` divides by.
 
 use crate::azure::{Block, BlockState};
 use crate::xml::decode::decode;
@@ -127,10 +127,7 @@ pub(crate) fn read<'b>(
         }
     }
     if count > room {
-        return Err(Error::Capacity(CapacityError {
-            required: count,
-            ..CapacityError::default()
-        }));
+        return Err(Error::Capacity(CapacityError { required: count }));
     }
     Ok(Listing {
         filled: count,

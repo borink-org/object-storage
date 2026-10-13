@@ -110,7 +110,7 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
         };
         let mut buf = vec![0; 2048];
         let unsigned = s3::encode_put(&template, &bytes, &item, None, &now, &mut buf).unwrap();
-        let request = s3::finish(&unsigned, &mut buf, &[0; 32]);
+        let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
         let found = request
             .headers()
             .find(|(found, _)| *found == name)

@@ -637,7 +637,7 @@ const _: () = {
     assert!(ServiceError::Service as u16 == proto::ServiceErrorKind::Service as u16);
     assert!(ServiceError::InvalidUpload as u16 == proto::ServiceErrorKind::InvalidUpload as u16);
     assert!(ServiceError::NoSuchUpload as u16 == proto::ServiceErrorKind::NoSuchUpload as u16);
-    // A stored template is the core crate's, byte for byte.
+    // A stored template is the protocol crate's, byte for byte.
     assert!(TEMPLATE_LEN == proto::azure::Template::STORED_LEN);
     assert!(TIMESTAMPS_LEN == proto::Timestamps::STORED_LEN);
 };

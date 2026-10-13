@@ -182,7 +182,7 @@ class Client {
     // or with `PlainHttp::Allowed` an HTTP one: see `borink::PlainHttp`.
     //
     // Throws std::runtime_error if the endpoint or the container cannot be
-    // used. The message is the sentence that the core crate wrote. A token
+    // used. The message is the sentence that the protocol crate wrote. A token
     // that cannot be used is reported by the first request.
     static Client open(std::string_view endpoint, std::string_view container,
                        std::string_view token, Limits limits = {},
@@ -195,7 +195,7 @@ class Client {
     // properties from `outcome()` and `head()` afterwards.
     //
     // Throws std::runtime_error if Azure returned no object. The message is
-    // the sentence that the core crate wrote for the outcome.
+    // the sentence that the protocol crate wrote for the outcome.
     void get(const GetItem &item, const Sink &sink, const GetOptions &options = get_options());
 
     // Writes `content` as the whole object that `item` names, with a
@@ -344,8 +344,8 @@ class Client {
         }
     }
 
-    // Reports an outcome that carries no object, in the words of the core
-    // crate.
+    // Reports an outcome that carries no object, in the words of the
+    // protocol crate.
     // `message_` is this client's room for such a sentence, and writing it is
     // the one place that a failing request allocates.
     [[noreturn]] void fail(std::string_view what) {

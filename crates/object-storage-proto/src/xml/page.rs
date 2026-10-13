@@ -113,10 +113,7 @@ pub(super) fn values_of<'b>(
 // the number it holds.
 pub(super) fn check_room(held: usize, room: usize) -> Result<()> {
     if held > room {
-        return Err(Error::Capacity(CapacityError {
-            required: held,
-            ..CapacityError::default()
-        }));
+        return Err(Error::Capacity(CapacityError { required: held }));
     }
     Ok(())
 }

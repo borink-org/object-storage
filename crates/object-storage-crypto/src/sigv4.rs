@@ -7,9 +7,9 @@
 //! # Signing one request
 //!
 //! 1. Derive the day's [`SigningKey`] once a day with [`signing_key`].
-//! 2. Build a [`Stamp`] with [`stamp`] for the instant you sign at. It holds
+//! 2. Build a [`Stamp`] with [`stamp`] for each second you sign at. It holds
 //!    the key and the start of the string to sign, which every request
-//!    signed at that instant shares.
+//!    signed in that second shares.
 //! 3. Encode the request with the operation's `encode_*`, and pass the
 //!    result to [`sign`], which returns the request ready to send.
 //!
@@ -17,7 +17,7 @@
 //!
 //! [`sign_batch`] computes the signatures of many requests, one hash step
 //! over all of them before the next. Pass each signature to
-//! `borink_object_storage_proto::s3::finish`.
+//! `borink_object_storage_proto::s3::set_signature`.
 
 use borink_object_storage_proto::s3::{self, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned};
 use borink_object_storage_proto::sigv4::Credentials;
@@ -103,16 +103,16 @@ pub fn signing_key<S: Sha256>(
     now: &Timestamps,
 ) -> Result<SigningKey<S>> {
     let mut key = s3::signing_key(template, bytes, credentials, now, hmac::<S>)?;
-    let absorbed = HmacKey::new(&key);
+    let hmac_key = HmacKey::new(&key);
     crate::wipe(&mut key);
-    Ok(absorbed)
+    Ok(hmac_key)
 }
 
-/// The signing key, gone on through the start of the string to sign of one
-/// instant.
+/// The HMAC of a signing key, after the start of the string to sign of one
+/// second.
 ///
-/// Build one for each instant you sign at, and sign every request of that
-/// instant from it.
+/// Build one with [`stamp`] for each second you sign at, and sign every
+/// request of that second from it.
 #[derive(Clone, Copy)]
 pub struct Stamp<S> {
     inner: S,
@@ -176,16 +176,16 @@ pub fn sign<'r, S: Sha256>(
     unsigned: &Unsigned<'r>,
     buf: &'r mut [u8],
 ) -> WireRequest<'r> {
-    seal_body::<S>(unsigned, buf);
+    hash_body::<S>(unsigned, buf);
     let mac = stamp.sign(&sha256::<S>(unsigned.canonical(buf)));
-    s3::finish(unsigned, buf, &mac)
+    s3::set_signature(unsigned, buf, &mac)
 }
 
 /// Writes the SHA-256 of the body of `unsigned` into `buf`, where the request
 /// signs it. Does nothing for a request that signs no body of its own.
 ///
 /// [`sign`] calls this. Call it yourself before [`sign_batch`].
-pub fn seal_body<S: Sha256>(unsigned: &Unsigned<'_>, buf: &mut [u8]) {
+pub fn hash_body<S: Sha256>(unsigned: &Unsigned<'_>, buf: &mut [u8]) {
     if unsigned.signs_body()
         && let Some(body) = unsigned.body(buf)
     {
@@ -198,7 +198,7 @@ pub fn seal_body<S: Sha256>(unsigned: &Unsigned<'_>, buf: &mut [u8]) {
 /// canonical request, then the HMAC of every string to sign.
 ///
 /// `macs` receives one signature for each canonical request. Pass each to
-/// `borink_object_storage_proto::s3::finish` with its request.
+/// `borink_object_storage_proto::s3::set_signature` with its request.
 pub fn sign_batch<S: Sha256>(stamp: &Stamp<S>, canonicals: &[&[u8]], macs: &mut [[u8; 32]]) {
     for (canonical, mac) in canonicals.iter().zip(macs.iter_mut()) {
         *mac = sha256::<S>(canonical);

@@ -128,7 +128,7 @@ fn sign(unsigned: Result<s3::Unsigned<'_>>, buf: &mut [u8]) -> bool {
         let _ = (unsigned.body(buf), unsigned.signs_body());
         s3::set_body_hash(&unsigned, buf, &SHA);
         let _ = s3::set_body_checksum(&unsigned, buf, &Digest::crc64(7));
-        read(Ok(s3::finish(&unsigned, buf, &[9; 32])));
+        read(Ok(s3::set_signature(&unsigned, buf, &[9; 32])));
     }
     true
 }

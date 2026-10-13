@@ -1,9 +1,9 @@
-//! What the entry points do between reading their pointers and calling the
-//! core crate.
+//! What the entry points do between reading their pointers and calling
+//! the protocol crate.
 //!
 //! Every value here is a Rust value already: [`crate::ptr`] read the pointers.
 //! Each function answers for one stage that several entry points share, and a
-//! refusal at any stage is one of the core crate's own errors.
+//! refusal at any stage is one of the protocol crate's own errors.
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +19,7 @@ use borink_object_storage_proto::{
     Container, Error, InvalidPlan, ListMarker, Listing, ResponseHead, WireRequest as Request, azure,
 };
 
-// The core crate's container, which every template is written from. A
+// The protocol crate's container, which every template is written from. A
 // value that is not text cannot be the thing it names, so it fails as that
 // thing, not as a fault of its own.
 pub(crate) fn container(values: Option<ContainerValues<'_>>) -> proto::Result<Container<'_>> {
@@ -165,7 +165,7 @@ fn filled(page: Listing<'_>) -> Fill {
 
 // Reads a page into the caller's array.
 //
-// The core crate writes the caller's entries itself: a C entry is built from
+// The protocol crate writes the caller's entries itself: a C entry is built from
 // a core entry as each is read, so no array stands in between and the page is
 // read in one call.
 pub(crate) fn filling(body: &mut [u8], into: &mut [ListEntry]) -> proto::Result<Fill> {
@@ -194,7 +194,7 @@ pub(crate) fn filling_with(
 }
 
 // The head, read where your HTTP library already put it. A name that is not
-// text is skipped: the core crate looks for its headers by text, so such a
+// text is skipped: the protocol crate looks for its headers by text, so such a
 // name is none of them.
 pub(crate) fn head_of<'a>(
     status: u16,
@@ -204,7 +204,7 @@ pub(crate) fn head_of<'a>(
     ResponseHead::from_headers(status, named)
 }
 
-// A failure that the caller passed back, as the core crate's record. One
+// A failure that the caller passed back, as the protocol crate's record. One
 // whose category this crate does not define is refused.
 pub(crate) fn failure(failure: Option<proto::Failure<'_>>) -> proto::Result<proto::Failure<'_>> {
     failure.ok_or(UNKNOWN)

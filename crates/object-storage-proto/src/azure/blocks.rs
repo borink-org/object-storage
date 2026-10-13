@@ -1,9 +1,8 @@
 // Azure block blobs: Put Block, Put Block List and Get Block List.
 //
 // A block blob is written in blocks: stage each block under an ID that you
-// choose, then commit an ordered list of them. The commit takes the shared
-// plan `PhysicalCommit`, and the three operations answer with the shared
-// outcomes.
+// choose, then commit an ordered list of them. The three operations answer
+// with the shared outcomes.
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
 // alone: a normal build would report it unused.
@@ -14,9 +13,8 @@ use crate::azure::template::{
     prepare as prepare_template,
 };
 use crate::azure::{
-    AzureNamespace, Blobs, Write, body_kind, exists_where_none_asked, failed, named,
-    names_failed_condition, push_metadata, push_stored, validate_key, validate_metadata,
-    validate_options,
+    AzureNamespace, body_kind, failed, named, names_existing_object, names_failed_condition,
+    validate_metadata,
 };
 use crate::azure::{
     Container, ObjectText, azure_tag_char, encode_object, prepare_object, stored_fields,
@@ -25,23 +23,17 @@ use crate::azure::{
 use crate::checksum::{BASE64_LEN, ChecksumKind};
 use crate::common::{
     checksum_text, condition_header, validate_checksum_item, validate_properties, validate_tags,
-    validate_template_options,
 };
-use crate::common::{
-    decimal_header, encoded, encoded_with_body, finish_with_body, meta_of, push_checksum,
-    push_condition, text_header, validate_condition,
-};
+use crate::common::{decimal_header, finish_with_body, meta_of, text_header, validate_condition};
+use crate::request::ByteSink;
 use crate::request::Writer;
-use crate::request::{ByteSink, HeadWriter, U64Decimal};
 use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
-use crate::url;
 use crate::url::QueryValue;
 use crate::{ChecksumValue, ConditionValue, MetadataPair, ObjectItem, RevisionKind, StageOptions};
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, Failure, HeaderSpan, InvalidPlan, LegacyRequest,
-    ListPartsHeadOutcome, Listing, Method, ObjectMeta, Payload, PhysicalCommit, RequestedRange,
-    ResponseFault, ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
-    WriteOptions,
+    CommitHeadOutcome, CommitShape, ConditionKind, Failure, InvalidPlan, ListPartsHeadOutcome,
+    Listing, Method, ObjectMeta, Payload, ResponseFault, ResponseHead, Result, ServiceErrorKind,
+    StageHeadOutcome, Timestamps, WriteOptions,
 };
 
 /// Which stored version of a block Put Block List must use.
@@ -87,7 +79,7 @@ pub struct BlockRef<'a> {
     /// The block ID, as the base64 text that the service stores.
     ///
     /// Choose the bytes yourself and write them with
-    /// [`layered::block_id`](crate::layered::block_id), or pass a listed
+    /// [`block_id`](crate::azure::block_id), or pass a listed
     /// [`Block::id`] unchanged. The encoder checks the text: it is not empty,
     /// and it is at most 88 characters of standard base64 with at most two `=`
     /// of padding. That is at most 64 decoded bytes. The encoder percent-encodes
@@ -164,372 +156,9 @@ pub struct Block<'b> {
     pub state: BlockState,
 }
 
-/// A native Put Block plan: stage one block of an object.
-#[derive(Debug, Clone, Copy)]
-pub struct PhysicalStageBlock<'a> {
-    /// Object key.
-    pub key: &'a str,
-    /// The block ID, as base64 text. See [`BlockRef::id`] for the rules.
-    pub id: &'a str,
-    /// The options of the stage, such as a checksum of the block. A stage
-    /// refuses [`WriteOptions::declared_md5`].
-    pub options: WriteOptions<'a>,
-}
-
-impl<'a> PhysicalStageBlock<'a> {
-    /// Creates a plan that stages `id` for `key` with no options.
-    pub const fn new(key: &'a str, id: &'a str) -> Self {
-        Self {
-            key,
-            id,
-            options: WriteOptions::new(),
-        }
-    }
-}
-
-/// A native Get Block List plan: read which blocks an object holds.
-#[derive(Debug, Clone, Copy)]
-pub struct PhysicalListBlocks<'a> {
-    /// Object key.
-    pub key: &'a str,
-    /// Committed, staged, or both lists.
-    pub kind: BlockListKind,
-    /// Optional snapshot target; mutually exclusive with version.
-    pub snapshot: Option<&'a str>,
-    /// Optional version target.
-    pub version: Option<&'a str>,
-}
-
-impl<'a> PhysicalListBlocks<'a> {
-    /// A read of the current object's blocks of `kind`.
-    pub const fn new(key: &'a str, kind: BlockListKind) -> Self {
-        Self {
-            key,
-            kind,
-            snapshot: None,
-            version: None,
-        }
-    }
-}
-
-impl<'a> Blobs<'a> {
-    /// Writes the request head for an Azure Get Block List into `buf`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// or if it names both a snapshot and a version. Returns
-    /// [`Error::Capacity`] as [`encode_get`](crate::azure::encode_get) does.
-    pub fn encode_list_blocks<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalListBlocks<'_>,
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        validate_block_key(plan.key, self.namespace)?;
-        if (plan.snapshot.is_some() && plan.version.is_some())
-            || plan.snapshot.is_some_and(str::is_empty)
-            || plan.version.is_some_and(str::is_empty)
-        {
-            return Err(InvalidPlan::Option.into());
-        }
-        let kind = match plan.kind {
-            BlockListKind::Committed => "committed",
-            BlockListKind::Staged => "uncommitted",
-            BlockListKind::All => "all",
-        };
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(
-            &mut head,
-            Some(plan.key),
-            &[
-                url::literal("comp", "blocklist"),
-                url::literal("blocklisttype", kind),
-                url::encoded("snapshot", plan.snapshot),
-                url::encoded("versionid", plan.version),
-            ],
-            RequestedRange::Whole,
-            now,
-        )?;
-        encoded(head, Method::Get, Payload::Slice(&[]))
-    }
-
-    /// Writes the request head for an Azure Put Block into `buf`.
-    ///
-    /// The head states the length of `content`, which stays where you put it,
-    /// as for [`encode_put`](crate::azure::encode_put).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// or if `content` is longer than one block may be. Returns
-    /// [`Error::Capacity`] as [`encode_put`](crate::azure::encode_put) does, or call
-    /// [`layered::stage_block_requirements`](crate::layered::stage_block_requirements)
-    /// first.
-    pub fn encode_stage_block<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalStageBlock<'_>,
-        content: Payload<'r>,
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        validate_block_key(plan.key, self.namespace)?;
-        validate_block_id(plan.id)?;
-        if content.len() > MAX_STAGE_LEN {
-            return Err(InvalidPlan::PayloadTooLarge.into());
-        }
-        validate_options(&plan.options, Write::Stage, content.bytes().is_some(), self)?;
-        let mut head = HeadWriter::new(buf, headers);
-        let query = [
-            url::literal("comp", "block"),
-            url::encoded("blockid", plan.id),
-        ];
-        self.build(
-            &mut head,
-            Some(plan.key),
-            &query,
-            RequestedRange::Whole,
-            now,
-        )?;
-        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
-        push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
-            sum.update(content.bytes().unwrap_or(&[]));
-        });
-        encoded(head, Method::Put, content)
-    }
-
-    /// Writes an Azure Put Block List into `buf`: the head, then the XML
-    /// body after it.
-    ///
-    /// `blocks` become the object in this order, each looked up where its
-    /// [`BlockSource`] says. The body is written into `buf` after the head,
-    /// so [`LegacyRequest::body_span`] names it and [`LegacyRequest::payload`]
-    /// borrows it; send both before reusing `buf`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `plan` cannot become an Azure request,
-    /// such as [`InvalidPlan::Option`] for a plan that sets
-    /// [`PhysicalCommit::size`], if `blocks` holds more than 50,000 entries or
-    /// an ID that fails the checks on [`BlockRef::id`]. Returns
-    /// [`Error::Capacity`] with the bytes that the head and the body need
-    /// together, or call
-    /// [`layered::commit_blocks_requirements`](crate::layered::commit_blocks_requirements)
-    /// first.
-    pub fn encode_commit_blocks<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalCommit<'_>,
-        blocks: &[BlockRef<'_>],
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        self.encode_commit_blocks_from_iter(
-            buf,
-            headers,
-            plan,
-            blocks.iter().map(|block| (block.id, block.source)),
-            now,
-        )
-    }
-
-    /// [`Blobs::encode_commit_blocks`] over block references that are not in
-    /// one array.
-    ///
-    /// Use this when the references are produced rather than stored: from an
-    /// array in another language, or from an ID derived per index. No second
-    /// array of references is built. This method still copies each ID into
-    /// the body.
-    ///
-    /// `blocks` is traversed twice: once to validate the IDs and size the
-    /// body, once to write it. Every traversal must yield the same items in
-    /// the same order, because the head states the body length that the first
-    /// traversal measured.
-    ///
-    /// # Errors
-    ///
-    /// As [`Blobs::encode_commit_blocks`].
-    pub fn encode_commit_blocks_from_iter<'r, I>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalCommit<'_>,
-        blocks: impl Iterator<Item = (I, BlockSource)> + Clone,
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>>
-    where
-        I: AsRef<str>,
-    {
-        validate_block_key(plan.key, self.namespace)?;
-        validate_condition(plan.condition, plan.condition_value)?;
-        validate_metadata(plan.metadata)?;
-        validate_options(&plan.options, Write::Commit, true, self)?;
-        // Azure does not check the length of the blocks it commits.
-        if plan.size.is_some() {
-            return Err(InvalidPlan::Option.into());
-        }
-        for (index, (id, _)) in blocks.clone().enumerate() {
-            if index >= MAX_BLOCKS {
-                return Err(InvalidPlan::Parts.into());
-            }
-            validate_block_id(id.as_ref())?;
-        }
-        let length = block_list_len(blocks.clone());
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(
-            &mut head,
-            Some(plan.key),
-            &[url::literal("comp", "blocklist")],
-            RequestedRange::Whole,
-            now,
-        )?;
-        head.header("content-length", U64Decimal::new(length as u64).as_bytes());
-        // The content of a commit is the block list, so a checksum of the
-        // content is a checksum of that text. The object's own MD5 is a
-        // property of the blob, `x-ms-blob-content-md5`.
-        push_checksum(&mut head, plan.options.checksum, &self.checksums, |sum| {
-            write_block_list(sum, blocks.clone());
-        });
-        if let Some(md5) = plan.options.declared_md5 {
-            head.header("x-ms-blob-content-md5", md5.as_bytes());
-        }
-        push_stored(&mut head, &plan.options);
-        push_metadata(&mut head, plan.metadata);
-        push_condition(&mut head, plan.condition, plan.condition_value);
-        encoded_with_body(head, Method::Put, |out| write_block_list(out, blocks))
-    }
-
-    /// Reads a Get Block List body whole into `into`.
-    ///
-    /// Both sections are read in the order the service wrote them, and each
-    /// entry names its section in [`Block::state`]. IDs are decoded in place,
-    /// so the entries borrow `body`, and the body cannot be read again. On an
-    /// error nothing in `into` is meaningful; fetch the body again before
-    /// retrying.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Capacity`] with the number of blocks the body holds if
-    /// `into` is shorter than that;
-    /// [`layered::max_blocks_in`](crate::layered::max_blocks_in) bounds it
-    /// from the body's length. Returns [`Error::Response`] if the body is not
-    /// a block list.
-    pub fn fill_blocks<'b, E: From<Block<'b>>>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [E],
-    ) -> Result<Listing<'b>> {
-        fill_blocks(body, into)
-    }
-
-    /// Reads the head that answers a stage.
-    ///
-    /// Every head that Azure sends becomes a [`StageHeadOutcome`],
-    /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`StageHeadOutcome::NeedErrorBody`]: read the
-    /// body and pass it to [`Self::accept_stage_block_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status that a stage never returns is [`ResponseFault::Status`].
-    pub fn accept_stage_block_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<StageHeadOutcome<'h>> {
-        accept_stage_block_head(head)
-    }
-
-    /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// Pass the [`Failure`] of that outcome and the body
-    /// that you read.
-    pub fn accept_stage_block_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> StageHeadOutcome<'h> {
-        accept_stage_block_error_body(failure, body)
-    }
-
-    /// Reads the head that answers a commit.
-    ///
-    /// Pass the `shape` that [`PhysicalCommit::shape`] gave you before
-    /// the request. A failed condition is reported as
-    /// [`CommitHeadOutcome::PreconditionFailed`] only if that plan
-    /// carried a condition. Otherwise a 412 is a service failure that names
-    /// its code.
-    ///
-    /// Every head that Azure sends becomes a [`CommitHeadOutcome`],
-    /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`CommitHeadOutcome::NeedErrorBody`]: read the
-    /// body and pass it to [`Self::accept_commit_blocks_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status that a commit never returns is [`ResponseFault::Status`].
-    pub fn accept_commit_blocks_head<'h>(
-        &self,
-        shape: CommitShape,
-        head: ResponseHead<'h>,
-    ) -> Result<CommitHeadOutcome<'h>> {
-        accept_commit_blocks_head(shape, head)
-    }
-
-    /// Finishes a [`CommitHeadOutcome::NeedErrorBody`] with the
-    /// response body.
-    ///
-    /// Pass the `shape` of the commit, the [`Failure`] of
-    /// that outcome and the body that you read.
-    pub fn accept_commit_blocks_error_body<'h>(
-        &self,
-        shape: CommitShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> CommitHeadOutcome<'h> {
-        accept_commit_blocks_error_body(shape, failure, body)
-    }
-
-    /// Reads the head that answers a block listing.
-    ///
-    /// Every head that Azure sends becomes a [`ListPartsHeadOutcome`],
-    /// including the heads that report a failure. If the head names no error
-    /// code, the outcome is [`ListPartsHeadOutcome::NeedErrorBody`]: read the
-    /// body and pass it to [`Self::accept_list_blocks_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 200 is [`ResponseFault::Status`], and a
-    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
-    pub fn accept_list_blocks_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<ListPartsHeadOutcome<'h>> {
-        accept_list_blocks_head(head)
-    }
-
-    /// Finishes a [`ListPartsHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// Pass the [`Failure`] of that outcome and the body
-    /// that you read.
-    pub fn accept_list_blocks_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> ListPartsHeadOutcome<'h> {
-        accept_list_blocks_error_body(failure, body)
-    }
-}
-
 /// The most bytes that Azure stages in one `Put Block` request.
 ///
-/// [`Blobs::encode_stage_block`] refuses a longer payload with
+/// [`encode_stage_block`] refuses a longer payload with
 /// [`InvalidPlan::PayloadTooLarge`].
 pub const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
 const MAX_BLOCKS: usize = 50_000;
@@ -541,10 +170,6 @@ fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
         last_modified: text_header(head.last_modified)?,
         ..meta_of(head)
     })
-}
-
-fn validate_block_key(key: &str, namespace: AzureNamespace) -> Result<()> {
-    validate_key(key, namespace)
 }
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
@@ -607,73 +232,6 @@ fn write_block_list<I: AsRef<str>>(
     out.push(COMMIT_CLOSE);
 }
 
-/// Azure block-operation response headers, borrowing transport-owned values.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BlockResponseHead<'a> {
-    /// Shared headers, including raw native error code and request ID.
-    pub common: ResponseHead<'a>,
-    /// The `content-md5` value.
-    pub content_md5: Option<&'a [u8]>,
-    /// The `x-ms-content-crc64` value.
-    pub content_crc64: Option<&'a [u8]>,
-    /// The `x-ms-request-server-encrypted` value.
-    pub server_encrypted: Option<&'a [u8]>,
-    /// The `x-ms-encryption-key-sha256` value.
-    pub encryption_key_sha256: Option<&'a [u8]>,
-    /// The `x-ms-encryption-scope` value.
-    pub encryption_scope: Option<&'a [u8]>,
-    /// The `x-ms-client-request-id` value.
-    pub client_request_id: Option<&'a [u8]>,
-    /// The `date` value.
-    pub date: Option<&'a [u8]>,
-    /// The `x-ms-blob-content-length` value.
-    pub blob_content_length: Option<&'a [u8]>,
-}
-
-impl<'a> BlockResponseHead<'a> {
-    /// Reads shared and native fields in one pass.
-    pub fn from_headers(
-        status: u16,
-        headers: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-    ) -> Self {
-        let mut result = Self {
-            common: ResponseHead::new(status),
-            ..Self::default()
-        };
-        for (name, value) in headers {
-            result.insert(name, value);
-        }
-        result
-    }
-
-    /// Consumes an incremental parser's header without copying its value.
-    pub fn insert(&mut self, name: &str, value: &'a [u8]) {
-        let slot = if name.eq_ignore_ascii_case("content-md5") {
-            &mut self.content_md5
-        } else if name.eq_ignore_ascii_case("x-ms-content-crc64") {
-            &mut self.content_crc64
-        } else if name.eq_ignore_ascii_case("x-ms-request-server-encrypted") {
-            &mut self.server_encrypted
-        } else if name.eq_ignore_ascii_case("x-ms-encryption-key-sha256") {
-            &mut self.encryption_key_sha256
-        } else if name.eq_ignore_ascii_case("x-ms-encryption-scope") {
-            &mut self.encryption_scope
-        } else if name.eq_ignore_ascii_case("x-ms-client-request-id") {
-            &mut self.client_request_id
-        } else if name.eq_ignore_ascii_case("date") {
-            &mut self.date
-        } else if name.eq_ignore_ascii_case("x-ms-blob-content-length") {
-            &mut self.blob_content_length
-        } else {
-            self.common.insert(name, value);
-            return;
-        };
-        if slot.is_none() {
-            *slot = Some(value);
-        }
-    }
-}
-
 /// One Put Block, which stages one block of a blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageBlockItem<'i> {
@@ -713,9 +271,7 @@ pub struct CommitOptions<'o> {
     /// [`PutOptions::metadata`](crate::PutOptions::metadata).
     pub metadata: &'o [MetadataPair<'o>],
     /// The content properties, the tags and the access tier to store with
-    /// each blob. [`WriteOptions::checksum`] and
-    /// [`WriteOptions::declared_md5`] are refused: a commit declares the
-    /// blob's MD5 in [`CommitItem::content_md5`].
+    /// each blob.
     pub options: WriteOptions<'o>,
     /// Whether each commit declares the MD5 of the blob it commits, which
     /// Azure stores and returns on a read but does not check.
@@ -906,7 +462,6 @@ pub fn prepare_commit_blocks(
     options: &CommitOptions<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    validate_template_options(&options.options)?;
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -1087,7 +642,7 @@ pub fn accept_commit_blocks_head<'h>(
         {
             Ok(CommitHeadOutcome::PreconditionFailed)
         }
-        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, named(&head)) => {
             Ok(CommitHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
@@ -1103,7 +658,7 @@ pub fn accept_commit_blocks_error_body<'h>(
 ) -> CommitHeadOutcome<'h> {
     let kind = body_kind(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
-        || exists_where_none_asked(failure.status, shape.condition, kind)
+        || names_existing_object(failure.status, shape.condition, kind)
     {
         return CommitHeadOutcome::PreconditionFailed;
     }
@@ -1216,4 +771,53 @@ pub fn fill_blocks<'b, E: From<Block<'b>>>(
     into: &mut [E],
 ) -> Result<Listing<'b>> {
     crate::xml::azure::blocks::fill_blocks(body, into)
+}
+
+/// The most blocks that a Get Block List body of `len` bytes can hold.
+///
+/// Use it to size the array for [`fill_blocks`] from the
+/// `expected_len` of
+/// [`ListPartsHeadOutcome::Parts`](crate::ListPartsHeadOutcome::Parts).
+/// The smallest element that the reader accepts is
+/// `<Block><Name>x</Name><Size>0</Size></Block>`, 43 bytes. The reader
+/// requires a name and a size, and does not check that the name is base64.
+pub const fn max_blocks_in(len: usize) -> usize {
+    len / 43
+}
+
+/// Writes the block ID for `bytes` in the base64 form that Azure stores.
+///
+/// A block ID is base64 text on the wire, and decodes to at most 64 bytes.
+/// Every block of one blob must decode to the same length. Choose the bytes
+/// however you number blocks, and pass what this returns as [`BlockRef::id`]
+/// or [`StageBlockItem::id`].
+///
+/// Copies the encoding into `into` and returns it. The encoding is four
+/// characters for every three bytes, rounded up, so 88 bytes of `into` fit
+/// every ID. Returns [`None`] if `bytes` is empty or longer than 64 bytes,
+/// or if `into` is shorter than the encoding.
+pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
+    if bytes.is_empty() || bytes.len() > 64 {
+        return None;
+    }
+    let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
+    Some(crate::encoding::base64_into(bytes, into))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_id;
+
+    #[test]
+    fn writes_the_base64_of_chosen_bytes() {
+        let mut into = [0; 12];
+        assert_eq!(block_id(&[0, 0, 0, 0], &mut into), Some("AAAAAA=="));
+        assert_eq!(block_id(&[0, 0, 0, 1], &mut into), Some("AAAAAQ=="));
+        assert_eq!(block_id(b"ab", &mut into), Some("YWI="));
+        assert_eq!(block_id(b"abc", &mut into), Some("YWJj"));
+        assert_eq!(block_id(&[0xfb, 0xff], &mut into), Some("+/8="));
+        assert_eq!(block_id(b"", &mut into), None);
+        assert_eq!(block_id(&[0; 65], &mut [0; 88]), None);
+        assert_eq!(block_id(b"abc", &mut [0; 3]), None);
+    }
 }

@@ -124,12 +124,11 @@ impl RequestedRange {
     }
 }
 
-/// The precondition that a plan carries.
+/// The precondition that every request of a template carries.
 ///
-/// The plan's `condition_value` holds what the precondition compares
-/// against: a [`ConditionValue::ETag`] for the first two, and a
-/// [`ConditionValue::Time`] for the last two. Set both with the plan's
-/// `with_condition`, which takes a [`Condition`].
+/// Each request's item holds what the precondition compares against, in its
+/// `condition_value`: a [`ConditionValue::ETag`] for the first two, and a
+/// [`ConditionValue::Time`] for the last two.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -169,46 +168,9 @@ pub enum ConditionValue<'h> {
     /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
     ///
     /// To compare against a `Last-Modified` that the service sent, read it
-    /// with [`layered::http_date_ms`](crate::layered::http_date_ms) and
+    /// with [`http_date_ms`](crate::http_date_ms) and
     /// divide by 1000.
     Time(u64),
-}
-
-/// A precondition and what it compares against, which a plan's
-/// `with_condition` stores as its `condition` and `condition_value`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Condition<'h> {
-    /// The request succeeds only if the current entity tag is this one, or
-    /// if any object exists for `*`.
-    IfMatch(&'h [u8]),
-    /// The request succeeds only if the current entity tag is not this one,
-    /// or if no object exists for `*`.
-    IfNoneMatch(&'h [u8]),
-    /// The request succeeds only if the object changed after this instant,
-    /// in seconds since the Unix epoch.
-    IfModifiedSince(u64),
-    /// The request succeeds only if the object has not changed since this
-    /// instant, in seconds since the Unix epoch.
-    IfUnmodifiedSince(u64),
-}
-
-impl<'h> Condition<'h> {
-    // The kind and the value that a plan stores apart.
-    pub(crate) const fn split(self) -> (ConditionKind, Option<ConditionValue<'h>>) {
-        match self {
-            Self::IfMatch(tag) => (ConditionKind::IfMatch, Some(ConditionValue::ETag(tag))),
-            Self::IfNoneMatch(tag) => (ConditionKind::IfNoneMatch, Some(ConditionValue::ETag(tag))),
-            Self::IfModifiedSince(seconds) => (
-                ConditionKind::IfModifiedSince,
-                Some(ConditionValue::Time(seconds)),
-            ),
-            Self::IfUnmodifiedSince(seconds) => (
-                ConditionKind::IfUnmodifiedSince,
-                Some(ConditionValue::Time(seconds)),
-            ),
-        }
-    }
 }
 
 impl ConditionKind {
@@ -461,58 +423,6 @@ pub struct MetadataPair<'h> {
     pub value: &'h str,
 }
 
-/// A checksum of the content, which Azure compares against the bytes it
-/// receives.
-///
-/// Azure refuses a write whose content does not match, with 400
-/// `Md5Mismatch` or `Crc64Mismatch`. The text is base64: of sixteen bytes
-/// for an MD5, of eight for a CRC64.
-///
-/// # What Azure stores
-///
-/// A whole-object write stores an MD5 whether or not you sent one, and
-/// stores a CRC64 only if you sent one. A listing reports both, as
-/// [`BlobProperty::ContentMd5`] and [`BlobProperty::ContentCrc64`]. A head
-/// read reports the MD5 alone. An object written in blocks stores neither
-/// unless the commit declares one: see [`WriteOptions::declared_md5`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TransactionalChecksum<'h> {
-    /// The base64 of the MD5 of the content, sent as `Content-MD5`.
-    Md5(&'h str),
-    /// The base64 of the CRC-64/NVME of the content.
-    ///
-    /// Azure takes it as `x-ms-content-crc64`, of the eight bytes in
-    /// little-endian order, as [`Digest::crc64`](crate::Digest::crc64) holds
-    /// them. S3 takes it as `x-amz-checksum-crc64nvme`, of the eight bytes
-    /// in big-endian order.
-    Crc64(&'h str),
-    /// The base64 of the CRC32 of the content, sent as
-    /// `x-amz-checksum-crc32`. S3 only.
-    Crc32(&'h str),
-    /// The base64 of the CRC32C of the content, sent as
-    /// `x-amz-checksum-crc32c`. S3 only.
-    Crc32c(&'h str),
-    /// The base64 of the SHA-1 of the content, sent as
-    /// `x-amz-checksum-sha1`. S3 only.
-    Sha1(&'h str),
-    /// The base64 of the SHA-256 of the content, sent as
-    /// `x-amz-checksum-sha256`. S3 only.
-    Sha256(&'h str),
-    /// A checksum of this kind that the encoder computes and sends.
-    ///
-    /// The encoder computes it with the provider of that kind that
-    /// [`Blobs::with_checksum`](crate::Blobs::with_checksum) or
-    /// [`s3::Objects::with_checksum`](crate::s3::Objects::with_checksum)
-    /// registered. It can only sum content that it holds: a
-    /// [`Payload::Slice`], or the list of parts of a commit. It refuses the plan with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option) if no provider of
-    /// that kind is registered, or if the payload is [`Payload::Streamed`].
-    /// For a streamed payload, compute the checksum yourself before you
-    /// encode and pass the text.
-    Compute(crate::checksum::ChecksumKind),
-}
-
 /// The properties that describe an object's content, which a write stores
 /// and a read returns in the response head.
 ///
@@ -590,38 +500,6 @@ pub struct Tag<'h> {
     pub value: &'h str,
 }
 
-/// A request that replaces the tags of an object: an Azure Set Blob Tags, or
-/// an S3 PutObjectTagging.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PhysicalSetTags<'h> {
-    /// The object key, under the rules of [Object keys](crate#object-keys).
-    pub key: &'h str,
-    /// The tags that the object then holds, and no others. An empty list
-    /// removes every tag.
-    pub tags: &'h [Tag<'h>],
-    /// A checksum of the request body for the encoder to compute and send,
-    /// with the provider of that kind that the client registered.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
-    /// The version whose tags to replace, or [`None`] for the object as it
-    /// is now. Each version keeps its own tags. Azure also replaces the tags
-    /// of a snapshot, apart from the object's, and S3, which keeps no
-    /// snapshots, refuses one with
-    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
-    pub revision: Option<Revision<'h>>,
-}
-
-impl<'h> PhysicalSetTags<'h> {
-    /// Creates a plan that gives `key` these tags, with no checksum.
-    pub const fn new(key: &'h str, tags: &'h [Tag<'h>]) -> Self {
-        Self {
-            key,
-            tags,
-            checksum: None,
-            revision: None,
-        }
-    }
-}
-
 /// One object of a removal of several: its key, and the snapshot or version
 /// to remove.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -651,58 +529,16 @@ impl<'h> From<&'h str> for DeleteTarget<'h> {
     }
 }
 
-/// A removal of several objects in one request: an Azure Blob Batch of
-/// Delete Blob requests, or an S3 DeleteObjects.
-///
-/// The service removes each object on its own, and answers with a result for
-/// each: see [`DeleteManyHeadOutcome`](crate::DeleteManyHeadOutcome).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PhysicalDeleteMany<'h> {
-    /// The objects to remove. Azure takes at most 256 in one request, and
-    /// S3 1,000.
-    pub objects: &'h [DeleteTarget<'h>],
-    /// A checksum of the request body for the encoder to compute and send,
-    /// with the provider of that kind that the client registered. AWS takes
-    /// a removal of several objects only with one.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
-}
-
-impl<'h> PhysicalDeleteMany<'h> {
-    /// Creates a plan that removes these objects, with no checksum.
-    pub const fn new(objects: &'h [DeleteTarget<'h>]) -> Self {
-        Self {
-            objects,
-            checksum: None,
-        }
-    }
-}
-
 /// The options of a write.
 ///
-/// [`PutOptions::options`](crate::PutOptions::options), [`PhysicalCommit::options`],
-/// [`azure::PhysicalStageBlock::options`](crate::azure::PhysicalStageBlock::options)
-/// and [`s3::PhysicalStagePart::options`](crate::s3::PhysicalStagePart::options)
+/// [`PutOptions::options`], [`CopyOptions::options`],
+/// [`azure::CommitOptions::options`](crate::azure::CommitOptions::options)
+/// and
+/// [`s3::CreateUploadOptions::options`](crate::s3::CreateUploadOptions::options)
 /// each hold one. Build it with `..Default::default()` or [`Self::new`], so
 /// that a field added later does not break your code.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriteOptions<'h> {
-    /// A checksum of the content, which the service compares against the
-    /// bytes it receives. Azure takes an MD5 or a CRC64, and so does a part
-    /// on S3. A whole-object write to S3 takes any of the kinds.
-    ///
-    /// The content of a commit is its list of parts, so on a commit this is a
-    /// checksum of that text.
-    pub checksum: Option<TransactionalChecksum<'h>>,
-    /// The base64 of an MD5 to store as the object's `Content-MD5`. Azure
-    /// only.
-    ///
-    /// Azure stores this value without comparing it to the content. Only a
-    /// commit takes it, because an object written in blocks stores no
-    /// checksum unless the commit declares one. A whole-object write or a
-    /// stage that sets it is refused with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option), and so is any S3
-    /// write that sets it.
-    pub declared_md5: Option<&'h str>,
     /// The content properties to store with the object.
     ///
     /// A write of a whole object takes them, and so does the write that
@@ -728,8 +564,6 @@ impl<'h> WriteOptions<'h> {
     /// This is the same value as [`Default::default`], from a `const fn`.
     pub const fn new() -> Self {
         Self {
-            checksum: None,
-            declared_md5: None,
             properties: ContentProperties::new(),
             tags: &[],
             storage_class: None,
@@ -899,100 +733,16 @@ pub struct PutShape {
     pub condition: ConditionKind,
 }
 
-/// The part of a [`PhysicalCommit`] that holds no borrows.
+/// What reading the answer to a commit needs to know of its template.
 ///
-/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to the
-/// method that reads the response, such as
-/// [`Blobs::accept_commit_blocks_head`](crate::Blobs::accept_commit_blocks_head).
+/// [`azure::Template::commit_shape`](crate::azure::Template::commit_shape)
+/// and [`s3::Template::commit_shape`](crate::s3::Template::commit_shape)
+/// return it. Pass it to the function that reads the response, such as
+/// [`azure::accept_commit_blocks_head`](crate::azure::accept_commit_blocks_head).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommitShape {
     /// The precondition on the object being committed.
     pub condition: ConditionKind,
-}
-
-/// One commit, which publishes an ordered list of staged parts as an object.
-///
-/// An object written in parts is written in three steps. Stage each part,
-/// commit the list of them with this plan, and read what the service holds
-/// with a listing of the parts. On Azure, a part is a block: see
-/// [`Blobs::encode_commit_blocks`](crate::Blobs::encode_commit_blocks). On
-/// S3, the parts belong to an upload, which you create first: see
-/// [`s3::Objects::encode_commit_parts`](crate::s3::Objects::encode_commit_parts).
-///
-/// The list of parts is not in the plan. Pass it beside the plan: it may be
-/// long, and a binding produces it rather than holding it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalCommit<'a> {
-    /// The object key, as for [Object keys](crate#object-keys).
-    ///
-    /// On S3 it is also the key the upload was created for.
-    pub key: &'a str,
-    /// The condition that the commit carries.
-    ///
-    /// The commit publishes the object only if the condition holds for the
-    /// object that the key holds before. [`ConditionKind::IfNoneMatch`] with
-    /// `*` publishes it only if the key holds none.
-    pub condition: ConditionKind,
-    /// What `condition` compares against: see [`ConditionValue`].
-    pub condition_value: Option<ConditionValue<'a>>,
-    /// The metadata pairs to store with the object.
-    ///
-    /// A commit replaces the whole set, as [`PutOptions::metadata`](crate::PutOptions::metadata) does.
-    /// Azure takes them here. S3 takes them when the upload is created, and
-    /// refuses a commit that carries any with [`InvalidPlan::Option`].
-    ///
-    /// [`InvalidPlan::Option`]: crate::InvalidPlan::Option
-    pub metadata: &'a [MetadataPair<'a>],
-    /// The options of the commit.
-    ///
-    /// The content of a commit is its list of parts, so a checksum in
-    /// [`WriteOptions::checksum`] is a checksum of that list as the request
-    /// writes it.
-    ///
-    /// An object written in parts stores no checksum of its own on Azure
-    /// unless the commit declares one in [`WriteOptions::declared_md5`]. S3
-    /// computes an entity tag from the parts, and takes no declared MD5.
-    pub options: WriteOptions<'a>,
-    /// The length of the object that the commit publishes, if you know it.
-    ///
-    /// S3 refuses the commit with 400 `InvalidRequest` if the parts add up
-    /// to another length, which catches a part left out of the list. Azure
-    /// has no such check, and refuses a plan that sets it with
-    /// [`InvalidPlan::Option`].
-    ///
-    /// [`InvalidPlan::Option`]: crate::InvalidPlan::Option
-    pub size: Option<u64>,
-}
-
-impl<'a> PhysicalCommit<'a> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Creates a plan that commits parts to `key` with no condition, no
-    /// metadata, no options and no size.
-    pub const fn new(key: &'a str) -> Self {
-        Self {
-            key,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            options: WriteOptions::new(),
-            size: None,
-        }
-    }
-
-    /// Returns the part of this plan that holds no borrows.
-    pub const fn shape(&self) -> CommitShape {
-        CommitShape {
-            condition: self.condition,
-        }
-    }
 }
 
 /// The content of a write, and where it comes from.
@@ -1164,65 +914,6 @@ impl<'i> ObjectItem<'i> {
     }
 }
 
-/// The object that a copy reads, in the same account or service as the
-/// client.
-///
-/// Azure names it by URL in `x-ms-copy-source`, and S3 by bucket and key in
-/// `x-amz-copy-source`. Each encodes the key as a request path does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CopySource<'a> {
-    /// The HTTPS origin of the storage account that holds the source, such
-    /// as `https://other.blob.core.windows.net`, or [`None`] for the
-    /// client's own. Azure only: an S3 client refuses one with
-    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource), and so
-    /// does an Azure client for one that is not an HTTPS origin.
-    ///
-    /// Azure reads a source in another account by Entra ID in a Copy Blob
-    /// From URL, a Put Blob From URL and a Put Block From URL. It refuses an
-    /// asynchronous Copy Blob from one with 401 `CannotVerifyCopySource`,
-    /// because it reads such a source only by a shared access signature.
-    pub endpoint: Option<&'a str>,
-    /// The container or bucket that holds the source, or [`None`] for the
-    /// client's own. It may not hold `/`, `?`, `#` or a control character:
-    /// a client refuses it with
-    /// [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
-    pub container: Option<&'a str>,
-    /// The key of the source, under the rules of [Object keys](crate#object-keys).
-    pub key: &'a str,
-    /// The snapshot or version to copy, or [`None`] for the object as it is
-    /// now. S3 copies a version, and no snapshot.
-    pub revision: Option<Revision<'a>>,
-    /// The condition on the source. The service copies nothing if it does
-    /// not hold.
-    pub condition: ConditionKind,
-    /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<ConditionValue<'a>>,
-}
-
-impl<'a> CopySource<'a> {
-    /// Returns this source with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Names the object `key` in the client's own container or bucket, as
-    /// it is now, with no condition.
-    pub const fn new(key: &'a str) -> Self {
-        Self {
-            endpoint: None,
-            container: None,
-            key,
-            revision: None,
-            condition: ConditionKind::None,
-            condition_value: None,
-        }
-    }
-}
-
 /// What every staged part of a template does alike: an Azure block, or a
 /// part of an S3 upload.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1348,85 +1039,6 @@ pub struct CopyShape {
     pub source_condition: ConditionKind,
 }
 
-/// One copy of an object onto a key, which the service carries out without
-/// sending the bytes through the client.
-///
-/// The target takes the source's bytes and content properties. Azure copies
-/// the source's metadata, and S3 its metadata and its tags, unless the plan
-/// names new ones in [`Self::metadata`] and [`Self::tags`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalCopy<'a> {
-    /// The key that the copy writes, under the rules of [Object keys](crate#object-keys).
-    pub key: &'a str,
-    /// The object that the copy reads.
-    pub source: CopySource<'a>,
-    /// The condition on the target, as a write carries it.
-    pub condition: ConditionKind,
-    /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<ConditionValue<'a>>,
-    /// The metadata of the target: [`None`] for the source's, or these pairs
-    /// alone. The rules of [`PutOptions::metadata`](crate::PutOptions::metadata) apply.
-    ///
-    /// S3 replaces the source's metadata with `x-amz-metadata-directive:
-    /// REPLACE`, which replaces its content properties too: see
-    /// [`Self::options`]. Azure copies the source's metadata unless the
-    /// request names pairs, so it cannot copy with none: a client refuses an
-    /// empty list with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
-    pub metadata: Option<&'a [MetadataPair<'a>]>,
-    /// The tags of the target: [`None`] for what the service gives a copy,
-    /// or these tags alone.
-    ///
-    /// S3 copies the source's tags unless the request replaces them with
-    /// `x-amz-tagging-directive: REPLACE`, which an empty list sends with no
-    /// tag. Azure gives a copy no tags but these.
-    pub tags: Option<&'a [Tag<'a>]>,
-    /// The storage class, and on S3 the content properties, of the target.
-    /// A copy names its tags in [`Self::tags`], carries no checksum and
-    /// declares no MD5: a client refuses any of these here with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
-    ///
-    /// On S3, a content property or new metadata replaces the source's
-    /// metadata and content properties together, with
-    /// `x-amz-metadata-directive: REPLACE`: name every one you want to keep.
-    /// Azure's Copy Blob takes the source's content properties, and refuses
-    /// one here with
-    /// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty).
-    pub options: WriteOptions<'a>,
-}
-
-impl<'a> PhysicalCopy<'a> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Creates a plan that copies `source` onto `key` with no condition on
-    /// the target, keeping what the source holds.
-    pub const fn new(key: &'a str, source: CopySource<'a>) -> Self {
-        Self {
-            key,
-            source,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: None,
-            tags: None,
-            options: WriteOptions::new(),
-        }
-    }
-
-    /// Returns the part of this plan that holds no borrows.
-    pub fn shape(&self) -> CopyShape {
-        CopyShape {
-            condition: self.condition,
-            source_condition: self.source.condition,
-        }
-    }
-}
-
 /// How soon the service makes an archived object readable again, and at
 /// what cost.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1453,56 +1065,6 @@ impl RestorePriority {
             3 => Self::High,
             _ => return None,
         })
-    }
-}
-
-/// A request that makes an object in an archive readable again: an S3
-/// RestoreObject, or an Azure Set Blob Tier out of the `Archive` tier.
-///
-/// The two services restore differently. S3 makes a temporary copy readable
-/// for [`Self::days`], and the object stays in its archive storage class.
-/// Azure rehydrates the object into [`Self::tier`] for good. Both take
-/// hours, and answer at once that they started: follow the restore with a
-/// HEAD, in [`ObjectMeta::restore_status`](crate::ObjectMeta::restore_status).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PhysicalRestore<'h> {
-    /// The object key, under the rules of [Object keys](crate#object-keys).
-    pub key: &'h str,
-    /// The version to restore, or [`None`] for the object as it is now.
-    /// Azure also rehydrates a snapshot, and S3 refuses one with
-    /// [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
-    pub revision: Option<Revision<'h>>,
-    /// How soon to restore. Azure refuses [`RestorePriority::Bulk`] with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
-    pub priority: RestorePriority,
-    /// How many days the restored copy stays readable, at least 1. S3 only.
-    ///
-    /// S3 requires it for an object in Glacier Flexible Retrieval or Deep
-    /// Archive, and refuses it for one in an archive tier of
-    /// Intelligent-Tiering, which it restores into a tier that stays. Azure
-    /// refuses it with [`InvalidPlan::Option`](crate::InvalidPlan::Option).
-    pub days: Option<u32>,
-    /// The tier to rehydrate into: `Hot`, `Cool` or `Cold`. Azure requires
-    /// it, and S3 refuses it, each with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
-    pub tier: Option<&'h str>,
-    /// A checksum of the request body for the encoder to compute and send,
-    /// with the provider of that kind that the client registered. S3 only:
-    /// an Azure request has no body.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
-}
-
-impl<'h> PhysicalRestore<'h> {
-    /// Creates a plan that restores `key` at the standard priority.
-    pub const fn new(key: &'h str) -> Self {
-        Self {
-            key,
-            revision: None,
-            priority: RestorePriority::Standard,
-            days: None,
-            tier: None,
-            checksum: None,
-        }
     }
 }
 
@@ -1690,15 +1252,15 @@ pub struct ListEntry<'b> {
     /// Azure lists an entity tag without the quotes that the `ETag` header
     /// carries, and conditions a request on either form. To write the one that
     /// HTTP defines, quote it with
-    /// [`layered::quoted_etag`](crate::layered::quoted_etag). S3 lists it
+    /// [`quoted_etag`](crate::quoted_etag). S3 lists it
     /// with its quotes.
     pub e_tag: Option<&'b str>,
     /// The value that the listing gave for the last modification.
     ///
     /// Azure writes it in the form that the `Last-Modified` header uses:
-    /// read it with [`layered::http_date_ms`](crate::layered::http_date_ms).
+    /// read it with [`http_date_ms`](crate::http_date_ms).
     /// S3 writes it in ISO 8601: read it with
-    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
+    /// [`iso8601_ms`](crate::iso8601_ms).
     pub last_modified: Option<&'b str>,
     /// The stored media type, decoded from `Content-Type` when present.
     ///
@@ -1728,7 +1290,7 @@ impl<'b> ListEntry<'b> {
     ///
     /// The value is the bytes between the two tags, as the service wrote them.
     /// A value that holds `&amp;` or another reference is decoded by
-    /// [`layered::decode_into`](crate::layered::decode_into).
+    /// [`decode_property`](crate::decode_property).
     ///
     /// The key, entity tag, date and content type were decoded when the page was
     /// read, so for those elements this reports the decoded text and
@@ -1787,7 +1349,7 @@ impl<'b> ListEntry<'b> {
 ///
 /// Each item is a name and a value, as the bytes between the pair's tags.
 /// The value is not decoded: pass it to
-/// [`layered::decode_into`](crate::layered::decode_into) to resolve `&amp;`
+/// [`decode_property`](crate::decode_property) to resolve `&amp;`
 /// and the other references.
 #[derive(Debug, Clone, Copy)]
 pub struct Metadata<'b> {

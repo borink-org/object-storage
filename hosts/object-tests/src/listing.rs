@@ -5,7 +5,7 @@
 
 use crate::{AdapterError, optional_text, successful_result, unsupported_by_adapter};
 use borink_object_storage_proto::{
-    EntryKind, ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, layered,
+    EntryKind, ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, decode_property,
 };
 use serde_json::{Value, json};
 
@@ -68,7 +68,7 @@ impl ListedPage {
 /// The decoded text of a listed value, such as a metadata name or value.
 pub(crate) fn decoded_listing_text(raw_value: &[u8]) -> String {
     let mut decoded = vec![0; raw_value.len()];
-    match layered::decode_into(raw_value, &mut decoded) {
+    match decode_property(raw_value, &mut decoded) {
         Some(text) => String::from_utf8_lossy(text).into_owned(),
         None => String::from_utf8_lossy(raw_value).into_owned(),
     }

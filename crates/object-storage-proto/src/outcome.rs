@@ -14,9 +14,7 @@ pub enum StageHeadOutcome<'h> {
         ///
         /// S3 names a part at the commit by its number and this tag, so keep
         /// it: see [`s3::PartRef`](crate::s3::PartRef). Azure names a block by
-        /// the ID you chose, and sends no tag. The checksum and encryption
-        /// headers that Azure does send are on
-        /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
+        /// the ID you chose, and sends no tag.
         e_tag: Option<&'h [u8]>,
     },
     /// S3 took an UploadPartCopy, and says in the body whether it
@@ -24,7 +22,7 @@ pub enum StageHeadOutcome<'h> {
     ///
     /// This outcome is not final. Read the whole body and pass it with the
     /// head to
-    /// [`s3::Objects::accept_stage_part_copy_body`](crate::s3::Objects::accept_stage_part_copy_body),
+    /// [`s3::accept_stage_part_copy_body`](crate::s3::accept_stage_part_copy_body),
     /// which returns the final outcome. No other stage returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
@@ -75,7 +73,7 @@ pub enum CopyHeadOutcome<'h> {
     ///
     /// `meta.copy_id` names the copy. Read its progress with a HEAD of the
     /// target, in [`ObjectMeta::copy_status`], or stop it with
-    /// [`Blobs::encode_abort_copy`](crate::Blobs::encode_abort_copy).
+    /// [`azure::encode_abort_copy`](crate::azure::encode_abort_copy).
     Pending {
         /// The metadata of the target, with the copy's ID and its status,
         /// `pending`.
@@ -85,7 +83,7 @@ pub enum CopyHeadOutcome<'h> {
     ///
     /// This outcome is not final. Read the whole body and pass it with the
     /// head to
-    /// [`s3::Objects::accept_copy_body`](crate::s3::Objects::accept_copy_body),
+    /// [`s3::accept_copy_body`](crate::s3::accept_copy_body),
     /// which returns the final outcome. Azure never returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
@@ -222,8 +220,8 @@ pub enum TagsHeadOutcome<'h> {
     /// The tags follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_tags`](crate::Blobs::fill_tags) or
-    /// [`s3::Objects::fill_tags`](crate::s3::Objects::fill_tags).
+    /// [`azure::fill_tags`](crate::azure::fill_tags) or
+    /// [`s3::fill_tags`](crate::s3::fill_tags).
     Tags {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -262,8 +260,8 @@ pub enum DeleteManyHeadOutcome<'h> {
     /// The result of each removal follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_delete_results`](crate::Blobs::fill_delete_results) or
-    /// [`s3::Objects::fill_delete_results`](crate::s3::Objects::fill_delete_results).
+    /// [`azure::fill_delete_results`](crate::azure::fill_delete_results) or
+    /// [`s3::fill_delete_results`](crate::s3::fill_delete_results).
     Results {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -304,7 +302,7 @@ pub enum CommitHeadOutcome<'h> {
     /// S3 answers a commit with status 200 before it has finished, and then
     /// writes either the result or an error into the body. This outcome is
     /// not final. Read the whole body and pass it with the head to
-    /// [`s3::Objects::accept_commit_parts_body`](crate::s3::Objects::accept_commit_parts_body),
+    /// [`s3::accept_commit_parts_body`](crate::s3::accept_commit_parts_body),
     /// which returns the final outcome. Azure never returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
@@ -357,8 +355,8 @@ pub enum ListPartsHeadOutcome<'h> {
     /// The parts follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_blocks`](crate::Blobs::fill_blocks) or
-    /// [`s3::Objects::fill_parts`](crate::s3::Objects::fill_parts).
+    /// [`azure::fill_blocks`](crate::azure::fill_blocks) or
+    /// [`s3::fill_parts`](crate::s3::fill_parts).
     #[non_exhaustive]
     Parts {
         /// Metadata of the committed object, if any. Only Azure sends it.
@@ -407,7 +405,7 @@ fn not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt:
 ///
 /// Each field holds the bytes that the service sent. `last_modified` holds
 /// them as text. To read it as an instant, use
-/// [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// [`http_date_ms`](crate::http_date_ms).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectMeta<'h> {
     /// The size of the whole object, if the head states it.

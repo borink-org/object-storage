@@ -4,7 +4,6 @@ use borink_object_storage_proto::azure;
 use borink_object_storage_proto::{
     AzureNamespace, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Container, Digest,
     Error, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
-    WriteOptions,
 };
 
 fn container() -> Container<'static> {
@@ -274,31 +273,20 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
         encode(&PutOptions::default(), &other, &mut [0; 1024]).map(drop),
         Err(Error::InvalidPlan(InvalidPlan::Checksum))
     );
-    // Azure takes no other kind, and a whole-object write takes no declared
-    // MD5: it stores the one it checks.
-    for options in [
-        PutOptions {
-            checksum: Some(ChecksumKind::Crc32c),
-            ..PutOptions::default()
-        },
-        PutOptions {
-            options: WriteOptions {
-                declared_md5: Some("rL0Y20zC+Fzt72VPzMSk2A=="),
-                ..WriteOptions::default()
-            },
-            ..PutOptions::default()
-        },
-    ] {
-        assert_eq!(
-            azure::prepare_put(
-                &container(),
-                "token",
-                AzureNamespace::Unknown,
-                &options,
-                &mut [0; 1024]
-            )
-            .err(),
-            Some(Error::InvalidPlan(InvalidPlan::Option))
-        );
-    }
+    // Azure takes no other kind.
+    let options = PutOptions {
+        checksum: Some(ChecksumKind::Crc32c),
+        ..PutOptions::default()
+    };
+    assert_eq!(
+        azure::prepare_put(
+            &container(),
+            "token",
+            AzureNamespace::Unknown,
+            &options,
+            &mut [0; 1024]
+        )
+        .err(),
+        Some(Error::InvalidPlan(InvalidPlan::Option))
+    );
 }

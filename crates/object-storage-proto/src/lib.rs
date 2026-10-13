@@ -183,19 +183,10 @@
 //!
 //! The functions that write a template or a request refuse a buffer that is
 //! too small, and state the exact number of bytes that they need. Pass an
-//! empty buffer to learn it. The clients [`Blobs`] and [`s3::Objects`],
-//! which write each request whole and stay beside the templates for now,
-//! need header slots as well: call a `*_requirements` function of
-//! [`layered`] first. The functions for an S3 client are in
-//! [`layered::s3`].
+//! empty buffer to learn it.
 //!
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
-//!
-//! A `*_requirements` function is a dry run: it encodes the request into an
-//! empty buffer and reads the capacities from the refusal. It allocates
-//! nothing, and it reports a plan error that the encoding method reports
-//! again.
 //!
 //! # Object keys
 //!
@@ -268,9 +259,9 @@ mod error;
 mod head;
 mod http;
 mod http_message;
-pub mod layered;
 #[cfg(test)]
 mod layout_tests;
+mod listed;
 #[cfg(test)]
 mod misuse_tests;
 mod multipart;
@@ -284,26 +275,25 @@ mod types;
 mod url;
 mod xml;
 
-pub use azure::{AzureNamespace, AzureRejection, Blobs, Container, VERSION, classify_error};
-pub use checksum::{ChecksumKind, ChecksumProvider, ChecksumState, Digest};
+pub use azure::{AzureNamespace, AzureRejection, Container, VERSION, classify_error};
+pub use checksum::{ChecksumKind, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
 pub use head::ResponseHead;
+pub use listed::{decode_property, http_date_ms, iso8601_ms, quoted_etag};
 pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
     ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, RestoreHeadOutcome,
     ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
 };
-pub use request::{HeaderSpan, LegacyRequest, Method, RequestSize, Span};
+pub use request::{Method, Span};
 pub use template::{Placement, WireRequest};
 pub use time::Timestamps;
 pub use types::{
-    BlobProperty, ChecksumValue, CommitShape, Condition, ConditionKind, ConditionValue,
-    ContentProperties, CopyItem, CopyOptions, CopyShape, CopySource, DeleteKind, DeleteOptions,
-    DeleteShape, DeleteTarget, EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry,
-    ListInclude, ListItem, ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Payload,
-    PhysicalCommit, PhysicalCopy, PhysicalDeleteMany, PhysicalRestore, PhysicalSetTags, Properties,
-    PropertySet, PropertyValues, PutItem, PutOptions, PutShape, RangeForm, Ranging, RequestedRange,
-    RestoreOptions, RestorePriority, Revision, RevisionKind, StageOptions, Tag,
-    TransactionalChecksum, WriteOptions,
+    BlobProperty, ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties,
+    CopyItem, CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget,
+    EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem,
+    ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PropertySet,
+    PropertyValues, PutItem, PutOptions, PutShape, RangeForm, Ranging, RequestedRange,
+    RestoreOptions, RestorePriority, Revision, RevisionKind, StageOptions, Tag, WriteOptions,
 };

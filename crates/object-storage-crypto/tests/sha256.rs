@@ -1,21 +1,28 @@
-//! The SHA-256 providers, against the published vectors and each other.
+//! The SHA-256 implementations, against the published vectors and each other.
 
 #![cfg(any(feature = "sha256-rustcrypto", feature = "sha256-minimal"))]
 
 use borink_object_storage_crypto::Sha256;
-use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
+use borink_object_storage_crypto::sigv4::{hmac, sha256};
 
-// Every provider that this build has.
+// The SHA-256 and the HMAC-SHA256 of one implementation.
+type Hash = fn(&[u8]) -> [u8; 32];
+type Hmac = fn(&[u8], &[u8]) -> [u8; 32];
+
+// Every implementation that this build has.
 #[allow(clippy::vec_init_then_push)]
-fn providers() -> Vec<(&'static str, Sha256Provider)> {
-    let mut all = Vec::new();
+fn implementations() -> Vec<(&'static str, Hash, Hmac)> {
+    let mut all: Vec<(&'static str, Hash, Hmac)> = Vec::new();
     #[cfg(feature = "sha256-rustcrypto")]
-    all.push((
-        "rustcrypto",
-        borink_object_storage_crypto::SHA256_RUSTCRYPTO,
-    ));
+    {
+        use borink_object_storage_crypto::Sha256RustCrypto as S;
+        all.push(("rustcrypto", sha256::<S>, hmac::<S>));
+    }
     #[cfg(feature = "sha256-minimal")]
-    all.push(("minimal", borink_object_storage_crypto::SHA256_MINIMAL));
+    {
+        use borink_object_storage_crypto::Sha256Minimal as S;
+        all.push(("minimal", sha256::<S>, hmac::<S>));
+    }
     all
 }
 
@@ -24,8 +31,8 @@ fn hex(bytes: [u8; 32]) -> String {
 }
 
 #[test]
-fn every_provider_matches_the_published_vectors() {
-    for (name, provider) in providers() {
+fn every_implementation_matches_the_published_vectors() {
+    for (name, hash, mac) in implementations() {
         // FIPS 180-2, appendix B.
         for (input, expected) in [
             (
@@ -41,7 +48,7 @@ fn every_provider_matches_the_published_vectors() {
                 "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
             ),
         ] {
-            assert_eq!(hex(provider.hash(input)), expected, "{name}");
+            assert_eq!(hex(hash(input)), expected, "{name}");
         }
         // RFC 4231, test cases 1, 2 and 6. The last key is longer than a
         // block, so HMAC hashes it first.
@@ -62,26 +69,26 @@ fn every_provider_matches_the_published_vectors() {
                 "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
             ),
         ] {
-            assert_eq!(hex(provider.hmac(key, message)), expected, "{name}");
+            assert_eq!(hex(mac(key, message)), expected, "{name}");
         }
     }
 }
 
 #[test]
-fn providers_agree_around_the_block_boundaries() {
-    let all = providers();
-    let (first_name, first) = all[0];
+fn implementations_agree_around_the_block_boundaries() {
+    let all = implementations();
+    let (first_name, first_hash, first_mac) = all[0];
     for len in [0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 1000] {
         let data = vec![0x5a; len];
-        for (name, provider) in &all[1..] {
+        for (name, hash, mac) in &all[1..] {
             assert_eq!(
-                provider.hash(&data),
-                first.hash(&data),
+                hash(&data),
+                first_hash(&data),
                 "{name} vs {first_name}, {len}"
             );
             assert_eq!(
-                provider.hmac(&data, &data),
-                first.hmac(&data, &data),
+                mac(&data, &data),
+                first_mac(&data, &data),
                 "{name} vs {first_name}, {len}"
             );
         }
@@ -108,25 +115,4 @@ fn every_implementation_hashes_in_pieces() {
     pieces_hash_as_the_whole::<borink_object_storage_crypto::Sha256RustCrypto>("rustcrypto");
     #[cfg(feature = "sha256-minimal")]
     pieces_hash_as_the_whole::<borink_object_storage_crypto::Sha256Minimal>("minimal");
-}
-
-#[test]
-#[allow(clippy::vec_init_then_push)]
-fn every_implementation_fits_the_state_slot() {
-    // `sha256_provider` asserts this at compile time; this reports the
-    // numbers that `Sha256State::LEN` is chosen against.
-    let mut sizes = Vec::new();
-    #[cfg(feature = "sha256-rustcrypto")]
-    sizes.push((
-        "rustcrypto",
-        size_of::<borink_object_storage_crypto::Sha256RustCrypto>(),
-    ));
-    #[cfg(feature = "sha256-minimal")]
-    sizes.push((
-        "minimal",
-        size_of::<borink_object_storage_crypto::Sha256Minimal>(),
-    ));
-    for (name, size) in sizes {
-        assert!(size <= Sha256State::LEN, "{name} is {size} bytes");
-    }
 }

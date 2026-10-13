@@ -11,7 +11,7 @@
 //! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
 //!    [`encode_get`] or [`encode_put`] to write it into a second buffer. The request is
 //!    [`Unsigned`]: sign it, as [Signing](#signing) describes, and send the
-//!    [`WireRequest`](crate::WireRequest) that [`finish`] returns with your
+//!    [`WireRequest`](crate::WireRequest) that [`set_signature`] returns with your
 //!    HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call
 //!    [`accept_get_head`] or [`accept_put_head`].
@@ -52,7 +52,7 @@
 //! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
 //! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
 //! let mac = hmac_of_string_to_sign(unsigned.canonical(&buffer));
-//! let request = s3::finish(&unsigned, &mut buffer, &mac);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &mac);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/directory/object.txt"
@@ -105,7 +105,7 @@
 //! 3. For each request, hash [`Unsigned::canonical`] with SHA-256, and
 //!    compute the HMAC-SHA256 of the prefix and the lowercase hexadecimal of
 //!    that hash, under the day's key.
-//! 4. Write the HMAC into the request with [`finish`].
+//! 4. Write the HMAC into the request with [`set_signature`].
 //!
 //! This crate computes no hash. The `sigv4` module of the
 //! `borink-object-storage-crypto` crate does steps 1 to 4 with any SHA-256,
@@ -154,7 +154,7 @@
 //! let pages = s3::prepare_list(&bucket, &credentials, &options, &mut template)?;
 //! let mut buffer = vec![0; 2048];
 //! let unsigned = s3::encode_list(&pages, &template, &ListItem::new("photos/"), &now, &mut buffer)?;
-//! let request = s3::finish(&unsigned, &mut buffer, &[0; 32]);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects\
@@ -233,7 +233,7 @@
 //! // `borink_object_storage_crypto::sigv4::sign` writes in the body's SHA-256
 //! // with `s3::set_body_hash`, and then signs.
 //! # s3::set_body_hash(&unsigned, &mut buffer, &[0; 32]);
-//! let request = s3::finish(&unsigned, &mut buffer, &[0; 32]);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploadId=VXBsb2FkSUQ"
@@ -304,33 +304,30 @@
 //!
 //! # Content that is not signed
 //!
-//! [`PayloadSigning::Unsigned`] sends a write without the SHA-256 of its
-//! content, and so does [`PayloadHash::Unsigned`] for a part. The signature then does
-//! not cover the content. TLS still protects the bytes in transit, but
-//! nothing checks the bytes that you handed to your HTTP client. Send a
-//! checksum of the content, in [`PutItem::checksum`](crate::PutItem::checksum)
-//! or [`WriteOptions::checksum`] for a part, to have S3 check them.
+//! [`PayloadSigning::Unsigned`] sends a write or a part without the SHA-256
+//! of its content. The signature then does not cover the content. TLS still
+//! protects the bytes in transit, but nothing checks the bytes that you
+//! handed to your HTTP client. Send a checksum of the content, in
+//! [`PutItem::checksum`](crate::PutItem::checksum) or
+//! [`StagePartItem::checksum`], to have S3 check them.
 
 use core::cmp::Ordering;
 
-use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum, check_base64_len};
+use crate::checksum::ChecksumKind;
 use crate::common::{
-    ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
-    failure, finish_with_body, meta_of, parse_content_range, push_checksum, text_header,
-    validate_checksum, validate_condition, validate_properties, validate_tags, write_range,
-    write_tags,
+    ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, failure,
+    finish_with_body, meta_of, parse_content_range, text_header, validate_condition,
+    validate_properties, validate_tags,
 };
 use crate::encoding::{self, rfc2047};
 use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeadWriter, HeaderValue, Pass, U64Decimal};
-use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
-use crate::url::{self, Parameter};
+use crate::request::ByteSink;
+use crate::sigv4::{Credentials, MAX_REGION_LEN};
 use crate::{
-    Classification, ConditionKind, ConditionValue, CopySource, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
-    LegacyRequest, ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair,
-    Method, ObjectMeta, Payload, PutHeadOutcome, PutShape, RequestedRange, ResponseFault,
-    ResponseHead, Result, Revision, ServiceErrorKind, Span, Tag, Timestamps, TransactionalChecksum,
+    Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteShape,
+    Error, Failure, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ListEntry, ListHeadOutcome,
+    ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome,
+    PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
     WriteOptions,
 };
 
@@ -345,7 +342,6 @@ use crate::checksum::BASE64_LEN;
 use crate::common::{
     checksum_text, validate_checksum_item, validate_delimiter, validate_get_item,
     validate_get_options, validate_revision_item, validate_revision_kind,
-    validate_template_options,
 };
 use crate::template::{Body, ParamValue};
 use crate::template::{Hole, Values};
@@ -360,14 +356,13 @@ pub use batch::{
     encode_delete_many, fill_delete_results, prepare_delete_many,
 };
 pub use copy::{
-    PhysicalStagePartCopy, StagePartCopyItem, accept_copy_body, accept_copy_error_body,
-    accept_copy_head, accept_stage_part_copy_body, accept_stage_part_copy_head, encode_copy,
-    encode_stage_part_copy, prepare_copy, prepare_stage_part_copy,
+    StagePartCopyItem, accept_copy_body, accept_copy_error_body, accept_copy_head,
+    accept_stage_part_copy_body, accept_stage_part_copy_head, encode_copy, encode_stage_part_copy,
+    prepare_copy, prepare_stage_part_copy,
 };
 pub use parts::{
     CommitItem, CommitOptions, CreateUploadHeadOutcome, CreateUploadOptions, ListPartsItem,
-    MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef, PhysicalAbortUpload,
-    PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart, StagePartItem, UploadItem,
+    MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef, StagePartItem, UploadItem,
     accept_abort_upload_error_body, accept_abort_upload_head, accept_commit_parts_body,
     accept_commit_parts_error_body, accept_commit_parts_head, accept_create_upload_error_body,
     accept_create_upload_head, accept_list_parts_error_body, accept_list_parts_head,
@@ -386,28 +381,12 @@ pub use tags::{
 };
 use template::{Describe, Detail, Field, FieldList, S3Values, Value};
 pub use template::{
-    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, finish, set_body_checksum,
-    set_body_hash, signing_key, string_to_sign_prefix,
+    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, set_body_checksum, set_body_hash,
+    set_signature, signing_key, string_to_sign_prefix,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
-
-// The value of `x-amz-content-sha256`: the SHA-256 of the content in
-// lowercase hexadecimal, or `UNSIGNED-PAYLOAD`.
-pub(crate) enum ContentSha256 {
-    Hex([u8; 64]),
-    Unsigned,
-}
-
-impl ContentSha256 {
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Hex(hex) => hex,
-            Self::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
-        }
-    }
-}
 
 /// The most bytes that an S3 object key holds.
 ///
@@ -739,24 +718,6 @@ impl<'a> Bucket<'a> {
         }
         out.push(self.authority.as_bytes());
     }
-
-    // The path of the URL, which the signature covers as it is written. A
-    // request to the bucket itself has the path `/` with virtual-hosted
-    // addressing and `/bucket` with path-style addressing.
-    fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
-        out.push(b"/");
-        if self.addressing == Addressing::Path {
-            out.push(self.name.as_bytes());
-            if key.is_some() {
-                out.push(b"/");
-            }
-        }
-        if let Some(key) = key {
-            for part in url::encode_object_key(key) {
-                out.push(part);
-            }
-        }
-    }
 }
 
 // The scheme of an endpoint, which decides its default port.
@@ -782,28 +743,6 @@ impl Scheme {
             Self::Https => ":443",
         }
     }
-}
-
-/// The SHA-256 of the content of a write, which the request signs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PayloadHash {
-    /// The encoder computes the SHA-256 of the content.
-    ///
-    /// This needs the bytes, so the encoder refuses it for a
-    /// [`Payload::Streamed`] with [`InvalidPlan::Option`].
-    #[default]
-    Compute,
-    /// The SHA-256 of the content, which you computed.
-    ///
-    /// S3 refuses the write with 400 `XAmzContentSHA256Mismatch` if the
-    /// content does not match.
-    Sha256([u8; 32]),
-    /// The request does not sign its content, and the encoder never reads
-    /// it.
-    ///
-    /// See the module documentation for what this leaves unchecked.
-    Unsigned,
 }
 
 /// An element that an S3 listing writes for an object, other than the four
@@ -1009,8 +948,8 @@ impl<'x, 'b> PropertyValues<'x, 'b> {
 /// The credentials of a session with one
 /// [directory bucket](self#directory-buckets).
 ///
-/// Only [`Objects::with_session`] takes them. Its
-/// [`Debug`](core::fmt::Debug) output shows the key ID and hides the secret
+/// [`Self::credentials`] turns them into the credentials that sign requests
+/// to that bucket. Its [`Debug`](core::fmt::Debug) output shows the key ID and hides the secret
 /// and the token.
 #[derive(Clone, Copy)]
 pub struct Session<'a> {
@@ -1056,7 +995,7 @@ impl core::fmt::Debug for Session<'_> {
 /// The result of reading the response head of a CreateSession.
 ///
 /// A head that reports a failure is one of these too.
-/// [`Objects::accept_create_session_head`] returns an [`Err`] only for a
+/// [`accept_create_session_head`] returns an [`Err`] only for a
 /// head it cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1064,7 +1003,7 @@ pub enum SessionHeadOutcome<'h> {
     /// The credentials follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Objects::read_session`].
+    /// [`read_session`].
     Session {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -1072,7 +1011,7 @@ pub enum SessionHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Objects::accept_create_session_error_body`], which returns the final
+    /// [`accept_create_session_error_body`], which returns the final
     /// outcome. If you cannot read the body, pass an empty one and the error
     /// stays unnamed.
     NeedErrorBody(Failure<'h>),
@@ -1092,533 +1031,6 @@ impl core::fmt::Display for SessionHeadOutcome<'_> {
             Self::NeedErrorBody(failure) | Self::ServiceFailure(failure) => {
                 core::fmt::Display::fmt(failure, f)
             }
-        }
-    }
-}
-
-/// The S3 operations that one set of credentials authorizes on one bucket.
-///
-/// This is a small value, and it is [`Copy`]. This crate never reads the
-/// clock, so every method that encodes a request takes the current time in
-/// `now`. It signs the request for that time.
-#[derive(Clone, Copy)]
-pub struct Objects<'a> {
-    pub(crate) bucket: Bucket<'a>,
-    credentials: Credentials<'a>,
-    pub(crate) sha256: Sha256Provider,
-    signing_key: Option<SigningKey>,
-    pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
-}
-
-impl core::fmt::Debug for Objects<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Objects")
-            .field("bucket", &self.bucket)
-            .field("credentials", &self.credentials)
-            .field("signing_key", &self.signing_key.map(|_| "<redacted>"))
-            .field("checksums", &self.checksums)
-            .finish_non_exhaustive()
-    }
-}
-
-// What the signature of one request covers, beside the client's own values.
-pub(crate) struct Signed<'p> {
-    pub(crate) method: Method,
-    // The object, or `None` for the bucket itself.
-    pub(crate) key: Option<&'p str>,
-    // The query, in the order of its names. See `url.rs`.
-    pub(crate) query: &'p [Parameter<'p>],
-    pub(crate) range: RequestedRange,
-    pub(crate) condition: ConditionKind,
-    pub(crate) condition_value: Option<ConditionValue<'p>>,
-    // Further signed headers, with lowercase names.
-    pub(crate) headers: &'p [(&'p str, &'p [u8])],
-    pub(crate) metadata: &'p [MetadataPair<'p>],
-    pub(crate) content_sha256: &'p [u8],
-    // The tags of a write, signed as `x-amz-tagging`.
-    pub(crate) tags: &'p [Tag<'p>],
-    // The source of a copy, signed with its condition.
-    pub(crate) copy: Option<SignedCopy<'p>>,
-}
-
-// The source of a copy, signed as `x-amz-copy-source`, and the bytes of it
-// that an UploadPartCopy copies, as `x-amz-copy-source-range`.
-#[derive(Clone, Copy)]
-pub(crate) struct SignedCopy<'p> {
-    pub(crate) source: CopySource<'p>,
-    pub(crate) range: RequestedRange,
-}
-
-// Where the value of a signed header comes from.
-#[derive(Clone, Copy)]
-enum SignedValue<'a> {
-    Bytes(&'a [u8]),
-    // Bytes that this crate formatted, such as a digest in hexadecimal,
-    // which hold no space for SigV4 to fold.
-    Formatted(&'a [u8]),
-    Host,
-    Range,
-    Date,
-    Tags,
-    CopySource,
-    CopyRange,
-    Condition(ConditionValue<'a>),
-}
-
-#[derive(Clone, Copy)]
-enum Header<'a> {
-    Fixed(&'a str, SignedValue<'a>),
-    Meta(&'a MetadataPair<'a>),
-}
-
-impl<'a> Objects<'a> {
-    /// Creates a client that signs requests to `bucket` with `credentials`,
-    /// computing SHA-256 with `sha256`.
-    pub const fn new(
-        bucket: Bucket<'a>,
-        credentials: Credentials<'a>,
-        sha256: Sha256Provider,
-    ) -> Self {
-        Self {
-            bucket,
-            credentials,
-            sha256,
-            signing_key: None,
-            checksums: [None; KINDS],
-        }
-    }
-
-    /// Returns this client with the signing key for the day of `now`.
-    ///
-    /// A request signed on that day uses the key. A request signed on
-    /// another day computes a key of its own, which takes four more HMACs.
-    /// Call this again when the day changes.
-    pub fn with_signing_key(mut self, now: &Timestamps) -> Self {
-        self.signing_key = Some(self.derive(now));
-        self
-    }
-
-    /// Returns this client with `provider` registered for the kind that it
-    /// computes.
-    ///
-    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
-    /// then has the encoder compute the checksum: an MD5, sent as
-    /// `Content-MD5`, or a CRC-64/NVME, sent as `x-amz-checksum-crc64nvme`.
-    pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
-        self.checksums[provider.kind().slot()] = Some(provider);
-        self
-    }
-
-    fn derive(&self, now: &Timestamps) -> SigningKey {
-        SigningKey::derive(
-            &self.credentials,
-            self.bucket.region,
-            self.bucket.signing_service(),
-            now,
-            &self.sha256,
-        )
-    }
-
-    /// Writes the signed request head of a CreateSession into `buf`, which
-    /// asks a [directory bucket](self#directory-buckets) for the credentials
-    /// of a session.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] with [`InvalidPlan::Option`] unless the
-    /// bucket is of [`Service::AwsDirectory`].
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::create_session_requirements`](crate::layered::s3::create_session_requirements)
-    /// first.
-    pub fn encode_create_session<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        match self.bucket.service {
-            Service::AwsDirectory => {}
-            Service::Aws | Service::Compatible => return Err(InvalidPlan::Option.into()),
-        }
-        let signed = Signed {
-            method: Method::Get,
-            key: None,
-            query: &[url::literal("session", "")],
-            headers: &[],
-            range: RequestedRange::Whole,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: &[],
-            copy: None,
-        };
-        let pass = Pass::of(buf);
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        encoded(head, Method::Get, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a CreateSession and reports what to do
-    /// next.
-    ///
-    /// A failure is [`SessionHeadOutcome::NeedErrorBody`]: read the body and
-    /// pass it to [`Self::accept_create_session_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 200 is [`ResponseFault::Status`], and a
-    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
-    pub fn accept_create_session_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<SessionHeadOutcome<'h>> {
-        accept_create_session_head(head)
-    }
-
-    /// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// This is [`accept_get_error_body`] for a CreateSession, and reads
-    /// the body the same way. A missing bucket is a
-    /// [`SessionHeadOutcome::ServiceFailure`] with
-    /// [`ServiceErrorKind::NoSuchContainer`].
-    pub fn accept_create_session_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> SessionHeadOutcome<'h> {
-        accept_create_session_error_body(failure, body)
-    }
-
-    /// Reads the credentials out of the response body of a CreateSession.
-    ///
-    /// The body is decoded in place, and the credentials borrow it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a `CreateSessionResult` that holds an access key ID, a secret
-    /// access key and a session token, or if its expiration is not an
-    /// ISO 8601 time in UTC.
-    ///
-    /// Returns [`Error::Service`] if `body` is an error document, which S3
-    /// can send under status 200.
-    pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
-        read_session(body)
-    }
-
-    /// Returns a client that signs its requests with the credentials of a
-    /// session, which [`Self::read_session`] read.
-    ///
-    /// The client wipes its copy of the secret with the function of this
-    /// client's credentials. It has no signing key yet: call
-    /// [`Self::with_signing_key`] on it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidCredentials`] if [`Credentials::new`] would
-    /// refuse the key ID or the secret of `session`, or if the token is not
-    /// usable as one HTTP header value.
-    pub fn with_session<'s>(self, session: Session<'s>) -> Result<Objects<'s>>
-    where
-        'a: 's,
-    {
-        let credentials =
-            Credentials::new(session.key_id, session.secret, self.credentials.wipe())?
-                .with_s3_session_token(session.token)?;
-        Ok(Objects {
-            credentials,
-            signing_key: None,
-            ..self
-        })
-    }
-
-    // Writes the URL and every signed header, then signs them. The signature
-    // is written as zeros, which are as long, and a writing pass replaces
-    // them once the head is written.
-    pub(crate) fn write_head(
-        &self,
-        head: &mut HeadWriter<'_>,
-        signed: &Signed<'_>,
-        pass: Pass,
-        now: &Timestamps,
-    ) {
-        let token = self.token();
-        let headers = SignedHeaders::of(signed, token);
-        let mut parts = SignedParts::default();
-        head.url(|out| {
-            out.push(self.bucket.scheme.as_str().as_bytes());
-            out.push(b"://");
-            parts.host = out.part(|out| self.bucket.write_host(out));
-            parts.path = out.part(|out| self.bucket.write_path(out, signed.key));
-            if signed.query.iter().any(Option::is_some) {
-                out.push(b"?");
-                parts.query = out.part(|out| url::write_query(out, signed.query));
-            }
-        });
-        head.header_with("authorization", |out| {
-            out.push(sigv4::ALGORITHM.as_bytes());
-            out.push(b" Credential=");
-            out.push(self.credentials.key_id().as_bytes());
-            out.push(b"/");
-            self.write_scope(out, now);
-            out.push(b", SignedHeaders=");
-            parts.names = out.part(|out| write_signed_names(out, &headers));
-            out.push(b", Signature=");
-            parts.signature = out.part(|out| out.push(&[b'0'; 64]));
-        });
-        parts.first_header = head.header_count();
-        for header in headers.iter() {
-            match header {
-                Header::Fixed(_, SignedValue::Host) => {}
-                Header::Fixed(name, value) => head.line_with(name, |out| match value {
-                    SignedValue::Bytes(bytes) | SignedValue::Formatted(bytes) => out.push(bytes),
-                    SignedValue::Condition(value) => value.write_to(out),
-                    SignedValue::Range => write_range(out, signed.range),
-                    SignedValue::Date => out.push(now.iso8601_bytes()),
-                    SignedValue::Tags => write_tags(out, signed.tags),
-                    SignedValue::CopySource => self.write_copy_source(out, signed),
-                    SignedValue::CopyRange => write_copy_range(out, signed),
-                    SignedValue::Host => {}
-                }),
-                Header::Meta(pair) => head.line_parts(
-                    |out| {
-                        out.push(METADATA_PREFIX.as_bytes());
-                        for byte in pair.name.bytes() {
-                            out.push(&[byte.to_ascii_lowercase()]);
-                        }
-                    },
-                    |out| write_metadata_value(out, pair.value, self.bucket.service),
-                ),
-            }
-        }
-        // A head that does not fit is refused, so it needs no signature.
-        if pass == Pass::Write && head.fits() {
-            let signature = self.signature(head, &parts, signed, &headers, now);
-            head.overwrite(parts.signature, &signature);
-        }
-    }
-
-    // The value of `x-amz-copy-source`: the source's bucket, or the client's
-    // own, the key encoded as a path, and the version.
-    fn write_copy_source(&self, out: &mut dyn ByteSink, signed: &Signed<'_>) {
-        let Some(copy) = signed.copy else { return };
-        out.push(b"/");
-        out.push(copy.source.container.unwrap_or(self.bucket.name).as_bytes());
-        out.push(b"/");
-        for part in url::encode_object_key(copy.source.key) {
-            out.push(part);
-        }
-        url::write_query_in_url(out, &[version_parameter(copy.source.revision)]);
-    }
-
-    // The session token and the header that carries it.
-    fn token(&self) -> Option<(&'static str, &'a str)> {
-        self.credentials.token().header()
-    }
-
-    // The text of `x-amz-content-sha256` for `content`. A measuring pass returns no
-    // request, so it does not read the content: the digest is the same
-    // length whatever it is.
-    pub(crate) fn content_sha256(
-        &self,
-        hash: PayloadHash,
-        content: Payload<'_>,
-        pass: Pass,
-    ) -> ContentSha256 {
-        match hash {
-            PayloadHash::Unsigned => ContentSha256::Unsigned,
-            PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
-            PayloadHash::Compute if pass == Pass::Measure => ContentSha256::Hex([b'0'; 64]),
-            PayloadHash::Compute => ContentSha256::Hex(encoding::hex(
-                &self.sha256.hash(content.bytes().unwrap_or_default()),
-            )),
-        }
-    }
-
-    // The headers that describe the content of a write, after the signed
-    // ones: its length, and its MD5 if the plan carries one. Any other
-    // checksum is an `x-amz-` header, which the request signs.
-    pub(crate) fn push_content(
-        &self,
-        head: &mut HeadWriter<'_>,
-        content: Payload<'_>,
-        checksum: Option<TransactionalChecksum<'_>>,
-    ) {
-        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
-        let md5 = checksum.filter(|checksum| {
-            matches!(
-                checksum,
-                TransactionalChecksum::Md5(_) | TransactionalChecksum::Compute(ChecksumKind::Md5)
-            )
-        });
-        push_checksum(head, md5, &self.checksums, |sum| {
-            sum.update(content.bytes().unwrap_or_default());
-        });
-    }
-
-    // The `x-amz-checksum-` header of a write and its value, written into
-    // `into`, for a checksum other than an MD5. `content` feeds the content
-    // to a computed checksum. A measuring pass computes nothing: the text is as
-    // long whatever it is.
-    pub(crate) fn signed_checksum<'x>(
-        &self,
-        checksum: Option<TransactionalChecksum<'x>>,
-        content: impl FnOnce(&mut Sum),
-        pass: Pass,
-        into: &'x mut [u8; CHECKSUM_TEXT_LEN],
-    ) -> Option<(&'static str, &'x [u8])> {
-        Some(match checksum? {
-            TransactionalChecksum::Crc64(text) => (CRC64_HEADER, text.as_bytes()),
-            TransactionalChecksum::Crc32(text) => ("x-amz-checksum-crc32", text.as_bytes()),
-            TransactionalChecksum::Crc32c(text) => ("x-amz-checksum-crc32c", text.as_bytes()),
-            TransactionalChecksum::Sha1(text) => ("x-amz-checksum-sha1", text.as_bytes()),
-            TransactionalChecksum::Sha256(text) => ("x-amz-checksum-sha256", text.as_bytes()),
-            TransactionalChecksum::Compute(ChecksumKind::Md5) => return None,
-            TransactionalChecksum::Compute(kind) => {
-                let len = kind.digest_len();
-                let mut bytes = [0; 32];
-                if pass == Pass::Write
-                    && let Some(provider) = &self.checksums[kind.slot()]
-                {
-                    let mut sum = provider.start();
-                    content(&mut sum);
-                    bytes[..len].copy_from_slice(sum.finish().as_bytes());
-                }
-                // A digest holds a CRC-64 in the little-endian order that
-                // Azure reads, and S3 reads it big-endian.
-                if kind == ChecksumKind::Crc64 {
-                    bytes[..len].reverse();
-                }
-                let text_len = len.div_ceil(3) * 4;
-                let text = encoding::base64_into(&bytes[..len], &mut into[..text_len]);
-                let name = match kind {
-                    ChecksumKind::Crc64 => CRC64_HEADER,
-                    kind => kind.header(),
-                };
-                (name, text.as_bytes())
-            }
-            _ => return None,
-        })
-    }
-
-    fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
-        out.push(now.date());
-        out.push(b"/");
-        out.push(self.bucket.region.as_bytes());
-        out.push(b"/");
-        out.push(self.bucket.signing_service().as_bytes());
-        out.push(b"/aws4_request");
-    }
-
-    // Returns the signature of the head, as lowercase hexadecimal.
-    //
-    // The canonical request of SigV4 is the method and the parts of the head
-    // that the signature covers: the path, the query, and each signed header
-    // with its value. Each is hashed from the bytes that the head holds, so
-    // nothing is written twice and the canonical request is never held. A
-    // value that the head sends with runs of spaces is signed with them
-    // folded, as SigV4 asks.
-    fn signature(
-        &self,
-        head: &HeadWriter<'_>,
-        parts: &SignedParts,
-        signed: &Signed<'_>,
-        headers: &SignedHeaders<'_>,
-        now: &Timestamps,
-    ) -> [u8; 64] {
-        let mut sum = self.sha256.start();
-        sum.update(signed.method.as_str().as_bytes());
-        sum.update(b"\n");
-        sum.update(head.written(parts.path));
-        sum.update(b"\n");
-        sum.update(head.written(parts.query));
-        sum.update(b"\n");
-        // The head writes every signed header but `host` in this order, right
-        // after `authorization`, as `name:value` lines: the canonical lines,
-        // unless SigV4 folds spaces in a value. The HTTP client writes `host`
-        // from the URL.
-        let sent = head.header_spans(parts.first_header);
-        let as_sent = headers
-            .iter()
-            .filter(|header| !matches!(header, Header::Fixed(_, SignedValue::Host)))
-            .zip(sent)
-            .all(|(header, span)| {
-                !folds_spaces(header, self.bucket.service)
-                    || !needs_folding(head.written(span.value))
-            });
-        if as_sent {
-            // The fields before `host` in one piece, `host`, then the rest.
-            let before = headers
-                .iter()
-                .take_while(|header| !matches!(header, Header::Fixed(_, SignedValue::Host)))
-                .count();
-            let lines = |sum: &mut crate::sigv4::Sum, spans: &[HeaderSpan]| {
-                if let (Some(first), Some(last)) = (spans.first(), spans.last()) {
-                    let end = last.value.start + last.value.len;
-                    sum.update(head.written(Span {
-                        start: first.name.start,
-                        len: end - first.name.start,
-                    }));
-                    sum.update(b"\n");
-                }
-            };
-            lines(&mut sum, &sent[..before]);
-            sum.update(b"host:");
-            sum.update(head.written(parts.host));
-            sum.update(b"\n");
-            lines(&mut sum, &sent[before..]);
-        } else {
-            self.write_folded_headers(&mut sum, head, parts, headers);
-        }
-        sum.update(b"\n");
-        sum.update(head.written(parts.names));
-        sum.update(b"\n");
-        sum.update(signed.content_sha256);
-        let canonical = sum.finish();
-        let key = match self.signing_key {
-            Some(key) if key.covers(now) => key,
-            _ => self.derive(now),
-        };
-        key.sign(
-            &canonical,
-            self.bucket.region,
-            self.bucket.signing_service(),
-            now,
-            &self.sha256,
-        )
-    }
-
-    // The signed headers of the canonical request one at a time, with the
-    // spaces of each value that SigV4 folds folded.
-    fn write_folded_headers(
-        &self,
-        sum: &mut crate::sigv4::Sum,
-        head: &HeadWriter<'_>,
-        parts: &SignedParts,
-        headers: &SignedHeaders<'_>,
-    ) {
-        let mut sent = head.header_spans(parts.first_header).iter();
-        for header in headers.iter() {
-            if let Header::Fixed(_, SignedValue::Host) = header {
-                sum.update(b"host:");
-                sum.update(head.written(parts.host));
-            } else {
-                let span = sent.next().expect("the head writes each signed header");
-                sum.update(head.written(span.name));
-                sum.update(b":");
-                let value = head.written(span.value);
-                if folds_spaces(header, self.bucket.service) {
-                    write_canonical_value(sum, value);
-                } else {
-                    sum.update(value);
-                }
-            }
-            sum.update(b"\n");
         }
     }
 }
@@ -1822,7 +1234,6 @@ pub fn prepare_put(
     buf: &mut [u8],
 ) -> Result<Template> {
     let service = bucket.service;
-    validate_template_options(&options.options)?;
     validate_metadata(options.metadata, service)?;
     validate_stored(&options.options, service)?;
     let aws = matches!(service, Service::Aws | Service::AwsDirectory);
@@ -2320,7 +1731,7 @@ pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHead
 ///
 /// AWS writes all objects of a page before its groups of keys. An
 /// object's entity tag keeps its quotes. Read its date with
-/// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
+/// [`iso8601_ms`](crate::iso8601_ms).
 ///
 /// # Errors
 ///
@@ -2436,179 +1847,6 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
         b"InternalError" | b"ServiceUnavailable" => ServiceErrorKind::Service,
         _ => return None,
     })
-}
-
-// Every signed header of one request in the order of its name: the fixed
-// set, sorted once per encode, merged with the metadata sorted by lowercase
-// name. The canonical request, the `authorization` header and the head each
-// walk it.
-struct SignedHeaders<'s> {
-    fixed: [Header<'s>; 24],
-    count: usize,
-    metadata: &'s [MetadataPair<'s>],
-}
-
-impl<'s> SignedHeaders<'s> {
-    fn of(signed: &'s Signed<'s>, token: Option<(&'static str, &'s str)>) -> Self {
-        let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
-        let mut count = 0;
-        // The headers this crate names come in the order of their names, so
-        // they are appended; only the plan's own are sorted in among them.
-        for (name, value) in fixed_headers(signed, token) {
-            fixed[count] = Header::Fixed(name, value);
-            count += 1;
-        }
-        debug_assert!(fixed[..count].is_sorted_by_key(|header| match header {
-            Header::Fixed(name, _) => *name,
-            Header::Meta(_) => "",
-        }));
-        for (name, value) in signed
-            .headers
-            .iter()
-            .map(|(name, value)| (*name, SignedValue::Bytes(value)))
-        {
-            let mut at = count;
-            while at > 0 && matches!(fixed[at - 1], Header::Fixed(previous, _) if previous > name) {
-                fixed[at] = fixed[at - 1];
-                at -= 1;
-            }
-            fixed[at] = Header::Fixed(name, value);
-            count += 1;
-        }
-        Self {
-            fixed,
-            count,
-            metadata: signed.metadata,
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = Header<'s>> + '_ {
-        let plain = self.metadata.is_empty();
-        let mut fixed = self.fixed[..self.count].iter().copied().peekable();
-        let mut metadata = sorted_metadata(self.metadata).peekable();
-        // Without metadata, which most requests carry none of, there is
-        // nothing to merge.
-        core::iter::from_fn(move || {
-            if plain {
-                return fixed.next();
-            }
-            match (fixed.peek(), metadata.peek()) {
-                (None, None) => None,
-                (Some(_), None) => fixed.next(),
-                (Some(Header::Fixed(name, _)), Some(pair))
-                    if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
-                {
-                    fixed.next()
-                }
-                _ => metadata.next().map(Header::Meta),
-            }
-        })
-    }
-}
-
-// Where the head holds what the signature covers, beside the headers.
-#[derive(Default)]
-struct SignedParts {
-    host: Span,
-    path: Span,
-    // The query without its `?`, empty if the URL has none.
-    query: Span,
-    // The names in `SignedHeaders=`.
-    names: Span,
-    signature: Span,
-    // The index of the first signed header after `authorization`.
-    first_header: usize,
-}
-
-// Whether SigV4 signs the value of `header` with each run of spaces folded,
-// rather than as the head sends it. The values that this crate formats hold
-// no such run; a value from the plan may.
-fn folds_spaces(header: Header<'_>, service: Service) -> bool {
-    match header {
-        Header::Fixed(_, SignedValue::Bytes(_))
-        | Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(_))) => true,
-        Header::Fixed(..) => false,
-        Header::Meta(pair) => !encodes(pair.value, service),
-    }
-}
-
-// Whether SigV4 would change `value` by folding its spaces: a space at
-// either end, or two in a row.
-fn needs_folding(value: &[u8]) -> bool {
-    value.first() == Some(&b' ')
-        || value.last() == Some(&b' ')
-        || value.windows(2).any(|pair| pair == b"  ")
-}
-
-// The signed headers that this crate names, other than metadata, in the
-// order of their names: the four conditions all sort between `host` and
-// `range`, the copy's headers between `x-amz-content-sha256` and
-// `x-amz-date`, and either token between `x-amz-date` and `x-amz-tagging`.
-fn fixed_headers<'s>(
-    signed: &'s Signed<'s>,
-    token: Option<(&'static str, &'s str)>,
-) -> impl Iterator<Item = (&'s str, SignedValue<'s>)> {
-    let copy_condition = signed.copy.and_then(|copy| {
-        let name = match copy.source.condition {
-            ConditionKind::None => return None,
-            ConditionKind::IfMatch => "x-amz-copy-source-if-match",
-            ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
-            ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
-            ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
-        };
-        Some((name, SignedValue::Condition(copy.source.condition_value?)))
-    });
-    [
-        Some(("host", SignedValue::Host)),
-        condition_header(signed.condition)
-            .zip(signed.condition_value)
-            .map(|(name, value)| (name, SignedValue::Condition(value))),
-        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
-        Some((
-            "x-amz-content-sha256",
-            SignedValue::Formatted(signed.content_sha256),
-        )),
-        signed
-            .copy
-            .map(|_| ("x-amz-copy-source", SignedValue::CopySource)),
-        copy_condition,
-        signed
-            .copy
-            .filter(|copy| copy.range != RequestedRange::Whole)
-            .map(|_| ("x-amz-copy-source-range", SignedValue::CopyRange)),
-        Some(("x-amz-date", SignedValue::Date)),
-        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
-        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
-    ]
-    .into_iter()
-    .flatten()
-}
-
-fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = u8> + 'p {
-    METADATA_PREFIX
-        .bytes()
-        .chain(pair.name.bytes().map(|byte| byte.to_ascii_lowercase()))
-}
-
-fn write_header_name(out: &mut dyn ByteSink, header: Header<'_>) {
-    match header {
-        Header::Fixed(name, _) => out.push(name.as_bytes()),
-        Header::Meta(pair) => {
-            for byte in metadata_header_name(pair) {
-                out.push(&[byte]);
-            }
-        }
-    }
-}
-
-// The names of the signed headers, in order, separated by `;`.
-fn write_signed_names(out: &mut dyn ByteSink, headers: &SignedHeaders<'_>) {
-    for (index, header) in headers.iter().enumerate() {
-        if index != 0 {
-            out.push(b";");
-        }
-        write_header_name(out, header);
-    }
 }
 
 // SigV4 signs a header value without the spaces at either end, and with each
@@ -2732,69 +1970,6 @@ fn has_dot_segment(key: &[u8]) -> bool {
     })
 }
 
-// The value of `x-amz-copy-source-range`, which names its last byte as
-// `Range` does.
-fn write_copy_range(out: &mut dyn ByteSink, signed: &Signed<'_>) {
-    if let Some(copy) = signed.copy {
-        write_range(out, copy.range);
-    }
-}
-
-// The query parameter that names a version, or none for the object as it is
-// now. Validation refused a snapshot.
-pub(crate) fn version_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
-    match revision? {
-        Revision::Version(id) => url::encoded("versionId", id),
-        Revision::Snapshot(_) => None,
-    }
-}
-
-// The writes that take options. A write of a whole object stores the
-// content properties, the tags and the storage class of the object, under
-// the rules of a service, and takes any checksum. A part, staged or
-// committed, takes none of those, and an MD5 alone.
-#[derive(Clone, Copy)]
-pub(crate) enum Stores {
-    Object(Service),
-    Part,
-}
-
-// Checks what a write sends beside its content. S3 stores no declared MD5.
-// A checksum or a SHA-256 that the encoder computes needs the bytes.
-pub(crate) fn validate_content(
-    options: &WriteOptions<'_>,
-    content: Payload<'_>,
-    hash: PayloadHash,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-    stores: Stores,
-) -> Result<()> {
-    let has_bytes = content.bytes().is_some();
-    if options.declared_md5.is_some() || (hash == PayloadHash::Compute && !has_bytes) {
-        return Err(InvalidPlan::Option.into());
-    }
-    let md5_or_none = matches!(
-        options.checksum,
-        None | Some(
-            TransactionalChecksum::Md5(_) | TransactionalChecksum::Compute(ChecksumKind::Md5)
-        )
-    );
-    if matches!(stores, Stores::Part) && !md5_or_none {
-        return Err(InvalidPlan::Option.into());
-    }
-    validate_s3_checksum(options.checksum, has_bytes, checksums)?;
-    match stores {
-        Stores::Object(service) => validate_stored(options, service),
-        Stores::Part
-            if !options.properties.is_empty()
-                || !options.tags.is_empty()
-                || options.storage_class.is_some() =>
-        {
-            Err(InvalidPlan::Option.into())
-        }
-        Stores::Part => Ok(()),
-    }
-}
-
 // Checks a checksum of S3's: one that a write signs as text, or one that the
 // encoder computes, an MD5 or a CRC-64/NVME.
 // Checks the content properties, the storage class and the tags that a write
@@ -2814,20 +1989,6 @@ pub(crate) fn validate_stored(options: &WriteOptions<'_>, service: Service) -> R
     validate_tags(options.tags, s3_tag_char, limits)
 }
 
-pub(crate) fn validate_s3_checksum(
-    checksum: Option<TransactionalChecksum<'_>>,
-    has_bytes: bool,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-) -> Result<()> {
-    let len = match checksum {
-        Some(TransactionalChecksum::Crc32(text) | TransactionalChecksum::Crc32c(text)) => (text, 4),
-        Some(TransactionalChecksum::Sha1(text)) => (text, 20),
-        Some(TransactionalChecksum::Sha256(text)) => (text, 32),
-        _ => return validate_checksum(checksum, has_bytes, checksums),
-    };
-    check_base64_len(len.0, len.1)
-}
-
 // The characters that S3 takes in the key and the value of a tag.
 pub(crate) fn s3_tag_char(character: char) -> bool {
     character.is_alphanumeric() || " +-=._:/@".contains(character)
@@ -2835,32 +1996,6 @@ pub(crate) fn s3_tag_char(character: char) -> bool {
 
 // The header that carries a CRC-64/NVME on S3.
 const CRC64_HEADER: &str = "x-amz-checksum-crc64nvme";
-
-// The longest text of a checksum that a write signs: the base64 of a
-// SHA-256.
-pub(crate) const CHECKSUM_TEXT_LEN: usize = 44;
-
-// The headers that a write signs beside the client's own: the content
-// properties, the storage class and a checksum other than an MD5.
-pub(crate) fn stored_headers<'a>(
-    options: &WriteOptions<'a>,
-    checksum: Option<(&'static str, &'a [u8])>,
-) -> ([(&'static str, &'a [u8]); 7], usize) {
-    let mut headers = [("", &[][..]); 7];
-    let mut count = 0;
-    let properties = options
-        .properties
-        .iter()
-        .map(|(name, value)| (name, value.as_bytes()));
-    let class = options
-        .storage_class
-        .map(|class| ("x-amz-storage-class", class.as_bytes()));
-    for header in properties.chain(class).chain(checksum) {
-        headers[count] = header;
-        count += 1;
-    }
-    (headers, count)
-}
 
 // Checks the condition of a write: a whole object, or a commit of parts.
 pub(crate) fn validate_write_condition(

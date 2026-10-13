@@ -1,13 +1,12 @@
 // What both providers share when they write a request head and read a
 // response head.
 
-use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum};
-use crate::request::{ByteSink, HeadWriter, HeaderValue, U64Decimal, Writer};
+use crate::checksum::ChecksumKind;
+use crate::request::{ByteSink, HeaderValue, U64Decimal};
 use crate::{
     BodyWindow, ConditionKind, ConditionValue, Error, Failure, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, HeaderSpan, InvalidPlan, LegacyRequest, Method, ObjectMeta, Payload,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
-    Timestamps, TransactionalChecksum, WriteOptions,
+    GetKind, GetShape, InvalidPlan, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
+    Result, Revision, ServiceErrorKind, Tag, Timestamps, WriteOptions,
 };
 
 // Checks the snapshot or version that a plan names: an identifier that is
@@ -353,18 +352,6 @@ pub(crate) fn failure_class(status: u16, kind: Option<ServiceErrorKind>) -> Fail
     }
 }
 
-// The condition is the last header of every request that carries one.
-pub(crate) fn push_condition(
-    head: &mut HeadWriter<'_>,
-    condition: ConditionKind,
-    value: Option<ConditionValue<'_>>,
-) {
-    if let Some(name) = condition_header(condition) {
-        let value = value.expect("the plan was validated");
-        head.header(name, value);
-    }
-}
-
 // A range is written as `Range` writes it: `bytes=` and its first and last
 // byte.
 impl HeaderValue for RequestedRange {
@@ -396,10 +383,8 @@ pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
 
 // The written head, or the exact number of bytes that it needed.
 pub(crate) fn capacity_error(capacity: crate::CapacityError) -> Error {
-    // A slice's byte size must fit isize, including descriptor arrays on 32-bit.
-    // HeaderSpan is nonzero-sized; divide before comparing to avoid overflow.
-    let max_headers = isize::MAX as usize / core::mem::size_of::<HeaderSpan>();
-    if capacity.required > isize::MAX as usize || capacity.required_headers > max_headers {
+    // A slice holds at most isize::MAX bytes.
+    if capacity.required > isize::MAX as usize {
         InvalidPlan::RequestTooLarge.into()
     } else {
         Error::Capacity(capacity)
@@ -409,38 +394,17 @@ pub(crate) fn capacity_error(capacity: crate::CapacityError) -> Error {
 #[cfg(test)]
 #[test]
 fn a_request_larger_than_a_slice_is_not_a_recoverable_capacity_error() {
+    let fits = crate::CapacityError {
+        required: isize::MAX as usize,
+    };
+    assert_eq!(capacity_error(fits), Error::Capacity(fits));
     let capacity = crate::CapacityError {
         required: isize::MAX as usize + 1,
-        ..crate::CapacityError::default()
     };
     assert_eq!(
         capacity_error(capacity),
         InvalidPlan::RequestTooLarge.into()
     );
-    let max_headers = isize::MAX as usize / core::mem::size_of::<HeaderSpan>();
-    let capacity = crate::CapacityError {
-        required_headers: max_headers,
-        ..crate::CapacityError::default()
-    };
-    assert_eq!(capacity_error(capacity), Error::Capacity(capacity));
-    let capacity = crate::CapacityError {
-        required_headers: max_headers + 1,
-        ..capacity
-    };
-    assert_eq!(
-        capacity_error(capacity),
-        InvalidPlan::RequestTooLarge.into()
-    );
-}
-
-pub(crate) fn encoded<'r>(
-    head: HeadWriter<'r>,
-    method: Method,
-    payload: Payload<'r>,
-) -> Result<LegacyRequest<'r>> {
-    let capacity = head.capacity();
-    head.finish(method, payload)
-        .ok_or_else(|| capacity_error(capacity))
 }
 
 pub(crate) fn condition_header(kind: ConditionKind) -> Option<&'static str> {
@@ -490,77 +454,9 @@ pub(crate) fn valid_header(value: &[u8]) -> bool {
     !value.is_empty() && value.is_ascii() && !value.iter().any(u8::is_ascii_control)
 }
 
-// Checks the checksum of a write. Text must be the base64 of a digest of its
-// kind. A computed checksum needs the content, which the encoder holds only
-// if `has_bytes`, and a provider of its kind among `checksums`. A provider
-// that refuses a kind refuses it before this.
-pub(crate) fn validate_checksum(
-    checksum: Option<TransactionalChecksum<'_>>,
-    has_bytes: bool,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-) -> Result<()> {
-    match checksum {
-        Some(TransactionalChecksum::Md5(text)) => ChecksumKind::Md5.check_base64(text),
-        Some(TransactionalChecksum::Crc64(text)) => ChecksumKind::Crc64.check_base64(text),
-        Some(TransactionalChecksum::Compute(kind))
-            if !has_bytes || checksums[kind.slot()].is_none() =>
-        {
-            Err(InvalidPlan::Option.into())
-        }
-        Some(TransactionalChecksum::Compute(_)) | None => Ok(()),
-        // The checksums that only S3 takes, which its client checks.
-        Some(_) => Err(InvalidPlan::Option.into()),
-    }
-}
-
-// Writes the checksum header of a write, if the plan carries a checksum.
-// Text that the plan gave is written as it is; `validate_checksum` checked
-// it. A computed checksum is summed here by the provider of its kind, which
-// `validate_checksum` checked is registered. `content` feeds the content to
-// the sum one piece at a time: a put or a stage has one piece, and a commit
-// writes its list of parts piece by piece.
-pub(crate) fn push_checksum(
-    head: &mut HeadWriter<'_>,
-    checksum: Option<TransactionalChecksum<'_>>,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-    content: impl FnOnce(&mut Sum),
-) {
-    match checksum {
-        Some(TransactionalChecksum::Md5(text)) => {
-            head.header(ChecksumKind::Md5.header(), text);
-        }
-        Some(TransactionalChecksum::Crc64(text)) => {
-            head.header(ChecksumKind::Crc64.header(), text);
-        }
-        Some(TransactionalChecksum::Compute(kind)) => {
-            // Validation refused the plan if this is `None`.
-            if let Some(provider) = &checksums[kind.slot()] {
-                let mut sum = provider.start();
-                content(&mut sum);
-                let mut into = [0; crate::checksum::BASE64_LEN];
-                let text = sum.finish().base64(&mut into);
-                head.header(kind.header(), text);
-            }
-        }
-        // `validate_checksum` refused any other kind.
-        _ => {}
-    }
-}
-
 // Writes the body that the encoder generates, such as the list of parts of
 // a commit, after the head, and finishes the request with it. `write` must
 // write the bytes that the head states the length of.
-pub(crate) fn encoded_with_body<'r>(
-    mut head: HeadWriter<'r>,
-    method: Method,
-    write: impl FnOnce(&mut Writer<'r>),
-) -> Result<LegacyRequest<'r>> {
-    let body = head.body(write);
-    let capacity = head.capacity();
-    head.finish_with_body(method, Payload::Slice(&[]), Some(body))
-        .ok_or_else(|| capacity_error(capacity))
-}
-
 // Checks the content properties and the storage class of a write: each is
 // one header value that the service stores as given, so no space at either
 // end, which HTTP drops. A value is ASCII, except that the properties that
@@ -781,15 +677,6 @@ pub(crate) fn validate_source_container(container: Option<&str>) -> Result<()> {
                 .any(|byte| matches!(byte, b'/' | b'?' | b'#') || byte.is_ascii_control()))
     {
         return Err(InvalidPlan::CopySource.into());
-    }
-    Ok(())
-}
-
-// Checks that the options of a template name no checksum: a template
-// names the kind of its checksum apart, and each request its value.
-pub(crate) fn validate_template_options(options: &WriteOptions<'_>) -> Result<()> {
-    if options.checksum.is_some() || options.declared_md5.is_some() {
-        return Err(InvalidPlan::Option.into());
     }
     Ok(())
 }

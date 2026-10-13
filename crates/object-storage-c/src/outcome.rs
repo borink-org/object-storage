@@ -1,6 +1,6 @@
 //! The outcome, as a C program reads it.
 //!
-//! A twin carries the fields of the core crate's own value, and borrows the
+//! A twin carries the fields of the protocol crate's own value, and borrows the
 //! same bytes rather than copying them.
 
 #![forbid(unsafe_code)]
@@ -194,7 +194,7 @@ fn failed(kind: OutcomeKind, failure: &proto::Failure<'_>) -> Outcome {
     }
 }
 
-// A missing object is not a failure of the head. The core crate's variant
+// A missing object is not a failure of the head. The protocol crate's variant
 // carries the error it named and nothing else, and so does this.
 fn not_found(kind: Option<ServiceErrorKind>) -> Outcome {
     Outcome {

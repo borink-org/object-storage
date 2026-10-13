@@ -55,7 +55,6 @@ struct Picked {
 };
 
 struct Round {
-    borink::Session session;
     std::vector<std::uint8_t> work;
     std::vector<borink::ListEntry> entries;
     std::vector<borink::MaybeBytes> values;
@@ -65,14 +64,14 @@ struct Round {
 
 std::size_t plain(Round &r) {
     const borink::Fill fill =
-        borink_fill_listing(&r.session, borink::into(r.work), r.entries.data(), r.entries.size());
+        borink_fill_listing(borink::into(r.work), r.entries.data(), r.entries.size());
     return borink::entries_of(r.entries, fill).size();
 }
 
 std::size_t with(Round &r) {
-    const borink::Fill fill = borink_fill_listing_with(&r.session, borink::into(r.work),
-                                                       r.entries.data(), r.entries.size(),
-                                                       r.wanted, r.values.data(), r.values.size());
+    const borink::Fill fill =
+        borink_fill_listing_with(borink::into(r.work), r.entries.data(), r.entries.size(),
+                                 r.wanted, r.values.data(), r.values.size());
     const std::span<const borink::ListEntry> read = borink::entries_of(r.entries, fill);
     for (std::size_t i = 0; i < read.size(); i++) {
         const std::span<const borink::MaybeBytes> row = borink::values_of(r.values, r.wanted, i);
@@ -155,7 +154,6 @@ int main(int argc, char **argv) {
     }
 
     Round r{
-        borink::session("https://acct.blob.core.windows.net", "data", "token"),
         std::vector<std::uint8_t>(page.size()),
         std::vector<borink::ListEntry>(Capacity),
         std::vector<borink::MaybeBytes>(Capacity * 3),

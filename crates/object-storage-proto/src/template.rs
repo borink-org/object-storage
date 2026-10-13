@@ -245,7 +245,7 @@ pub(crate) struct Table {
     // body section, beside the step of text alone that ends it.
     body: bool,
     // A hash of the template's bytes, by which it knows them again.
-    seal: u64,
+    fingerprint: u64,
 }
 
 /// One run of a request's layout.
@@ -401,12 +401,9 @@ impl<'t> Builder<'t> {
         }
         let end = self.out.position();
         if !self.out.fits() {
-            return Err(capacity_error(CapacityError {
-                required: end,
-                required_headers: 0,
-            }));
+            return Err(capacity_error(CapacityError { required: end }));
         }
-        let seal = seal(self.out.written());
+        let fingerprint = fingerprint(self.out.written());
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
             return Err(InvalidPlan::RequestTooLarge.into());
         };
@@ -432,25 +429,25 @@ impl<'t> Builder<'t> {
             url_fixed,
             fields: self.fields,
             body,
-            seal,
+            fingerprint,
         })
     }
 }
 
 // A hash of a template's bytes, its text and its table: not a check against
 // tampering, but against bytes that are another template's or were changed.
-pub(crate) fn seal(bytes: &[u8]) -> u64 {
+pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
     let (words, rest) = bytes.as_chunks::<8>();
     let mut last = [0; 8];
     last[..rest.len()].copy_from_slice(rest);
-    words
-        .iter()
-        .chain([&last])
-        .fold(0x243F_6A88_85A3_08D3 ^ bytes.len() as u64, |seal, word| {
-            (seal ^ u64::from_le_bytes(*word))
+    words.iter().chain([&last]).fold(
+        0x243F_6A88_85A3_08D3 ^ bytes.len() as u64,
+        |fingerprint, word| {
+            (fingerprint ^ u64::from_le_bytes(*word))
                 .wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 .rotate_left(23)
-        })
+        },
+    )
 }
 
 // Writes the values of a stored template one after another, as
@@ -532,7 +529,7 @@ impl Table {
         into.put(&[self.fields.0]);
         into.u32(self.fields.1);
         into.put(&[u8::from(self.body)]);
-        into.put(&self.seal.to_le_bytes());
+        into.put(&self.fingerprint.to_le_bytes());
     }
 
     // Reads a table that `store` wrote, or `None` for one that no template
@@ -551,7 +548,7 @@ impl Table {
             1 => true,
             _ => return None,
         };
-        let seal = u64::from_le_bytes(from.take());
+        let fingerprint = u64::from_le_bytes(from.take());
         let steps: usize = counts.iter().map(|&count| usize::from(count)).sum();
         if steps != usize::from(total)
             || steps > MAX_STEPS
@@ -569,7 +566,7 @@ impl Table {
             url_fixed,
             fields,
             body,
-            seal,
+            fingerprint,
         })
     }
 }
@@ -689,7 +686,7 @@ impl Table {
     // are the ones it sealed. A request's pass checks neither.
     pub(crate) fn check(&self, bytes: &[u8]) -> Result<()> {
         match bytes.get(..self.end as usize) {
-            Some(own) if seal(own) == self.seal => Ok(()),
+            Some(own) if fingerprint(own) == self.fingerprint => Ok(()),
             _ => Err(InvalidPlan::Template.into()),
         }
     }
@@ -1011,7 +1008,6 @@ pub(crate) fn fitted(
     if !out.fits() {
         return Err(capacity_error(CapacityError {
             required: written.end,
-            required_headers: 0,
         }));
     }
     #[cfg(test)]

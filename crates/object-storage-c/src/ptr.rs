@@ -69,7 +69,7 @@ pub(crate) unsafe fn maybe_slice<'a>(value: MaybeBytes) -> Option<&'a [u8]> {
     value.present.then(|| unsafe { slice(value.bytes) })
 }
 
-/// The values of a container, as the core crate's container takes them.
+/// The values of a container, as the protocol crate's container takes them.
 #[derive(Clone, Copy)]
 pub(crate) struct ContainerValues<'a> {
     pub(crate) endpoint: &'a [u8],
@@ -155,7 +155,7 @@ pub(crate) unsafe fn headers<'a>(
         .map(|header| unsafe { (slice(header.name), slice(header.value)) })
 }
 
-/// Reads a failure as the core crate's record. One whose category this
+/// Reads a failure as the protocol crate's record. One whose category this
 /// crate does not define reads nothing.
 ///
 /// # Safety

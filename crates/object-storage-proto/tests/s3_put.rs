@@ -4,7 +4,7 @@ use borink_object_storage_proto::s3::{self, Bucket, MAX_PUT_LEN, PayloadSigning,
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
     ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidPlan,
-    MetadataPair, Payload, PutItem, PutOptions, Timestamps, WriteOptions,
+    MetadataPair, Payload, PutItem, PutOptions, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -43,7 +43,7 @@ fn encode(
     let mut buf = vec![0; 4096];
     let unsigned = s3::encode_put(&template, &bytes, item, content_sha256, &now(), &mut buf)
         .map_err(refusal)?;
-    let request = s3::finish(&unsigned, &mut buf, &[0; 32]);
+    let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
     Ok(request
         .headers()
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -123,17 +123,6 @@ fn a_write_that_s3_cannot_take_is_refused() {
     assert_eq!(
         refused(&md5, unsigned, &not_base64, None),
         InvalidPlan::Checksum
-    );
-    let declared = PutOptions {
-        options: WriteOptions {
-            declared_md5: Some("1B2M2Y8AsgTpgAmY7PhCfg=="),
-            ..WriteOptions::new()
-        },
-        ..plain
-    };
-    assert_eq!(
-        refused(&declared, unsigned, &PutItem::new("k", slice), None),
-        InvalidPlan::Option
     );
 
     let metadata = |pairs: &[MetadataPair<'_>]| {

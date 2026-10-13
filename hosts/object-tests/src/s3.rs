@@ -1,5 +1,5 @@
-//! The S3 half of the adapter: `s3::Objects` for GET, HEAD, PUT, DELETE,
-//! listing and uploads in parts, and for the SigV4 signatures of the vector
+//! The S3 half of the adapter: a template for each call, and a request
+//! written and signed from it, including the SigV4 signatures of the vector
 //! suite.
 //!
 //! The crate signs with long-lived or temporary credentials. Offline cases
@@ -24,8 +24,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Sha256RustCrypto, sigv4, wipe};
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Part, PartRef,
-    PayloadHash, PayloadSigning, PropertySet, Service, Session, SessionHeadOutcome, Template,
-    Unsigned,
+    PayloadSigning, PropertySet, Service, Session, SessionHeadOutcome, Template, Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
@@ -35,7 +34,7 @@ use borink_object_storage_proto::{
     ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload, PutHeadOutcome, PutItem,
     PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind,
     StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
-    WireRequest, WriteOptions, layered,
+    WireRequest, WriteOptions, iso8601_ms,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -364,7 +363,6 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "storage_class"),
-            ..WriteOptions::default()
         },
         checksum: checksum_kind,
     };
@@ -466,7 +464,6 @@ fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "storage_class"),
-            ..WriteOptions::default()
         },
         ..s3::CreateUploadOptions::default()
     };
@@ -905,7 +902,7 @@ fn listed_entry_value(listed: &ObjectWithProperties<'_>) -> Value {
     if entry.kind == EntryKind::DeleteMarker {
         value["delete_marker"] = json!(true);
     }
-    if let Some(millis) = entry.last_modified.and_then(layered::iso8601_ms) {
+    if let Some(millis) = entry.last_modified.and_then(iso8601_ms) {
         value["last_modified"] = json!(rfc3339(millis / 1000));
     }
     if let Some(storage_class) = listed.storage_class {
@@ -1012,11 +1009,11 @@ fn parse_range_header(value: &str) -> Option<RequestedRange> {
     })
 }
 
-/// Signs a GET, HEAD, PUT or DELETE the way `Objects` signs it, and returns
-/// the request's headers.
+/// Signs a GET, HEAD, PUT or DELETE from a template, and returns the
+/// request's headers.
 ///
-/// The URL names a virtual-hosted bucket, and the plan carries the one header
-/// the case adds. The crate derives every other signed header itself, so a
+/// The URL names a virtual-hosted bucket. The case adds at most one header,
+/// a range, which the request's item carries. The crate derives every other signed header itself, so a
 /// header it does not write is unsupported.
 fn sign(call: &Value) -> Result<Value, AdapterError> {
     // An S3 Express session signs for a directory bucket, and the crate
@@ -1072,9 +1069,9 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
             .iter()
             .all(|(name, _)| allowed.contains(&name.as_str()))
     };
-    let hash = match optional_text(call, "payload_hash") {
-        None => PayloadHash::Compute,
-        Some("UNSIGNED-PAYLOAD") => PayloadHash::Unsigned,
+    let signing = match optional_text(call, "payload_hash") {
+        None => PayloadSigning::Signed,
+        Some("UNSIGNED-PAYLOAD") => PayloadSigning::Unsigned,
         Some(_) => return Ok(unsupported_by_crate("the crate signs no streaming payload")),
     };
     let key = key.as_str();
@@ -1259,12 +1256,9 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
         "PUT" if range == RequestedRange::Whole && version.is_none() => {
             let options = PutOptions::default();
             let item = PutItem::new(key, Payload::Slice(&body));
-            let (signing, digest) = match hash {
-                PayloadHash::Unsigned => (PayloadSigning::Unsigned, None),
-                _ => (
-                    PayloadSigning::Signed,
-                    Some(sigv4::sha256::<Sha256RustCrypto>(&body)),
-                ),
+            let digest = match signing {
+                PayloadSigning::Unsigned => None,
+                PayloadSigning::Signed => Some(sigv4::sha256::<Sha256RustCrypto>(&body)),
             };
             let (_, request) = crate_step!(signed(
                 &bucket,

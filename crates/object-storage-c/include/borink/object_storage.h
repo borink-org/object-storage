@@ -54,7 +54,7 @@ typedef uint16_t borink_azure_namespace;
 /**
  * Which kind of failure a `borink_status` carries.
  *
- * These are the numbers that the core crate's error code uses.
+ * These are the numbers that `borink-object-storage-proto`'s error code uses.
  */
 enum borink_error_code
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -324,7 +324,7 @@ typedef uint16_t borink_condition_form;
 /**
  * The kind of checksum that every request of a template sends.
  *
- * These are the numbers that the core crate's checksum kind uses. Azure
+ * These are the numbers that `borink-object-storage-proto`'s checksum kind uses. Azure
  * takes an MD5 or a CRC64, and a template of any other is refused.
  */
 enum borink_checksum_kind
@@ -415,7 +415,7 @@ typedef uint32_t borink_list_include;
 /**
  * The category of a service failure.
  *
- * These are the numbers that the core crate's failure class uses. A number
+ * These are the numbers that `borink-object-storage-proto`'s failure class uses. A number
  * that is not listed here comes from a later version of that crate. It
  * crosses unchanged, never as a substitute.
  */
@@ -460,7 +460,7 @@ typedef uint16_t borink_failure_class;
 /**
  * The specific error that the service named.
  *
- * These are the numbers that the core crate's service error kind uses, and
+ * These are the numbers that `borink-object-storage-proto`'s service error kind uses, and
  * they cross unchanged in both directions.
  */
 enum borink_service_error
@@ -588,7 +588,7 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_INVALID = 11,
     /**
-     * The core crate returned a variant that this crate does not know.
+     * The protocol crate returned a variant that this crate does not know.
      */
     BORINK_OUTCOME_KIND_UNSUPPORTED = 12,
     /**
@@ -657,7 +657,7 @@ typedef uint16_t borink_entry_kind;
  * written under the properties element; the ones marked otherwise stand
  * beside it. Read anything not listed here with `borink_entry_property`.
  *
- * These are the numbers that the core crate's `BlobProperty` uses. A
+ * These are the numbers that `borink-object-storage-proto`'s `BlobProperty` uses. A
  * `const` block in `layout.rs` fails the build if the two lists drift.
  */
 enum borink_blob_property
@@ -847,7 +847,7 @@ typedef uint16_t borink_blob_property;
 #endif // __cplusplus
 
 /**
- * A failure, as the two numbers that describe every error of the core crate.
+ * A failure, as the two numbers that describe every error of `borink-object-storage-proto`.
  *
  * `code` is a `borink_error_code`, and `detail` is the discriminant of the
  * value inside it. A `code` of 0 means that nothing failed. Both numbers are
@@ -888,7 +888,7 @@ typedef struct borink_bytes {
 
 /**
  * The container that the requests of a template go to: what
- * `Container::new` and `Container::object` describe in the core crate.
+ * `Container::new` and `Container::object` describe in `borink-object-storage-proto`.
  *
  * Your program owns the values. They must stay valid for the call that
  * prepares a template, and no longer: a template holds no pointer.
@@ -926,7 +926,7 @@ typedef struct borink_container {
 
 /**
  * An instant, formatted for the dates that a request carries: what
- * `Timestamps` is in the core crate, as it stores itself.
+ * `Timestamps` is in `borink-object-storage-proto`, as it stores itself.
  *
  * `borink_timestamps_from_unix` writes one. Write one each second, and pass
  * it to every request of that second, so that no request formats its dates
@@ -1617,7 +1617,7 @@ typedef struct borink_failure {
      * The category of the failure, as a `borink_failure_class`. Use it to
      * decide whether to retry.
      *
-     * This is `class` in the core crate, which C++ cannot spell.
+     * This is `class` in `borink-object-storage-proto`, which C++ cannot spell.
      */
     uint16_t class_;
     /**
@@ -2065,7 +2065,7 @@ extern "C" {
 
 /**
  * Reports what is wrong with `container`, if anything: what
- * `Container::new` refuses in the core crate.
+ * `Container::new` refuses in `borink-object-storage-proto`.
  *
  * A `code` of 0 means that a template can be prepared for it. Every
  * `borink_prepare_*` call makes the same check, so this exists to fail
@@ -2081,7 +2081,7 @@ struct borink_status borink_container_check(const struct borink_container *conta
 
 /**
  * Returns the instant `unix_seconds` after the Unix epoch, formatted for the
- * dates that a request carries: `Timestamps::from_unix` in the core crate.
+ * dates that a request carries: `Timestamps::from_unix` in `borink-object-storage-proto`.
  *
  * Call it once a second, and pass the result to every request of that
  * second. A value after `9999-12-31 23:59:59 UTC` becomes that instant.
@@ -2696,8 +2696,8 @@ struct borink_property borink_next_property(struct borink_properties *walk);
  * The bytes returned are `into`, so they are valid until you release or
  * reuse it.
  */
-struct borink_maybe_bytes borink_decode_into(struct borink_bytes value,
-                                             struct borink_bytes_mut into);
+struct borink_maybe_bytes borink_decode_property(struct borink_bytes value,
+                                                 struct borink_bytes_mut into);
 
 /**
  * Writes an entity tag from a listing in the quoted form that HTTP defines.

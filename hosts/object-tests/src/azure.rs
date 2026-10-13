@@ -1,4 +1,5 @@
-//! The Azure half of the adapter: `Blobs` for every operation it has.
+//! The Azure half of the adapter: a template for each call, and a request
+//! written from it.
 //!
 //! The crate authenticates with a bearer token only. Offline cases receive a
 //! placeholder token. Live cases need `endpoint.auth = "bearer"`, and the
@@ -26,7 +27,7 @@ use borink_object_storage_proto::{
     GetKind, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome,
     ObjectItem, PropertySet, PutHeadOutcome, PutItem, PutOptions, RequestedRange,
     RestoreHeadOutcome, Revision, RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome,
-    UpdateHeadOutcome, WireRequest, WriteOptions, layered,
+    UpdateHeadOutcome, WireRequest, WriteOptions,
 };
 use serde_json::{Map, Value, json};
 
@@ -232,7 +233,6 @@ fn write_object(
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "tier"),
-            ..WriteOptions::default()
         },
         checksum: checksum_kind,
     };
@@ -532,7 +532,6 @@ fn commit_blocks(
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "tier"),
-            ..WriteOptions::default()
         },
         content_md5: content_md5.is_some(),
         ..azure::CommitOptions::default()
@@ -636,7 +635,7 @@ fn list_blocks(
     }
 
     // The crate bounds the count from the body's own length.
-    let mut blocks = vec![Block::default(); layered::max_blocks_in(exchange.body.len())];
+    let mut blocks = vec![Block::default(); azure::max_blocks_in(exchange.body.len())];
     let listing = crate_step!(azure::fill_blocks(&mut exchange.body, &mut blocks));
 
     let mut committed = Vec::new();

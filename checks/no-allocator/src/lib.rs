@@ -9,7 +9,7 @@ use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     AzureNamespace, BlobProperty, ChecksumKind, ChecksumValue, Container, GetHeadOutcome, GetItem,
     GetOptions, ListEntry, ListHeadOutcome, ListItem, ListMarker, ListOptions, MetadataPair,
-    Payload, PropertySet, PutItem, PutOptions, ResponseHead, Timestamps, layered,
+    Payload, PropertySet, PutItem, PutOptions, ResponseHead, Timestamps, decode_property,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -60,7 +60,7 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
 
 // A signed request derives its key from the secret in a fixed array on the
 // stack, and hashes its canonical request where it was written. Neither
-// provider asks for memory either.
+// SHA-256 implementation asks for memory either.
 fn signed_requests(now: &Timestamps) -> usize {
     let Ok(bucket) = Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws) else {
         return 10;
@@ -155,7 +155,7 @@ fn digest<C: borink_object_storage_crypto::Checksum>(
     checksum.finish()
 }
 
-// A write sends the checksum that a provider computed over its content.
+// A write sends the checksum that a `Checksum` computed over its content.
 // Neither the encoder nor either implementation asks for memory.
 fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
     let mut written = 0;
@@ -239,7 +239,7 @@ fn listing(container: &Container<'_>, now: &Timestamps) -> usize {
     let mut into = [0; 16];
     let length = first[0]
         .property("Content-Length")
-        .and_then(|value| layered::decode_into(value, &mut into))
+        .and_then(|value| decode_property(value, &mut into))
         .map_or(0, <[u8]>::len)
         + first[0].properties().count();
     let key = first[0].key.len() + first[1].key.len() + length;

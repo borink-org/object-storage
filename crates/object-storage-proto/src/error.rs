@@ -7,29 +7,22 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// The exact capacity that your buffer needs.
 ///
-/// For encoding, grow the byte buffer to `required` and the descriptor array
-/// to `required_headers`, then retry. Pass empty buffers to learn both
-/// before the first call. A function that writes a template or a request
-/// from one needs bytes only, and `required_headers` is zero.
+/// For a function that writes a template or a request, grow the buffer to
+/// `required` bytes and call it again. Pass an empty buffer to learn the size
+/// before the first call.
 ///
 /// For [`azure::fill_listing`](crate::azure::fill_listing) and
-/// [`s3::fill_listing`](crate::s3::fill_listing),
-/// `required` counts entries, not bytes, and `required_headers` is zero.
+/// [`s3::fill_listing`](crate::s3::fill_listing), `required` counts entries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapacityError {
-    /// Required bytes for encoding, or entries for a listing fill.
+    /// The number of bytes that a write needs, or of entries that a listing
+    /// needs.
     pub required: usize,
-    /// Header slots required by an encoder; zero for a body fill.
-    pub required_headers: usize,
 }
 
 impl fmt::Display for CapacityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the buffer needs {}", self.required)?;
-        if self.required_headers != 0 {
-            write!(f, "; headers need {}", self.required_headers)?;
-        }
-        Ok(())
+        write!(f, "the buffer needs {}", self.required)
     }
 }
 
@@ -144,7 +137,7 @@ pub enum InvalidPlan {
     /// A checksum is not the base64 of the bytes it names: sixteen for an
     /// MD5, eight for a CRC64.
     ///
-    /// See [`TransactionalChecksum`](crate::TransactionalChecksum).
+    /// See [`ChecksumValue`](crate::ChecksumValue).
     Checksum = 24,
     /// The metadata pairs together hold more bytes than the service accepts.
     ///
@@ -155,7 +148,7 @@ pub enum InvalidPlan {
     Delimiter = 26,
     /// The ID of an S3 upload is empty.
     ///
-    /// Pass the ID that [`s3::Objects::read_upload_id`](crate::s3::Objects::read_upload_id)
+    /// Pass the ID that [`s3::read_upload_id`](crate::s3::read_upload_id)
     /// read, unchanged.
     UploadId = 27,
     /// A content property or the storage class is not one HTTP header
@@ -178,7 +171,7 @@ pub enum InvalidPlan {
     /// The source of a copy names a container or bucket that cannot be
     /// written into a request.
     ///
-    /// See [`CopySource`](crate::CopySource).
+    /// See [`CopyOptions::source_container`](crate::CopyOptions::source_container).
     CopySource = 32,
     /// The template is for another operation, or the bytes passed with it
     /// are not the ones it was written into.
@@ -614,12 +607,12 @@ mod tests {
     use std::string::ToString;
     use std::vec::Vec;
 
-    // Every fallible call in this crate pays for this size. Two `usize`
-    // capacity fields set it, so a field added later shows up here.
+    // Every fallible call in this crate pays for this size. The `usize` of a
+    // capacity error sets it, so a field added later shows up here.
     #[test]
     fn a_result_stays_small() {
-        assert_eq!(size_of::<Error>(), 3 * size_of::<usize>());
-        assert!(size_of::<Result<(), Error>>() <= 4 * size_of::<usize>());
+        assert_eq!(size_of::<Error>(), 2 * size_of::<usize>());
+        assert!(size_of::<Result<(), Error>>() <= 3 * size_of::<usize>());
     }
 
     // Every error except a capacity error, which carries sizes rather than a
@@ -659,23 +652,12 @@ mod tests {
 
     #[test]
     fn a_capacity_error_carries_its_sizes_instead_of_a_discriminant() {
-        let error = Error::Capacity(CapacityError {
-            required: 96,
-            required_headers: 6,
-        });
+        let error = Error::Capacity(CapacityError { required: 96 });
         assert_eq!(error.code(), ErrorCode::Capacity);
         assert_eq!(error.detail(), 0);
         assert_eq!(Error::from_parts(ErrorCode::Capacity, 0), None);
         assert_eq!(error.capacity().unwrap().required, 96);
-        assert_eq!(error.to_string(), "the buffer needs 96; headers need 6");
-        assert_eq!(
-            CapacityError {
-                required: 2,
-                required_headers: 0
-            }
-            .to_string(),
-            "the buffer needs 2"
-        );
+        assert_eq!(error.to_string(), "the buffer needs 96");
     }
 
     #[test]

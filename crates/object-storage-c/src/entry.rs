@@ -6,7 +6,7 @@
 //! forbid `unsafe` code, so what a pointer read needs is checked here and
 //! nowhere else.
 //!
-//! The functions mirror the core crate's `azure` module: `borink_prepare_get`
+//! The functions mirror the protocol crate's `azure` module: `borink_prepare_get`
 //! is `azure::prepare_get`, `borink_encode_get` is `azure::encode_get`, and
 //! so on for each operation.
 
@@ -20,10 +20,10 @@ use crate::sentence::{describe, describe_status};
 use crate::step::{self, filling, filling_with, head_of, prepared, written};
 use crate::types::*;
 
-use borink_object_storage_proto::{self as proto, azure, layered};
+use borink_object_storage_proto::{self as proto, azure};
 
 /// Reports what is wrong with `container`, if anything: what
-/// `Container::new` refuses in the core crate.
+/// `Container::new` refuses in the protocol crate.
 ///
 /// A `code` of 0 means that a template can be prepared for it. Every
 /// `borink_prepare_*` call makes the same check, so this exists to fail
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn borink_container_check(container: *const Container) -> 
 }
 
 /// Returns the instant `unix_seconds` after the Unix epoch, formatted for the
-/// dates that a request carries: `Timestamps::from_unix` in the core crate.
+/// dates that a request carries: `Timestamps::from_unix` in the protocol crate.
 ///
 /// Call it once a second, and pass the result to every request of that
 /// second. A value after `9999-12-31 23:59:59 UTC` becomes that instant.
@@ -1001,7 +1001,7 @@ pub extern "C" fn borink_property_name(property: u16) -> Bytes {
     }
 }
 
-// The core crate's property with this number, which is its position in the
+// The protocol crate's property with this number, which is its position in the
 // list both crates are built from.
 fn blob_property(number: u16) -> Option<proto::BlobProperty> {
     proto::BlobProperty::ALL.get(usize::from(number)).copied()
@@ -1120,10 +1120,10 @@ pub unsafe extern "C" fn borink_next_property(walk: *mut Properties) -> Property
 /// The bytes returned are `into`, so they are valid until you release or
 /// reuse it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_decode_into(value: Bytes, into: BytesMut) -> MaybeBytes {
+pub unsafe extern "C" fn borink_decode_property(value: Bytes, into: BytesMut) -> MaybeBytes {
     // SAFETY: the caller states the contract of this function.
     let (value, into) = unsafe { (ptr::slice(value), ptr::slice_mut(into)) };
-    maybe_bytes(layered::decode_into(value, into))
+    maybe_bytes(proto::decode_property(value, into))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
@@ -1146,7 +1146,7 @@ pub unsafe extern "C" fn borink_decode_into(value: Bytes, into: BytesMut) -> May
 pub unsafe extern "C" fn borink_quoted_etag(listed: Bytes, into: BytesMut) -> MaybeBytes {
     // SAFETY: the caller states the contract of this function.
     let (listed, into) = unsafe { (ptr::slice(listed), ptr::slice_mut(into)) };
-    maybe_bytes(layered::quoted_etag(listed, into))
+    maybe_bytes(proto::quoted_etag(listed, into))
 }
 
 /// Reads an HTTP date as milliseconds since the Unix epoch.
@@ -1164,7 +1164,7 @@ pub unsafe extern "C" fn borink_http_date_ms(value: Bytes) -> MaybeU64 {
     maybe_number(
         core::str::from_utf8(value)
             .ok()
-            .and_then(layered::http_date_ms),
+            .and_then(proto::http_date_ms),
     )
 }
 

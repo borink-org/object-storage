@@ -22,7 +22,7 @@ pub(crate) mod batch;
 pub(crate) mod copy;
 pub(crate) mod parts;
 
-use crate::layered::iso8601_ms;
+use crate::iso8601_ms;
 use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
 use crate::xml::decode::decode;

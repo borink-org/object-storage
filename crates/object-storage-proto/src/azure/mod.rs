@@ -4,23 +4,21 @@
 
 use core::fmt;
 
-use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS};
+use crate::checksum::ChecksumKind;
 use crate::common::{
-    ContentRange, FailureOutcome, accept_success, decimal_header, encoded, failure,
-    finish_with_body, meta_of, missing, parse_content_range, push_condition, text_header,
-    trim_ascii, valid_header, validate_checksum, validate_condition, validate_properties,
-    validate_tags,
+    ContentRange, FailureOutcome, accept_success, decimal_header, failure, finish_with_body,
+    meta_of, missing, parse_content_range, text_header, trim_ascii, validate_condition,
+    validate_properties, validate_tags,
 };
 use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeadWriter, HeaderValue, Writer};
+use crate::request::{ByteSink, HeaderValue};
 use crate::url::{self, Parameter};
 use crate::{
-    Classification, Condition, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
-    LegacyRequest, ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair,
-    Method, ObjectMeta, Payload, PropertySet, PropertyValues, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
-    TransactionalChecksum, WriteOptions,
+    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
+    GetHeadOutcome, GetKind, GetShape, InvalidPlan, ListEntry, ListHeadOutcome, ListInclude,
+    ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PropertySet, PropertyValues,
+    PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
+    ServiceErrorKind, Timestamps, WriteOptions,
 };
 
 mod batch;
@@ -31,7 +29,7 @@ mod template;
 use crate::checksum::BASE64_LEN;
 use crate::common::{
     checksum_text, condition_header, validate_checksum_item, validate_delimiter, validate_get_item,
-    validate_get_options, validate_revision_item, validate_template_options,
+    validate_get_options, validate_revision_item,
 };
 use crate::template::{Body, Param, ParamValue};
 use crate::template::{Hole, Values};
@@ -54,27 +52,26 @@ pub use batch::{
     encode_delete_many, fill_delete_results, prepare_delete_many,
 };
 pub use blocks::{
-    Block, BlockListKind, BlockRef, BlockResponseHead, BlockSource, BlockState, CommitItem,
-    CommitOptions, MAX_STAGE_LEN, PhysicalListBlocks, PhysicalStageBlock, StageBlockItem,
-    accept_commit_blocks_error_body, accept_commit_blocks_head, accept_list_blocks_error_body,
-    accept_list_blocks_head, accept_stage_block_error_body, accept_stage_block_head,
-    encode_commit_blocks, encode_list_blocks, encode_stage_block, fill_blocks,
-    prepare_commit_blocks, prepare_list_blocks, prepare_stage_block,
+    Block, BlockListKind, BlockRef, BlockSource, BlockState, CommitItem, CommitOptions,
+    MAX_STAGE_LEN, StageBlockItem, accept_commit_blocks_error_body, accept_commit_blocks_head,
+    accept_list_blocks_error_body, accept_list_blocks_head, accept_stage_block_error_body,
+    accept_stage_block_head, block_id, encode_commit_blocks, encode_list_blocks,
+    encode_stage_block, fill_blocks, max_blocks_in, prepare_commit_blocks, prepare_list_blocks,
+    prepare_stage_block,
 };
 pub use copy::{
-    AbortCopyItem, PhysicalStageBlockFromUrl, StageBlockFromUrlItem, accept_abort_copy_head,
-    accept_copy_error_body, accept_copy_head, accept_put_from_url_error_body,
-    accept_put_from_url_head, encode_abort_copy, encode_copy, encode_copy_from_url,
-    encode_put_from_url, encode_stage_block_from_url, prepare_abort_copy, prepare_copy,
-    prepare_copy_from_url, prepare_put_from_url, prepare_stage_block_from_url,
+    AbortCopyItem, StageBlockFromUrlItem, accept_abort_copy_head, accept_copy_error_body,
+    accept_copy_head, accept_put_from_url_error_body, accept_put_from_url_head, encode_abort_copy,
+    encode_copy, encode_copy_from_url, encode_put_from_url, encode_stage_block_from_url,
+    prepare_abort_copy, prepare_copy, prepare_copy_from_url, prepare_put_from_url,
+    prepare_stage_block_from_url,
 };
 pub use tags::{
-    PhysicalSetMetadata, PhysicalSetProperties, SetMetadataOptions, SetPropertiesOptions,
-    accept_get_tags_error_body, accept_get_tags_head, accept_set_metadata_head,
-    accept_set_properties_head, accept_set_tags_head, accept_set_tier_head,
-    accept_update_error_body, encode_get_tags, encode_set_metadata, encode_set_properties,
-    encode_set_tags, encode_set_tier, fill_tags, prepare_get_tags, prepare_set_metadata,
-    prepare_set_properties, prepare_set_tags, prepare_set_tier,
+    SetMetadataOptions, SetPropertiesOptions, accept_get_tags_error_body, accept_get_tags_head,
+    accept_set_metadata_head, accept_set_properties_head, accept_set_tags_head,
+    accept_set_tier_head, accept_update_error_body, encode_get_tags, encode_set_metadata,
+    encode_set_properties, encode_set_tags, encode_set_tier, fill_tags, prepare_get_tags,
+    prepare_set_metadata, prepare_set_properties, prepare_set_tags, prepare_set_tier,
 };
 
 /// The most recent Azure Storage version that every region supports.
@@ -207,37 +204,10 @@ impl<'a> Container<'a> {
     }
 }
 
-/// The Azure Blob operations that one bearer token authorizes.
-///
-/// This is a small borrowed value, and it is [`Copy`]. Create it once per
-/// token. Creating it for every request also works: each creation checks
-/// the token as a header value, and nothing else.
-///
-/// Every method that encodes a request takes the current time in `now`,
-/// because this crate never reads the clock.
-#[derive(Clone, Copy)]
-pub struct Blobs<'a> {
-    container: Container<'a>,
-    pub(crate) token: &'a str,
-    pub(crate) namespace: AzureNamespace,
-    pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
-}
-
-impl core::fmt::Debug for Blobs<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Blobs")
-            .field("container", &self.container)
-            .field("token", &"<redacted>")
-            .field("namespace", &self.namespace)
-            .field("checksums", &self.checksums)
-            .finish()
-    }
-}
-
 /// The kind of storage account that a client talks to.
 ///
-/// [`Blobs::with_namespace`] sets it and [`InvalidPlan::azure_rejection`]
-/// reads it. This crate never discovers it: no request or response says
+/// Pass it to each `prepare_*` function, such as [`prepare_get`].
+/// [`InvalidPlan::azure_rejection`] reads it. This crate never discovers it: no request or response says
 /// which kind of account answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u16)]
@@ -293,222 +263,10 @@ impl InvalidPlan {
     }
 }
 
-impl<'a> Blobs<'a> {
-    /// Creates a client from a container and a bearer token.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
-    /// header value.
-    pub fn new(container: Container<'a>, token: &'a str) -> Result<Self> {
-        if !valid_header(token.as_bytes()) {
-            return Err(Error::InvalidToken);
-        }
-        Ok(Self {
-            container,
-            token,
-            namespace: AzureNamespace::Unknown,
-            checksums: [None; KINDS],
-        })
-    }
-
-    /// Returns this client with the account's namespace set.
-    ///
-    /// A client told it is on a flat account refuses a key of more than 1,024
-    /// UTF-16 code units as [`InvalidPlan::KeyTooLong`]. Any other client
-    /// sends it and reports what the service answers.
-    pub const fn with_namespace(mut self, namespace: AzureNamespace) -> Self {
-        self.namespace = namespace;
-        self
-    }
-
-    /// Returns this client with `provider` registered for the kind that it
-    /// computes.
-    ///
-    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
-    /// then has the encoder compute the checksum. Register a provider for
-    /// each kind you compute: the encoder refuses `Compute` of a kind with no
-    /// provider as [`InvalidPlan::Option`]. Registering a kind twice keeps
-    /// the later provider. A checksum that you pass as text needs no
-    /// provider.
-    ///
-    /// Azure takes an MD5 and a CRC64, and the encoder refuses `Compute` of
-    /// any other kind with [`InvalidPlan::Option`]. The
-    /// `borink-object-storage-crypto` crate has providers for both.
-    pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
-        self.checksums[provider.kind().slot()] = Some(provider);
-        self
-    }
-
-    // The parts that every request head carries, in the order that they are
-    // written into the caller's buffer. Each part is one range of that buffer.
-    // `key` is `None` for a request that names the container alone, and the
-    // query is written in the order it is given.
-    //
-    // The URL is the one part whose length depends on the endpoint and the
-    // container as well as on the plan, so it is the one rule that cannot be
-    // checked on the plan alone. It is counted into nothing first, so that
-    // a refusal is reported before any byte reaches the caller's buffer.
-    pub(crate) fn build(
-        &self,
-        head: &mut HeadWriter<'_>,
-        key: Option<&str>,
-        query: &[Parameter<'_>],
-        range: RequestedRange,
-        now: &Timestamps,
-    ) -> Result<()> {
-        let mut counted = Writer::new(&mut []);
-        self.write_url(&mut counted, key, query);
-        if counted.position() > MAX_URL_LEN {
-            return Err(InvalidPlan::UrlTooLong.into());
-        }
-        head.url(|out| self.write_url(out, key, query));
-        head.header("authorization", Bearer(self.token));
-        head.header("x-ms-date", now.rfc1123_bytes());
-        head.header("x-ms-version", VERSION.as_bytes());
-        if range != RequestedRange::Whole {
-            head.header("range", range);
-        }
-        Ok(())
-    }
-
-    fn write_url(&self, out: &mut dyn ByteSink, key: Option<&str>, query: &[Parameter<'_>]) {
-        out.push(self.container.endpoint.as_bytes());
-        self.write_path(out, key);
-        url::write_query_in_url(out, query);
-    }
-
-    // The path of the URL: the container, and the object if `key` names one.
-    pub(crate) fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
-        out.push(b"/");
-        out.push(self.container.name.as_bytes());
-        if let Some(key) = key {
-            out.push(b"/");
-            for part in url::encode_object_key(key) {
-                out.push(part);
-            }
-        }
-    }
-
-    /// Writes the request head of a Snapshot Blob into `buf`, which takes a
-    /// read-only snapshot of the object as it is now.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] for a key that [`encode_get`]
-    /// refuses, a metadata pair that [`encode_put`] refuses, or an
-    /// invalid condition.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots, or call
-    /// [`layered::snapshot_requirements`](crate::layered::snapshot_requirements)
-    /// first.
-    pub fn encode_snapshot<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalSnapshot<'_>,
-        now: &Timestamps,
-    ) -> Result<LegacyRequest<'r>> {
-        validate_key(plan.key, self.namespace)?;
-        validate_metadata(plan.metadata)?;
-        validate_condition(plan.condition, plan.condition_value)?;
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(
-            &mut head,
-            Some(plan.key),
-            &[url::literal("comp", "snapshot")],
-            RequestedRange::Whole,
-            now,
-        )?;
-        head.header("content-length", b"0");
-        push_metadata(&mut head, plan.metadata);
-        push_condition(&mut head, plan.condition, plan.condition_value);
-        encoded(head, Method::Put, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a Snapshot Blob and reports what Azure
-    /// did.
-    ///
-    /// Pass the condition of the plan. A 412 is
-    /// [`SnapshotHeadOutcome::PreconditionFailed`] only if the plan carried
-    /// one and Azure names a failed condition.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 201 is [`ResponseFault::Status`], and a 201 without
-    /// `x-ms-snapshot` is [`ResponseFault::Head`].
-    pub fn accept_snapshot_head<'h>(
-        &self,
-        condition: ConditionKind,
-        head: ResponseHead<'h>,
-    ) -> Result<SnapshotHeadOutcome<'h>> {
-        accept_snapshot_head(condition, head)
-    }
-
-    /// Finishes a [`SnapshotHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// This is [`accept_get_error_body`] for a Snapshot Blob, and reads
-    /// the body the same way.
-    pub fn accept_snapshot_error_body<'h>(
-        &self,
-        condition: ConditionKind,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> SnapshotHeadOutcome<'h> {
-        accept_snapshot_error_body(condition, failure, body)
-    }
-}
-
-/// One Snapshot Blob: a read-only copy of an object as it is now, which
-/// Azure keeps beside the object until the snapshot is removed.
-///
-/// Read a snapshot from a template of [`RevisionKind::Snapshot`],
-/// and remove it with a template of [`DeleteOptions::revision`]. A hierarchical
-/// account takes no snapshot: Azure refuses with 409
-/// `FeatureNotYetSupportedForHierarchicalNamespaceAccounts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhysicalSnapshot<'a> {
-    /// The object key, under the rules of [Object keys](crate#object-keys).
-    pub key: &'a str,
-    /// The metadata of the snapshot. With no pair, the snapshot has the
-    /// object's metadata; with any, it has these pairs alone. The rules of
-    /// [`PutOptions::metadata`](crate::PutOptions::metadata) apply.
-    pub metadata: &'a [MetadataPair<'a>],
-    /// The condition on the object, as a read carries it.
-    pub condition: ConditionKind,
-    /// What `condition` compares against: see [`ConditionKind`].
-    pub condition_value: Option<ConditionValue<'a>>,
-}
-
-impl<'a> PhysicalSnapshot<'a> {
-    /// Returns this plan with `condition`, which sets [`Self::condition`]
-    /// and [`Self::condition_value`] together.
-    pub const fn with_condition(mut self, condition: Condition<'a>) -> Self {
-        let (kind, value) = condition.split();
-        self.condition = kind;
-        self.condition_value = value;
-        self
-    }
-
-    /// Creates a plan that takes a snapshot of `key`, with the object's
-    /// metadata and no condition.
-    pub const fn new(key: &'a str) -> Self {
-        Self {
-            key,
-            metadata: &[],
-            condition: ConditionKind::None,
-            condition_value: None,
-        }
-    }
-}
-
 /// The result of reading the response head of a Snapshot Blob.
 ///
 /// A head that reports a failure is one of these too.
-/// [`Blobs::accept_snapshot_head`] returns an [`Err`] only for a head it
+/// [`accept_snapshot_head`] returns an [`Err`] only for a head it
 /// cannot read.
 // The crate allocates nothing and its outcomes are `Copy`, so the variant
 // that carries the metadata cannot be boxed.
@@ -654,7 +412,7 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
 
 // Whether a write conditional on `If-None-Match` failed because an object
 // exists. Azure answers that with 409 `BlobAlreadyExists`, not 412.
-pub(crate) fn exists_where_none_asked(
+pub(crate) fn names_existing_object(
     status: u16,
     condition: ConditionKind,
     kind: Option<ServiceErrorKind>,
@@ -875,7 +633,6 @@ pub fn prepare_put(
     options: &PutOptions<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    validate_template_options(&options.options)?;
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -1013,7 +770,7 @@ pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<Pu
         {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
-        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, named(&head)) => {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
@@ -1031,7 +788,7 @@ pub fn accept_put_error_body<'h>(
 ) -> PutHeadOutcome<'h> {
     let kind = body_kind(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
-        || exists_where_none_asked(failure.status, shape.condition, kind)
+        || names_existing_object(failure.status, shape.condition, kind)
     {
         return PutHeadOutcome::PreconditionFailed;
     }
@@ -1606,10 +1363,9 @@ pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHead
 /// again, with a larger array.
 ///
 /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-/// not a listing page. This reads the grammar that Azure writes, not XML
-/// at large: a namespace prefix, a reference to an entity no listing
-/// declares, an entry tag spelled with an attribute, and anything else
-/// Azure does not write are refused rather than guessed at.
+/// not a listing page. This reads only the XML that Azure writes. It refuses
+/// a namespace prefix, a reference to an entity that no listing declares, an
+/// entry tag with an attribute, and anything else that Azure does not write.
 pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
     body: &'b mut [u8],
     into: &mut [E],
@@ -1790,21 +1546,6 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 /// is a `u64` because it does not fit a 32-bit `usize`.
 pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
-// Checks a checksum that Azure takes: an MD5 or a CRC64, as text or
-// computed.
-pub(crate) fn validate_azure_checksum(
-    checksum: Option<TransactionalChecksum<'_>>,
-    has_bytes: bool,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-) -> Result<()> {
-    if let Some(TransactionalChecksum::Compute(kind)) = checksum
-        && !kind.azure_takes()
-    {
-        return Err(InvalidPlan::Option.into());
-    }
-    validate_checksum(checksum, has_bytes, checksums)
-}
-
 // The characters that Azure takes in the key and the value of a tag.
 pub(crate) fn azure_tag_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || " +-./:=_".contains(character)
@@ -1812,38 +1553,8 @@ pub(crate) fn azure_tag_char(character: char) -> bool {
 
 // The content properties, tags and access tier that a write stores with the
 // object, which `validate_options` checked.
-pub(crate) fn push_stored(head: &mut HeadWriter<'_>, options: &WriteOptions<'_>) {
-    for (name, value) in options.properties.iter() {
-        head.header_parts(
-            |out| {
-                out.push(b"x-ms-blob-");
-                out.push(name.as_bytes());
-            },
-            |out| out.push(value.as_bytes()),
-        );
-    }
-    if !options.tags.is_empty() {
-        head.header("x-ms-tags", options.tags);
-    }
-    if let Some(tier) = options.storage_class {
-        head.header("x-ms-access-tier", tier.as_bytes());
-    }
-}
-
 // One header per pair, named with the prefix and the pair's own name. The
 // plan was validated, so each name and each value is usable in a header.
-pub(crate) fn push_metadata(head: &mut HeadWriter<'_>, metadata: &[MetadataPair<'_>]) {
-    for pair in metadata {
-        head.header_parts(
-            |out| {
-                out.push(METADATA_PREFIX.as_bytes());
-                out.push(pair.name.as_bytes());
-            },
-            |out| out.push(pair.value.as_bytes()),
-        );
-    }
-}
-
 // Azure names a metadata pair with a C# identifier: ASCII letters, digits
 // and underscores, and no leading digit. It refuses anything else with 400
 // `InvalidMetadata`. The total size of the pairs is the service's to check;
@@ -1892,58 +1603,5 @@ pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static s
     }
 }
 
-// The writes that take options. `validate_options` refuses an option on a
-// write that does not take it. `Copy` is a Copy Blob or a Copy Blob From
-// URL, which take the source's content properties, and `FromUrl` a Put
-// Blob From URL, which takes the plan's.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Write {
-    Stage,
-    Commit,
-    Copy,
-    FromUrl,
-}
-
 // `has_bytes` says whether the encoder holds the content, which it does not
 // for a streamed payload. `checksums` are the client's providers.
-pub(crate) fn validate_options(
-    options: &WriteOptions<'_>,
-    write: Write,
-    has_bytes: bool,
-    client: &Blobs<'_>,
-) -> Result<()> {
-    validate_azure_checksum(options.checksum, has_bytes, &client.checksums)?;
-    // A copy sends no content, so it has nothing to sum, and a Copy Blob
-    // takes no content property.
-    // A copy names its tags apart, so that none can differ from the
-    // source's.
-    let copy = matches!(write, Write::Copy | Write::FromUrl);
-    if copy && (options.checksum.is_some() || !options.tags.is_empty()) {
-        return Err(InvalidPlan::Option.into());
-    }
-    if write == Write::Copy && !options.properties.is_empty() {
-        return Err(InvalidPlan::ContentProperty.into());
-    }
-    // A block is not an object, so it stores neither properties nor tags.
-    let stored = !options.properties.is_empty()
-        || !options.tags.is_empty()
-        || options.storage_class.is_some();
-    if stored && write == Write::Stage {
-        return Err(InvalidPlan::Option.into());
-    }
-    // A flat account returns a Content-Type in UTF-8 as it got it. A
-    // hierarchical one takes it but returns each byte as a character, so
-    // `é` comes back as the byte e9. Both refuse a Content-Disposition
-    // outside ASCII with 400 InvalidMetadata.
-    validate_properties(options, utf8_properties(client.namespace))?;
-    validate_tags(options.tags, azure_tag_char, Some((10, 128, 256)))?;
-    if let Some(text) = options.declared_md5 {
-        // A whole-object write stores the MD5 that Azure checked, and a block
-        // is not an object. Only a commit declares one.
-        if write != Write::Commit {
-            return Err(InvalidPlan::Option.into());
-        }
-        ChecksumKind::Md5.check_base64(text)?;
-    }
-    Ok(())
-}

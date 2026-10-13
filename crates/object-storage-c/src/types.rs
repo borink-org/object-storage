@@ -105,7 +105,7 @@ pub struct MaybeU32 {
     pub value: u32,
 }
 
-/// A failure, as the two numbers that describe every error of the core crate.
+/// A failure, as the two numbers that describe every error of the protocol crate.
 ///
 /// `code` is a `borink_error_code`, and `detail` is the discriminant of the
 /// value inside it. A `code` of 0 means that nothing failed. Both numbers are
@@ -147,7 +147,7 @@ pub struct AzureRejection {
 
 /// Which kind of failure a `borink_status` carries.
 ///
-/// These are the numbers that the core crate's error code uses.
+/// These are the numbers that the protocol crate's error code uses.
 #[repr(u16)]
 #[derive(Clone, Copy)]
 pub enum ErrorCode {
@@ -269,7 +269,7 @@ pub enum ConditionForm {
 
 /// The kind of checksum that every request of a template sends.
 ///
-/// These are the numbers that the core crate's checksum kind uses. Azure
+/// These are the numbers that the protocol crate's checksum kind uses. Azure
 /// takes an MD5 or a CRC64, and a template of any other is refused.
 #[repr(u16)]
 #[derive(Clone, Copy)]
@@ -325,7 +325,7 @@ pub enum EntryKind {
 
 /// The category of a service failure.
 ///
-/// These are the numbers that the core crate's failure class uses. A number
+/// These are the numbers that the protocol crate's failure class uses. A number
 /// that is not listed here comes from a later version of that crate. It
 /// crosses unchanged, never as a substitute.
 #[repr(u16)]
@@ -347,7 +347,7 @@ pub enum FailureClass {
 
 /// The specific error that the service named.
 ///
-/// These are the numbers that the core crate's service error kind uses, and
+/// These are the numbers that the protocol crate's service error kind uses, and
 /// they cross unchanged in both directions.
 #[repr(u16)]
 #[derive(Clone, Copy)]
@@ -414,7 +414,7 @@ pub enum OutcomeKind {
     /// `error.detail` names the part that was wrong, not the value. You still
     /// hold the headers and the shape, so read those for the value itself.
     Invalid = 11,
-    /// The core crate returned a variant that this crate does not know.
+    /// The protocol crate returned a variant that this crate does not know.
     Unsupported = 12,
     /// The page of a listing follows in the response body.
     ///
@@ -428,7 +428,7 @@ pub enum OutcomeKind {
 }
 
 /// The container that the requests of a template go to: what
-/// `Container::new` and `Container::object` describe in the core crate.
+/// `Container::new` and `Container::object` describe in the protocol crate.
 ///
 /// Your program owns the values. They must stay valid for the call that
 /// prepares a template, and no longer: a template holds no pointer.
@@ -461,7 +461,7 @@ pub struct Container {
 pub const TIMESTAMPS_LEN: usize = 53;
 
 /// An instant, formatted for the dates that a request carries: what
-/// `Timestamps` is in the core crate, as it stores itself.
+/// `Timestamps` is in the protocol crate, as it stores itself.
 ///
 /// `borink_timestamps_from_unix` writes one. Write one each second, and pass
 /// it to every request of that second, so that no request formats its dates
@@ -919,7 +919,7 @@ pub struct Failure {
     /// The category of the failure, as a `borink_failure_class`. Use it to
     /// decide whether to retry.
     ///
-    /// This is `class` in the core crate, which C++ cannot spell.
+    /// This is `class` in the protocol crate, which C++ cannot spell.
     pub class: u16,
     /// The specific error that the head or the body named, as a
     /// `borink_service_error`.
@@ -1031,7 +1031,7 @@ pub struct Property {
 /// written under the properties element; the ones marked otherwise stand
 /// beside it. Read anything not listed here with `borink_entry_property`.
 ///
-/// These are the numbers that the core crate's `BlobProperty` uses. A
+/// These are the numbers that the protocol crate's `BlobProperty` uses. A
 /// `const` block in `layout.rs` fails the build if the two lists drift.
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

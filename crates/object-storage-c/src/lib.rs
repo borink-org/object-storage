@@ -8,7 +8,7 @@
 //! include `borink/object_storage.hpp` instead, which adds inline helpers over
 //! the same declarations and needs no C++ runtime library.
 //!
-//! The calls mirror the `azure` module of the core crate,
+//! The calls mirror the `azure` module of the protocol crate,
 //! `borink-object-storage-proto`, for reads, whole-object writes, writes in
 //! blocks and listings. Its documentation says what each one sends and
 //! refuses.
@@ -111,8 +111,8 @@
 //! `borink_outcome` each carry one.
 //!
 //! A status is two numbers. `code` is a `borink_error_code`, and `detail` is
-//! the discriminant of the value inside it. Both are the core crate's own, and
-//! `borink_describe_status` writes the sentence for a pair.
+//! the discriminant of the value inside it. Both are the protocol crate's
+//! own, and `borink_describe_status` writes the sentence for a pair.
 //!
 //! A status names the part of the exchange that was wrong, not the value that
 //! was wrong. You passed the values in, so read those to find the value.
@@ -121,8 +121,8 @@
 //! object, a failed condition and a throttle each arrive as an outcome
 //! kind.
 //!
-//! Every other enum crosses as the number the core crate gives it, in both
-//! directions. A number that this crate does not define is refused as
+//! Every other enum crosses as the number the protocol crate gives it, in
+//! both directions. A number that this crate does not define is refused as
 //! `InvalidPlan`, not read as another value.
 //!
 //! # What it costs

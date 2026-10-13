@@ -16,7 +16,7 @@ borink-object-storage-proto = { path = "../object-storage-proto", version = "0.0
 # because this crate needs the hasher alone: not `std`, `alloc` or the OID
 # tables.
 md-5 = { version = "0.11", optional = true, default-features = false }
-# The SHA-256 that SigV4 signs with, one provider per
+# The SHA-256 that SigV4 signs with, one implementation per
 # feature. Each links only its own crates.
 #
 # RustCrypto's, which uses the CPU's SHA extensions where it finds them and

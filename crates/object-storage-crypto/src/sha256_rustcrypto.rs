@@ -8,7 +8,7 @@ use crate::Sha256;
 /// them, and portable code elsewhere. It needs no `std`.
 ///
 /// This type keeps the state, the partial block and the length itself, so
-/// that it is [`Copy`], as a provider's SHA-256 must be.
+/// that it is [`Copy`], as [`Sha256`](crate::Sha256) requires.
 #[derive(Debug, Clone, Copy)]
 pub struct Sha256RustCrypto {
     state: [u32; 8],

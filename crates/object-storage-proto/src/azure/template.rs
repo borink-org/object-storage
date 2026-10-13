@@ -305,7 +305,7 @@ impl Template {
             into.u32(span.len as u32);
         }
         if let Some((values, hash)) = stored.split_last_chunk_mut::<8>() {
-            *hash = template::seal(values).to_le_bytes();
+            *hash = template::fingerprint(values).to_le_bytes();
         }
         stored
     }
@@ -323,7 +323,7 @@ impl Template {
         let (values, hash) = stored
             .split_last_chunk::<8>()
             .ok_or(InvalidPlan::Template)?;
-        if template::seal(values) != u64::from_le_bytes(*hash) {
+        if template::fingerprint(values) != u64::from_le_bytes(*hash) {
             return Err(InvalidPlan::Template.into());
         }
         load(values).ok_or_else(|| InvalidPlan::Template.into())
@@ -767,9 +767,9 @@ pub(super) fn layout<P: Pass, const Q: usize>(
 /// Writes the template of `describe` into `buf`, and lets `stash` write
 /// text that no section holds after the table's text.
 ///
-/// A container that names an object makes a template of that object: its
-/// key is the template's text, and an operation that names none refuses
-/// it with [`InvalidPlan::Option`].
+/// A container that names an object makes a template of that object, whose
+/// text holds the key. An operation that names no object refuses such a
+/// container with [`InvalidPlan::Option`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare<const Q: usize>(
     container: &Container<'_>,

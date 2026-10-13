@@ -1,15 +1,11 @@
-//! S3 client construction, service rules and request sizing.
+//! S3 buckets and credentials, service rules and request sizing.
 //!
 //! The signatures themselves are checked against known answers in
 //! `crates/object-storage-crypto/tests/sigv4.rs`, which has SHA-256
-//! implementations. The provider here computes nothing.
+//! implementations.
 
-use borink_object_storage_proto::s3::{
-    self, Bucket, MAX_METADATA_LEN, Objects, PayloadSigning, Service,
-};
-use borink_object_storage_proto::sigv4::{
-    Credentials, Sha256Provider, Sha256State, wipe_best_effort,
-};
+use borink_object_storage_proto::s3::{self, Bucket, MAX_METADATA_LEN, PayloadSigning, Service};
+use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
     BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions, Error,
     GetHeadOutcome, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions, ResponseFault,
@@ -19,21 +15,11 @@ use borink_object_storage_proto::{
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TOKEN: &str = "session-token";
 
-const ZEROS: Sha256Provider = Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32]);
-
-fn bucket() -> Bucket<'static> {
-    Bucket::new("https://s3.example.com", "bucket", "auto", Service::Aws).unwrap()
-}
-
 fn credentials() -> Credentials<'static> {
     Credentials::new("AKIAIOSFODNN7EXAMPLE", SECRET, wipe_best_effort)
         .unwrap()
         .with_session_token(TOKEN)
         .unwrap()
-}
-
-fn objects() -> Objects<'static> {
-    Objects::new(bucket(), credentials(), ZEROS)
 }
 
 fn now() -> Timestamps {
@@ -107,7 +93,7 @@ fn credentials_refuse_what_the_authorization_header_cannot_carry() {
 
 #[test]
 fn debug_output_hides_the_secret_and_the_token() {
-    let text = format!("{:?}", objects().with_signing_key(&now()));
+    let text = format!("{:?}", credentials());
     assert!(text.contains("AKIAIOSFODNN7EXAMPLE"), "{text}");
     assert!(!text.contains(SECRET), "{text}");
     assert!(!text.contains(TOKEN), "{text}");

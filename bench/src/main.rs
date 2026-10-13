@@ -12,9 +12,7 @@ use std::hint::black_box;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use borink_object_storage_proto::{
-    BlobProperty, Blobs, Container, ListEntry, PropertySet, PropertyValues,
-};
+use borink_object_storage_proto::{BlobProperty, ListEntry, PropertySet, PropertyValues, azure};
 
 // Set on the process this one starts after granting itself the capability,
 // so that a refusal there is reported rather than asked about again.
@@ -146,8 +144,6 @@ fn main() {
     let rounds = args.rounds.unwrap_or(60);
     let counters = counters();
     let page = fixture::azure(args.entries);
-    let container = Container::new("https://acct.blob.core.windows.net", "data").unwrap();
-    let blobs = Blobs::new(container, "token").unwrap();
     println!(
         "Azure page: {} bytes, {} objects and 64 groups of keys, {} rounds\n",
         page.len(),
@@ -168,7 +164,7 @@ fn main() {
         |_| (),
         |work, ()| {
             let mut entries = vec![ListEntry::default(); room];
-            let filled = blobs.fill_listing(work, &mut entries).unwrap().filled;
+            let filled = azure::fill_listing(work, &mut entries).unwrap().filled;
             black_box(&entries);
             filled
         },
@@ -183,11 +179,6 @@ fn main() {
     // functions compile to about five hundred more stack accesses when the
     // exported entry points are in the link. The cause was not found; it is
     // in LLVM's code generation, not in the source.
-    let session = borink_object_storage_c::Session {
-        endpoint: c_bytes(b"https://acct.blob.core.windows.net"),
-        container: c_bytes(b"data"),
-        token: c_bytes(b"token"),
-    };
     measure(
         "borink_fill_listing, from Rust",
         &page,
@@ -200,7 +191,6 @@ fn main() {
             // nothing else reaches them.
             let fill = unsafe {
                 borink_object_storage_c::borink_fill_listing(
-                    &session,
                     borink_object_storage_c::BytesMut {
                         ptr: work.as_mut_ptr(),
                         len: work.len(),
@@ -228,21 +218,13 @@ fn main() {
         |_| (),
         |work, ()| {
             let mut entries = vec![Picked::default(); room];
-            let filled = blobs
-                .fill_listing_with(work, &mut entries, THREE, Picked::build)
+            let filled = azure::fill_listing_with(work, &mut entries, THREE, Picked::build)
                 .unwrap()
                 .filled;
             black_box(&entries);
             filled
         },
     );
-}
-
-fn c_bytes(value: &'static [u8]) -> borink_object_storage_c::Bytes {
-    borink_object_storage_c::Bytes {
-        ptr: value.as_ptr(),
-        len: value.len(),
-    }
 }
 
 // The fields are only read through `black_box`, which the compiler does not

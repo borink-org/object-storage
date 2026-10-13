@@ -179,7 +179,7 @@ void board_main(void) {
          found = borink_next_property(&walk)) {
         sink = (unsigned)(found.name.len + found.value.len);
     }
-    sink = (unsigned)borink_decode_into(as_bytes("a&amp;b"),
+    sink = (unsigned)borink_decode_property(as_bytes("a&amp;b"),
                                         (borink_bytes_mut){quoted, sizeof quoted})
                .bytes.len;
 

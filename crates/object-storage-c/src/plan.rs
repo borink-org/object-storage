@@ -1,4 +1,4 @@
-//! The options, the items and the shapes, as the core crate reads them.
+//! The options, the items and the shapes, as the protocol crate reads them.
 //!
 //! A number that names no variant is refused rather than read as another one.
 //! [`crate::entry`] read every pointer that a value holds, and hands the bytes
@@ -12,7 +12,7 @@ use crate::types::*;
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{Error, InvalidPlan, azure};
 
-// A number that names no value of the core crate's enum. It is refused as an
+// A number that names no value of the protocol crate's enum. It is refused as an
 // invalid plan, and the plan is never read as the value that happens to be
 // oldest.
 pub(crate) const UNKNOWN: Error = Error::InvalidPlan(InvalidPlan::Unknown);
@@ -191,7 +191,7 @@ pub(crate) fn commit_options<'a>(
 // A commit, from the bytes that its key, its entity tag and its MD5 address,
 // and its blocks as `ptr::blocks` reads them. Every block is checked once
 // here: an ID that is not text, or a source that this crate does not define,
-// is refused before the core crate reads any, so the reads after this find
+// is refused before the protocol crate reads any, so the reads after this find
 // none.
 pub(crate) fn commit_item<'a, B>(
     item: &CommitItem,
@@ -226,7 +226,7 @@ pub(crate) fn commit_shape(shape: &CommitShape) -> proto::Result<proto::CommitSh
     })
 }
 
-// The flags that `borink_list_include` names, and the core crate's value of
+// The flags that `borink_list_include` names, and the protocol crate's value of
 // each. Any other bit is refused.
 const INCLUDES: [(ListInclude, proto::ListInclude); 3] = [
     (ListInclude::Metadata, proto::ListInclude::METADATA),

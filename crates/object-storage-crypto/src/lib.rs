@@ -1,97 +1,65 @@
 //! Checksum and SHA-256 implementations for
-//! [`borink-object-storage-proto`], and the traits that turn one into a
-//! provider that crate can call.
+//! [`borink-object-storage-proto`].
 //!
 //! # Checksums
 //!
-//! The protocol crate computes no checksum. To have it compute one for a
-//! write, register a provider with
-//! [`Blobs::with_checksum`](borink_object_storage_proto::Blobs::with_checksum),
-//! then ask for
-//! [`TransactionalChecksum::Compute`](borink_object_storage_proto::TransactionalChecksum::Compute)
-//! in the plan of the write.
+//! The protocol crate computes no checksum. A template names the kind of
+//! checksum that its requests send, and each request takes the value in its
+//! item, such as
+//! [`PutItem::checksum`](borink_object_storage_proto::PutItem::checksum).
+//! Compute the value with a [`Checksum`]: create it, add the content, and
+//! pass the digest.
 //!
 //! ```
 //! # #[cfg(feature = "crc64")] {
-//! use borink_object_storage_proto::{Blobs, Container};
+//! use borink_object_storage_crypto::{Checksum, Crc64};
+//! use borink_object_storage_proto::ChecksumValue;
 //!
-//! let container = Container::new("https://account.blob.core.windows.net", "objects")?;
-//! let blobs = Blobs::new(container, "access-token")?
-//!     .with_checksum(borink_object_storage_crypto::CRC64);
+//! let mut crc = Crc64::default();
+//! crc.update(b"the content of the write");
+//! let checksum = ChecksumValue::Digest(crc.finish());
 //! # }
-//! # Ok::<(), borink_object_storage_proto::Error>(())
 //! ```
 //!
-//! Each checksum provider of this crate is behind a feature, and none is on
-//! by default, so you link the one you register and nothing else:
+//! Each implementation is behind a feature, and none is on by default:
 //!
-//! - `crc64` builds [`Crc64`], this crate's own CRC-64/NVME, as [`CRC64`].
-//! - `md5-rustcrypto` builds [`Md5RustCrypto`], an adapter for
-//!   RustCrypto's `md-5`, as [`MD5_RUSTCRYPTO`].
-//! - `crc32` and `crc32c` build [`Crc32`] and [`Crc32c`], this crate's own,
-//!   as [`CRC32`] and [`CRC32C`]. Only S3 takes them.
+//! - `crc64` builds [`Crc64`], this crate's own CRC-64/NVME.
+//! - `md5-rustcrypto` builds [`Md5RustCrypto`], an adapter for RustCrypto's
+//!   `md-5`.
+//! - `crc32` and `crc32c` build [`Crc32`] and [`Crc32c`], this crate's own.
+//!   Only S3 takes them.
 //! - `sha1-rustcrypto` builds [`Sha1RustCrypto`], an adapter for RustCrypto's
-//!   `sha1`, as [`SHA1_RUSTCRYPTO`]. Only S3 takes it.
-//! - The SHA-256 providers below are checksum providers as well, as
-//!   [`SHA256_CHECKSUM_RUSTCRYPTO`] and [`SHA256_CHECKSUM_MINIMAL`]. Only S3
-//!   takes them.
-//!
-//! To register an implementation of your own, implement [`Checksum`] for it
-//! and pass the type to [`provider`].
+//!   `sha1`. Only S3 takes it.
+//! - The SHA-256 implementations below are checksums as well. Only S3 takes
+//!   them.
 //!
 //! A checksum here detects corruption in transit and nothing else, a SHA-1
 //! or a SHA-256 included.
 //!
 //! # SHA-256
 //!
-//! An S3 client signs each request with SHA-256, and with HMAC-SHA256,
-//! which it builds from SHA-256. Pass a provider to
-//! [`s3::Objects::new`](borink_object_storage_proto::s3::Objects::new):
+//! The [`sigv4`] module signs S3 requests with any [`Sha256`]. This crate
+//! has two, each behind a feature of its name:
 //!
-//! ```
-//! # #[cfg(feature = "sha256-rustcrypto")] {
-//! use borink_object_storage_proto::s3::{Bucket, Service, Objects};
-//! use borink_object_storage_proto::sigv4::Credentials;
+//! - [`Sha256RustCrypto`] (`sha256-rustcrypto`), over RustCrypto's `sha2`.
+//!   It needs no `std`, runs on every target, and uses the CPU's SHA
+//!   extensions where it finds them.
+//! - [`Sha256Minimal`] (`sha256-minimal`), over `hmac-sha256`. That crate
+//!   has no dependencies and needs no `std`. It is portable code, and uses
+//!   no SHA extensions.
 //!
-//! let bucket = Bucket::new(
-//!     "https://s3.eu-west-1.amazonaws.com", "objects", "eu-west-1", Service::Aws,
-//! )?;
-//! let credentials = Credentials::new(
-//!     "AKIAIOSFODNN7EXAMPLE", "secret", borink_object_storage_crypto::wipe,
-//! )?;
-//! let objects = Objects::new(
-//!     bucket, credentials, borink_object_storage_crypto::SHA256_RUSTCRYPTO,
-//! );
-//! # }
-//! # Ok::<(), borink_object_storage_proto::Error>(())
-//! ```
-//!
-//! This crate has two providers, each behind a feature of its name:
-//!
-//! - [`SHA256_RUSTCRYPTO`], over RustCrypto's `sha2`. It needs no
-//!   `std`, runs on every target, and uses the CPU's SHA extensions where it
-//!   finds them.
-//! - [`SHA256_MINIMAL`], over `hmac-sha256`. That crate has no dependencies
-//!   and needs no `std`. It is portable code, and uses no SHA extensions.
-//!
-//! To register an implementation of your own, implement [`Sha256`] for it
-//! and pass the type to [`sha256_provider`].
-//!
-//! Pass [`wipe`] to `Credentials::new`, as above. A client calls it on the
-//! copy of the secret access key that it makes to derive its signing key.
-//! The `zeroize` feature routes it through the `zeroize` crate. A client
-//! keeps its signing key as two SHA-256 states, which it copies with
-//! itself and never wipes, and neither provider wipes the states of a
-//! signature it leaves on the stack.
+//! Pass [`wipe`] to
+//! [`Credentials::new`](borink_object_storage_proto::sigv4::Credentials::new).
+//! [`sigv4::signing_key`] calls it on the copies of the secret access key
+//! that it makes. The `zeroize` feature routes it through the `zeroize`
+//! crate. A [`sigv4::SigningKey`] and a [`sigv4::Stamp`] hold SHA-256
+//! states derived from the secret, and nothing wipes them.
 //!
 //! [`borink-object-storage-proto`]: borink_object_storage_proto
 
 #![no_std]
 
-use borink_object_storage_proto::checksum::{
-    ChecksumKind, ChecksumProvider, ChecksumState, Digest,
-};
-use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
+use borink_object_storage_proto::checksum::{ChecksumKind, Digest};
 
 #[cfg(any(feature = "crc32", feature = "crc32c"))]
 mod crc32;
@@ -122,57 +90,10 @@ pub use sha256_minimal::Sha256Minimal;
 #[cfg(feature = "sha256-rustcrypto")]
 pub use sha256_rustcrypto::Sha256RustCrypto;
 
-/// [`Crc64`] as a provider.
-#[cfg(feature = "crc64")]
-pub const CRC64: ChecksumProvider = provider::<Crc64>();
-
-/// [`Md5RustCrypto`] as a provider.
-#[cfg(feature = "md5-rustcrypto")]
-pub const MD5_RUSTCRYPTO: ChecksumProvider = provider::<Md5RustCrypto>();
-
-/// [`Crc32`] as a provider.
-#[cfg(feature = "crc32")]
-pub const CRC32: ChecksumProvider = provider::<Crc32>();
-
-/// [`Crc32c`] as a provider.
-#[cfg(feature = "crc32c")]
-pub const CRC32C: ChecksumProvider = provider::<Crc32c>();
-
-/// [`Sha1RustCrypto`] as a provider.
-#[cfg(feature = "sha1-rustcrypto")]
-pub const SHA1_RUSTCRYPTO: ChecksumProvider = provider::<Sha1RustCrypto>();
-
-/// [`Sha256RustCrypto`] as a checksum provider, for an S3 write that sends
-/// `x-amz-checksum-sha256`.
-#[cfg(feature = "sha256-rustcrypto")]
-pub const SHA256_CHECKSUM_RUSTCRYPTO: ChecksumProvider = provider::<Sha256RustCrypto>();
-
-/// [`Sha256Minimal`] as a checksum provider, for an S3 write that sends
-/// `x-amz-checksum-sha256`.
-#[cfg(feature = "sha256-minimal")]
-pub const SHA256_CHECKSUM_MINIMAL: ChecksumProvider = provider::<Sha256Minimal>();
-
-/// [`Sha256RustCrypto`] as a provider.
-#[cfg(feature = "sha256-rustcrypto")]
-pub const SHA256_RUSTCRYPTO: Sha256Provider = sha256_provider::<Sha256RustCrypto>();
-
-/// [`Sha256Minimal`] as a provider.
-#[cfg(feature = "sha256-minimal")]
-pub const SHA256_MINIMAL: Sha256Provider = sha256_provider::<Sha256Minimal>();
-
 /// A checksum computed one piece of the content at a time.
 ///
-/// Implement this for a checksum of your own, such as a hardware CRC or a
-/// library you already link, and pass the type to [`provider`]. The
-/// encoder creates the value with [`Default`], calls [`Self::update`] with
-/// each piece of the content in order, and calls [`Self::finish`] once.
-///
-/// # Size
-///
-/// The value lives in a [`ChecksumState`] on the encoder's stack. It must be
-/// no larger than [`ChecksumState::LEN`] bytes and aligned to no more than
-/// sixteen. [`provider`] fails to compile for a type that breaks either
-/// limit.
+/// Create the value with [`Default`], call [`Self::update`] with each piece
+/// of the content in order, and call [`Self::finish`] once.
 pub trait Checksum: Default {
     /// The kind of checksum this computes, which decides the header that
     /// carries it.
@@ -186,98 +107,16 @@ pub trait Checksum: Default {
     fn finish(self) -> Digest;
 }
 
-/// Returns a provider that computes `C`.
-///
-/// Register it with
-/// [`Blobs::with_checksum`](borink_object_storage_proto::Blobs::with_checksum).
-/// This is a `const fn`, so the result can be a `const`, as [`CRC64`] and
-/// [`MD5_RUSTCRYPTO`] are.
-///
-/// # Compile-time check
-///
-/// A `C` larger than [`ChecksumState::LEN`] bytes, or aligned to more than
-/// sixteen, fails to compile:
-///
-/// ```compile_fail
-/// use borink_object_storage_crypto::{Checksum, provider};
-/// use borink_object_storage_proto::checksum::{ChecksumKind, Digest};
-///
-/// #[derive(Default)]
-/// struct Wide([u64; 32]);
-///
-/// impl Checksum for Wide {
-///     const KIND: ChecksumKind = ChecksumKind::Crc64;
-///     fn update(&mut self, _: &[u8]) {}
-///     fn finish(self) -> Digest {
-///         Digest::crc64(0)
-///     }
-/// }
-///
-/// let too_wide = provider::<Wide>();
-/// ```
-pub const fn provider<C: Checksum>() -> ChecksumProvider {
-    ChecksumProvider::new(C::KIND, start::<C>, update::<C>, finish::<C>)
-}
-
-// A `C` lives in the state slot for the length of one encoding call. Each
-// of the three functions below evaluates this in an inline `const`, so a
-// provider of a `C` that does not fit fails to compile.
-const fn assert_fits<C>() {
-    assert!(
-        size_of::<C>() <= ChecksumState::LEN,
-        "a checksum larger than ChecksumState::LEN cannot be a provider",
-    );
-    assert!(
-        align_of::<C>() <= 16,
-        "a checksum aligned to more than sixteen bytes cannot be a provider",
-    );
-}
-
-fn start<C: Checksum>() -> ChecksumState {
-    const { assert_fits::<C>() };
-    let mut state = ChecksumState::uninit();
-    // SAFETY: the slot is `ChecksumState::LEN` bytes aligned to sixteen, and
-    // a `C` fits in both, so this writes a whole `C` inside the slot.
-    unsafe { state.as_mut_ptr().cast::<C>().write(C::default()) };
-    state
-}
-
-fn update<C: Checksum>(state: &mut ChecksumState, bytes: &[u8]) {
-    const { assert_fits::<C>() };
-    // SAFETY: a client only ever calls this on a state that `start::<C>`
-    // wrote a `C` into, and nothing between the two reads or writes the
-    // bytes, so the slot holds a live `C` that this borrow does not alias.
-    let checksum = unsafe { &mut *state.as_mut_ptr().cast::<C>() };
-    checksum.update(bytes);
-}
-
-fn finish<C: Checksum>(mut state: ChecksumState) -> Digest {
-    const { assert_fits::<C>() };
-    // SAFETY: as in `update`, the slot holds a live `C`. The state is taken
-    // by value and is dropped here, so the `C` is moved out exactly once and
-    // the bytes are never read again.
-    let checksum = unsafe { state.as_mut_ptr().cast::<C>().read() };
-    checksum.finish()
-}
-
 /// SHA-256 computed one piece of the input at a time.
 ///
 /// Implement this for a SHA-256 of your own, such as a library you already
-/// link, and pass the type to [`sha256_provider`]. The encoder creates the
-/// value with [`Default`], calls [`Self::update`] with each piece of the
-/// input in order, and calls [`Self::finish`] once. It builds HMAC-SHA256
-/// from these calls itself.
+/// link. [`sigv4`] creates the value with [`Default`], calls
+/// [`Self::update`] with each piece of the input in order, and calls
+/// [`Self::finish`] once. It builds HMAC-SHA256 from these calls itself.
 ///
-/// The value is [`Copy`]: a client keeps the state of a hash after the
-/// padding block of its signing key, and starts each signature from a copy
+/// The value is [`Copy`]: a [`sigv4::SigningKey`] keeps the state of a hash
+/// after the padding block of the key, and each signature starts from a copy
 /// of it.
-///
-/// # Size
-///
-/// The value lives in a [`Sha256State`] on the encoder's stack. It must be
-/// no larger than [`Sha256State::LEN`] bytes and aligned to no more than
-/// sixteen. [`sha256_provider`] fails to compile for a type that breaks
-/// either limit.
 pub trait Sha256: Default + Copy {
     /// Adds `bytes` to the input seen so far.
     fn update(&mut self, bytes: &[u8]);
@@ -307,77 +146,4 @@ pub fn wipe(bytes: &mut [u8]) {
         // Keeps later accesses from moving before the writes.
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
-}
-
-/// Returns a provider that computes SHA-256 with `S`.
-///
-/// Pass it to
-/// [`s3::Objects::new`](borink_object_storage_proto::s3::Objects::new).
-/// This is a `const fn`, so the result can be a `const`, as
-/// [`SHA256_RUSTCRYPTO`] is.
-///
-/// # Compile-time check
-///
-/// An `S` larger than [`Sha256State::LEN`] bytes, or aligned to more than
-/// sixteen, fails to compile:
-///
-/// ```compile_fail
-/// use borink_object_storage_crypto::{Sha256, sha256_provider};
-///
-/// #[derive(Clone, Copy, Default)]
-/// struct Wide([u64; 32]);
-///
-/// impl Sha256 for Wide {
-///     fn update(&mut self, _: &[u8]) {}
-///     fn finish(self) -> [u8; 32] {
-///         [0; 32]
-///     }
-/// }
-///
-/// let too_wide = sha256_provider::<Wide>();
-/// ```
-pub const fn sha256_provider<S: Sha256>() -> Sha256Provider {
-    Sha256Provider::new(sha256_start::<S>, sha256_update::<S>, sha256_finish::<S>)
-}
-
-// An `S` lives in the state slot for the length of one hash. Each of the
-// three functions below evaluates this in an inline `const`, so a provider
-// of an `S` that does not fit fails to compile.
-const fn assert_sha256_fits<S>() {
-    assert!(
-        size_of::<S>() <= Sha256State::LEN,
-        "a SHA-256 larger than Sha256State::LEN cannot be a provider",
-    );
-    assert!(
-        align_of::<S>() <= 16,
-        "a SHA-256 aligned to more than sixteen bytes cannot be a provider",
-    );
-}
-
-fn sha256_start<S: Sha256>() -> Sha256State {
-    const { assert_sha256_fits::<S>() };
-    let mut state = Sha256State::uninit();
-    // SAFETY: the slot is `Sha256State::LEN` bytes aligned to sixteen, and
-    // an `S` fits in both, so this writes a whole `S` inside the slot.
-    unsafe { state.as_mut_ptr().cast::<S>().write(S::default()) };
-    state
-}
-
-fn sha256_update<S: Sha256>(state: &mut Sha256State, bytes: &[u8]) {
-    const { assert_sha256_fits::<S>() };
-    // SAFETY: a client only ever calls this on a state that
-    // `sha256_start::<S>` wrote an `S` into, or on a copy of one, and only
-    // `update` writes the bytes in between. `S` is `Copy`, so a copy of
-    // the bytes is a valid `S` of its own, and this borrow of the slot
-    // aliases nothing.
-    let sum = unsafe { &mut *state.as_mut_ptr().cast::<S>() };
-    sum.update(bytes);
-}
-
-fn sha256_finish<S: Sha256>(mut state: Sha256State) -> [u8; 32] {
-    const { assert_sha256_fits::<S>() };
-    // SAFETY: as in `sha256_update`, the slot holds a valid `S`, which is
-    // `Copy`, so reading it out leaves nothing to release.
-    let sum = unsafe { state.as_mut_ptr().cast::<S>().read() };
-    sum.finish()
 }

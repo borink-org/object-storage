@@ -14,7 +14,7 @@ Client Client::open(std::string_view endpoint, std::string_view container, std::
     const Container checked = client.container();
     const Status status = borink_container_check(&checked);
     if (status.code != 0) {
-        // The core crate names the value that cannot be used. This host writes
+        // The protocol crate names the value that cannot be used. This host writes
         // no second table of its own.
         std::vector<std::uint8_t> message(128);
         throw std::runtime_error(std::string(describe_whole(message, status)));

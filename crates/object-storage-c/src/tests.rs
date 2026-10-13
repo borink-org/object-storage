@@ -75,7 +75,7 @@ fn now() -> Timestamps {
     borink_timestamps_from_unix(NOW)
 }
 
-fn core_container() -> proto::Container<'static> {
+fn proto_container() -> proto::Container<'static> {
     proto::Container::new(ENDPOINT, CONTAINER).unwrap()
 }
 
@@ -207,8 +207,8 @@ fn sent(request: &WireRequest, buf: &[u8]) -> Sent {
     }
 }
 
-fn core_sent(request: proto::Result<proto::WireRequest<'_>>) -> Sent {
-    let request = request.expect("the core crate writes the request");
+fn proto_sent(request: proto::Result<proto::WireRequest<'_>>) -> Sent {
+    let request = request.expect("the protocol crate writes the request");
     Sent {
         url: request.url().to_string(),
         head: String::from_utf8(request.head().to_vec()).unwrap(),
@@ -365,7 +365,7 @@ fn every_write_and_block_outcome_crosses_whole() {
 }
 
 // The sentence for a failure, a missing object and an unsatisfiable range
-// is the core crate's own. A settled outcome gets a literal, which names no
+// is the protocol crate's own. A settled outcome gets a literal, which names no
 // operation because one twin answers them all.
 #[test]
 fn every_outcome_kind_says_something_of_its_own() {
@@ -854,12 +854,12 @@ fn a_null_pointer_is_refused_rather_than_read() {
     }
 }
 
-// Every request that crosses is the one that the core crate writes from the
+// Every request that crosses is the one that the protocol crate writes from the
 // same values: the same URL, the same head and the same body.
 #[test]
-fn each_request_is_the_one_the_core_crate_writes() {
+fn each_request_is_the_one_the_proto_crate_writes() {
     let container = container();
-    let core = core_container();
+    let core = proto_container();
     let core_now = proto::Timestamps::from_unix(NOW);
     let mut room = vec![0; 4096];
     let mut written = vec![0; 4096];
@@ -909,7 +909,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        core_sent(azure::encode_get(
+        proto_sent(azure::encode_get(
             &template,
             &room,
             &core_item,
@@ -957,7 +957,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        core_sent(azure::encode_get(
+        proto_sent(azure::encode_get(
             &template,
             &room,
             &core_item,
@@ -1020,7 +1020,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        core_sent(azure::encode_put(
+        proto_sent(azure::encode_put(
             &template,
             &room,
             &core_item,
@@ -1067,7 +1067,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        core_sent(azure::encode_stage_block(
+        proto_sent(azure::encode_stage_block(
             &template,
             &room,
             &core_item,
@@ -1135,7 +1135,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
         content_md5: Some(MD5),
         ..azure::CommitItem::new(KEY, &core_blocks)
     };
-    let theirs = core_sent(azure::encode_commit_blocks(
+    let theirs = proto_sent(azure::encode_commit_blocks(
         &template,
         &room,
         &core_item,
@@ -1190,7 +1190,7 @@ fn each_request_is_the_one_the_core_crate_writes() {
     let ours = sent(&ours, &buf);
     assert_eq!(
         ours,
-        core_sent(azure::encode_list(
+        proto_sent(azure::encode_list(
             &template,
             &room,
             &core_item,
@@ -1406,7 +1406,7 @@ fn a_stored_template_is_checked_against_its_bytes() {
     };
 }
 
-// A commit checks each of its blocks before the core crate reads any.
+// A commit checks each of its blocks before the protocol crate reads any.
 #[test]
 fn a_commit_refuses_a_block_it_cannot_read() {
     let commits = kept(|buf| {
@@ -1622,7 +1622,7 @@ fn a_container_that_cannot_be_used_says_which_value_is_wrong() {
         assert_eq!(refused.status, status);
     }
     // The token, and the key of the one object, are checked where a
-    // template is prepared, as the core crate checks them.
+    // template is prepared, as the protocol crate checks them.
     let normalized = Container {
         object: lent(b"dir/../up"),
         ..container()
@@ -1770,7 +1770,7 @@ fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
     }
 }
 
-// Every value that the core crate returns has one twin, the twin carries
+// Every value that the protocol crate returns has one twin, the twin carries
 // every field of it, and every borrowed field points at the same bytes.
 #[test]
 fn every_read_outcome_crosses_whole() {
@@ -1869,7 +1869,7 @@ fn every_read_outcome_crosses_whole() {
     }
 }
 
-// Every error of the core crate crosses as two numbers and comes back as
+// Every error of the protocol crate crosses as two numbers and comes back as
 // the same sentence.
 #[test]
 fn every_error_crosses_as_a_status() {
@@ -1915,7 +1915,7 @@ fn a_head_crosses_as_slices_of_whatever_holds_it() {
         header("Content-Length", b"10"),
         header("Content-Type", content_type),
         header("x-ms-request-id", IDENTIFIER),
-        // A name that is not text is none of the ones the core crate reads,
+        // A name that is not text is none of the ones the protocol crate reads,
         // so it is skipped rather than refused.
         HeaderRef {
             name: lent(b"\xff"),
@@ -2117,7 +2117,7 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
     assert!(fill.next_marker.present);
 }
 
-// A body that is not a page reports the fault of the core crate, and no
+// A body that is not a page reports the fault of the protocol crate, and no
 // entry of the array is reported.
 #[test]
 fn a_body_that_is_not_a_page_is_refused() {
@@ -2281,9 +2281,9 @@ fn a_listed_value_is_decoded_into_the_caller_s_buffer() {
     // SAFETY: every value is live, and nothing else reaches the buffers.
     let (decoded, refused, unknown) = unsafe {
         (
-            borink_decode_into(lent(b"a&amp;b"), writable(&mut room)),
-            borink_decode_into(lent(b"a&amp;b"), writable(&mut cramped)),
-            borink_decode_into(lent(b"a&nbsp;b"), writable(&mut third)),
+            borink_decode_property(lent(b"a&amp;b"), writable(&mut room)),
+            borink_decode_property(lent(b"a&amp;b"), writable(&mut cramped)),
+            borink_decode_property(lent(b"a&nbsp;b"), writable(&mut third)),
         )
     };
     assert_eq!(borrowed(decoded), Some(b"a&b".as_slice()));

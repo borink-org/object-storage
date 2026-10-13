@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "borink-object-storage-proto"
-version = "0.0.2"
+version = "0.0.4"
 
 [[package]]
 name = "libc"

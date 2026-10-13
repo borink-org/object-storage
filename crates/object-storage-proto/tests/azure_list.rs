@@ -4,7 +4,7 @@ use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::{
     AzureNamespace, BlobProperty, CapacityError, Container, EntryKind, Error, InvalidPlan,
     ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, Metadata, PropertySet,
-    PropertyValues, ResponseFault, Timestamps, layered,
+    PropertyValues, ResponseFault, Timestamps, decode_property, http_date_ms,
 };
 
 fn now() -> Timestamps {
@@ -207,7 +207,7 @@ fn a_page_reports_every_object_it_holds() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].key, "b/c.txt");
@@ -401,10 +401,7 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
     let mut entries = [ListEntry::default(); 2];
     assert_eq!(
         azure::fill_listing(&mut body, &mut entries),
-        Err(Error::Capacity(CapacityError {
-            required: 3,
-            ..CapacityError::default()
-        }))
+        Err(Error::Capacity(CapacityError { required: 3 }))
     );
 }
 
@@ -421,10 +418,7 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
     let mut none: [ListEntry; 0] = [];
     assert_eq!(
         azure::fill_listing(&mut body, &mut none),
-        Err(Error::Capacity(CapacityError {
-            required: 1,
-            ..CapacityError::default()
-        }))
+        Err(Error::Capacity(CapacityError { required: 1 }))
     );
 }
 
@@ -466,7 +460,7 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].kind, EntryKind::Directory);
@@ -682,7 +676,7 @@ fn a_page_the_service_actually_sent() {
     assert_eq!(entries[0].size, Some(1));
     assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_788_289_691_000)
     );
     // The last page of the listing, written the way the service writes it.
@@ -813,21 +807,21 @@ fn a_value_that_was_decoded_in_place_is_reported_decoded_by_the_walk() {
 fn a_listed_value_is_decoded_into_a_buffer_of_the_caller() {
     let mut into = [0; 32];
     assert_eq!(
-        layered::decode_into(b"a&amp;b", &mut into),
+        decode_property(b"a&amp;b", &mut into),
         Some(b"a&b".as_slice())
     );
     assert_eq!(
-        layered::decode_into(b"caf&#233;", &mut into),
+        decode_property(b"caf&#233;", &mut into),
         Some("café".as_bytes())
     );
     // Text with nothing to decode is copied as it stands.
     assert_eq!(
-        layered::decode_into(b"text/plain", &mut into),
+        decode_property(b"text/plain", &mut into),
         Some(b"text/plain".as_slice())
     );
     // A buffer shorter than the value, and a reference no listing declares.
-    assert_eq!(layered::decode_into(b"a&amp;b", &mut [0; 6]), None);
-    assert_eq!(layered::decode_into(b"a&nbsp;b", &mut into), None);
+    assert_eq!(decode_property(b"a&amp;b", &mut [0; 6]), None);
+    assert_eq!(decode_property(b"a&nbsp;b", &mut into), None);
 }
 
 /// A prefix that a hierarchical account furnishes, and an entry whose
@@ -1093,7 +1087,7 @@ fn an_entry_reports_the_metadata_pairs_the_service_wrote() {
     // where the caller wants them resolved.
     let mut into = [0; 16];
     assert_eq!(
-        layered::decode_into(pairs[1].1, &mut into),
+        decode_property(pairs[1].1, &mut into),
         Some(b"a & b".as_slice())
     );
     // The entry's own fields are unchanged by the metadata beside them.

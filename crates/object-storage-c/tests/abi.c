@@ -599,7 +599,7 @@ static void a_property_is_read_out_of_the_entry(void) {
     // A reference is resolved into the caller's own buffer.
     uint8_t room[16];
     const borink_maybe_bytes decoded =
-        borink_decode_into(as_bytes("a&amp;b"), (borink_bytes_mut){room, sizeof room});
+        borink_decode_property(as_bytes("a&amp;b"), (borink_bytes_mut){room, sizeof room});
     CHECK(decoded.present);
     CHECK(decoded.bytes.len == 3);
     CHECK(memcmp(decoded.bytes.ptr, "a&b", 3) == 0);

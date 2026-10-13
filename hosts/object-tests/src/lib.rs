@@ -9,14 +9,14 @@
 //! `azure.rs` and `s3.rs` map the calls of each provider onto the crate.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, SHA256_RUSTCRYPTO};
+use borink_object_storage_crypto::sigv4::{hmac, sha256};
+use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, Sha256RustCrypto};
 use borink_object_storage_proto::{
     BodyWindow, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties,
-    CopyItem, CopyOptions, CopySource, DeleteKind, DeleteOptions, DeleteTarget,
-    Error as CrateError, GetItem, GetKind, GetOptions, MetadataPair, ObjectItem, ObjectMeta,
-    Payload, Ranging, RequestedRange, ResponseHead, RestoreHeadOutcome, RestoreOptions,
-    RestorePriority, Revision, RevisionKind, ServiceErrorKind, Tag, Timestamps, WireRequest,
-    WriteOptions,
+    CopyItem, CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, Error as CrateError, GetItem,
+    GetKind, GetOptions, MetadataPair, ObjectItem, ObjectMeta, Payload, Ranging, RequestedRange,
+    ResponseHead, RestoreHeadOutcome, RestoreOptions, RestorePriority, Revision, RevisionKind,
+    ServiceErrorKind, Tag, Timestamps, WireRequest, WriteOptions,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -324,10 +324,26 @@ const SOURCE_CONDITION_FIELDS: [(&str, ConditionKind); 4] = [
     ),
 ];
 
+/// The object that a copy call reads.
+struct Source<'c> {
+    /// The storage account that holds it, or `None` for the target's.
+    endpoint: Option<&'c str>,
+    /// Its container or bucket, or `None` for the target's.
+    container: Option<&'c str>,
+    /// Its key.
+    key: &'c str,
+    /// Its version, or `None` for the object as it is now.
+    version: Option<&'c str>,
+    /// The kind of the condition on it.
+    condition: ConditionKind,
+    /// What the condition compares against.
+    condition_value: Option<ConditionValue<'c>>,
+}
+
 /// The object that a copy call reads, with `container_field` naming its
 /// container or bucket, or `None` if the call names more than the one
 /// condition on it that the crate takes.
-fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySource<'c>> {
+fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<Source<'c>> {
     let mut given = SOURCE_CONDITION_FIELDS
         .iter()
         .filter_map(|(field, kind)| Some((*kind, optional_text(call, field)?)));
@@ -336,11 +352,11 @@ fn requested_source<'c>(call: &'c Value, container_field: &str) -> Option<CopySo
         (Some((kind, text)), None) => (kind, Some(condition_value(kind, text))),
         (Some(_), Some(_)) => return None,
     };
-    Some(CopySource {
+    Some(Source {
         endpoint: optional_text(call, "source_account_url"),
         container: optional_text(call, container_field),
         key: optional_text(call, "source_key").unwrap_or_default(),
-        revision: optional_text(call, "source_version").map(Revision::Version),
+        version: optional_text(call, "source_version"),
         condition,
         condition_value,
     })
@@ -372,7 +388,7 @@ pub(crate) fn requested_copy<'c>(
     let options = CopyOptions {
         source_endpoint: source.endpoint,
         source_container: source.container,
-        source_revision: match source.revision {
+        source_revision: match source.version {
             Some(_) => RevisionKind::Version,
             None => RevisionKind::Current,
         },
@@ -976,7 +992,7 @@ fn requested_condition(call: &Value) -> Option<(ConditionKind, Option<ConditionV
 fn condition_value(kind: ConditionKind, text: &str) -> ConditionValue<'_> {
     match kind {
         ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince => ConditionValue::Time(
-            borink_object_storage_proto::layered::http_date_ms(text)
+            borink_object_storage_proto::http_date_ms(text)
                 .map_or(u64::MAX, |millis| millis / 1000),
         ),
         _ => ConditionValue::ETag(text.as_bytes()),
@@ -1038,7 +1054,7 @@ fn compute_digest(call: &Value) -> Result<Value, AdapterError> {
     let digest = match optional_text(call, "algorithm") {
         Some("md5") => checksum_digest::<Md5RustCrypto>(&body),
         Some("azure_crc64") => checksum_digest::<Crc64>(&body),
-        Some("sha256") => SHA256_RUSTCRYPTO.hash(&body).to_vec(),
+        Some("sha256") => sha256::<Sha256RustCrypto>(&body).to_vec(),
         _ => return Ok(unsupported_by_crate("digest algorithm")),
     };
     Ok(successful_result(
@@ -1050,7 +1066,7 @@ fn hmac_sha256(call: &Value) -> Result<Value, AdapterError> {
     let key = decode_base64_field(call, "key_base64")?;
     let body = decode_base64_field(call, "body_base64")?;
     Ok(successful_result(json!({
-        "digest_base64": STANDARD.encode(SHA256_RUSTCRYPTO.hmac(&key, &body)),
+        "digest_base64": STANDARD.encode(hmac::<Sha256RustCrypto>(&key, &body)),
     })))
 }
 
