@@ -31,7 +31,7 @@ sha1 = { version = "0.11", optional = true, default-features = false }
 zeroize = { version = "1", optional = true, default-features = false }
 
 [features]
-# Nothing by default: a host that registers no checksum links no algorithm.
+# Nothing by default: a host that enables no feature links no algorithm.
 default = []
 # The software CRC-64/NVME of `crc64`.
 crc64 = []

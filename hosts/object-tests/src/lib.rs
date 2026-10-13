@@ -1048,7 +1048,8 @@ fn checksum_digest<C: Checksum>(body: &[u8]) -> Vec<u8> {
     checksum.finish().as_bytes().to_vec()
 }
 
-/// Computes a digest with the providers of `borink-object-storage-crypto`.
+/// Computes a digest with the checksum and SHA-256 types of
+/// `borink-object-storage-crypto`.
 fn compute_digest(call: &Value) -> Result<Value, AdapterError> {
     let body = decode_base64_field(call, "body_base64")?;
     let digest = match optional_text(call, "algorithm") {
