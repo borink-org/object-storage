@@ -1,9 +1,10 @@
 //! Azure Delete Blob: the removals the client refuses.
 
 use borink_object_storage_proto::azure;
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteKind, DeleteOptions, Error,
-    InvalidRequest, ObjectItem, RevisionKind, Timestamps,
+    ConditionKind, ConditionValue, DeleteKind, DeleteOptions, Error, InvalidRequest, ObjectItem,
+    RevisionKind, Timestamps,
 };
 
 fn container() -> Container<'static> {

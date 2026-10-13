@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_proto::Container;
+use borink_object_storage_proto::azure::Container;
 use borink_object_storage_ureq::azure;
 
 #[test]

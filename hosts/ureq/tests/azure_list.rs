@@ -6,9 +6,8 @@ use std::net::TcpListener;
 use std::thread;
 
 use borink_object_storage_proto::azure as proto;
-use borink_object_storage_proto::{
-    AzureNamespace, Container, ListEntry, ListItem, ListMarker, ListOptions,
-};
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
+use borink_object_storage_proto::{ListEntry, ListItem, ListMarker, ListOptions};
 use borink_object_storage_ureq::azure;
 
 const PAGE: &str = "<EnumerationResults><Blobs>\

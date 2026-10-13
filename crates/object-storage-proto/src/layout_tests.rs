@@ -10,12 +10,13 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
+use crate::azure::AzureNamespace;
 use crate::azure::{self, BlockListKind, BlockRef, BlockSource, Container};
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
-    AzureNamespace, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties,
-    CopyItem, CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties, CopyItem,
+    CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
     ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, PutItem,
     PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind,
     StageOptions, Tag, Timestamps, WriteOptions,

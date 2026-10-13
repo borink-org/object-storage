@@ -174,6 +174,15 @@ pub(crate) enum ParamValue<'p> {
 // One query parameter, or `None` for one that the template leaves out.
 pub(crate) type Param<'p> = Option<(&'p str, ParamValue<'p>)>;
 
+// Whether every parameter of `query` is the same for each request, so that
+// a URL with no key of its own is the template's text.
+pub(crate) fn fixed_query(query: &[Param<'_>]) -> bool {
+    query
+        .iter()
+        .flatten()
+        .all(|(_, value)| matches!(value, ParamValue::Fixed(_)))
+}
+
 // The body of a template's requests: none, the same text for every request,
 // or a body that each request writes.
 #[derive(Clone, Copy)]
@@ -1455,10 +1464,9 @@ impl<'r> WireRequest<'r> {
 /// returns the placement:
 ///
 /// ```
-/// use borink_object_storage_proto::azure;
+/// use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
 /// use borink_object_storage_proto::{
-///     AzureNamespace, Container, Error, Payload, Placement, PutItem, PutOptions, Result,
-///     Timestamps,
+///     Error, Payload, Placement, PutItem, PutOptions, Result, Timestamps,
 /// };
 ///
 /// fn write(buf: &mut Vec<u8>, encode: impl Fn(&mut [u8]) -> Result<Placement>) -> Result<Placement> {

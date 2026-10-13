@@ -8,16 +8,14 @@
 
 pub(crate) mod blocks;
 
+use crate::azure::{BlobProperty, PropertySet, PropertyValues};
 use crate::xml::decode::decode;
 use crate::xml::page::{
-    ListProperty, ListPropertySet, capture, check_body, check_room, decode_value_in_place,
-    end_decoded_key, open_root_element, read_known, read_other, read_size, set_once, text,
-    values_of,
+    ListProperty, capture, check_body, check_room, decode_value_in_place, end_decoded_key,
+    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, Tag, fault, trim};
-use crate::{
-    BlobProperty, EntryKind, ListEntry, ListMarker, Listing, PropertySet, PropertyValues, Result,
-};
+use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
 
 const ROOT: &[u8] = b"EnumerationResults";
 
@@ -35,21 +33,6 @@ impl ListProperty for BlobProperty {
     }
 }
 
-impl ListPropertySet for PropertySet {
-    type Property = BlobProperty;
-
-    fn contains(self, property: BlobProperty) -> bool {
-        PropertySet::contains(self, property)
-    }
-
-    fn is_empty(self) -> bool {
-        PropertySet::is_empty(self)
-    }
-
-    fn slot(self, property: BlobProperty) -> usize {
-        PropertySet::slot(self, property)
-    }
-}
 const BLOBS: &[u8] = b"Blobs";
 
 pub(crate) fn fill_listing<'b, E>(

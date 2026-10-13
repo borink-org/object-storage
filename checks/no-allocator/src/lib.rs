@@ -4,12 +4,13 @@
 
 use borink_object_storage_crypto::sigv4;
 use borink_object_storage_proto::azure;
+use borink_object_storage_proto::azure::{AzureNamespace, BlobProperty, Container, PropertySet};
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    AzureNamespace, BlobProperty, ChecksumKind, ChecksumValue, Container, GetHeadOutcome, GetItem,
-    GetOptions, ListEntry, ListHeadOutcome, ListItem, ListMarker, ListOptions, MetadataPair,
-    Payload, PropertySet, PutItem, PutOptions, ResponseHead, Timestamps, decode_property,
+    ChecksumKind, ChecksumValue, GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome,
+    ListItem, ListMarker, ListOptions, MetadataPair, Payload, PutItem, PutOptions, ResponseHead,
+    Timestamps, decode_property,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.

@@ -3,7 +3,7 @@
 use std::env;
 use std::io::Write;
 
-use borink_object_storage_proto::Container;
+use borink_object_storage_proto::azure::Container;
 use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -21,13 +21,14 @@ use crate::{
 use borink_object_storage_proto::azure::{
     self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, SnapshotHeadOutcome,
 };
+use borink_object_storage_proto::azure::{AzureNamespace, Container, PropertySet};
 use borink_object_storage_proto::{
-    AzureNamespace, ChecksumKind, Classification, CommitHeadOutcome, Container, CopyHeadOutcome,
-    DeleteHeadOutcome, DeleteManyHeadOutcome, EntryKind, Error as CrateError, GetHeadOutcome,
-    GetKind, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome,
-    ObjectItem, PropertySet, PutHeadOutcome, PutItem, PutOptions, RequestedRange,
-    RestoreHeadOutcome, Revision, RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome,
-    UpdateHeadOutcome, WireRequest, WriteOptions,
+    ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
+    DeleteManyHeadOutcome, EntryKind, Error as CrateError, GetHeadOutcome, GetKind, ListEntry,
+    ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome, ObjectItem,
+    PutHeadOutcome, PutItem, PutOptions, RequestedRange, RestoreHeadOutcome, Revision,
+    RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome, UpdateHeadOutcome, WireRequest,
+    WriteOptions,
 };
 use serde_json::{Map, Value, json};
 

@@ -781,7 +781,7 @@ pub struct Listing<'b> {
     pub next_marker: Option<crate::ListMarker<'b>>,
 }
 
-/// The result of [`classify_error`](crate::classify_error).
+/// The result of [`classify_error`](crate::azure::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Classification {

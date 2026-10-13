@@ -1,10 +1,10 @@
 //! Azure requests, written from templates.
 
 use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    AzureNamespace, Container, DeleteHeadOutcome, DeleteOptions, GetHeadOutcome, GetItem,
-    GetOptions, ListEntry, ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome,
-    PutItem, PutOptions,
+    DeleteHeadOutcome, DeleteOptions, GetHeadOutcome, GetItem, GetOptions, ListEntry,
+    ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem, PutOptions,
 };
 
 /// Builds and executes one GET request, returning an owned response body.

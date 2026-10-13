@@ -1,9 +1,10 @@
 //! Azure write encoding and response interpretation.
 
 use borink_object_storage_proto::azure;
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    AzureNamespace, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Container, Digest,
-    Error, InvalidRequest, MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidRequest,
+    MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {

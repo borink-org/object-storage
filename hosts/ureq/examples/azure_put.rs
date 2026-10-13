@@ -7,9 +7,9 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use borink_object_storage_proto::azure;
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    AzureNamespace, Container, Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead,
-    Timestamps,
+    Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

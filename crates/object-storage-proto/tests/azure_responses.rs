@@ -1,9 +1,10 @@
 //! Azure response interpretation fixtures.
 
 use borink_object_storage_proto::azure;
+use borink_object_storage_proto::azure::classify_error;
 use borink_object_storage_proto::{
     Classification, ConditionKind, Error, GetHeadOutcome, GetShape, RequestedRange, ResponseFault,
-    ResponseHead, ServiceErrorKind, classify_error,
+    ResponseHead, ServiceErrorKind,
 };
 
 fn accept<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>, Error> {
@@ -233,9 +234,8 @@ fn an_object_that_exists_fails_a_write_for_none() {
 
 #[test]
 fn a_template_states_the_shape_of_its_responses() {
-    use borink_object_storage_proto::{
-        AzureNamespace, Container, DeleteKind, DeleteOptions, GetItem, InvalidRequest,
-    };
+    use borink_object_storage_proto::azure::{AzureNamespace, Container};
+    use borink_object_storage_proto::{DeleteKind, DeleteOptions, GetItem, InvalidRequest};
     let container = Container::new("https://account.blob.core.windows.net", "container").unwrap();
     let options = DeleteOptions {
         kind: DeleteKind::ObjectAndSnapshots,

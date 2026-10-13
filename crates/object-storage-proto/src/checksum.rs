@@ -96,27 +96,14 @@ impl ChecksumKind {
         base64_shape(self.digest_len())
     }
 
-    // Checks that `text` is the base64 of a digest of this kind: the right
-    // number of characters from the alphabet, then the right number of `=`.
+    // Checks that `text` is the padded base64 of a digest of this kind.
     // Azure refuses any other text with 400 `InvalidHeaderValue`.
     pub(crate) fn check_base64(self, text: &str) -> Result<()> {
-        check_base64_len(text, self.digest_len())
+        if crate::encoding::base64_len(text.as_bytes()) != Some(self.digest_len()) {
+            return Err(InvalidRequest::Checksum.into());
+        }
+        Ok(())
     }
-}
-
-// Checks that `text` is the base64 of `len` bytes: the right number of
-// characters from the alphabet, then the right number of `=`.
-pub(crate) fn check_base64_len(text: &str, len: usize) -> Result<()> {
-    let (chars, padding) = base64_shape(len);
-    let bytes = text.as_bytes();
-    let alphabet = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/';
-    if bytes.len() != chars + padding
-        || !bytes[..chars].iter().all(alphabet)
-        || !bytes[chars..].iter().all(|byte| *byte == b'=')
-    {
-        return Err(InvalidRequest::Checksum.into());
-    }
-    Ok(())
 }
 
 // The length of the base64 of `len` bytes, as the characters from the

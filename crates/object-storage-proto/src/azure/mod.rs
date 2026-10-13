@@ -16,9 +16,9 @@ use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
     GetHeadOutcome, GetKind, GetShape, InvalidRequest, ListEntry, ListHeadOutcome, ListInclude,
-    ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PropertySet, PropertyValues,
-    PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
-    ServiceErrorKind, Timestamps, WriteOptions,
+    ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome, PutShape,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
+    WriteOptions,
 };
 
 mod batch;
@@ -113,8 +113,7 @@ pub const METADATA_PREFIX: &str = "x-ms-meta-";
 /// Returns the metadata name that a response header carries, or [`None`]
 /// for a header that carries no pair.
 pub fn metadata_name(header: &str) -> Option<&str> {
-    let (prefix, name) = header.split_at_checked(METADATA_PREFIX.len())?;
-    (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
+    crate::common::metadata_name(header, METADATA_PREFIX)
 }
 
 // A bearer token, as `Authorization` and `x-ms-copy-source-authorization`
@@ -245,7 +244,8 @@ impl InvalidRequest {
     /// precedence nor the outcome of a request containing other faults.
     ///
     /// ```
-    /// use borink_object_storage_proto::{AzureNamespace, InvalidRequest};
+    /// use borink_object_storage_proto::InvalidRequest;
+    /// use borink_object_storage_proto::azure::AzureNamespace;
     /// let reason = InvalidRequest::KeyTooLong;
     /// let azure = reason.azure_rejection(AzureNamespace::Flat).unwrap();
     /// assert_eq!((azure.status, azure.code), (400, "OutOfRangeInput"));
@@ -313,19 +313,7 @@ impl fmt::Display for SnapshotHeadOutcome<'_> {
     }
 }
 
-impl<'h> FailureOutcome<'h> for SnapshotHeadOutcome<'h> {
-    fn need_error_body(failure: Failure<'h>) -> Self {
-        Self::NeedErrorBody(failure)
-    }
-
-    fn not_found(failure: Failure<'h>) -> Self {
-        Self::NotFound { kind: failure.kind }
-    }
-
-    fn service_failure(failure: Failure<'h>) -> Self {
-        Self::ServiceFailure(failure)
-    }
-}
+crate::common::failure_outcome!(SnapshotHeadOutcome<'h>);
 
 // The word for each include flag. The query writes them in this order,
 // whatever order the set was built in.
@@ -1352,7 +1340,7 @@ pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHead
 /// one, so a binding fills its own array directly.
 ///
 /// For fields not carried by `ListEntry`, use [`ListEntry::property`] or
-/// [`fill_listing_with`], selecting [`BlobProperty`](crate::BlobProperty)
+/// [`fill_listing_with`], selecting [`BlobProperty`]
 /// values such as `VersionId`, `IsCurrentVersion` and `Snapshot`.
 ///
 /// # Errors
@@ -1386,9 +1374,8 @@ pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
 /// as reading it without one.
 ///
 /// ```
-/// # use borink_object_storage_proto::{
-/// #     ListEntry, PropertySet, BlobProperty, Result, azure,
-/// # };
+/// # use borink_object_storage_proto::azure::{self, BlobProperty, PropertySet};
+/// # use borink_object_storage_proto::{ListEntry, Result};
 /// # fn read(body: &mut [u8]) -> Result<()> {
 /// let wanted = PropertySet::of(&[
 ///     BlobProperty::VersionId, BlobProperty::IsCurrentVersion,
@@ -1605,3 +1592,301 @@ pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static s
 
 // `has_bytes` says whether the encoder holds the content, which it does not
 // for a streamed payload. `checksums` are the client's providers.
+
+/// An element that a listing writes for a blob, other than the four that
+/// every [`ListEntry`] carries.
+///
+/// Name the ones you want in a [`PropertySet`] and read a page with
+/// [`azure::fill_listing_with`](crate::azure::fill_listing_with), which
+/// hands you their values as it goes. Most are written under the properties
+/// element; the ones marked otherwise stand beside it. Read anything that is
+/// not listed here with [`ListEntry::properties`].
+///
+/// The page reader matches each of these by its whole start tag, in
+/// `xml/azure/mod.rs`. A property added here is added to that match too, and a
+/// test there checks that every one of these is matched.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BlobProperty {
+    /// The access tier: `Hot`, `Cool`, `Cold` or `Archive`.
+    AccessTier,
+    /// Whether the tier was inferred rather than set.
+    AccessTierInferred,
+    /// When the tier was last changed.
+    AccessTierChangeTime,
+    /// The progress of a rehydration out of the archive tier.
+    ArchiveStatus,
+    /// The access control list, on a hierarchical account listing with permissions.
+    Acl,
+    /// `BlockBlob`, `PageBlob` or `AppendBlob`.
+    BlobType,
+    /// When the blob was created, in the form of the `Last-Modified` header.
+    CreationTime,
+    /// The media type, as stored with the blob.
+    ContentType,
+    /// The content encoding, as stored with the blob.
+    ContentEncoding,
+    /// The content language, as stored with the blob.
+    ContentLanguage,
+    /// The CRC64 of the content, if the service holds one.
+    ContentCrc64,
+    /// The MD5 of the content, base64, if the service holds one.
+    ContentMd5,
+    /// The cache control directives, as stored with the blob.
+    CacheControl,
+    /// The content disposition, as stored with the blob.
+    ContentDisposition,
+    /// The identifier of the last copy operation onto this blob.
+    CopyId,
+    /// The state of that copy: `pending`, `success`, `aborted` or `failed`.
+    CopyStatus,
+    /// The URL that copy read from.
+    CopySource,
+    /// The bytes copied so far and the total, as `copied/total`.
+    CopyProgress,
+    /// When that copy finished.
+    CopyCompletionTime,
+    /// Why that copy failed or was aborted.
+    CopyStatusDescription,
+    /// When a soft-deleted blob was deleted.
+    DeletedTime,
+    /// Whether the entry is a soft-deleted blob. Written beside the properties element.
+    Deleted,
+    /// The encryption scope the blob is stored under.
+    EncryptionScope,
+    /// When the blob expires, on a hierarchical account.
+    ExpiryTime,
+    /// The owning group, on a hierarchical account listing with permissions.
+    Group,
+    /// Whether this version is the current one. Written beside the properties element.
+    IsCurrentVersion,
+    /// Whether the blob is an incremental copy of a page blob snapshot.
+    IncrementalCopy,
+    /// Until when the immutability policy holds.
+    ImmutabilityPolicyUntilDate,
+    /// The immutability policy: `unlocked` or `locked`.
+    ImmutabilityPolicyMode,
+    /// Whether the blob is leased: `locked` or `unlocked`.
+    LeaseStatus,
+    /// The state of the lease: `available`, `leased`, `expired`, `breaking` or `broken`.
+    LeaseState,
+    /// Whether the lease is `infinite` or `fixed`.
+    LeaseDuration,
+    /// Whether a legal hold is set.
+    LegalHold,
+    /// The owner, on a hierarchical account listing with permissions.
+    Owner,
+    /// The POSIX permissions, on a hierarchical account listing with permissions.
+    Permissions,
+    /// How many days a soft-deleted blob is kept.
+    RemainingRetentionDays,
+    /// The priority of a rehydration out of the archive tier.
+    RehydratePriority,
+    /// Whether the blob is encrypted at rest.
+    ServerEncrypted,
+    /// The snapshot's timestamp, on an entry that names a snapshot. Written
+    /// beside the properties element.
+    Snapshot,
+    /// How many tags the blob has.
+    TagCount,
+    /// The version's identifier, on an account that keeps versions. Written
+    /// beside the properties element.
+    VersionId,
+    /// The sequence number of a page blob.
+    BlobSequenceNumber,
+    /// The metadata pairs of the object, as the bytes between the tags of
+    /// the `Metadata` element. Pass the value to [`Metadata::new`](crate::Metadata::new) to read
+    /// the pairs. Azure writes the element only when the listing asked for
+    /// [`ListInclude::METADATA`].
+    Metadata,
+}
+
+impl BlobProperty {
+    /// Every property, in the order of their numbers.
+    pub const ALL: &[Self] = &[
+        Self::AccessTier,
+        Self::AccessTierInferred,
+        Self::AccessTierChangeTime,
+        Self::ArchiveStatus,
+        Self::Acl,
+        Self::BlobType,
+        Self::CreationTime,
+        Self::ContentType,
+        Self::ContentEncoding,
+        Self::ContentLanguage,
+        Self::ContentCrc64,
+        Self::ContentMd5,
+        Self::CacheControl,
+        Self::ContentDisposition,
+        Self::CopyId,
+        Self::CopyStatus,
+        Self::CopySource,
+        Self::CopyProgress,
+        Self::CopyCompletionTime,
+        Self::CopyStatusDescription,
+        Self::DeletedTime,
+        Self::Deleted,
+        Self::EncryptionScope,
+        Self::ExpiryTime,
+        Self::Group,
+        Self::IsCurrentVersion,
+        Self::IncrementalCopy,
+        Self::ImmutabilityPolicyUntilDate,
+        Self::ImmutabilityPolicyMode,
+        Self::LeaseStatus,
+        Self::LeaseState,
+        Self::LeaseDuration,
+        Self::LegalHold,
+        Self::Owner,
+        Self::Permissions,
+        Self::RemainingRetentionDays,
+        Self::RehydratePriority,
+        Self::ServerEncrypted,
+        Self::Snapshot,
+        Self::TagCount,
+        Self::VersionId,
+        Self::BlobSequenceNumber,
+        Self::Metadata,
+    ];
+
+    /// The element name, as the service writes it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AccessTier => "AccessTier",
+            Self::AccessTierInferred => "AccessTierInferred",
+            Self::AccessTierChangeTime => "AccessTierChangeTime",
+            Self::ArchiveStatus => "ArchiveStatus",
+            Self::Acl => "Acl",
+            Self::BlobType => "BlobType",
+            Self::CreationTime => "Creation-Time",
+            Self::ContentType => "Content-Type",
+            Self::ContentEncoding => "Content-Encoding",
+            Self::ContentLanguage => "Content-Language",
+            Self::ContentCrc64 => "Content-CRC64",
+            Self::ContentMd5 => "Content-MD5",
+            Self::CacheControl => "Cache-Control",
+            Self::ContentDisposition => "Content-Disposition",
+            Self::CopyId => "CopyId",
+            Self::CopyStatus => "CopyStatus",
+            Self::CopySource => "CopySource",
+            Self::CopyProgress => "CopyProgress",
+            Self::CopyCompletionTime => "CopyCompletionTime",
+            Self::CopyStatusDescription => "CopyStatusDescription",
+            Self::DeletedTime => "DeletedTime",
+            Self::Deleted => "Deleted",
+            Self::EncryptionScope => "EncryptionScope",
+            Self::ExpiryTime => "Expiry-Time",
+            Self::Group => "Group",
+            Self::IsCurrentVersion => "IsCurrentVersion",
+            Self::IncrementalCopy => "IncrementalCopy",
+            Self::ImmutabilityPolicyUntilDate => "ImmutabilityPolicyUntilDate",
+            Self::ImmutabilityPolicyMode => "ImmutabilityPolicyMode",
+            Self::LeaseStatus => "LeaseStatus",
+            Self::LeaseState => "LeaseState",
+            Self::LeaseDuration => "LeaseDuration",
+            Self::LegalHold => "LegalHold",
+            Self::Owner => "Owner",
+            Self::Permissions => "Permissions",
+            Self::RemainingRetentionDays => "RemainingRetentionDays",
+            Self::RehydratePriority => "RehydratePriority",
+            Self::ServerEncrypted => "ServerEncrypted",
+            Self::Snapshot => "Snapshot",
+            Self::TagCount => "TagCount",
+            Self::VersionId => "VersionId",
+            Self::BlobSequenceNumber => "x-ms-blob-sequence-number",
+            Self::Metadata => "Metadata",
+        }
+    }
+
+    // Whether the element holds other elements rather than one text. The
+    // page reader reads such an element to its close tag and reports
+    // everything between the tags.
+    pub(crate) const fn holds_elements(self) -> bool {
+        matches!(self, Self::Metadata)
+    }
+}
+
+// from_bits shifts by COUNT, which must be below the u64 shift width.
+const _: () = assert!(BlobProperty::ALL.len() < 64);
+
+impl BlobProperty {
+    /// How many properties there are, which is the most a set can hold.
+    pub const COUNT: usize = Self::ALL.len();
+
+    // The property that an element name stands for, if it is one of these.
+    // This is the slow way to find out and is used only where a tag was not
+    // matched whole: an unusual spelling, or an element that is none of them.
+    pub(crate) fn identify(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|property| property.name().as_bytes() == name)
+    }
+}
+
+impl crate::properties::sealed::Sealed for BlobProperty {}
+
+impl crate::properties::Property for BlobProperty {
+    const COUNT: usize = BlobProperty::ALL.len();
+
+    fn number(self) -> u8 {
+        self as u8
+    }
+}
+
+/// The properties that one read of an Azure page is asked for.
+///
+/// Build one with [`PropertySet::of`] and pass it to [`fill_listing_with`].
+pub type PropertySet = crate::properties::PropertySet<BlobProperty>;
+
+/// The values that one entry of an Azure listing gave for the properties of a
+/// [`PropertySet`].
+pub type PropertyValues<'x, 'b> = crate::properties::PropertyValues<'x, 'b, BlobProperty>;
+
+impl PropertySet {
+    /// A set of these properties. Naming one twice is the same as once.
+    pub const fn of(properties: &[BlobProperty]) -> Self {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < properties.len() {
+            bits |= 1 << (properties[i] as u8);
+            i += 1;
+        }
+        Self::new(bits)
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::{BlobProperty, PropertySet};
+
+    #[test]
+    fn every_property_is_found_by_its_name_and_numbered_in_order() {
+        for (index, property) in BlobProperty::ALL.iter().enumerate() {
+            assert_eq!(*property as usize, index);
+            assert_eq!(
+                BlobProperty::identify(property.name().as_bytes()),
+                Some(*property)
+            );
+        }
+        assert_eq!(BlobProperty::identify(b"Name"), None);
+        assert_eq!(BlobProperty::identify(b""), None);
+    }
+
+    #[test]
+    fn a_set_numbers_its_members_in_the_order_the_enum_does() {
+        let set = PropertySet::of(&[
+            BlobProperty::ServerEncrypted,
+            BlobProperty::AccessTier,
+            BlobProperty::AccessTier,
+            BlobProperty::CreationTime,
+        ]);
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.slot(BlobProperty::AccessTier), 0);
+        assert_eq!(set.slot(BlobProperty::CreationTime), 1);
+        assert_eq!(set.slot(BlobProperty::ServerEncrypted), 2);
+        assert!(!set.contains(BlobProperty::BlobType));
+        assert!(PropertySet::default().is_empty());
+    }
+}

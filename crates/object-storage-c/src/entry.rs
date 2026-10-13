@@ -937,7 +937,7 @@ pub unsafe extern "C" fn borink_fill_listing_with(
     values: *mut MaybeBytes,
     value_capacity: usize,
 ) -> Fill {
-    let wanted = proto::PropertySet::from_bits(wanted.mask);
+    let wanted = proto::azure::PropertySet::from_bits(wanted.mask);
     let width = wanted.len();
     // Rows the values array has room for, when the set names anything.
     let rows = value_capacity
@@ -963,7 +963,7 @@ pub unsafe extern "C" fn borink_fill_listing_with(
 pub extern "C" fn borink_property_set_with(set: PropertySet, property: u16) -> PropertySet {
     match blob_property(property) {
         Some(property) => PropertySet {
-            mask: set.mask | proto::PropertySet::of(&[property]).bits(),
+            mask: set.mask | proto::azure::PropertySet::of(&[property]).bits(),
         },
         None => set,
     }
@@ -973,7 +973,7 @@ pub extern "C" fn borink_property_set_with(set: PropertySet, property: u16) -> P
 /// row of `borink_fill_listing_with` has.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_set_len(set: PropertySet) -> usize {
-    proto::PropertySet::from_bits(set.mask).len()
+    proto::azure::PropertySet::from_bits(set.mask).len()
 }
 
 /// Returns where a property's value stands in a row: its rank among the
@@ -983,7 +983,7 @@ pub extern "C" fn borink_property_set_len(set: PropertySet) -> usize {
 /// is the length of the row: one past its last value.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_slot(set: PropertySet, property: u16) -> usize {
-    let set = proto::PropertySet::from_bits(set.mask);
+    let set = proto::azure::PropertySet::from_bits(set.mask);
     match blob_property(property) {
         Some(property) if set.contains(property) => set.slot(property),
         _ => set.len(),
@@ -994,7 +994,7 @@ pub extern "C" fn borink_property_slot(set: PropertySet, property: u16) -> usize
 /// for a number that names no property.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_name(property: u16) -> Bytes {
-    let name = blob_property(property).map_or("", proto::BlobProperty::name);
+    let name = blob_property(property).map_or("", proto::azure::BlobProperty::name);
     Bytes {
         ptr: name.as_ptr(),
         len: name.len(),
@@ -1003,8 +1003,10 @@ pub extern "C" fn borink_property_name(property: u16) -> Bytes {
 
 // The protocol crate's property with this number, which is its position in the
 // list both crates are built from.
-fn blob_property(number: u16) -> Option<proto::BlobProperty> {
-    proto::BlobProperty::ALL.get(usize::from(number)).copied()
+fn blob_property(number: u16) -> Option<proto::azure::BlobProperty> {
+    proto::azure::BlobProperty::ALL
+        .get(usize::from(number))
+        .copied()
 }
 
 /// Returns the value that one entry gave for a property.

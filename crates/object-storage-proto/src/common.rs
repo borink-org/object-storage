@@ -65,9 +65,11 @@ pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
     }
 }
 
+// The outcomes whose request names an object, which report a 404 for the
+// object as `NotFound`.
 macro_rules! failure_outcome {
-    ($($outcome:ident),*) => {$(
-        impl<'h> FailureOutcome<'h> for crate::$outcome<'h> {
+    ($($outcome:ty),*) => {$(
+        impl<'h> FailureOutcome<'h> for $outcome {
             fn need_error_body(failure: Failure<'h>) -> Self {
                 Self::NeedErrorBody(failure)
             }
@@ -82,6 +84,7 @@ macro_rules! failure_outcome {
         }
     )*};
 }
+pub(crate) use failure_outcome;
 
 // The outcomes whose request names no object, which report every 404 as a
 // failure of the service.
@@ -105,15 +108,15 @@ macro_rules! container_failure_outcome {
 pub(crate) use container_failure_outcome;
 
 failure_outcome!(
-    CopyHeadOutcome,
-    RestoreHeadOutcome,
-    GetHeadOutcome,
-    DeleteHeadOutcome,
-    StageHeadOutcome,
-    CommitHeadOutcome,
-    ListPartsHeadOutcome,
-    UpdateHeadOutcome,
-    TagsHeadOutcome
+    crate::CopyHeadOutcome<'h>,
+    crate::RestoreHeadOutcome<'h>,
+    crate::GetHeadOutcome<'h>,
+    crate::DeleteHeadOutcome<'h>,
+    crate::StageHeadOutcome<'h>,
+    crate::CommitHeadOutcome<'h>,
+    crate::ListPartsHeadOutcome<'h>,
+    crate::UpdateHeadOutcome<'h>,
+    crate::TagsHeadOutcome<'h>
 );
 
 container_failure_outcome!(
@@ -679,4 +682,11 @@ pub(crate) fn validate_source_container(container: Option<&str>) -> Result<()> {
         return Err(InvalidRequest::CopySource.into());
     }
     Ok(())
+}
+
+// The name of the metadata pair that `header` carries under `prefix`, which
+// the header name starts with in any case, or `None` for another header.
+pub(crate) fn metadata_name<'h>(header: &'h str, prefix: &str) -> Option<&'h str> {
+    let (start, name) = header.split_at_checked(prefix.len())?;
+    (start.eq_ignore_ascii_case(prefix) && !name.is_empty()).then_some(name)
 }

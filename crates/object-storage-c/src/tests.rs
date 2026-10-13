@@ -75,8 +75,8 @@ fn now() -> Timestamps {
     borink_timestamps_from_unix(NOW)
 }
 
-fn proto_container() -> proto::Container<'static> {
-    proto::Container::new(ENDPOINT, CONTAINER).unwrap()
+fn proto_container() -> proto::azure::Container<'static> {
+    proto::azure::Container::new(ENDPOINT, CONTAINER).unwrap()
 }
 
 fn whole() -> Range {
@@ -896,7 +896,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_get(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -946,7 +946,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_get(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -1008,7 +1008,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_put(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -1056,7 +1056,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_stage_block(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -1115,7 +1115,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_commit_blocks(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -1178,7 +1178,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let template = azure::prepare_list(
         &core,
         TOKEN,
-        proto::AzureNamespace::Unknown,
+        proto::azure::AzureNamespace::Unknown,
         &core_options,
         &mut room,
     )
@@ -2297,7 +2297,7 @@ fn a_listed_value_is_decoded_into_the_caller_s_buffer() {
 /// the names agree. A number that names none is refused everywhere.
 #[test]
 fn the_properties_cross_by_number_and_name() {
-    for (number, property) in proto::BlobProperty::ALL.iter().enumerate() {
+    for (number, property) in proto::azure::BlobProperty::ALL.iter().enumerate() {
         let number = u16::try_from(number).unwrap();
         // SAFETY: the name is a static of this crate.
         let name = unsafe { slice(borink_property_name(number)) };
@@ -2306,7 +2306,7 @@ fn the_properties_cross_by_number_and_name() {
         assert_eq!(borink_property_set_len(set), 1);
         assert_eq!(borink_property_slot(set, number), 0);
     }
-    let none = u16::try_from(proto::BlobProperty::ALL.len()).unwrap();
+    let none = u16::try_from(proto::azure::BlobProperty::ALL.len()).unwrap();
     assert_eq!(
         borink_property_set_with(PropertySet::default(), none),
         PropertySet::default()

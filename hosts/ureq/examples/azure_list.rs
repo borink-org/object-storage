@@ -3,9 +3,8 @@
 use std::env;
 
 use borink_object_storage_proto::azure as proto;
-use borink_object_storage_proto::{
-    AzureNamespace, Container, Error, ListEntry, ListItem, ListMarker, ListOptions,
-};
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
+use borink_object_storage_proto::{Error, ListEntry, ListItem, ListMarker, ListOptions};
 use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

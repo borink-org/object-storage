@@ -19,7 +19,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New methods `get_shape`, `put_shape`, `delete_shape`, `commit_shape` and `copy_shape` on `azure::Template` and `s3::Template`. Each returns the shape that the operation's `accept_*_head` reads a response against, from the options the template was written with. A template of another operation returns `InvalidRequest::Template`.
   - New struct `Placement`, and new method `WireRequest::placement`. A placement is where a request's parts are in its buffer, without a borrow of the buffer, and `Placement::request` gives the request back. A host can grow its buffer and write a request again in one function.
   - New feature `compact`. It writes every request by walking its template's table, one function for every operation, in place of the code that each operation's layout compiles to. Turn it on for a target where size matters more than speed.
-- Templates of one object: new methods `Container::object` and `Bucket::object`. Each names the object that every request of a template writes. The template holds the key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidRequest::Option`.
+- Templates of one object: new methods `azure::Container::object` and `s3::Bucket::object`. Each names the object that every request of a template writes. The template holds the key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidRequest::Option`.
 - Bodies that this crate writes:
   - A request from a template holds the body that this crate writes after its head. Such a body is a list of blocks or parts, a set of tags, a restore or a removal of many objects. On S3 the body's SHA-256 and checksum are placeholders.
   - New functions `s3::set_body_hash` and `s3::set_body_checksum`, which write them in.
@@ -45,6 +45,11 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ### Changed
 
+- Moved the Azure items at the crate root into `azure`: `Container`, `AzureNamespace`, `AzureRejection`, `VERSION` and `classify_error` are `azure::Container` and so on, as their S3 counterparts are in `s3`.
+- Properties of a listing:
+  - Moved enum `BlobProperty` to `azure::BlobProperty`.
+  - Structs `PropertySet` and `PropertyValues` moved to the new module `properties`, and take the property type as a parameter. New trait `properties::Property` names the two property types. `azure::PropertySet` and `s3::PropertySet`, and the two `PropertyValues`, are aliases of them. `PropertySet::contains` and `PropertySet::slot` are no longer `const fn`; `of` still is.
+- Moved functions `http_date_ms` and `iso8601_ms` beside `Timestamps`. Their paths at the crate root are unchanged.
 - Renamed enum `InvalidPlan` to `InvalidRequest`, and the variants `Error::InvalidPlan` and `ErrorCode::InvalidPlan` to `InvalidRequest`. In the C ABI, `BORINK_ERROR_CODE_INVALID_PLAN` is `BORINK_ERROR_CODE_INVALID_REQUEST`.
 - Functions `s3::accept_get_error_body`, `s3::accept_put_error_body` and `s3::accept_delete_error_body` take the shape of the request first, as Azure's do, so that a host reads both services alike.
 - Function `azure::accept_get_head` finishes the failure of a HEAD itself, since its answer has no body. It never returns `GetHeadOutcome::NeedErrorBody` for a HEAD.
@@ -56,7 +61,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New functions `borink_accept_stage_block_head`, `borink_accept_commit_blocks_head` and their `borink_accept_*_error_body`. Every `borink_accept_*` function takes its shape by value and no session.
   - Renamed `borink_finish_*_error_body` to `borink_accept_*_error_body`.
   - New functions `borink_template_check`, `borink_next_header`, `borink_get_item_shape`, `borink_put_item_shape` and `borink_commit_item_shape`.
-  - New struct `borink_container`, which replaces `borink_session`. Its field `object` names the object of a template of one object, as `Container::object` does.
+  - New struct `borink_container`, which replaces `borink_session`. Its field `object` names the object of a template of one object, as `azure::Container::object` does.
   - Renamed `borink_validate` to `borink_container_check`. It checks the container alone; a template's preparation checks the token.
   - Removed `borink_encode_delete`, `borink_accept_delete_head`, `borink_delete_shape`, `borink_list_shape`, `borink_request_buffer` and `borink_request_head`. `borink_fill_listing` and `borink_fill_listing_with` take no session.
   - Renamed the outcome kind `Done` to `Created`, and replaced `Accepted` with `Staged` and `Committed`.

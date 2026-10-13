@@ -12,14 +12,15 @@ use std::rc::Rc;
 use std::vec;
 use std::vec::Vec;
 
+use crate::azure::AzureNamespace;
 use crate::azure::{self, BlockRef, BlockSource, Container};
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
-    AzureNamespace, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, CopyItem,
-    CopyOptions, DeleteTarget, Digest, GetItem, GetOptions, ListInclude, ListItem, ListMarker,
-    ListOptions, MetadataPair, ObjectItem, Payload, PutItem, PutOptions, Ranging, RequestedRange,
-    Result, Revision, RevisionKind, StageOptions, Tag, Timestamps, WireRequest,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, CopyItem, CopyOptions,
+    DeleteTarget, Digest, GetItem, GetOptions, ListInclude, ListItem, ListMarker, ListOptions,
+    MetadataPair, ObjectItem, Payload, PutItem, PutOptions, Ranging, RequestedRange, Result,
+    Revision, RevisionKind, StageOptions, Tag, Timestamps, WireRequest,
 };
 
 const KEY: &str = "dir/file name.sst";

@@ -7,6 +7,19 @@ use crate::request::ByteSink;
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+// The value of each byte as a base64 digit, or 64 for a byte that is none.
+// A lookup per byte costs less than the comparisons it replaces on text as
+// short as a checksum or a block ID.
+static SEXTETS: [u8; 256] = {
+    let mut values = [64; 256];
+    let mut value = 0;
+    while value < 64 {
+        values[BASE64[value] as usize] = value as u8;
+        value += 1;
+    }
+    values
+};
+
 // Writes 32 bytes as lowercase hexadecimal, as SigV4 writes a digest.
 pub(crate) fn hex(bytes: &[u8; 32]) -> [u8; 64] {
     let mut out = [0; 64];
@@ -60,6 +73,23 @@ pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
     crate::request::text(into)
 }
 
+// The number of bytes that padded standard base64 `text` holds, or `None`
+// if `text` is not that: a multiple of four characters from the alphabet,
+// of which the last one or two may be `=`.
+pub(crate) fn base64_len(text: &[u8]) -> Option<usize> {
+    let data = match text {
+        [data @ .., b'=', b'='] | [data @ .., b'='] => data,
+        data => data,
+    };
+    let alphabet = data
+        .iter()
+        .fold(true, |valid, &byte| valid & (SEXTETS[byte as usize] < 64));
+    // A text with padding is at least four characters, so the subtraction
+    // leaves at least one byte.
+    (alphabet && text.len().is_multiple_of(4))
+        .then(|| text.len() / 4 * 3 - (text.len() - data.len()))
+}
+
 // Writes the bytes of padded standard base64 `text` into `into`, and returns
 // how many it wrote. Returns `None` for text that is not base64, or if
 // `into` is too small; the bytes never outnumber the characters.
@@ -68,8 +98,8 @@ pub(crate) fn decode_base64(text: &[u8], into: &mut [u8]) -> Option<usize> {
         return None;
     }
     let sextet = |byte: u8| -> Option<u32> {
-        let index = BASE64.iter().position(|&digit| digit == byte)?;
-        Some(index as u32)
+        let value = SEXTETS[byte as usize];
+        (value < 64).then_some(u32::from(value))
     };
     let mut len = 0;
     let groups = text.len() / 4;
@@ -193,4 +223,28 @@ pub(crate) fn write_xml_text(out: &mut dyn ByteSink, text: &[u8]) {
         start = at + 1;
     }
     out.push(&text[start..]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_len;
+
+    #[test]
+    fn padded_base64_states_the_bytes_it_holds() {
+        for (text, len) in [
+            ("", Some(0)),
+            ("YQ==", Some(1)),
+            ("YWI=", Some(2)),
+            ("YWJj", Some(3)),
+            ("+/8=", Some(2)),
+            // Unpadded, padding in the middle, too much padding, and a
+            // character outside the alphabet.
+            ("YQ", None),
+            ("YQ==YWJj", None),
+            ("Y===", None),
+            ("YW-j", None),
+        ] {
+            assert_eq!(base64_len(text.as_bytes()), len, "{text}");
+        }
+    }
 }

@@ -1,10 +1,10 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
 use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    AzureNamespace, ConditionKind, ConditionValue, Container, DeleteKind, DeleteOptions, GetItem,
-    GetOptions, ObjectItem, Payload, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps,
-    WireRequest,
+    ConditionKind, ConditionValue, DeleteKind, DeleteOptions, GetItem, GetOptions, ObjectItem,
+    Payload, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {

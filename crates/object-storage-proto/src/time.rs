@@ -145,11 +145,131 @@ fn write_fixed_digits(output: &mut [u8], mut value: u64) {
     }
 }
 
+/// Reads an HTTP date as milliseconds since the Unix epoch.
+///
+/// Use this on [`ObjectMeta::last_modified`], and on
+/// [`ListEntry::last_modified`] of an Azure listing. Returns [`None`] if
+/// `value` is not an RFC 1123 date.
+///
+/// [`ObjectMeta::last_modified`]: crate::ObjectMeta::last_modified
+/// [`ListEntry::last_modified`]: crate::ListEntry::last_modified
+pub fn http_date_ms(value: &str) -> Option<u64> {
+    // RFC 1123 `Www, DD Mon YYYY HH:MM:SS GMT`, the only form these services
+    // send and the only one this crate writes.
+    let value = value.as_bytes();
+    if value.len() != 29
+        || value[3] != b','
+        || value[4] != b' '
+        || value[7] != b' '
+        || value[11] != b' '
+        || value[16] != b' '
+        || value[19] != b':'
+        || value[22] != b':'
+        || &value[25..] != b" GMT"
+    {
+        return None;
+    }
+    let day = number(&value[5..7])?;
+    let month = MONTHS
+        .iter()
+        .position(|name| name.as_slice() == &value[8..11])? as u64
+        + 1;
+    let year = number(&value[12..16])? as i64;
+    let hour = number(&value[17..19])?;
+    let minute = number(&value[20..22])?;
+    let second = number(&value[23..25])?;
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add((hour * 3600 + minute * 60 + second) as i64)?;
+    u64::try_from(seconds).ok()?.checked_mul(1000)
+}
+
+/// Reads an ISO 8601 date as milliseconds since the Unix epoch.
+///
+/// Use this on [`ListEntry::last_modified`] of an S3 listing, which is
+/// written as `2026-08-22T12:01:01.000Z`. The fraction of a second is
+/// optional and read to the millisecond. Returns [`None`] if `value` is not
+/// such a date in UTC.
+///
+/// [`ListEntry::last_modified`]: crate::ListEntry::last_modified
+pub fn iso8601_ms(value: &str) -> Option<u64> {
+    let value = value.as_bytes();
+    if value.len() < 20
+        || value[4] != b'-'
+        || value[7] != b'-'
+        || value[10] != b'T'
+        || value[13] != b':'
+        || value[16] != b':'
+        || value.last() != Some(&b'Z')
+    {
+        return None;
+    }
+    let year = number(&value[..4])? as i64;
+    let month = number(&value[5..7])?;
+    let day = number(&value[8..10])?;
+    let hour = number(&value[11..13])?;
+    let minute = number(&value[14..16])?;
+    let second = number(&value[17..19])?;
+    // The fraction, if any, between the seconds and the `Z`.
+    let millis = match &value[19..value.len() - 1] {
+        [] => 0,
+        [b'.', digits @ ..] if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) => {
+            // Three digits are milliseconds; fewer are padded and more cut.
+            digits
+                .iter()
+                .chain(core::iter::repeat(&b'0'))
+                .take(3)
+                .fold(0, |value, digit| value * 10 + (digit - b'0') as u64)
+        }
+        _ => return None,
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let seconds = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add((hour * 3600 + minute * 60 + second) as i64)?;
+    u64::try_from(seconds)
+        .ok()?
+        .checked_mul(1000)?
+        .checked_add(millis)
+}
+
+fn number(bytes: &[u8]) -> Option<u64> {
+    // The date readers pass only two- or four-byte fields, so the sum is <= 9999.
+    bytes.iter().try_fold(0, |value, byte| {
+        byte.checked_sub(b'0')
+            .filter(|digit| *digit <= 9)
+            .map(|digit| value * 10 + digit as u64)
+    })
+}
+
+// Howard Hinnant's `days_from_civil`, the inverse of `civil_from_days` in `Timestamps::from_unix`.
+// Called only with a four-digit year, month 1..=12 and day 1..=31; all
+// intermediates fit i64, including the adjusted year -1 for January of year 0.
+fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
 
-    use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS};
+    use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS, http_date_ms, iso8601_ms};
 
     #[test]
     fn a_stored_timestamp_reads_back_as_itself_and_needs_text() {
@@ -269,6 +389,38 @@ mod tests {
             }
             2 => 28,
             _ => 31,
+        }
+    }
+
+    #[test]
+    fn reads_an_azure_last_modified_header() {
+        assert_eq!(
+            http_date_ms("Fri, 24 May 2013 00:00:00 GMT"),
+            Some(1_369_353_600_000)
+        );
+        assert_eq!(http_date_ms("not an HTTP date"), None);
+        assert_eq!(http_date_ms("Fri, 24 Xxx 2013 00:00:00 GMT"), None);
+    }
+
+    #[test]
+    fn reads_an_s3_listing_date() {
+        assert_eq!(
+            iso8601_ms("2013-05-24T00:00:00.000Z"),
+            Some(1_369_353_600_000)
+        );
+        assert_eq!(
+            iso8601_ms("2013-05-24T00:00:01.5Z"),
+            Some(1_369_353_601_500)
+        );
+        assert_eq!(iso8601_ms("2013-05-24T00:00:01Z"), Some(1_369_353_601_000));
+        for value in [
+            "2013-05-24T00:00:00.000",
+            "2013-05-24 00:00:00Z",
+            "2013-05-24T00:00:00.Z",
+            "2013-13-24T00:00:00Z",
+            "Fri, 24 May 2013 00:00:00 GMT",
+        ] {
+            assert_eq!(iso8601_ms(value), None, "{value}");
         }
     }
 }

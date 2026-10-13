@@ -1,10 +1,12 @@
 //! Azure listing encoding and page reading.
 
 use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure::{
+    AzureNamespace, BlobProperty, Container, PropertySet, PropertyValues,
+};
 use borink_object_storage_proto::{
-    AzureNamespace, BlobProperty, CapacityError, Container, EntryKind, Error, InvalidRequest,
-    ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, Metadata, PropertySet,
-    PropertyValues, ResponseFault, Timestamps, decode_property, http_date_ms,
+    CapacityError, EntryKind, Error, InvalidRequest, ListEntry, ListInclude, ListItem, ListMarker,
+    ListOptions, Listing, Metadata, ResponseFault, Timestamps, decode_property, http_date_ms,
 };
 
 fn now() -> Timestamps {

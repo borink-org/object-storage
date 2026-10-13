@@ -1,10 +1,10 @@
 //! Azure bearer GET integration tests.
 
 use borink_object_storage_proto::azure::{self, Template, metadata_name};
+use borink_object_storage_proto::azure::{AzureNamespace, Container, VERSION};
 use borink_object_storage_proto::{
-    AzureNamespace, ConditionKind, ConditionValue, Container, Error, GetHeadOutcome, GetItem,
-    GetOptions, GetShape, InvalidRequest, Method, RequestedRange, ResponseHead, Timestamps,
-    VERSION, WireRequest,
+    ConditionKind, ConditionValue, Error, GetHeadOutcome, GetItem, GetOptions, GetShape,
+    InvalidRequest, Method, RequestedRange, ResponseHead, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -326,7 +326,7 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
     }
     assert_eq!(
         InvalidRequest::UrlTooLong.azure_rejection(AzureNamespace::Unknown),
-        Some(borink_object_storage_proto::AzureRejection {
+        Some(borink_object_storage_proto::azure::AzureRejection {
             status: 414,
             code: ""
         })

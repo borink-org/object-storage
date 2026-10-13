@@ -15,9 +15,9 @@ use crate::{
 
 use crate::ptr::ContainerValues;
 use borink_object_storage_proto as proto;
+use borink_object_storage_proto::azure::Container;
 use borink_object_storage_proto::{
-    Container, Error, InvalidRequest, ListMarker, Listing, ResponseHead, WireRequest as Request,
-    azure,
+    Error, InvalidRequest, ListMarker, Listing, ResponseHead, WireRequest as Request, azure,
 };
 
 // The protocol crate's container, which every template is written from. A
@@ -49,11 +49,11 @@ pub(crate) fn timestamps(now: Option<&Timestamps>) -> proto::Result<proto::Times
 }
 
 // The kind of account, from its number.
-pub(crate) fn namespace(number: u16) -> proto::Result<proto::AzureNamespace> {
+pub(crate) fn namespace(number: u16) -> proto::Result<proto::azure::AzureNamespace> {
     match number {
-        0 => Ok(proto::AzureNamespace::Unknown),
-        1 => Ok(proto::AzureNamespace::Flat),
-        2 => Ok(proto::AzureNamespace::Hierarchical),
+        0 => Ok(proto::azure::AzureNamespace::Unknown),
+        1 => Ok(proto::azure::AzureNamespace::Flat),
+        2 => Ok(proto::azure::AzureNamespace::Hierarchical),
         _ => Err(UNKNOWN),
     }
 }
@@ -178,7 +178,7 @@ pub(crate) fn filling(body: &mut [u8], into: &mut [ListEntry]) -> proto::Result<
 pub(crate) fn filling_with(
     body: &mut [u8],
     into: &mut [ListEntry],
-    wanted: proto::PropertySet,
+    wanted: proto::azure::PropertySet,
     values: &mut [MaybeBytes],
 ) -> proto::Result<Fill> {
     let width = wanted.len();

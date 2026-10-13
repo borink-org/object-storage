@@ -584,14 +584,6 @@ fn write_canonical_field(out: &mut Writer<'_>, signed: Signed<'_>, fixed: &Fixed
     out.push(b"\n");
 }
 
-// Whether every parameter of `query` is the same for each request.
-fn fixed_query(query: &[Param<'_>]) -> bool {
-    query
-        .iter()
-        .flatten()
-        .all(|(_, value)| matches!(value, ParamValue::Fixed(_)))
-}
-
 // Writes the path of the URL, with the template's object when it names one.
 fn write_path(out: &mut Writer<'_>, fixed: &Fixed<'_>, key: bool) {
     let bucket = fixed.bucket;
@@ -746,7 +738,7 @@ fn layout<P: Pass, const Q: usize>(
 
     // A URL that no request writes a value into is the template's text, in
     // the request line and in the canonical request.
-    let url_fixed = (object || !d.key) && fixed_query(&d.query);
+    let url_fixed = (object || !d.key) && template::fixed_query(&d.query);
     p.section(Section::Head);
     p.text(|out| {
         out.push(d.method.as_str().as_bytes());

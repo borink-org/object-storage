@@ -175,28 +175,10 @@ fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
 pub(super) fn validate_block_id(id: &str) -> Result<()> {
-    let id = id.as_bytes();
-    let data = match id {
-        [data @ .., b'=', b'='] | [data @ .., b'='] => data,
-        data => data,
-    };
-    // The padding is the one or two `=` that end the ID.
-    let padding = id.len() - data.len();
-    // Every byte is tested, without stopping at the first bad one, so that
-    // the test runs on many bytes at once.
-    let base64 = data.iter().fold(true, |valid, &b| {
-        valid & (b.is_ascii_alphanumeric() | (b == b'+') | (b == b'/'))
-    });
-    if id.is_empty()
-        || id.len() > 88
-        || !id.len().is_multiple_of(4)
-        // The preceding checks establish 4 <= len <= 88.
-        || id.len() / 4 * 3 - padding > 64
-        || !base64
-    {
-        return Err(InvalidRequest::PartId.into());
+    match crate::encoding::base64_len(id.as_bytes()) {
+        Some(1..=64) => Ok(()),
+        _ => Err(InvalidRequest::PartId.into()),
     }
-    Ok(())
 }
 
 // Writes the block list of a commit into `out`, one piece at a time. The

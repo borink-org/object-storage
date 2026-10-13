@@ -63,10 +63,10 @@
 //! # Example
 //!
 //! ```
+//! use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
 //! use borink_object_storage_proto::{
-//!     AzureNamespace, Container, GetHeadOutcome, GetItem, GetOptions, ListEntry,
-//!     ListHeadOutcome, ListItem, ListOptions, Method, Payload, PutHeadOutcome, PutItem,
-//!     PutOptions, ResponseHead, Timestamps, azure,
+//!     GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem, ListOptions,
+//!     Method, Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -202,9 +202,9 @@
 //!   name without that dot.
 //! - On Azure, a control character is [`InvalidRequest::KeyControlCharacter`],
 //!   and more than 255 segments is [`InvalidRequest::KeyTooManySegments`].
-//! - On an Azure account of [`AzureNamespace::Flat`], more than 1024 UTF-16
+//! - On an Azure account of [`azure::AzureNamespace::Flat`], more than 1024 UTF-16
 //!   code units is [`InvalidRequest::KeyTooLong`], where a character outside the
-//!   basic plane counts twice. A template for [`AzureNamespace::Unknown`]
+//!   basic plane counts twice. A template for [`azure::AzureNamespace::Unknown`]
 //!   sends such a key.
 //! - On S3, more than [`s3::MAX_KEY_LEN`] bytes is
 //!   [`InvalidRequest::KeyTooLong`]. S3 takes every other key.
@@ -266,6 +266,7 @@ mod listed;
 mod misuse_tests;
 mod multipart;
 mod outcome;
+pub mod properties;
 mod request;
 pub mod s3;
 pub mod sigv4;
@@ -275,11 +276,10 @@ mod types;
 mod url;
 mod xml;
 
-pub use azure::{AzureNamespace, AzureRejection, Container, VERSION, classify_error};
 pub use checksum::{ChecksumKind, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, Result};
 pub use head::ResponseHead;
-pub use listed::{decode_property, http_date_ms, iso8601_ms, quoted_etag};
+pub use listed::{decode_property, quoted_etag};
 pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
@@ -288,12 +288,12 @@ pub use outcome::{
 };
 pub use request::{Method, Span};
 pub use template::{Placement, WireRequest};
-pub use time::Timestamps;
+pub use time::{Timestamps, http_date_ms, iso8601_ms};
 pub use types::{
-    BlobProperty, ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties,
-    CopyItem, CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget,
-    EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem,
-    ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PropertySet,
-    PropertyValues, PutItem, PutOptions, PutShape, RangeForm, Ranging, RequestedRange,
-    RestoreOptions, RestorePriority, Revision, RevisionKind, StageOptions, Tag, WriteOptions,
+    ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties, CopyItem,
+    CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget, EntryKind,
+    GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem, ListMarker,
+    ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PutItem, PutOptions,
+    PutShape, RangeForm, Ranging, RequestedRange, RestoreOptions, RestorePriority, Revision,
+    RevisionKind, StageOptions, Tag, WriteOptions,
 };

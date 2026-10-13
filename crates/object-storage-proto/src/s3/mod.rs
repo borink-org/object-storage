@@ -408,8 +408,7 @@ pub const METADATA_PREFIX: &str = "x-amz-meta-";
 ///
 /// S3 stores a metadata name in lowercase, and returns it so.
 pub fn metadata_name(header: &str) -> Option<&str> {
-    let (prefix, name) = header.split_at_checked(METADATA_PREFIX.len())?;
-    (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
+    crate::common::metadata_name(header, METADATA_PREFIX)
 }
 
 /// Returns the text of a metadata value that a response header carries.
@@ -841,107 +840,40 @@ impl ObjectProperty {
             .copied()
             .find(|property| property.name().as_bytes() == name)
     }
-
-    const fn bit(self) -> u64 {
-        1 << (self as u8)
-    }
 }
 
 // `from_bits` shifts by `COUNT`, which must be below the `u64` shift width.
 const _: () = assert!(ObjectProperty::COUNT < 64);
 
+impl crate::properties::sealed::Sealed for ObjectProperty {}
+
+impl crate::properties::Property for ObjectProperty {
+    const COUNT: usize = ObjectProperty::ALL.len();
+
+    fn number(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The properties that one read of an S3 page is asked for.
 ///
-/// Build one with [`Self::of`] and pass it to [`fill_listing_with`].
-/// The values come back in the order that [`ObjectProperty`] lists them,
-/// whatever order the set was built in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct PropertySet(u64);
+/// Build one with [`PropertySet::of`] and pass it to [`fill_listing_with`].
+pub type PropertySet = crate::properties::PropertySet<ObjectProperty>;
+
+/// The values that one entry of an S3 listing gave for the properties of a
+/// [`PropertySet`].
+pub type PropertyValues<'x, 'b> = crate::properties::PropertyValues<'x, 'b, ObjectProperty>;
 
 impl PropertySet {
     /// A set of these properties. Naming one twice is the same as once.
     pub const fn of(properties: &[ObjectProperty]) -> Self {
-        let mut mask = 0;
+        let mut bits = 0;
         let mut i = 0;
         while i < properties.len() {
-            mask |= properties[i].bit();
+            bits |= 1 << (properties[i] as u8);
             i += 1;
         }
-        Self(mask)
-    }
-
-    /// A set from its bits, one per property in the order [`ObjectProperty`]
-    /// numbers them. A bit that names no property is dropped.
-    pub const fn from_bits(bits: u64) -> Self {
-        Self(bits & ((1 << ObjectProperty::COUNT) - 1))
-    }
-
-    /// The set's bits, as [`Self::from_bits`] reads them.
-    pub const fn bits(self) -> u64 {
-        self.0
-    }
-
-    /// Whether the set holds this property.
-    pub const fn contains(self, property: ObjectProperty) -> bool {
-        self.0 & property.bit() != 0
-    }
-
-    /// How many properties the set holds, which is how many values a read
-    /// reports for each entry.
-    pub const fn len(self) -> usize {
-        self.0.count_ones() as usize
-    }
-
-    /// Whether the set holds nothing.
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Where a property's value stands among the values of an entry: its
-    /// rank among the set's members, in the order [`ObjectProperty`] lists
-    /// them. Meaningful only for a property the set holds.
-    pub const fn slot(self, property: ObjectProperty) -> usize {
-        (self.0 & (property.bit() - 1)).count_ones() as usize
-    }
-}
-
-/// The values that one entry gave for the properties of a set.
-///
-/// [`fill_listing_with`] hands one to the closure that builds each
-/// entry. Each value is the bytes between the element's tags, as S3 wrote
-/// them, under the rules that [`ListEntry::property`] states. A group of
-/// keys gives no values.
-#[derive(Clone, Copy, Debug)]
-pub struct PropertyValues<'x, 'b> {
-    set: PropertySet,
-    values: &'x [Option<&'b [u8]>],
-}
-
-impl<'x, 'b> PropertyValues<'x, 'b> {
-    pub(crate) fn new(set: PropertySet, values: &'x [Option<&'b [u8]>]) -> Self {
-        Self { set, values }
-    }
-
-    /// The set that the page was read with.
-    pub const fn set(&self) -> PropertySet {
-        self.set
-    }
-
-    /// The value the entry gave for one property.
-    ///
-    /// [`None`] if the property is not in the set or the entry wrote no such
-    /// element; an empty slice if it wrote the element empty.
-    pub fn get(&self, property: ObjectProperty) -> Option<&'b [u8]> {
-        if !self.set.contains(property) {
-            return None;
-        }
-        self.values[self.set.slot(property)]
-    }
-
-    /// Every value, one per member of the set, in the order
-    /// [`ObjectProperty`] lists them.
-    pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
-        self.values
+        Self::new(bits)
     }
 }
 

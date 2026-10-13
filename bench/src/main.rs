@@ -12,7 +12,8 @@ use std::hint::black_box;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use borink_object_storage_proto::{BlobProperty, ListEntry, PropertySet, PropertyValues, azure};
+use borink_object_storage_proto::{ListEntry, azure};
+use borink_object_storage_proto::azure::{BlobProperty, PropertySet, PropertyValues};
 
 // Set on the process this one starts after granting itself the capability,
 // so that a refusal there is reported rather than asked about again.

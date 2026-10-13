@@ -27,7 +27,7 @@ use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
 use crate::xml::decode::decode;
 use crate::xml::page::{
-    ListProperty, ListPropertySet, check_body, check_room, decode_value_in_place, end_decoded_key,
+    ListProperty, check_body, check_room, decode_value_in_place, end_decoded_key,
     open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, fault, trim};
@@ -51,22 +51,6 @@ impl ListProperty for ObjectProperty {
 
     fn identify(name: &[u8]) -> Option<Self> {
         ObjectProperty::identify(name)
-    }
-}
-
-impl ListPropertySet for PropertySet {
-    type Property = ObjectProperty;
-
-    fn contains(self, property: ObjectProperty) -> bool {
-        PropertySet::contains(self, property)
-    }
-
-    fn is_empty(self) -> bool {
-        PropertySet::is_empty(self)
-    }
-
-    fn slot(self, property: ObjectProperty) -> usize {
-        PropertySet::slot(self, property)
     }
 }
 

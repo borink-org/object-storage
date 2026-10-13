@@ -574,15 +574,6 @@ fn write_value(out: &mut Writer<'_>, value: Value<'_>) {
     }
 }
 
-// Whether every parameter of `query` is the same for each request, so that
-// a URL with no key of its own is the template's text.
-fn fixed_query(query: &[Param<'_>]) -> bool {
-    query
-        .iter()
-        .flatten()
-        .all(|(_, value)| matches!(value, ParamValue::Fixed(_)))
-}
-
 // Writes a query whose every parameter is fixed, as the template's pass
 // writes it.
 fn write_fixed_query(out: &mut Writer<'_>, query: &[Param<'_>]) {
@@ -674,7 +665,7 @@ pub(super) fn layout<P: Pass, const Q: usize>(
         out.push(b" ");
     });
     // A URL that no request writes a value into is the template's text.
-    if (object || !d.key) && fixed_query(&d.query) {
+    if (object || !d.key) && template::fixed_query(&d.query) {
         p.text(|out| {
             if let Some(fixed) = fixed {
                 write_path(out, fixed, d.key);

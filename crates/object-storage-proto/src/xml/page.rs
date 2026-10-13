@@ -4,11 +4,12 @@
 
 use super::decode::decode;
 use super::scan::{Scan, Span, Tag, fault, trim};
+use crate::properties::{Property, PropertySet};
 use crate::{CapacityError, Error, Result};
 
-// A property whose value a page reader can keep: `BlobProperty` or
+// A property whose value a page reader can keep: `azure::BlobProperty` or
 // `s3::ObjectProperty`.
-pub(super) trait ListProperty: Copy {
+pub(super) trait ListProperty: Property {
     fn name(self) -> &'static str;
 
     // Whether the element holds other elements rather than one text.
@@ -18,27 +19,13 @@ pub(super) trait ListProperty: Copy {
     fn identify(name: &[u8]) -> Option<Self>;
 }
 
-// The properties that one read of a page keeps the values of: `PropertySet`
-// or `s3::PropertySet`. It is a projection, like Parquet's `ProjectionMask`:
-// the reader walks every element and keeps only these.
-pub(super) trait ListPropertySet: Copy {
-    type Property: ListProperty;
-
-    fn contains(self, property: Self::Property) -> bool;
-
-    fn is_empty(self) -> bool;
-
-    // The property's rank among the set's members, which is its slot.
-    fn slot(self, property: Self::Property) -> usize;
-}
-
 // Keeps the span of a property's value if `wanted` holds the property. A
 // property written twice keeps the first.
 #[inline(always)]
-pub(super) fn capture<S: ListPropertySet>(
-    property: S::Property,
+pub(super) fn capture<P: ListProperty>(
+    property: P,
     span: Span,
-    wanted: S,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) {
     // The slot is in range: `captured` has one slot per member of `wanted`.
@@ -55,10 +42,10 @@ pub(super) fn capture<S: ListPropertySet>(
 // value if it is wanted. An element that holds other elements is read to its
 // close tag, and its value is everything between its tags.
 #[inline(always)]
-pub(super) fn read_known<S: ListPropertySet>(
+pub(super) fn read_known<P: ListProperty>(
     scan: &mut Scan<'_>,
-    property: S::Property,
-    wanted: S,
+    property: P,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) -> Result<()> {
     let name = property.name().as_bytes();
@@ -74,16 +61,16 @@ pub(super) fn read_known<S: ListPropertySet>(
 // Reads past an element that no whole-tag match took: one this crate does
 // not know, or a known one in another spelling, such as `<AccessTier >`.
 // Keeps the value of a wanted one.
-pub(super) fn read_other<S: ListPropertySet>(
+pub(super) fn read_other<P: ListProperty>(
     scan: &mut Scan<'_>,
     tag: Tag,
-    wanted: S,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) -> Result<()> {
     if wanted.is_empty() {
         return scan.skip(tag);
     }
-    match S::Property::identify(scan.text(tag.name)) {
+    match P::identify(scan.text(tag.name)) {
         Some(property) if wanted.contains(property) => {
             let span = if property.holds_elements() && !tag.empty {
                 scan.nested(property.name().as_bytes())?
