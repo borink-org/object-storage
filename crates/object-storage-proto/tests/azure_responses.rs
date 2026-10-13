@@ -40,7 +40,7 @@ fn conditional_statuses_need_the_condition_that_explains_them() {
         Ok(GetHeadOutcome::PreconditionFailed)
     );
 
-    // Nothing in an unconditional plan explains a 304.
+    // Nothing in an unconditional read explains a 304.
     assert_eq!(
         accept(GetShape::default(), not_modified),
         Err(Error::Response(ResponseFault::Status))
@@ -234,7 +234,7 @@ fn an_object_that_exists_fails_a_write_for_none() {
 #[test]
 fn a_template_states_the_shape_of_its_responses() {
     use borink_object_storage_proto::{
-        AzureNamespace, Container, DeleteKind, DeleteOptions, GetItem, InvalidPlan,
+        AzureNamespace, Container, DeleteKind, DeleteOptions, GetItem, InvalidRequest,
     };
     let container = Container::new("https://account.blob.core.windows.net", "container").unwrap();
     let options = DeleteOptions {
@@ -256,6 +256,6 @@ fn a_template_states_the_shape_of_its_responses() {
     assert_eq!(stored.delete_shape(), Ok(options.shape()));
     assert_eq!(
         stored.get_shape(&GetItem::new("key")),
-        Err(Error::InvalidPlan(InvalidPlan::Template))
+        Err(Error::InvalidRequest(InvalidRequest::Template))
     );
 }

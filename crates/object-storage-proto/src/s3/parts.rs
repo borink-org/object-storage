@@ -27,7 +27,7 @@ use crate::template::{Body, Fill, Hole, ParamValue, Values};
 use crate::url::QueryValue;
 use crate::{ChecksumValue, ConditionValue, ObjectItem, RevisionKind, StageOptions};
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, InvalidPlan,
+    CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, InvalidRequest,
     ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta, Payload, ResponseFault,
     ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
 };
@@ -35,7 +35,7 @@ use crate::{
 /// The most bytes that S3 takes in one part.
 ///
 /// [`encode_stage_part`] refuses a longer payload with
-/// [`InvalidPlan::PayloadTooLarge`].
+/// [`InvalidRequest::PayloadTooLarge`].
 pub const MAX_PART_LEN: u64 = 5 * 1024 * 1024 * 1024;
 
 /// The fewest bytes that AWS takes in a part other than the last.
@@ -50,7 +50,7 @@ pub const MIN_PART_LEN: u64 = 5 * 1024 * 1024;
 /// one upload.
 ///
 /// A client of [`Service::Aws`] or [`Service::AwsDirectory`] refuses a
-/// higher number with [`InvalidPlan::PartId`].
+/// higher number with [`InvalidRequest::PartId`].
 pub const MAX_PARTS: u32 = 10_000;
 
 /// One entry of the list of parts that a commit publishes.
@@ -135,14 +135,14 @@ impl core::fmt::Display for CreateUploadHeadOutcome<'_> {
 pub(super) fn validate_part_number(number: u32, service: Service) -> Result<()> {
     let limited = service.is_aws();
     if number == 0 || (limited && number > MAX_PARTS) {
-        return Err(InvalidPlan::PartId.into());
+        return Err(InvalidRequest::PartId.into());
     }
     Ok(())
 }
 
 pub(super) fn validate_upload_id(upload_id: &str) -> Result<()> {
     if upload_id.is_empty() {
-        return Err(InvalidPlan::UploadId.into());
+        return Err(InvalidRequest::UploadId.into());
     }
     Ok(())
 }
@@ -159,15 +159,15 @@ fn validate_parts<E: AsRef<[u8]>>(
     for (number, e_tag) in parts {
         validate_part_number(number, service)?;
         if !valid_header(e_tag.as_ref()) {
-            return Err(InvalidPlan::PartId.into());
+            return Err(InvalidRequest::PartId.into());
         }
         if ordered && previous.is_some_and(|previous| number <= previous) {
-            return Err(InvalidPlan::Parts.into());
+            return Err(InvalidRequest::Parts.into());
         }
         previous = Some(number);
     }
     if previous.is_none() {
-        return Err(InvalidPlan::Parts.into());
+        return Err(InvalidRequest::Parts.into());
     }
     Ok(())
 }
@@ -181,7 +181,7 @@ const COMMIT_CLOSE: &[u8] = b"</CompleteMultipartUpload>";
 
 // Writes the list of parts of a commit into `out`, one piece at a time. The
 // list is written into the length, the SHA-256 that the request signs, a
-// checksum if the plan asks for one, and the body. Every one of those goes
+// checksum if the template asks for one, and the body. Every one of those goes
 // through this function, so they all see the same bytes.
 fn write_part_list<E: AsRef<[u8]>>(out: &mut dyn ByteSink, parts: impl Iterator<Item = (u32, E)>) {
     out.push(COMMIT_OPEN);
@@ -320,9 +320,9 @@ pub struct ListPartsItem<'i> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a metadata pair or a stored option
-/// that [`prepare_put`](crate::s3::prepare_put) refuses, and
-/// [`InvalidPlan::Option`] for a checksum or a declared MD5.
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a
+/// metadata pair or a stored option that
+/// [`prepare_put`](crate::s3::prepare_put) refuses.
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
 /// needs.
@@ -360,7 +360,7 @@ pub fn prepare_create_upload(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a key that S3 refuses, see
 /// [Object keys](crate#object-keys), for a revision or a condition value,
 /// and for a template of another operation.
 ///
@@ -466,10 +466,10 @@ fn describe_stage(checksum: Option<ChecksumKind>, signing: PayloadSigning) -> De
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
-/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
-/// upload ID, [`InvalidPlan::PartId`] for a part number that S3 refuses,
-/// [`InvalidPlan::PayloadTooLarge`] for content longer than
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidRequest::UploadId`] for an empty
+/// upload ID, [`InvalidRequest::PartId`] for a part number that S3 refuses,
+/// [`InvalidRequest::PayloadTooLarge`] for content longer than
 /// [`MAX_PART_LEN`], a checksum that is not the template's, a SHA-256 that
 /// the template does not sign, and a template of another operation.
 ///
@@ -484,19 +484,19 @@ pub fn encode_stage_part<'i>(
     buf: &mut [u8],
 ) -> Result<Unsigned<'i>> {
     let Detail::Stage { checksum, signing } = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     validate_part_number(item.number, template.service)?;
     if item.content.len() > MAX_PART_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
+        return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_checksum_item(checksum, item.checksum)?;
     let hex = match (signing, content_sha256) {
         (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex(digest)),
         (PayloadSigning::Unsigned, None) => None,
-        _ => return Err(InvalidPlan::Option.into()),
+        _ => return Err(InvalidRequest::Option.into()),
     };
     let mut text = [0; BASE64_LEN];
     let values = S3Values(Values {
@@ -551,7 +551,7 @@ pub fn accept_stage_part_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> St
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Condition`] for a date condition, for
+/// Returns [`InvalidRequest::Condition`] for a date condition, for
 /// [`Service::Aws`] and [`Service::AwsDirectory`].
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
@@ -563,7 +563,7 @@ pub fn prepare_commit_parts(
     buf: &mut [u8],
 ) -> Result<Template> {
     if bucket.service.is_aws() && options.condition.is_date() {
-        return Err(InvalidPlan::Condition.into());
+        return Err(InvalidRequest::Condition.into());
     }
     template::prepare(
         bucket,
@@ -627,13 +627,13 @@ impl Fill for CommitFill<'_> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
-/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidRequest::UploadId`] for an empty
 /// upload ID, a condition value that the template does not take,
-/// [`InvalidPlan::Parts`] for no part or, on AWS, parts out of order,
-/// [`InvalidPlan::PartId`] for a part number or an entity tag that S3
-/// refuses, [`InvalidPlan::Option`] for a size that the template does not
-/// state, and [`InvalidPlan::Template`] for a template of another operation.
+/// [`InvalidRequest::Parts`] for no part or, on AWS, parts out of order,
+/// [`InvalidRequest::PartId`] for a part number or an entity tag that S3
+/// refuses, [`InvalidRequest::Option`] for a size that the template does not
+/// state, and [`InvalidRequest::Template`] for a template of another operation.
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
 /// needs.
@@ -650,7 +650,7 @@ pub fn encode_commit_parts(
         sized,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
@@ -660,7 +660,7 @@ pub fn encode_commit_parts(
         template.service,
     )?;
     if sized != item.size.is_some() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let fill = CommitFill {
         values: S3Values(Values {
@@ -783,9 +783,9 @@ fn describe_abort_upload() -> Describe<'static, 4> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
-/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
-/// upload ID, and [`InvalidPlan::Template`] for a template of another
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidRequest::UploadId`] for an empty
+/// upload ID, and [`InvalidRequest::Template`] for a template of another
 /// operation.
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
@@ -798,7 +798,7 @@ pub fn encode_abort_upload(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     if template.operation != Operation::AbortUpload {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
@@ -883,10 +883,10 @@ fn describe_list_parts(max_parts: Option<u32>) -> Describe<'static, 4> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`](crate::Error::InvalidPlan) for a key that S3 refuses, see
-/// [Object keys](crate#object-keys), [`InvalidPlan::UploadId`] for an empty
-/// upload ID, [`InvalidPlan::Marker`] for an empty marker, and
-/// [`InvalidPlan::Template`] for a template of another operation.
+/// Returns [`Error::InvalidRequest`](crate::Error::InvalidRequest) for a key that S3 refuses, see
+/// [Object keys](crate#object-keys), [`InvalidRequest::UploadId`] for an empty
+/// upload ID, [`InvalidRequest::Marker`] for an empty marker, and
+/// [`InvalidRequest::Template`] for a template of another operation.
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
 /// needs.
@@ -898,12 +898,12 @@ pub fn encode_list_parts(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     if template.operation != Operation::ListParts {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     if item.marker.is_some_and(str::is_empty) {
-        return Err(InvalidPlan::Marker.into());
+        return Err(InvalidRequest::Marker.into());
     }
     let values = S3Values(Values {
         now: Some(now),

@@ -15,8 +15,8 @@ use crate::sigv4::Credentials;
 use crate::template::{Body, Fill, Hole, ParamValue, Values};
 use crate::url::QueryValue;
 use crate::{
-    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidPlan, Method, ResponseFault, ResponseHead,
-    Result, Revision, Timestamps,
+    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidRequest, Method, ResponseFault,
+    ResponseHead, Result, Revision, Timestamps,
 };
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
@@ -104,7 +104,7 @@ impl Fill for DeleteFill<'_> {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Option`] for no checksum, for
+/// Returns [`InvalidRequest::Option`] for no checksum, for
 /// [`Service::Aws`](crate::s3::Service::Aws) and
 /// [`Service::AwsDirectory`](crate::s3::Service::AwsDirectory): AWS takes a removal of
 /// several objects only with one.
@@ -118,7 +118,7 @@ pub fn prepare_delete_many(
     buf: &mut [u8],
 ) -> Result<Template> {
     if bucket.service.is_aws() && checksum.is_none() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     template::prepare(bucket, credentials, &describe_delete_many(checksum), buf)
 }
@@ -142,12 +142,12 @@ fn describe_delete_many(checksum: Option<ChecksumKind>) -> Describe<'static, 4> 
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Keys`] for no object or more than
-/// [`MAX_DELETE_KEYS`], [`Error::InvalidPlan`] for a key that S3 refuses,
-/// see [Object keys](crate#object-keys), [`InvalidPlan::KeyControlCharacter`]
+/// Returns [`InvalidRequest::Keys`] for no object or more than
+/// [`MAX_DELETE_KEYS`], [`Error::InvalidRequest`] for a key that S3 refuses,
+/// see [Object keys](crate#object-keys), [`InvalidRequest::KeyControlCharacter`]
 /// for a key with a control character other than a tab, which XML cannot
-/// carry, [`InvalidPlan::Revision`] for a snapshot, and
-/// [`InvalidPlan::Template`] for a template of another operation.
+/// carry, [`InvalidRequest::Revision`] for a snapshot, and
+/// [`InvalidRequest::Template`] for a template of another operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -159,10 +159,10 @@ pub fn encode_delete_many(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     let Detail::DeleteMany(checksum) = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if objects.is_empty() || objects.len() > MAX_DELETE_KEYS {
-        return Err(InvalidPlan::Keys.into());
+        return Err(InvalidRequest::Keys.into());
     }
     for object in objects {
         validate_key(object.key)?;
@@ -171,7 +171,7 @@ pub fn encode_delete_many(
             .bytes()
             .any(|byte| byte.is_ascii_control() && byte != b'\t')
         {
-            return Err(InvalidPlan::KeyControlCharacter.into());
+            return Err(InvalidRequest::KeyControlCharacter.into());
         }
         validate_revision(object.revision, false)?;
     }

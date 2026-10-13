@@ -16,10 +16,10 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New methods `azure::Template::bytes_len` and `s3::Template::bytes_len`. Each returns how many bytes of its buffer the template takes.
   - New constant `azure::Template::STORED_LEN`, and new methods `azure::Template::to_bytes` and `azure::Template::from_bytes`. `to_bytes` stores a template in 80 bytes that hold no pointer and end in a hash of the rest. `from_bytes` reads them back, and refuses bytes that were changed.
   - New constant `Timestamps::STORED_LEN`, and new methods `Timestamps::to_bytes` and `Timestamps::from_bytes`. `from_bytes` returns `None` for dates that are not ASCII.
-  - New methods `get_shape`, `put_shape`, `delete_shape`, `commit_shape` and `copy_shape` on `azure::Template` and `s3::Template`. Each returns the shape that the operation's `accept_*_head` reads a response against, from the options the template was written with. A template of another operation returns `InvalidPlan::Template`.
+  - New methods `get_shape`, `put_shape`, `delete_shape`, `commit_shape` and `copy_shape` on `azure::Template` and `s3::Template`. Each returns the shape that the operation's `accept_*_head` reads a response against, from the options the template was written with. A template of another operation returns `InvalidRequest::Template`.
   - New struct `Placement`, and new method `WireRequest::placement`. A placement is where a request's parts are in its buffer, without a borrow of the buffer, and `Placement::request` gives the request back. A host can grow its buffer and write a request again in one function.
   - New feature `compact`. It writes every request by walking its template's table, one function for every operation, in place of the code that each operation's layout compiles to. Turn it on for a target where size matters more than speed.
-- Templates of one object: new methods `Container::object` and `Bucket::object`. Each names the object that every request of a template writes. The template holds the key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidPlan::Option`.
+- Templates of one object: new methods `Container::object` and `Bucket::object`. Each names the object that every request of a template writes. The template holds the key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidRequest::Option`.
 - Bodies that this crate writes:
   - A request from a template holds the body that this crate writes after its head. Such a body is a list of blocks or parts, a set of tags, a restore or a removal of many objects. On S3 the body's SHA-256 and checksum are placeholders.
   - New functions `s3::set_body_hash` and `s3::set_body_checksum`, which write them in.
@@ -45,6 +45,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ### Changed
 
+- Renamed enum `InvalidPlan` to `InvalidRequest`, and the variants `Error::InvalidPlan` and `ErrorCode::InvalidPlan` to `InvalidRequest`. In the C ABI, `BORINK_ERROR_CODE_INVALID_PLAN` is `BORINK_ERROR_CODE_INVALID_REQUEST`.
 - Functions `s3::accept_get_error_body`, `s3::accept_put_error_body` and `s3::accept_delete_error_body` take the shape of the request first, as Azure's do, so that a host reads both services alike.
 - Function `azure::accept_get_head` finishes the failure of a HEAD itself, since its answer has no body. It never returns `GetHeadOutcome::NeedErrorBody` for a HEAD.
 - On Azure, a put, a commit or a copy conditional on `If-None-Match` onto an object that exists is now `PreconditionFailed`, as on S3. Azure answers it with 409 `BlobAlreadyExists`, which was a `ServiceFailure` before.

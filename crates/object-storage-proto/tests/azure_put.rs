@@ -3,7 +3,7 @@
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::{
     AzureNamespace, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Container, Digest,
-    Error, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
+    Error, InvalidRequest, MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -46,12 +46,12 @@ fn a_write_is_validated_before_any_byte_is_written() {
         (
             PutOptions::default(),
             PutItem::new("", content),
-            InvalidPlan::EmptyKey,
+            InvalidRequest::EmptyKey,
         ),
         (
             if_match,
             PutItem::new("object.bin", content),
-            InvalidPlan::Condition,
+            InvalidRequest::Condition,
         ),
         (
             PutOptions::default(),
@@ -59,13 +59,13 @@ fn a_write_is_validated_before_any_byte_is_written() {
                 condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
                 ..PutItem::new("object.bin", content)
             },
-            InvalidPlan::Condition,
+            InvalidRequest::Condition,
         ),
     ] {
         let mut untouched = [0xAA; 1024];
         assert_eq!(
             encode(&options, &item, &mut untouched).err(),
-            Some(Error::InvalidPlan(expected))
+            Some(Error::InvalidRequest(expected))
         );
         assert!(untouched.iter().all(|byte| *byte == 0xAA));
     }
@@ -83,7 +83,7 @@ fn a_write_is_validated_before_any_byte_is_written() {
             &mut [0; 16384]
         )
         .err(),
-        Some(Error::InvalidPlan(InvalidPlan::KeyTooLong))
+        Some(Error::InvalidRequest(InvalidRequest::KeyTooLong))
     );
 
     // A template that does not know its account, and one told it is for a
@@ -129,7 +129,7 @@ fn a_streamed_payload_is_refused_at_the_same_length_as_a_held_one() {
     );
     assert_eq!(
         encode(&options, &too_long, &mut [0; 1024]).err(),
-        Some(Error::InvalidPlan(InvalidPlan::PayloadTooLarge))
+        Some(Error::InvalidRequest(InvalidRequest::PayloadTooLarge))
     );
     let longest = PutItem::new(
         "object.bin",
@@ -154,16 +154,16 @@ fn metadata_a_request_cannot_carry_is_refused_before_it_is_written() {
     ];
     let pair = |name, value| [MetadataPair { name, value }];
     for (metadata, expected) in [
-        (pair("", "1").as_slice(), InvalidPlan::MetadataName),
-        (&pair("1st", "1"), InvalidPlan::MetadataName),
-        (&pair("source-mtime", "1"), InvalidPlan::MetadataName),
-        (&pair("mtime", "one\ntwo"), InvalidPlan::MetadataValue),
-        (&pair("mtime", "één"), InvalidPlan::MetadataValue),
+        (pair("", "1").as_slice(), InvalidRequest::MetadataName),
+        (&pair("1st", "1"), InvalidRequest::MetadataName),
+        (&pair("source-mtime", "1"), InvalidRequest::MetadataName),
+        (&pair("mtime", "one\ntwo"), InvalidRequest::MetadataValue),
+        (&pair("mtime", "één"), InvalidRequest::MetadataValue),
         // HTTP drops the spaces at either end of a header value, so the pair
         // would not come back as it was written.
-        (&pair("mtime", " 1"), InvalidPlan::MetadataValue),
-        (&pair("mtime", "1 "), InvalidPlan::MetadataValue),
-        (&duplicate, InvalidPlan::MetadataDuplicate),
+        (&pair("mtime", " 1"), InvalidRequest::MetadataValue),
+        (&pair("mtime", "1 "), InvalidRequest::MetadataValue),
+        (&duplicate, InvalidRequest::MetadataDuplicate),
     ] {
         let options = PutOptions {
             metadata,
@@ -178,7 +178,7 @@ fn metadata_a_request_cannot_carry_is_refused_before_it_is_written() {
                 &mut [0; 1024]
             )
             .err(),
-            Some(Error::InvalidPlan(expected)),
+            Some(Error::InvalidRequest(expected)),
             "{:?}",
             metadata[0].name
         );
@@ -238,7 +238,7 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
     ] {
         assert_eq!(
             refused(ChecksumKind::Md5, value),
-            Error::InvalidPlan(InvalidPlan::Checksum),
+            Error::InvalidRequest(InvalidRequest::Checksum),
             "{value:?}"
         );
     }
@@ -251,7 +251,7 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
     ] {
         assert_eq!(
             refused(ChecksumKind::Crc64, value),
-            Error::InvalidPlan(InvalidPlan::Checksum),
+            Error::InvalidRequest(InvalidRequest::Checksum),
             "{value:?}"
         );
     }
@@ -267,11 +267,11 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
     };
     assert_eq!(
         encode(&options, &other, &mut [0; 1024]).map(drop),
-        Err(Error::InvalidPlan(InvalidPlan::Checksum))
+        Err(Error::InvalidRequest(InvalidRequest::Checksum))
     );
     assert_eq!(
         encode(&PutOptions::default(), &other, &mut [0; 1024]).map(drop),
-        Err(Error::InvalidPlan(InvalidPlan::Checksum))
+        Err(Error::InvalidRequest(InvalidRequest::Checksum))
     );
     // Azure takes no other kind.
     let options = PutOptions {
@@ -287,6 +287,6 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
             &mut [0; 1024]
         )
         .err(),
-        Some(Error::InvalidPlan(InvalidPlan::Option))
+        Some(Error::InvalidRequest(InvalidRequest::Option))
     );
 }

@@ -3,7 +3,7 @@
 use borink_object_storage_proto::s3::{self, Addressing, Bucket, Service};
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    EntryKind, Error, InvalidPlan, ListEntry, ListInclude, ListItem, ListMarker, ListOptions,
+    EntryKind, Error, InvalidRequest, ListEntry, ListInclude, ListItem, ListMarker, ListOptions,
     Listing, ResponseFault, Timestamps,
 };
 
@@ -121,13 +121,13 @@ fn a_listing_that_s3_cannot_take_is_refused() {
     });
     for (service, options, item, expected) in [
         // A listing continues from the kind of marker its pages hand out.
-        (Service::Aws, objects, version, InvalidPlan::Marker),
-        (Service::Aws, versions, text, InvalidPlan::Marker),
+        (Service::Aws, objects, version, InvalidRequest::Marker),
+        (Service::Aws, versions, text, InvalidRequest::Marker),
         (
             Service::Aws,
             objects,
             ListItem::new("").after(ListMarker::Text("")),
-            InvalidPlan::Marker,
+            InvalidRequest::Marker,
         ),
         // A listing of versions starts at its markers alone.
         (
@@ -137,7 +137,7 @@ fn a_listing_that_s3_cannot_take_is_refused() {
                 start_after: Some("k"),
                 ..ListItem::new("")
             },
-            InvalidPlan::Option,
+            InvalidRequest::Option,
         ),
         (
             Service::Aws,
@@ -146,7 +146,7 @@ fn a_listing_that_s3_cannot_take_is_refused() {
                 ..objects
             },
             ListItem::new(""),
-            InvalidPlan::Option,
+            InvalidRequest::Option,
         ),
         // A directory bucket groups keys at `/` alone, lists only at a
         // prefix that ends in it, and keeps no versions.
@@ -157,24 +157,24 @@ fn a_listing_that_s3_cannot_take_is_refused() {
                 ..objects
             },
             ListItem::new(""),
-            InvalidPlan::Delimiter,
+            InvalidRequest::Delimiter,
         ),
         (
             Service::AwsDirectory,
             objects,
             ListItem::new("dir"),
-            InvalidPlan::Prefix,
+            InvalidRequest::Prefix,
         ),
         (
             Service::AwsDirectory,
             versions,
             ListItem::new(""),
-            InvalidPlan::Option,
+            InvalidRequest::Option,
         ),
     ] {
         assert_eq!(
             refused(service, &options, &item),
-            Error::InvalidPlan(expected),
+            Error::InvalidRequest(expected),
             "{service:?} {options:?} {item:?}"
         );
     }

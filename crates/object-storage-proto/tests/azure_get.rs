@@ -3,8 +3,8 @@
 use borink_object_storage_proto::azure::{self, Template, metadata_name};
 use borink_object_storage_proto::{
     AzureNamespace, ConditionKind, ConditionValue, Container, Error, GetHeadOutcome, GetItem,
-    GetOptions, GetShape, InvalidPlan, Method, RequestedRange, ResponseHead, Timestamps, VERSION,
-    WireRequest,
+    GetOptions, GetShape, InvalidRequest, Method, RequestedRange, ResponseHead, Timestamps,
+    VERSION, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -226,49 +226,53 @@ fn refuses_invalid_reads_before_writing_anything() {
         ..GetItem::new("object")
     };
     let cases = [
-        (GetOptions::new(), GetItem::new(""), InvalidPlan::EmptyKey),
+        (
+            GetOptions::new(),
+            GetItem::new(""),
+            InvalidRequest::EmptyKey,
+        ),
         (
             ranged,
             GetItem::new("object").with_range(RequestedRange::Bounded { start: 6, end: 2 }),
-            InvalidPlan::Range,
+            InvalidRequest::Range,
         ),
         (
             ranged,
             GetItem::new("object").with_range(RequestedRange::Suffix(4)),
-            InvalidPlan::UnsupportedRange,
+            InvalidRequest::UnsupportedRange,
         ),
         // A range where the template sends none, and none where it sends one.
         (
             GetOptions::new(),
             GetItem::new("object").with_range(RequestedRange::Offset(2)),
-            InvalidPlan::Range,
+            InvalidRequest::Range,
         ),
-        (ranged, GetItem::new("object"), InvalidPlan::Range),
+        (ranged, GetItem::new("object"), InvalidRequest::Range),
         // A kind without a value and a value without a kind are both invalid.
-        (if_match, GetItem::new("object"), InvalidPlan::Condition),
+        (if_match, GetItem::new("object"), InvalidRequest::Condition),
         (
             GetOptions::new(),
             with_value(ConditionValue::ETag(b"\"etag\"")),
-            InvalidPlan::Condition,
+            InvalidRequest::Condition,
         ),
         (
             if_match,
             with_value(ConditionValue::ETag(b"etag\r\nheader")),
-            InvalidPlan::Condition,
+            InvalidRequest::Condition,
         ),
     ];
     for (options, get, expected) in cases {
         let mut untouched = [0xAA; 256];
         assert_eq!(
             encode(options, &get, &mut untouched).err(),
-            Some(Error::InvalidPlan(expected)),
+            Some(Error::InvalidRequest(expected)),
             "{get:?}"
         );
         assert!(untouched.iter().all(|byte| *byte == 0xAA));
         // An empty buffer reports the same refusal unchanged.
         assert_eq!(
             encode(options, &get, &mut []).err(),
-            Some(Error::InvalidPlan(expected))
+            Some(Error::InvalidRequest(expected))
         );
     }
 
@@ -282,7 +286,7 @@ fn refuses_invalid_reads_before_writing_anything() {
             &mut [0; 512]
         )
         .err(),
-        Some(Error::InvalidPlan(InvalidPlan::RangedHead))
+        Some(Error::InvalidRequest(InvalidRequest::RangedHead))
     );
 }
 
@@ -316,12 +320,12 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
                 &mut untouched
             )
             .map(drop),
-            Err(Error::InvalidPlan(InvalidPlan::UrlTooLong))
+            Err(Error::InvalidRequest(InvalidRequest::UrlTooLong))
         );
         assert!(untouched.iter().all(|byte| *byte == 0xAA));
     }
     assert_eq!(
-        InvalidPlan::UrlTooLong.azure_rejection(AzureNamespace::Unknown),
+        InvalidRequest::UrlTooLong.azure_rejection(AzureNamespace::Unknown),
         Some(borink_object_storage_proto::AzureRejection {
             status: 414,
             code: ""
@@ -361,7 +365,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for over in ["a".repeat(1025), "é".repeat(1025), "🦀".repeat(513)] {
         assert_eq!(
             refused(&over),
-            Err(Error::InvalidPlan(InvalidPlan::KeyTooLong)),
+            Err(Error::InvalidRequest(InvalidRequest::KeyTooLong)),
             "{} UTF-16 code units",
             over.encode_utf16().count()
         );
@@ -373,7 +377,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["dot.", "a/dot.", "dotseg./x", "a./b", "..", ".", "a/../"] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::KeyWouldBeNormalized)),
+            Err(Error::InvalidRequest(InvalidRequest::KeyWouldBeNormalized)),
             "{key:?}"
         );
     }
@@ -383,7 +387,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["a\u{1}b", "a\tb", "a\nb", "a\rb", "\u{1f}", "a\u{7f}b"] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::KeyControlCharacter)),
+            Err(Error::InvalidRequest(InvalidRequest::KeyControlCharacter)),
             "{key:?}"
         );
     }
@@ -398,7 +402,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     for key in ["a/../b", "a/./b", "../b", "./b", "a/.."] {
         assert_eq!(
             refused(key),
-            Err(Error::InvalidPlan(InvalidPlan::KeyWouldBeNormalized)),
+            Err(Error::InvalidRequest(InvalidRequest::KeyWouldBeNormalized)),
             "{key:?}"
         );
     }
@@ -407,7 +411,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
     assert!(refused(&vec!["s"; 255].join("/")).is_ok());
     assert_eq!(
         refused(&vec!["s"; 256].join("/")),
-        Err(Error::InvalidPlan(InvalidPlan::KeyTooManySegments))
+        Err(Error::InvalidRequest(InvalidRequest::KeyTooManySegments))
     );
 
     // A dot that is not the whole segment and not at the end is ordinary text,

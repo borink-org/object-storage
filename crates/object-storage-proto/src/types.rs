@@ -1,4 +1,4 @@
-/// What a plan asks the service to return.
+/// What a read asks the service to return.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -16,7 +16,7 @@ impl GetKind {
     /// Returns the kind with this discriminant.
     ///
     /// Returns [`None`] for a discriminant that this version does not define.
-    /// A caller that carries a plan across a language boundary sends each
+    /// A caller that carries a value across a language boundary sends each
     /// value as its number, and refuses a number that names nothing here.
     pub const fn from_discriminant(value: u16) -> Option<Self> {
         Some(match value {
@@ -27,11 +27,11 @@ impl GetKind {
     }
 }
 
-/// Which form of byte range a plan requests, without its offsets.
+/// Which form of byte range a read requests, without its offsets.
 ///
 /// [`RequestedRange`] carries the offsets as well, which a number cannot. This
 /// is the part of it that is one value. Pair it with the offsets in
-/// [`RequestedRange::from_parts`] to carry a plan across a language boundary.
+/// [`RequestedRange::from_parts`] to carry a range across a language boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -62,7 +62,7 @@ impl RangeForm {
     }
 }
 
-/// The byte range that a plan requests.
+/// The byte range that a read requests.
 ///
 /// The offsets count the stored bytes of the object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,12 +75,12 @@ pub enum RequestedRange {
     ///
     /// The end must be after the start. The encoding methods refuse an empty
     /// or inverted range with
-    /// [`InvalidPlan::Range`](crate::InvalidPlan::Range), so you need no check
+    /// [`InvalidRequest::Range`](crate::InvalidRequest::Range), so you need no check
     /// of your own: S3 would answer one with the whole object.
     Bounded {
-        /// The first byte that the plan requests.
+        /// The first byte that the read requests.
         start: u64,
-        /// The byte after the last byte that the plan requests.
+        /// The byte after the last byte that the read requests.
         end: u64,
     },
     /// Every byte from this offset to the end of the object.
@@ -160,12 +160,12 @@ pub enum ConditionValue<'h> {
     /// An entity tag, or `*` for any, as `If-Match` and `If-None-Match`
     /// carry it. A client refuses an empty one, and one that is not ASCII
     /// or holds a control character, with
-    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    /// [`InvalidRequest::Condition`](crate::InvalidRequest::Condition).
     ETag(&'h [u8]),
     /// An instant, in seconds since the Unix epoch, which the request writes
     /// as an HTTP date. HTTP dates count whole seconds and end at the year
     /// 9999: a client refuses a later instant with
-    /// [`InvalidPlan::Condition`](crate::InvalidPlan::Condition).
+    /// [`InvalidRequest::Condition`](crate::InvalidRequest::Condition).
     ///
     /// To compare against a `Last-Modified` that the service sent, read it
     /// with [`http_date_ms`](crate::http_date_ms) and
@@ -208,11 +208,11 @@ impl ConditionKind {
 /// needs only this part to read the response.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GetShape {
-    /// Whether the plan asks for bytes or for metadata.
+    /// Whether the read asks for bytes or for metadata.
     pub kind: GetKind,
-    /// The byte range that the plan requests.
+    /// The byte range that the read requests.
     pub range: RequestedRange,
-    /// The precondition that the plan carries.
+    /// The precondition that the read carries.
     pub condition: ConditionKind,
 }
 
@@ -428,7 +428,7 @@ pub struct MetadataPair<'h> {
 ///
 /// Each is one HTTP header value: ASCII, with no control character and no
 /// space at either end. A write refuses any other value with
-/// [`InvalidPlan::ContentProperty`](crate::InvalidPlan::ContentProperty),
+/// [`InvalidRequest::ContentProperty`](crate::InvalidRequest::ContentProperty),
 /// except where the service returns UTF-8 as it got it: a `Content-Type` on
 /// an Azure account of [`AzureNamespace::Flat`](crate::AzureNamespace::Flat),
 /// and a `Content-Type` and a `Content-Disposition` on an S3 general purpose
@@ -489,7 +489,7 @@ impl<'h> ContentProperties<'h> {
 /// characters and a value of at most 256. Azure takes ASCII letters and
 /// digits, space and `+-./:=_` in both. S3 takes any letter or digit, space
 /// and `+-=._:/@`. A write refuses a tag outside those rules, and two tags
-/// with the same key, with [`InvalidPlan::Tag`](crate::InvalidPlan::Tag). A
+/// with the same key, with [`InvalidRequest::Tag`](crate::InvalidRequest::Tag). A
 /// client of [`s3::Service::Compatible`](crate::s3::Service::Compatible)
 /// refuses only an empty key and a repeated one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -509,7 +509,7 @@ pub struct DeleteTarget<'h> {
     /// The snapshot or version to remove, or [`None`] for the object as it
     /// is now. Azure sends it in the path of the object's Delete Blob, and
     /// S3 as the object's `VersionId`. S3 removes no snapshot: a client
-    /// refuses one with [`InvalidPlan::Revision`](crate::InvalidPlan::Revision).
+    /// refuses one with [`InvalidRequest::Revision`](crate::InvalidRequest::Revision).
     pub revision: Option<Revision<'h>>,
 }
 
@@ -544,7 +544,7 @@ pub struct WriteOptions<'h> {
     /// A write of a whole object takes them, and so does the write that
     /// names the object of a write in parts: an Azure commit, or an S3
     /// CreateMultipartUpload. Any other write refuses them with
-    /// [`InvalidPlan::Option`](crate::InvalidPlan::Option).
+    /// [`InvalidRequest::Option`](crate::InvalidRequest::Option).
     pub properties: ContentProperties<'h>,
     /// The tags to store with the object, under the rules of [`Tag`]. The
     /// writes that take [`Self::properties`] take these.
@@ -656,8 +656,7 @@ pub struct PutOptions<'o> {
     /// whole set.
     pub metadata: &'o [MetadataPair<'o>],
     /// The content properties, the tags and the storage class to store with
-    /// each object. Its `checksum` and `declared_md5` must be [`None`]: set
-    /// [`Self::checksum`] instead.
+    /// each object.
     pub options: WriteOptions<'o>,
     /// The kind of checksum every write sends, or [`None`] for none. Each
     /// write names its value: see [`PutItem::checksum`].
@@ -957,7 +956,7 @@ pub struct CopyOptions<'o> {
     /// The origin of another Azure account that holds the sources, such as
     /// `https://other.blob.core.windows.net`, or [`None`] for the template's
     /// own. S3 names a bucket of any account by its name alone, and refuses
-    /// one with [`InvalidPlan::CopySource`](crate::InvalidPlan::CopySource).
+    /// one with [`InvalidRequest::CopySource`](crate::InvalidRequest::CopySource).
     pub source_endpoint: Option<&'o str>,
     /// The container or bucket that holds the sources, or [`None`] for the
     /// template's own.
@@ -1027,10 +1026,11 @@ impl<'i> CopyItem<'i> {
     }
 }
 
-/// The part of a copy plan that holds no borrows.
+/// What reading the answer to a copy needs to know of its template.
 ///
-/// This is [`Copy`] and has no lifetime, so you can store it. Pass it to
-/// the method that reads the response of the copy.
+/// [`azure::Template::copy_shape`](crate::azure::Template::copy_shape) and
+/// [`s3::Template::copy_shape`](crate::s3::Template::copy_shape) return it.
+/// Pass it to the function that reads the response of the copy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CopyShape {
     /// The condition on the target.
@@ -1115,7 +1115,7 @@ impl EntryKind {
 ///
 /// Take it from [`Listing::next_marker`](crate::Listing::next_marker), copy
 /// its text into your own storage before the next page overwrites the body,
-/// and pass it back in the next plan.
+/// and pass it back in the item of the next listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListMarker<'a> {
@@ -1196,7 +1196,7 @@ pub struct ListItem<'i> {
     /// [`ListMarker::Version`] for an S3 listing of
     /// [`ListInclude::VERSIONS`], and [`ListMarker::Text`] for every other.
     /// The other kind, and an empty text, are refused with
-    /// [`InvalidPlan::Marker`](crate::InvalidPlan::Marker).
+    /// [`InvalidRequest::Marker`](crate::InvalidRequest::Marker).
     pub marker: Option<ListMarker<'i>>,
     /// The text after which the listing starts. S3 only.
     ///
@@ -1315,7 +1315,7 @@ impl<'b> ListEntry<'b> {
     /// Returns the metadata pairs that this entry carries.
     ///
     /// Returns [`None`] if the entry has no metadata element, which Azure
-    /// writes only when the plan asked for [`ListInclude::METADATA`]. This
+    /// writes only when the listing asked for [`ListInclude::METADATA`]. This
     /// method reads the entry again. To read the pairs in the same pass as
     /// the rest of the page, select [`BlobProperty::Metadata`].
     pub fn metadata(&self) -> Option<Metadata<'b>> {
@@ -1483,7 +1483,7 @@ mod tests {
             assert_eq!(EntryKind::from_discriminant(kind as u16), Some(kind));
         }
 
-        // 0 is the twins' "absent", so no plan value may claim it.
+        // 0 is the twins' "absent", so no value may claim it.
         assert_eq!(GetKind::from_discriminant(0), None);
         assert_eq!(ConditionKind::from_discriminant(0), None);
         assert_eq!(DeleteKind::from_discriminant(0), None);
@@ -1594,7 +1594,7 @@ pub enum BlobProperty {
     BlobSequenceNumber,
     /// The metadata pairs of the object, as the bytes between the tags of
     /// the `Metadata` element. Pass the value to [`Metadata::new`] to read
-    /// the pairs. Azure writes the element only when the plan asked for
+    /// the pairs. Azure writes the element only when the listing asked for
     /// [`ListInclude::METADATA`].
     Metadata,
 }

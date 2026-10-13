@@ -8,15 +8,16 @@
 #![forbid(unsafe_code)]
 
 use crate::{
+    inputs::UNKNOWN,
     outcome::{entry_view, maybe_bytes, page_fill, status_of},
-    plan::UNKNOWN,
     types::*,
 };
 
 use crate::ptr::ContainerValues;
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
-    Container, Error, InvalidPlan, ListMarker, Listing, ResponseHead, WireRequest as Request, azure,
+    Container, Error, InvalidRequest, ListMarker, Listing, ResponseHead, WireRequest as Request,
+    azure,
 };
 
 // The protocol crate's container, which every template is written from. A
@@ -32,7 +33,7 @@ pub(crate) fn container(values: Option<ContainerValues<'_>>) -> proto::Result<Co
         Container::new(endpoint, name)?
     };
     Ok(match optional(values.object) {
-        Some(key) => container.object(text(key, InvalidPlan::KeyNotUtf8)?),
+        Some(key) => container.object(text(key, InvalidRequest::KeyNotUtf8)?),
         None => container,
     })
 }

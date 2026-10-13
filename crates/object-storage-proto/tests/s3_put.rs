@@ -3,7 +3,7 @@
 use borink_object_storage_proto::s3::{self, Bucket, MAX_PUT_LEN, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidPlan,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidRequest,
     MetadataPair, Payload, PutItem, PutOptions, Timestamps,
 };
 
@@ -32,10 +32,10 @@ fn encode(
     signing: PayloadSigning,
     item: &PutItem<'_>,
     content_sha256: Option<&[u8; 32]>,
-) -> Result<Vec<(String, String)>, InvalidPlan> {
+) -> Result<Vec<(String, String)>, InvalidRequest> {
     let refusal = |error| match error {
-        Error::InvalidPlan(reason) => reason,
-        other => panic!("expected an invalid plan, got {other:?}"),
+        Error::InvalidRequest(reason) => reason,
+        other => panic!("expected an invalid request, got {other:?}"),
     };
     let mut bytes = vec![0; 2048];
     let template = s3::prepare_put(&bucket(), &credentials(), options, signing, &mut bytes)
@@ -55,7 +55,7 @@ fn refused(
     signing: PayloadSigning,
     item: &PutItem<'_>,
     content_sha256: Option<&[u8; 32]>,
-) -> InvalidPlan {
+) -> InvalidRequest {
     encode(options, signing, item, content_sha256).unwrap_err()
 }
 
@@ -76,7 +76,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     };
     assert_eq!(
         refused(&create, unsigned, &etag, None),
-        InvalidPlan::Condition
+        InvalidRequest::Condition
     );
     // AWS takes no date condition on a write.
     let dated = PutOptions {
@@ -85,7 +85,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     };
     assert_eq!(
         refused(&dated, unsigned, &PutItem::new("k", slice), None),
-        InvalidPlan::Condition
+        InvalidRequest::Condition
     );
     // A signed template needs the SHA-256 of each write, and an unsigned one
     // takes none.
@@ -96,11 +96,11 @@ fn a_write_that_s3_cannot_take_is_refused() {
             &PutItem::new("k", slice),
             None
         ),
-        InvalidPlan::Option
+        InvalidRequest::Option
     );
     assert_eq!(
         refused(&plain, unsigned, &PutItem::new("k", slice), Some(&[0; 32])),
-        InvalidPlan::Option
+        InvalidRequest::Option
     );
     let too_long = PutItem::new(
         "k",
@@ -110,7 +110,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     );
     assert_eq!(
         refused(&plain, unsigned, &too_long, None),
-        InvalidPlan::PayloadTooLarge
+        InvalidRequest::PayloadTooLarge
     );
     let md5 = PutOptions {
         checksum: Some(ChecksumKind::Md5),
@@ -122,7 +122,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     };
     assert_eq!(
         refused(&md5, unsigned, &not_base64, None),
-        InvalidPlan::Checksum
+        InvalidRequest::Checksum
     );
 
     let metadata = |pairs: &[MetadataPair<'_>]| {
@@ -133,12 +133,12 @@ fn a_write_that_s3_cannot_take_is_refused() {
         refused(&options, unsigned, &PutItem::new("k", slice), None)
     };
     let pair = |name, value| MetadataPair { name, value };
-    assert_eq!(metadata(&[pair("", "v")]), InvalidPlan::MetadataName);
-    assert_eq!(metadata(&[pair("a b", "v")]), InvalidPlan::MetadataName);
-    assert_eq!(metadata(&[pair("a", "v\n")]), InvalidPlan::MetadataValue);
+    assert_eq!(metadata(&[pair("", "v")]), InvalidRequest::MetadataName);
+    assert_eq!(metadata(&[pair("a b", "v")]), InvalidRequest::MetadataName);
+    assert_eq!(metadata(&[pair("a", "v\n")]), InvalidRequest::MetadataValue);
     assert_eq!(
         metadata(&[pair("Name", "v"), pair("name", "w")]),
-        InvalidPlan::MetadataDuplicate
+        InvalidRequest::MetadataDuplicate
     );
 }
 

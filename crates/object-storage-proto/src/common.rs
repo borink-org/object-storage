@@ -5,11 +5,11 @@ use crate::checksum::ChecksumKind;
 use crate::request::{ByteSink, HeaderValue, U64Decimal};
 use crate::{
     BodyWindow, ConditionKind, ConditionValue, Error, Failure, FailureClass, GetHeadOutcome,
-    GetKind, GetShape, InvalidPlan, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
+    GetKind, GetShape, InvalidRequest, ObjectMeta, RequestedRange, ResponseFault, ResponseHead,
     Result, Revision, ServiceErrorKind, Tag, Timestamps, WriteOptions,
 };
 
-// Checks the snapshot or version that a plan names: an identifier that is
+// Checks the snapshot or version that a request names: an identifier that is
 // not empty, and a snapshot only where the service keeps snapshots.
 pub(crate) fn validate_revision(
     revision: Option<Revision<'_>>,
@@ -17,9 +17,9 @@ pub(crate) fn validate_revision(
 ) -> Result<()> {
     match revision {
         None => Ok(()),
-        Some(Revision::Snapshot(_)) if !keeps_snapshots => Err(InvalidPlan::Revision.into()),
+        Some(Revision::Snapshot(_)) if !keeps_snapshots => Err(InvalidRequest::Revision.into()),
         Some(Revision::Snapshot(id) | Revision::Version(id)) if id.is_empty() => {
-            Err(InvalidPlan::Revision.into())
+            Err(InvalidRequest::Revision.into())
         }
         Some(_) => Ok(()),
     }
@@ -163,7 +163,7 @@ pub(crate) fn accept_success<'h>(
         ..meta_of(head)
     };
     if head.status == 200 {
-        // An unranged plan reads from byte zero, and the service states the whole
+        // An unranged read reads from byte zero, and the service states the whole
         // object length, so `Content-Length` is both the window and the size.
         return Ok(match shape.kind {
             GetKind::Head => GetHeadOutcome::Complete {
@@ -377,7 +377,7 @@ pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
             out.push(b"-");
             out.push(U64Decimal::new(last).as_bytes());
         }
-        RequestedRange::Whole => unreachable!("the plan was validated"),
+        RequestedRange::Whole => unreachable!("the item was validated"),
     }
 }
 
@@ -385,7 +385,7 @@ pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
 pub(crate) fn capacity_error(capacity: crate::CapacityError) -> Error {
     // A slice holds at most isize::MAX bytes.
     if capacity.required > isize::MAX as usize {
-        InvalidPlan::RequestTooLarge.into()
+        InvalidRequest::RequestTooLarge.into()
     } else {
         Error::Capacity(capacity)
     }
@@ -403,7 +403,7 @@ fn a_request_larger_than_a_slice_is_not_a_recoverable_capacity_error() {
     };
     assert_eq!(
         capacity_error(capacity),
-        InvalidPlan::RequestTooLarge.into()
+        InvalidRequest::RequestTooLarge.into()
     );
 }
 
@@ -436,7 +436,7 @@ pub(crate) fn validate_condition(
             ConditionKind::IfModifiedSince | ConditionKind::IfUnmodifiedSince,
             Some(ConditionValue::Time(seconds)),
         ) if seconds <= crate::time::MAX_UNIX_SECONDS => Ok(()),
-        _ => Err(InvalidPlan::Condition.into()),
+        _ => Err(InvalidRequest::Condition.into()),
     }
 }
 
@@ -482,7 +482,7 @@ pub(crate) fn validate_properties(options: &WriteOptions<'_>, utf8: &[&str]) -> 
     {
         Ok(())
     } else {
-        Err(InvalidPlan::ContentProperty.into())
+        Err(InvalidRequest::ContentProperty.into())
     }
 }
 
@@ -506,11 +506,11 @@ pub(crate) fn validate_tags(
             None => true,
         };
         if tag.key.is_empty() || !shaped || tags[..index].iter().any(|t| t.key == tag.key) {
-            return Err(InvalidPlan::Tag.into());
+            return Err(InvalidRequest::Tag.into());
         }
     }
     if limits.is_some_and(|(count, _, _)| tags.len() > count) {
-        return Err(InvalidPlan::Tag.into());
+        return Err(InvalidRequest::Tag.into());
     }
     Ok(())
 }
@@ -562,7 +562,7 @@ pub(crate) fn validate_revision_kind(
     keeps_snapshots: bool,
 ) -> Result<()> {
     if kind == crate::RevisionKind::Snapshot && !keeps_snapshots {
-        return Err(InvalidPlan::Revision.into());
+        return Err(InvalidRequest::Revision.into());
     }
     Ok(())
 }
@@ -573,7 +573,7 @@ pub(crate) fn validate_revision_kind(
 pub(crate) fn validate_delimiter(delimiter: Option<&str>, slash_only: bool) -> Result<()> {
     match delimiter {
         Some(text) if text.is_empty() || (slash_only && text != "/") => {
-            Err(InvalidPlan::Delimiter.into())
+            Err(InvalidRequest::Delimiter.into())
         }
         _ => Ok(()),
     }
@@ -584,7 +584,7 @@ pub(crate) fn validate_get_options(
     keeps_snapshots: bool,
 ) -> Result<()> {
     if options.kind == GetKind::Head && options.ranging == crate::Ranging::Ranged {
-        return Err(InvalidPlan::RangedHead.into());
+        return Err(InvalidRequest::RangedHead.into());
     }
     validate_revision_kind(options.revision, keeps_snapshots)
 }
@@ -598,13 +598,13 @@ pub(crate) fn validate_get_item(
 ) -> Result<()> {
     let ranged = item.range != RequestedRange::Whole;
     if ranged != (options.ranging == crate::Ranging::Ranged) {
-        return Err(InvalidPlan::Range.into());
+        return Err(InvalidRequest::Range.into());
     }
     match item.range {
         RequestedRange::Bounded { start, end } if start >= end => {
-            return Err(InvalidPlan::Range.into());
+            return Err(InvalidRequest::Range.into());
         }
-        RequestedRange::Suffix(0) => return Err(InvalidPlan::Range.into()),
+        RequestedRange::Suffix(0) => return Err(InvalidRequest::Range.into()),
         _ => {}
     }
     validate_revision_item(options.revision, item.revision)?;
@@ -619,8 +619,8 @@ pub(crate) fn validate_revision_item(
 ) -> Result<()> {
     match (kind, revision) {
         (crate::RevisionKind::Current, None) => Ok(()),
-        (crate::RevisionKind::Current, Some(_)) | (_, None) => Err(InvalidPlan::Revision.into()),
-        (_, Some("")) => Err(InvalidPlan::Revision.into()),
+        (crate::RevisionKind::Current, Some(_)) | (_, None) => Err(InvalidRequest::Revision.into()),
+        (_, Some("")) => Err(InvalidRequest::Revision.into()),
         (_, Some(_)) => Ok(()),
     }
 }
@@ -636,7 +636,7 @@ pub(crate) fn validate_checksum_item(
         (None, None) => Ok(()),
         (Some(kind), Some(crate::ChecksumValue::Base64(text))) => kind.check_base64(text),
         (Some(kind), Some(crate::ChecksumValue::Digest(digest))) if digest.kind() == kind => Ok(()),
-        _ => Err(InvalidPlan::Checksum.into()),
+        _ => Err(InvalidRequest::Checksum.into()),
     }
 }
 
@@ -660,9 +660,9 @@ pub(crate) fn validate_source_range(ranging: crate::Ranging, range: RequestedRan
         (crate::Ranging::Whole, RequestedRange::Whole) => Ok(()),
         (crate::Ranging::Ranged, RequestedRange::Bounded { start, end }) if start < end => Ok(()),
         (crate::Ranging::Ranged, RequestedRange::Suffix(_) | RequestedRange::Offset(_)) => {
-            Err(InvalidPlan::UnsupportedRange.into())
+            Err(InvalidRequest::UnsupportedRange.into())
         }
-        _ => Err(InvalidPlan::Range.into()),
+        _ => Err(InvalidRequest::Range.into()),
     }
 }
 
@@ -676,7 +676,7 @@ pub(crate) fn validate_source_container(container: Option<&str>) -> Result<()> {
                 .bytes()
                 .any(|byte| matches!(byte, b'/' | b'?' | b'#') || byte.is_ascii_control()))
     {
-        return Err(InvalidPlan::CopySource.into());
+        return Err(InvalidRequest::CopySource.into());
     }
     Ok(())
 }

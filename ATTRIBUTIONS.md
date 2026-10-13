@@ -166,11 +166,11 @@ Read to decide what this crate should ask for when it needs storage. It ended up
 
 ### Error and outcome design
 
-Read while `Error`, `InvalidPlan` and the three head outcomes were designed. The learnings are written up separately; what follows is the sources.
+Read while `Error`, `InvalidRequest` and the three head outcomes were designed. The learnings are written up separately; what follows is the sources.
 
 | Project | License (SPDX) | Upstream | Read for |
 | --- | --- | --- | --- |
-| Boost.Outcome, including Outcome.Experimental and `status-code` | `Apache-2.0 OR BSL-1.0` | <https://github.com/ned14/outcome> | `status_code<D>` as `{ domain, value }` in two machine words, with all behaviour on a constexpr domain and no `std::string` anywhere. Two things came from it. First, the split this crate makes between an outcome and an error: a response the service is entitled to give (not found, precondition failed, range not satisfiable) is a variant of `GetHeadOutcome`, and `Err` is reserved for "this crate cannot proceed". Second, that a boundary needs stable numbers, which is why `InvalidPlan`, `FailureClass` and `ServiceErrorKind` are `#[repr(u16)]` with their discriminants written out. Its `indirecting_domain`, which boxes a payload too large to erase, has no counterpart: nothing here allocates on the error path either. |
+| Boost.Outcome, including Outcome.Experimental and `status-code` | `Apache-2.0 OR BSL-1.0` | <https://github.com/ned14/outcome> | `status_code<D>` as `{ domain, value }` in two machine words, with all behaviour on a constexpr domain and no `std::string` anywhere. Two things came from it. First, the split this crate makes between an outcome and an error: a response the service is entitled to give (not found, precondition failed, range not satisfiable) is a variant of `GetHeadOutcome`, and `Err` is reserved for "this crate cannot proceed". Second, that a boundary needs stable numbers, which is why `InvalidRequest`, `FailureClass` and `ServiceErrorKind` are `#[repr(u16)]` with their discriminants written out. Its `indirecting_domain`, which boxes a payload too large to erase, has no counterpart: nothing here allocates on the error path either. |
 | SNAFU | `MIT OR Apache-2.0` | <https://github.com/shepmaster/snafu> | The context-selector approach to Rust library errors, and its rules on error types being per unit of fallibility rather than per crate. Not used: SNAFU builds errors that own their context, and an error here must fit in a fixed size and hold no allocation. |
 
 ### Other

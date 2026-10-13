@@ -123,7 +123,7 @@
 //!
 //! Every other enum crosses as the number the protocol crate gives it, in
 //! both directions. A number that this crate does not define is refused as
-//! `InvalidPlan`, not read as another value.
+//! `InvalidRequest`, not read as another value.
 //!
 //! # What it costs
 //!
@@ -134,7 +134,7 @@
 //!
 //! Every entry point that takes a pointer is an `unsafe extern "C"` function
 //! with a `# Safety` section naming what it requires. A null container,
-//! template, options, item or timestamps is refused as `InvalidPlan`, never
+//! template, options, item or timestamps is refused as `InvalidRequest`, never
 //! dereferenced. A `borink_bytes` whose `len` is 0 may have a null `ptr`.
 
 #![no_std]
@@ -152,11 +152,11 @@ extern crate std;
 // no line-by-line reading: cbindgen generates the header from `types`, and a C
 // compiler checks `layout` against it. Every read of a caller's pointer is in
 // `ptr`, and every call of one is in `entry` and `layout`. The logic is in
-// `step`, `plan`, `outcome` and `sentence`, which forbid `unsafe` code.
+// `step`, `inputs`, `outcome` and `sentence`, which forbid `unsafe` code.
 mod entry;
+mod inputs;
 mod layout;
 mod outcome;
-mod plan;
 mod ptr;
 mod sentence;
 mod step;

@@ -1,10 +1,10 @@
 //! Tests for the whole boundary, driven through the entry points.
 
-use crate::{entry::*, layout::*, outcome::*, plan::*, ptr::*, sentence::*, types::*};
+use crate::{entry::*, inputs::*, layout::*, outcome::*, ptr::*, sentence::*, types::*};
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
     BodyWindow as CoreBodyWindow, CommitHeadOutcome, Error, Failure as CoreFailure,
-    FailureClass as CoreFailureClass, GetHeadOutcome, InvalidPlan, ObjectMeta as CoreObjectMeta,
+    FailureClass as CoreFailureClass, GetHeadOutcome, InvalidRequest, ObjectMeta as CoreObjectMeta,
     PutHeadOutcome, RequestedRange, ResponseFault, ServiceErrorKind, StageHeadOutcome, azure,
 };
 use std::format;
@@ -447,7 +447,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
     assert!(outcome_kind_of(0).is_none());
     assert!(outcome_kind_of(15).is_none());
 
-    // The plan side, which crosses inwards and must refuse.
+    // The input side, which crosses inwards and must refuse.
     for (form, expected) in [
         (RangeForm::Whole as u16, Some(RequestedRange::Whole)),
         (
@@ -628,8 +628,8 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
     };
     for refused in [refused, unknown_namespace] {
         assert_eq!(refused.status, unknown());
-        assert_eq!(refused.status.code, ErrorCode::InvalidPlan as u16);
-        assert_eq!(refused.status.detail, InvalidPlan::Unknown as u16);
+        assert_eq!(refused.status.code, ErrorCode::InvalidRequest as u16);
+        assert_eq!(refused.status.detail, InvalidRequest::Unknown as u16);
         assert_eq!(refused.required, 0);
     }
 
@@ -667,11 +667,11 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
     assert_eq!(outcome.error, unknown());
     assert_eq!(
         text(&outcome),
-        Error::InvalidPlan(InvalidPlan::Unknown).to_string()
+        Error::InvalidRequest(InvalidRequest::Unknown).to_string()
     );
 }
 
-// A pointer that was never filled in is refused as an invalid plan, and
+// A pointer that was never filled in is refused as an invalid request, and
 // never read.
 #[test]
 fn a_null_pointer_is_refused_rather_than_read() {
@@ -1337,7 +1337,7 @@ fn a_template_of_one_object_writes_its_key() {
             writable(&mut buf),
         )
     };
-    assert_eq!(refused.status, status_of(&InvalidPlan::Template.into()));
+    assert_eq!(refused.status, status_of(&InvalidRequest::Template.into()));
 
     // A listing names no object.
     // SAFETY: as above.
@@ -1350,7 +1350,7 @@ fn a_template_of_one_object_writes_its_key() {
             writable(&mut buf),
         )
     };
-    assert_eq!(refused.status, status_of(&InvalidPlan::Option.into()));
+    assert_eq!(refused.status, status_of(&InvalidRequest::Option.into()));
 }
 
 // A template holds no pointer: it can be copied and stored, and its bytes
@@ -1374,7 +1374,7 @@ fn a_stored_template_is_checked_against_its_bytes() {
         );
         assert_eq!(
             borink_template_check(&copied, pages.bytes()),
-            status_of(&InvalidPlan::Template.into())
+            status_of(&InvalidRequest::Template.into())
         );
     }
     // A template of another operation is refused, and so is one this crate
@@ -1390,7 +1390,7 @@ fn a_stored_template_is_checked_against_its_bytes() {
         // SAFETY: as above.
         let refused =
             unsafe { borink_encode_get(&template, bytes, &item, &now(), writable(&mut buf)) };
-        assert_eq!(refused.status, status_of(&InvalidPlan::Template.into()));
+        assert_eq!(refused.status, status_of(&InvalidRequest::Template.into()));
     }
     // Bytes that are not the template's write a wrong request or are
     // refused, and never panic.
@@ -1435,15 +1435,15 @@ fn a_commit_refuses_a_block_it_cannot_read() {
                 id: lent(b"\xff\xfe=="),
                 ..good
             },
-            InvalidPlan::PartId,
+            InvalidRequest::PartId,
         ),
-        (BlockRef { source: 9, ..good }, InvalidPlan::Unknown),
+        (BlockRef { source: 9, ..good }, InvalidRequest::Unknown),
         (
             BlockRef {
                 id: lent(b"not base64!"),
                 ..good
             },
-            InvalidPlan::PartId,
+            InvalidRequest::PartId,
         ),
     ] {
         let blocks = [good, block];
@@ -1602,7 +1602,7 @@ fn a_container_that_cannot_be_used_says_which_value_is_wrong() {
             b"https://account.example",
             b"container",
             b"\xff",
-            status_of(&InvalidPlan::KeyNotUtf8.into()),
+            status_of(&InvalidRequest::KeyNotUtf8.into()),
         ),
     ] {
         let container = Container {
@@ -1632,7 +1632,7 @@ fn a_container_that_cannot_be_used_says_which_value_is_wrong() {
         assert_eq!(borink_container_check(&normalized), Status::default());
         assert_eq!(
             borink_prepare_get(&normalized, token(), 0, &read_options(), writable(&mut buf)).status,
-            status_of(&InvalidPlan::KeyWouldBeNormalized.into())
+            status_of(&InvalidRequest::KeyWouldBeNormalized.into())
         );
         for token in [b"".as_slice(), b"\xff", b"two\nlines"] {
             assert_eq!(
@@ -1651,7 +1651,7 @@ fn a_container_that_cannot_be_used_says_which_value_is_wrong() {
     }
 }
 
-// A listing plan is checked before any byte is written, and the reason names
+// A listing request is checked before any byte is written, and the reason names
 // the field that was wrong.
 #[test]
 fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
@@ -1666,14 +1666,14 @@ fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
                 },
                 ..ListOptions::default()
             },
-            status_of(&InvalidPlan::MaxResults.into()),
+            status_of(&InvalidRequest::MaxResults.into()),
         ),
         (
             ListOptions {
                 delimiter: lent(b"\xff"),
                 ..ListOptions::default()
             },
-            status_of(&InvalidPlan::Delimiter.into()),
+            status_of(&InvalidRequest::Delimiter.into()),
         ),
         (
             ListOptions {
@@ -1703,7 +1703,7 @@ fn a_listing_plan_that_azure_would_refuse_is_refused_here() {
             writable(&mut buf),
         )
     };
-    assert_eq!(refused.status, status_of(&InvalidPlan::Delimiter.into()));
+    assert_eq!(refused.status, status_of(&InvalidRequest::Delimiter.into()));
 }
 
 #[test]
@@ -1725,15 +1725,15 @@ fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
         AzureNamespace::Hierarchical,
     ] {
         for reason in [
-            InvalidPlan::MaxResults,
-            InvalidPlan::KeyTooLong,
-            InvalidPlan::UnsupportedRange,
+            InvalidRequest::MaxResults,
+            InvalidRequest::KeyTooLong,
+            InvalidRequest::UnsupportedRange,
         ] {
-            let status = status_of(&Error::InvalidPlan(reason));
+            let status = status_of(&Error::InvalidRequest(reason));
             let azure = borink_azure_rejection_for(status, namespace as u16);
             let expected = match reason {
-                InvalidPlan::MaxResults => Some("OutOfRangeQueryParameterValue"),
-                InvalidPlan::KeyTooLong if namespace as u16 == AzureNamespace::Flat as u16 => {
+                InvalidRequest::MaxResults => Some("OutOfRangeQueryParameterValue"),
+                InvalidRequest::KeyTooLong if namespace as u16 == AzureNamespace::Flat as u16 => {
                     Some("OutOfRangeInput")
                 }
                 _ => None,
@@ -1747,13 +1747,13 @@ fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
         }
     }
     assert_eq!(borink_azure_rejection_for(Status::default(), 0).status, 0);
-    let status = status_of(&Error::InvalidPlan(InvalidPlan::MaxResults));
+    let status = status_of(&Error::InvalidRequest(InvalidRequest::MaxResults));
     assert_eq!(borink_azure_rejection_for(status, u16::MAX).status, 0);
 
     let reads = reads(&read_options());
     for (key, reason) in [
-        (b"".as_slice(), InvalidPlan::EmptyKey),
-        (b"\xff", InvalidPlan::KeyNotUtf8),
+        (b"".as_slice(), InvalidRequest::EmptyKey),
+        (b"\xff", InvalidRequest::KeyNotUtf8),
     ] {
         let item = read_item(key);
         // SAFETY: inputs are live; the output capacity is zero.
@@ -1766,7 +1766,7 @@ fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
                 writable(&mut []),
             )
         };
-        assert_eq!(written.status, status_of(&Error::InvalidPlan(reason)));
+        assert_eq!(written.status, status_of(&Error::InvalidRequest(reason)));
     }
 }
 
@@ -1971,7 +1971,7 @@ fn the_error_body_finishes_what_the_head_left_open() {
     assert_eq!(kind_of(unnamed.failure.kind), None);
 }
 
-// A 412 is the plan's failed condition only if the plan carried one and
+// A 412 is the request's failed condition only if the request carried one and
 // Azure names it, whether in the head or only in the body.
 #[test]
 fn a_412_is_a_failed_condition_only_when_azure_names_one() {
@@ -1997,7 +1997,7 @@ fn a_412_is_a_failed_condition_only_when_azure_names_one() {
     assert_eq!(failed.kind, OutcomeKind::PreconditionFailed as u16);
 }
 
-// A head that does not answer the plan is a status, not a sentence.
+// A head that does not answer the request is a status, not a sentence.
 #[test]
 fn an_invalid_head_carries_the_error_of_the_core_crate() {
     // SAFETY: every pointer addresses a live value of this test. A write

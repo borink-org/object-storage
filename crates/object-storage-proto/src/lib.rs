@@ -163,7 +163,7 @@
 //! [`PutOptions::metadata`], [`azure::CommitOptions::metadata`] or, on S3,
 //! [`s3::CreateUploadOptions::metadata`].
 //! To read them back from a listing, put [`ListInclude::METADATA`] in the
-//! plan and call [`ListEntry::metadata`] on each entry. To read them back
+//! options and call [`ListEntry::metadata`] on each entry. To read them back
 //! from a head read, pass each response header name to
 //! [`azure::metadata_name`] or [`s3::metadata_name`]. On S3, pass each
 //! value to [`s3::metadata_value`].
@@ -195,24 +195,24 @@
 //! the service refuses, or that would name another object than the one asked
 //! for:
 //!
-//! - An empty key is [`InvalidPlan::EmptyKey`].
-//! - A `.` or `..` segment is [`InvalidPlan::KeyWouldBeNormalized`],
+//! - An empty key is [`InvalidRequest::EmptyKey`].
+//! - A `.` or `..` segment is [`InvalidRequest::KeyWouldBeNormalized`],
 //!   because a host resolves it out of the URL before it sends the request.
 //!   On Azure, so is any segment that ends in `.`, because Azure stores the
 //!   name without that dot.
-//! - On Azure, a control character is [`InvalidPlan::KeyControlCharacter`],
-//!   and more than 255 segments is [`InvalidPlan::KeyTooManySegments`].
+//! - On Azure, a control character is [`InvalidRequest::KeyControlCharacter`],
+//!   and more than 255 segments is [`InvalidRequest::KeyTooManySegments`].
 //! - On an Azure account of [`AzureNamespace::Flat`], more than 1024 UTF-16
-//!   code units is [`InvalidPlan::KeyTooLong`], where a character outside the
+//!   code units is [`InvalidRequest::KeyTooLong`], where a character outside the
 //!   basic plane counts twice. A template for [`AzureNamespace::Unknown`]
 //!   sends such a key.
 //! - On S3, more than [`s3::MAX_KEY_LEN`] bytes is
-//!   [`InvalidPlan::KeyTooLong`]. S3 takes every other key.
+//!   [`InvalidRequest::KeyTooLong`]. S3 takes every other key.
 //!
 //! # Staying within the service's limits
 //!
-//! The encoding methods refuse a plan that the service would refuse, with an
-//! [`InvalidPlan`] that names the rule. See [Object keys](#object-keys) for
+//! The encoding functions refuse a request that the service would refuse, with an
+//! [`InvalidRequest`] that names the rule. See [Object keys](#object-keys) for
 //! the rules on a key. On Azure, the numeric limits are
 //! [`azure::MAX_URL_LEN`] for the whole URL, [`azure::MAX_PUT_LEN`] for one
 //! write, and [`azure::MAX_STAGE_LEN`] for one block. On S3, they are
@@ -277,7 +277,7 @@ mod xml;
 
 pub use azure::{AzureNamespace, AzureRejection, Container, VERSION, classify_error};
 pub use checksum::{ChecksumKind, Digest};
-pub use error::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, Result};
+pub use error::{CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, Result};
 pub use head::ResponseHead;
 pub use listed::{decode_property, http_date_ms, iso8601_ms, quoted_etag};
 pub use outcome::{

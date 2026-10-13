@@ -98,7 +98,7 @@ inline constexpr ErrorCode ErrorCodeCapacity         = BORINK_ERROR_CODE_CAPACIT
 inline constexpr ErrorCode ErrorCodeInvalidEndpoint  = BORINK_ERROR_CODE_INVALID_ENDPOINT;
 inline constexpr ErrorCode ErrorCodeInvalidContainer = BORINK_ERROR_CODE_INVALID_CONTAINER;
 inline constexpr ErrorCode ErrorCodeInvalidToken     = BORINK_ERROR_CODE_INVALID_TOKEN;
-inline constexpr ErrorCode ErrorCodeInvalidPlan      = BORINK_ERROR_CODE_INVALID_PLAN;
+inline constexpr ErrorCode ErrorCodeInvalidRequest   = BORINK_ERROR_CODE_INVALID_REQUEST;
 inline constexpr ErrorCode ErrorCodeResponse         = BORINK_ERROR_CODE_RESPONSE;
 
 inline constexpr AzureNamespace AzureNamespaceUnknown = BORINK_AZURE_NAMESPACE_UNKNOWN;

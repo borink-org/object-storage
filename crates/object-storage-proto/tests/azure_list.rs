@@ -2,7 +2,7 @@
 
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::{
-    AzureNamespace, BlobProperty, CapacityError, Container, EntryKind, Error, InvalidPlan,
+    AzureNamespace, BlobProperty, CapacityError, Container, EntryKind, Error, InvalidRequest,
     ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, Metadata, PropertySet,
     PropertyValues, ResponseFault, Timestamps, decode_property, http_date_ms,
 };
@@ -141,11 +141,11 @@ fn a_listing_is_refused_before_any_byte_is_written() {
         encode(AzureNamespace::Hierarchical, options, item).map(drop)
     };
     for (options, item, expected) in [
-        (plain, ListItem::new(&over), InvalidPlan::UrlTooLong),
+        (plain, ListItem::new(&over), InvalidRequest::UrlTooLong),
         (
             plain,
             ListItem::new("").after(ListMarker::Text("")),
-            InvalidPlan::Marker,
+            InvalidRequest::Marker,
         ),
         (
             plain,
@@ -153,7 +153,7 @@ fn a_listing_is_refused_before_any_byte_is_written() {
                 key: "k",
                 version: None,
             }),
-            InvalidPlan::Marker,
+            InvalidRequest::Marker,
         ),
         // Azure starts a listing only at its own marker, and names no owner.
         (
@@ -162,7 +162,7 @@ fn a_listing_is_refused_before_any_byte_is_written() {
                 start_after: Some("k"),
                 ..ListItem::new("")
             },
-            InvalidPlan::Option,
+            InvalidRequest::Option,
         ),
         (
             ListOptions {
@@ -170,7 +170,7 @@ fn a_listing_is_refused_before_any_byte_is_written() {
                 ..plain
             },
             ListItem::new(""),
-            InvalidPlan::Option,
+            InvalidRequest::Option,
         ),
         (
             ListOptions {
@@ -178,7 +178,7 @@ fn a_listing_is_refused_before_any_byte_is_written() {
                 ..plain
             },
             ListItem::new(""),
-            InvalidPlan::MaxResults,
+            InvalidRequest::MaxResults,
         ),
         // A hierarchical account groups names at `/` alone.
         (
@@ -187,10 +187,13 @@ fn a_listing_is_refused_before_any_byte_is_written() {
                 ..plain
             },
             ListItem::new(""),
-            InvalidPlan::Delimiter,
+            InvalidRequest::Delimiter,
         ),
     ] {
-        assert_eq!(refused(&options, &item), Err(Error::InvalidPlan(expected)));
+        assert_eq!(
+            refused(&options, &item),
+            Err(Error::InvalidRequest(expected))
+        );
     }
 }
 

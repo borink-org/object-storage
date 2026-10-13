@@ -31,7 +31,7 @@ use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
 use crate::url::QueryValue;
 use crate::{ChecksumValue, ConditionValue, MetadataPair, ObjectItem, RevisionKind, StageOptions};
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, Failure, InvalidPlan, ListPartsHeadOutcome,
+    CommitHeadOutcome, CommitShape, ConditionKind, Failure, InvalidRequest, ListPartsHeadOutcome,
     Listing, Method, ObjectMeta, Payload, ResponseFault, ResponseHead, Result, ServiceErrorKind,
     StageHeadOutcome, Timestamps, WriteOptions,
 };
@@ -159,7 +159,7 @@ pub struct Block<'b> {
 /// The most bytes that Azure stages in one `Put Block` request.
 ///
 /// [`encode_stage_block`] refuses a longer payload with
-/// [`InvalidPlan::PayloadTooLarge`].
+/// [`InvalidRequest::PayloadTooLarge`].
 pub const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
 const MAX_BLOCKS: usize = 50_000;
 const COMMIT_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
@@ -194,7 +194,7 @@ pub(super) fn validate_block_id(id: &str) -> Result<()> {
         || id.len() / 4 * 3 - padding > 64
         || !base64
     {
-        return Err(InvalidPlan::PartId.into());
+        return Err(InvalidRequest::PartId.into());
     }
     Ok(())
 }
@@ -324,7 +324,7 @@ impl<B> CommitItem<'_, B> {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Option`] for a checksum other than an MD5 or a
+/// Returns [`InvalidRequest::Option`] for a checksum other than an MD5 or a
 /// CRC64.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -337,7 +337,7 @@ pub fn prepare_stage_block(
     buf: &mut [u8],
 ) -> Result<Template> {
     if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     prepare_template(
         container,
@@ -379,7 +379,7 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a block ID that breaks the rules
 /// of [`BlockRef::id`], for content longer than [`MAX_STAGE_LEN`], for a
 /// checksum that is not the template's, and for a template of another
@@ -395,12 +395,12 @@ pub fn encode_stage_block<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
     let Detail::Stage(checksum) = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     validate_block_id(item.id)?;
     if item.content.len() > MAX_STAGE_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
+        return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_checksum_item(checksum, item.checksum)?;
     let mut text = [0; BASE64_LEN];
@@ -448,10 +448,9 @@ pub fn accept_stage_block_error_body<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a metadata pair, a content property,
+/// Returns [`Error::InvalidRequest`] for a metadata pair, a content property,
 /// a tag or a storage class that [`prepare_put`](crate::azure::prepare_put)
-/// refuses, and [`InvalidPlan::Option`] for a checksum or a declared MD5 in
-/// [`CommitOptions::options`].
+/// refuses.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -562,9 +561,9 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a condition value or an MD5 that
-/// the template does not take, [`InvalidPlan::Parts`] for more than 50,000
+/// the template does not take, [`InvalidRequest::Parts`] for more than 50,000
 /// blocks, a block ID that breaks the rules of [`BlockRef::id`], and a
 /// template of another operation.
 ///
@@ -585,17 +584,17 @@ where
         content_md5,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     validate_condition(condition, item.condition_value)?;
     match (content_md5, item.content_md5) {
         (false, None) => {}
         (true, Some(text)) => ChecksumKind::Md5.check_base64(text)?,
-        _ => return Err(InvalidPlan::Checksum.into()),
+        _ => return Err(InvalidRequest::Checksum.into()),
     }
     if item.blocks.clone().into_iter().count() > MAX_BLOCKS {
-        return Err(InvalidPlan::Parts.into());
+        return Err(InvalidRequest::Parts.into());
     }
     for (id, _) in block_pairs(&item.blocks) {
         validate_block_id(id)?;
@@ -710,7 +709,7 @@ pub fn prepare_list_blocks(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a revision that is not the
 /// template's kind, for a condition value, and for a template of another
 /// operation.

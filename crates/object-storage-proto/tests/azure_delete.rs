@@ -3,7 +3,7 @@
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::{
     AzureNamespace, ConditionKind, ConditionValue, Container, DeleteKind, DeleteOptions, Error,
-    InvalidPlan, ObjectItem, RevisionKind, Timestamps,
+    InvalidRequest, ObjectItem, RevisionKind, Timestamps,
 };
 
 fn container() -> Container<'static> {
@@ -45,27 +45,27 @@ fn a_removal_is_refused_before_any_byte_is_written() {
         (
             DeleteOptions::new(),
             ObjectItem::new(""),
-            InvalidPlan::EmptyKey,
+            InvalidRequest::EmptyKey,
         ),
         // The template carries a condition, so each removal names its value.
-        (if_match, ObjectItem::new("k"), InvalidPlan::Condition),
+        (if_match, ObjectItem::new("k"), InvalidRequest::Condition),
         (
             DeleteOptions::new(),
             ObjectItem {
                 condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
                 ..ObjectItem::new("k")
             },
-            InvalidPlan::Condition,
+            InvalidRequest::Condition,
         ),
         // The template names a version, so each removal names one.
-        (version, ObjectItem::new("k"), InvalidPlan::Revision),
+        (version, ObjectItem::new("k"), InvalidRequest::Revision),
         (
             version,
             ObjectItem {
                 revision: Some(""),
                 ..ObjectItem::new("k")
             },
-            InvalidPlan::Revision,
+            InvalidRequest::Revision,
         ),
         // A version has no snapshots of its own, and Azure refuses
         // `x-ms-delete-snapshots` beside one.
@@ -78,12 +78,12 @@ fn a_removal_is_refused_before_any_byte_is_written() {
                 revision: Some("v1"),
                 ..ObjectItem::new("k")
             },
-            InvalidPlan::Revision,
+            InvalidRequest::Revision,
         ),
     ] {
         assert_eq!(
             refusal(&options, &item),
-            Some(Error::InvalidPlan(expected)),
+            Some(Error::InvalidRequest(expected)),
             "{options:?} {item:?}"
         );
     }

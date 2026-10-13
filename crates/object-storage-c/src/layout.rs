@@ -502,7 +502,7 @@ const _: () = {
     assert!(ErrorCode::InvalidEndpoint as u16 == proto::ErrorCode::InvalidEndpoint as u16);
     assert!(ErrorCode::InvalidContainer as u16 == proto::ErrorCode::InvalidContainer as u16);
     assert!(ErrorCode::InvalidToken as u16 == proto::ErrorCode::InvalidToken as u16);
-    assert!(ErrorCode::InvalidPlan as u16 == proto::ErrorCode::InvalidPlan as u16);
+    assert!(ErrorCode::InvalidRequest as u16 == proto::ErrorCode::InvalidRequest as u16);
     assert!(ErrorCode::Capacity as u16 == proto::ErrorCode::Capacity as u16);
     assert!(ErrorCode::Response as u16 == proto::ErrorCode::Response as u16);
 

@@ -25,8 +25,8 @@ use crate::sigv4::Credentials;
 use crate::sigv4::Token;
 use crate::template::{Hole, ParamValue, Values};
 use crate::{
-    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidPlan, Method, ObjectMeta, Payload,
-    ResponseFault, ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
+    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidRequest, Method, ObjectMeta,
+    Payload, ResponseFault, ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
 };
 use crate::{CopyItem, CopyOptions, Ranging, RevisionKind, WriteOptions};
 
@@ -70,15 +70,15 @@ fn prepare_copy_kind(
     // AWS authorizes a copy into a directory bucket by the caller's own
     // credentials, and refuses those of a session.
     if let Token::S3Session(_) = credentials.token() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     // A bucket of any account is named by its name alone.
     if options.source_endpoint.is_some() {
-        return Err(InvalidPlan::CopySource.into());
+        return Err(InvalidRequest::CopySource.into());
     }
     validate_source_container(options.source_container)?;
     if options.source_revision == RevisionKind::Snapshot {
-        return Err(InvalidPlan::Revision.into());
+        return Err(InvalidRequest::Revision.into());
     }
     // A part is no object: it takes a source, and nothing that an object
     // stores.
@@ -88,16 +88,16 @@ fn prepare_copy_kind(
             || options.tags.is_some()
             || options.options != WriteOptions::default())
     {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     if !staged && options.source_ranging == Ranging::Ranged {
-        return Err(InvalidPlan::Range.into());
+        return Err(InvalidRequest::Range.into());
     }
     validate_metadata(options.metadata.unwrap_or(&[]), service)?;
     // A copy names its tags apart, so that none can differ from the
     // source's, and has nothing of its own to sum.
     if !options.options.tags.is_empty() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     validate_tags(
         options.tags.unwrap_or(&[]),
@@ -106,7 +106,7 @@ fn prepare_copy_kind(
     )?;
     validate_stored(&options.options, service)?;
     if service.is_aws() && options.condition.is_date() {
-        return Err(InvalidPlan::Condition.into());
+        return Err(InvalidRequest::Condition.into());
     }
     let detail = Detail::Copy {
         condition: options.condition,
@@ -195,10 +195,10 @@ fn encode_copy_kind(
         source_ranging,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if template.operation != operation {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key)?;
@@ -237,12 +237,12 @@ fn encode_copy_kind(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for options that S3 refuses:
-/// [`InvalidPlan::Option`] for the credentials of a session, which AWS
+/// Returns [`Error::InvalidRequest`] for options that S3 refuses:
+/// [`InvalidRequest::Option`] for the credentials of a session, which AWS
 /// refuses for a copy, for a checksum, and for tags in
-/// [`CopyOptions::options`]; [`InvalidPlan::CopySource`] for a source
+/// [`CopyOptions::options`]; [`InvalidRequest::CopySource`] for a source
 /// endpoint, or a source bucket that is empty or holds `/`, `?` or `#`;
-/// [`InvalidPlan::Revision`] for a snapshot; [`InvalidPlan::Condition`] for
+/// [`InvalidRequest::Revision`] for a snapshot; [`InvalidRequest::Condition`] for
 /// a date condition on the target, on AWS; and the refusals of
 /// [`prepare_put`](crate::s3::prepare_put) for metadata, tags and stored
 /// options.
@@ -263,7 +263,7 @@ pub fn prepare_copy(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key of the target or the source
+/// Returns [`Error::InvalidRequest`] for a key of the target or the source
 /// that S3 refuses, see [Object keys](crate#object-keys), for a version or a
 /// condition value that the template does not take, and for a template of
 /// another operation.
@@ -286,7 +286,7 @@ pub fn encode_copy(
 /// # Errors
 ///
 /// As [`prepare_copy`]. A part stores nothing of its own, so options beyond
-/// the source's are [`InvalidPlan::Option`].
+/// the source's are [`InvalidRequest::Option`].
 pub fn prepare_stage_part_copy(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
@@ -301,8 +301,8 @@ pub fn prepare_stage_part_copy(
 ///
 /// # Errors
 ///
-/// As [`encode_copy`], with [`InvalidPlan::UploadId`] for an empty upload
-/// ID, [`InvalidPlan::PartId`] for a part number that S3 refuses, and a
+/// As [`encode_copy`], with [`InvalidRequest::UploadId`] for an empty upload
+/// ID, [`InvalidRequest::PartId`] for a part number that S3 refuses, and a
 /// range of the source that is empty, or that is not bounded where the
 /// template names one.
 pub fn encode_stage_part_copy(

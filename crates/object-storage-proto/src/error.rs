@@ -28,21 +28,21 @@ impl fmt::Display for CapacityError {
 
 impl core::error::Error for CapacityError {}
 
-/// The reason that a plan cannot become a request.
+/// The reason that a template or a request cannot be written.
 ///
 /// The encoding methods report these before they write any byte, and never
 /// confuse them with a capacity error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
-pub enum InvalidPlan {
+pub enum InvalidRequest {
     /// The object key is empty.
     EmptyKey = 1,
     /// A bounded range is empty, or its end is before its start.
     Range = 2,
     /// The service does not accept this form of range.
     UnsupportedRange = 3,
-    /// A [`GetKind::Head`](crate::GetKind::Head) plan carries a byte range,
+    /// A [`GetKind::Head`](crate::GetKind::Head) read carries a byte range,
     /// which the service cannot answer.
     RangedHead = 4,
     /// The condition kind and the condition value do not agree.
@@ -57,10 +57,9 @@ pub enum InvalidPlan {
     /// [`s3::MAX_PUT_LEN`](crate::s3::MAX_PUT_LEN) and
     /// [`s3::MAX_PART_LEN`](crate::s3::MAX_PART_LEN) state the limits.
     PayloadTooLarge = 6,
-    /// A field of the plan holds a discriminant that this crate does not
-    /// define.
+    /// A field holds a discriminant that this crate does not define.
     ///
-    /// A plan built in another language carries each enum as its number. A
+    /// A value built in another language carries each enum as its number. A
     /// number that names no value here is refused rather than read as the
     /// value that happens to be oldest.
     Unknown = 7,
@@ -92,9 +91,8 @@ pub enum InvalidPlan {
     MaxResults = 12,
     /// A provider option is invalid or inapplicable.
     ///
-    /// A block listing that names both a snapshot and a version is one. A
-    /// declared MD5 on a write that is not a commit is another, and so is a
-    /// listing that asks a service for what only the other one lists.
+    /// A block listing that names both a snapshot and a version is one, and
+    /// so is a listing that asks a service for what only the other one lists.
     Option = 13,
     /// The encoded request cannot be addressed on this target.
     RequestTooLarge = 14,
@@ -163,8 +161,8 @@ pub enum InvalidPlan {
     /// The list of keys to remove is empty, or longer than the service
     /// takes in one request.
     Keys = 30,
-    /// The snapshot or version that the plan names is empty, or one that the
-    /// service does not keep, or the plan cannot take one.
+    /// The snapshot or version that the request names is empty, or one that
+    /// the service does not keep, or the request cannot take one.
     ///
     /// See [`Revision`](crate::Revision).
     Revision = 31,
@@ -178,7 +176,7 @@ pub enum InvalidPlan {
     Template = 33,
 }
 
-impl InvalidPlan {
+impl InvalidRequest {
     /// Returns the sentence that [`Display`](fmt::Display) writes for this
     /// reason.
     pub const fn as_str(self) -> &'static str {
@@ -193,10 +191,10 @@ impl InvalidPlan {
             Self::UnsupportedRange => {
                 "the service does not support Range: bytes=-N suffix requests"
             }
-            Self::RangedHead => "a head plan cannot carry a byte range",
+            Self::RangedHead => "a head read cannot carry a byte range",
             Self::Condition => "invalid condition",
             Self::PayloadTooLarge => "the content is too long to write in one request",
-            Self::Unknown => "the plan holds a value that this crate does not define",
+            Self::Unknown => "a field holds a value that this crate does not define",
             Self::PartId => "invalid part identifier",
             Self::Parts => "invalid list of parts",
             Self::Option => "invalid provider option",
@@ -264,7 +262,7 @@ impl InvalidPlan {
     }
 }
 
-impl fmt::Display for InvalidPlan {
+impl fmt::Display for InvalidRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -312,7 +310,7 @@ pub enum ResponseFault {
     Head = 1,
     /// The status does not answer the request that was sent.
     Status = 2,
-    /// The service served a range other than the one that the plan requested.
+    /// The service served a range other than the one that the read requested.
     Range = 3,
     /// The response body is not well formed, or it is not the document that
     /// answers the request.
@@ -326,7 +324,7 @@ impl ResponseFault {
         match self {
             Self::Head => "the response head is unreadable, or it contradicts itself",
             Self::Status => "the status does not answer the request",
-            Self::Range => "the service served another range than the plan requested",
+            Self::Range => "the service served another range than the read requested",
             Self::Body => "the response body is not the document that answers the request",
         }
     }
@@ -366,8 +364,8 @@ pub enum ErrorCode {
     InvalidContainer = 2,
     /// [`Error::InvalidToken`].
     InvalidToken = 3,
-    /// [`Error::InvalidPlan`].
-    InvalidPlan = 4,
+    /// [`Error::InvalidRequest`].
+    InvalidRequest = 4,
     /// [`Error::Capacity`].
     Capacity = 5,
     /// [`Error::Response`].
@@ -387,7 +385,7 @@ impl ErrorCode {
             Self::InvalidEndpoint => "invalid endpoint",
             Self::InvalidContainer => "invalid container name",
             Self::InvalidToken => "invalid bearer token",
-            Self::InvalidPlan => "the plan cannot become a request",
+            Self::InvalidRequest => "the request cannot be written",
             Self::Capacity => "the buffer is too small",
             Self::Response => "the response cannot be read",
             Self::InvalidCredentials => "invalid credentials",
@@ -404,7 +402,7 @@ impl ErrorCode {
             1 => Self::InvalidEndpoint,
             2 => Self::InvalidContainer,
             3 => Self::InvalidToken,
-            4 => Self::InvalidPlan,
+            4 => Self::InvalidRequest,
             5 => Self::Capacity,
             6 => Self::Response,
             7 => Self::InvalidCredentials,
@@ -447,8 +445,8 @@ pub enum Error {
     InvalidContainer,
     /// The bearer token is not usable as one HTTP header value.
     InvalidToken,
-    /// The plan cannot become a request.
-    InvalidPlan(InvalidPlan),
+    /// The template or the request cannot be written.
+    InvalidRequest(InvalidRequest),
     /// Your request buffer or your entry array is too small.
     ///
     /// Grow a request buffer and encode again. An entry array cannot be
@@ -481,7 +479,7 @@ impl fmt::Display for Error {
             | Self::InvalidToken
             | Self::InvalidCredentials
             | Self::InvalidRegion => f.write_str(self.code().as_str()),
-            Self::InvalidPlan(plan) => fmt::Display::fmt(plan, f),
+            Self::InvalidRequest(reason) => fmt::Display::fmt(reason, f),
             Self::Capacity(error) => fmt::Display::fmt(error, f),
             Self::Response(fault) => fmt::Display::fmt(fault, f),
             Self::Service(Some(kind)) => write!(f, "{}: {}", self.code().as_str(), kind.as_str()),
@@ -498,9 +496,9 @@ impl From<CapacityError> for Error {
     }
 }
 
-impl From<InvalidPlan> for Error {
-    fn from(value: InvalidPlan) -> Self {
-        Self::InvalidPlan(value)
+impl From<InvalidRequest> for Error {
+    fn from(value: InvalidRequest) -> Self {
+        Self::InvalidRequest(value)
     }
 }
 
@@ -525,7 +523,7 @@ impl Error {
             Self::InvalidEndpoint => ErrorCode::InvalidEndpoint,
             Self::InvalidContainer => ErrorCode::InvalidContainer,
             Self::InvalidToken => ErrorCode::InvalidToken,
-            Self::InvalidPlan(_) => ErrorCode::InvalidPlan,
+            Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::Capacity(_) => ErrorCode::Capacity,
             Self::Response(_) => ErrorCode::Response,
             Self::InvalidCredentials => ErrorCode::InvalidCredentials,
@@ -541,7 +539,7 @@ impl Error {
     /// [`Self::Service`] that names no known error returns 0 too.
     pub const fn detail(&self) -> u16 {
         match *self {
-            Self::InvalidPlan(plan) => plan as u16,
+            Self::InvalidRequest(reason) => reason as u16,
             Self::Response(fault) => fault as u16,
             Self::Service(Some(kind)) => kind as u16,
             _ => 0,
@@ -581,8 +579,8 @@ impl Error {
             | ErrorCode::InvalidRegion => {
                 return None;
             }
-            ErrorCode::InvalidPlan => match InvalidPlan::from_discriminant(detail) {
-                Some(plan) => Self::InvalidPlan(plan),
+            ErrorCode::InvalidRequest => match InvalidRequest::from_discriminant(detail) {
+                Some(reason) => Self::InvalidRequest(reason),
                 None => return None,
             },
             ErrorCode::Response => match ResponseFault::from_discriminant(detail) {
@@ -603,7 +601,7 @@ impl Error {
 mod tests {
     extern crate std;
 
-    use super::{CapacityError, Error, ErrorCode, InvalidPlan, ResponseFault, ServiceErrorKind};
+    use super::{CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, ServiceErrorKind};
     use std::string::ToString;
     use std::vec::Vec;
 
@@ -627,8 +625,8 @@ mod tests {
             Error::Service(None),
         ];
         for detail in 1..=u16::MAX {
-            if let Some(plan) = InvalidPlan::from_discriminant(detail) {
-                errors.push(Error::InvalidPlan(plan));
+            if let Some(reason) = InvalidRequest::from_discriminant(detail) {
+                errors.push(Error::InvalidRequest(reason));
             }
             if let Some(fault) = ResponseFault::from_discriminant(detail) {
                 errors.push(Error::Response(fault));
@@ -662,7 +660,7 @@ mod tests {
 
     #[test]
     fn an_unknown_discriminant_rebuilds_nothing() {
-        assert_eq!(Error::from_parts(ErrorCode::InvalidPlan, 0), None);
+        assert_eq!(Error::from_parts(ErrorCode::InvalidRequest, 0), None);
         assert_eq!(Error::from_parts(ErrorCode::Response, 4095), None);
         // A code that carries no value inside takes no detail either.
         assert_eq!(Error::from_parts(ErrorCode::InvalidToken, 1), None);

@@ -31,7 +31,7 @@
 use crate::common::capacity_error;
 use crate::request::{Writer, text};
 use crate::url::QueryValue;
-use crate::{CapacityError, InvalidPlan, Method, Payload, Result, Span};
+use crate::{CapacityError, InvalidRequest, Method, Payload, Result, Span};
 
 /// The value that a request writes into one hole of its template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,11 +388,11 @@ impl<'t> Builder<'t> {
         debug_assert!(self.count <= MAX_STEPS, "a template holds too many steps");
         debug_assert!(!self.scattered, "a template's text is written in order");
         if self.count > MAX_STEPS {
-            return Err(InvalidPlan::RequestTooLarge.into());
+            return Err(InvalidRequest::RequestTooLarge.into());
         }
         self.end_sections(SECTIONS);
         if self.scattered {
-            return Err(InvalidPlan::Template.into());
+            return Err(InvalidRequest::Template.into());
         }
         let start = self.out.position();
         for step in &self.steps[..self.count] {
@@ -405,7 +405,7 @@ impl<'t> Builder<'t> {
         }
         let fingerprint = fingerprint(self.out.written());
         let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
-            return Err(InvalidPlan::RequestTooLarge.into());
+            return Err(InvalidRequest::RequestTooLarge.into());
         };
         // The URL's sections come first, so their steps do too.
         let url_steps: usize = self.counts[..Section::Head as usize]
@@ -664,10 +664,10 @@ impl Table {
     fn steps<'t>(&self, template: &'t [u8]) -> Result<&'t [[u8; 8]]> {
         let table = template
             .get(self.start as usize..self.end as usize)
-            .ok_or(InvalidPlan::Template)?;
+            .ok_or(InvalidRequest::Template)?;
         let (steps, rest) = table.as_chunks::<8>();
         if !rest.is_empty() || steps.len() != self.total as usize {
-            return Err(InvalidPlan::Template.into());
+            return Err(InvalidRequest::Template.into());
         }
         Ok(steps)
     }
@@ -678,7 +678,7 @@ impl Table {
         let steps = self.steps(bytes)?;
         let text = bytes
             .get(..self.start as usize)
-            .ok_or(InvalidPlan::Template)?;
+            .ok_or(InvalidRequest::Template)?;
         Ok(Parts { bytes, steps, text })
     }
 
@@ -687,7 +687,7 @@ impl Table {
     pub(crate) fn check(&self, bytes: &[u8]) -> Result<()> {
         match bytes.get(..self.end as usize) {
             Some(own) if fingerprint(own) == self.fingerprint => Ok(()),
-            _ => Err(InvalidPlan::Template.into()),
+            _ => Err(InvalidRequest::Template.into()),
         }
     }
 
@@ -718,7 +718,7 @@ impl Table {
         for at in self.steps_before(Section::Body as usize)..steps.len() {
             let step = step(steps, at)?;
             if step.hole != NO_HOLE {
-                return Err(InvalidPlan::Template.into());
+                return Err(InvalidRequest::Template.into());
             }
             len += step.len as usize;
         }
@@ -743,7 +743,7 @@ impl Table {
                         return Ok(counted.position());
                     }
                 },
-                _ => return Err(InvalidPlan::Template.into()),
+                _ => return Err(InvalidRequest::Template.into()),
             };
         }
         Ok(len)
@@ -752,7 +752,7 @@ impl Table {
 
 // The step at `at` of `steps`.
 fn step(steps: &[[u8; 8]], at: usize) -> Result<Step> {
-    let [l0, l1, l2, l3, hole, name, ends, _] = *steps.get(at).ok_or(InvalidPlan::Template)?;
+    let [l0, l1, l2, l3, hole, name, ends, _] = *steps.get(at).ok_or(InvalidRequest::Template)?;
     Ok(Step {
         len: u32::from_le_bytes([l0, l1, l2, l3]),
         hole,
@@ -1093,7 +1093,7 @@ fn walk(
     let text = &template[..table.start as usize];
     let run = |cursor: usize, len: usize| {
         text.get(cursor..cursor.wrapping_add(len))
-            .ok_or(InvalidPlan::Template)
+            .ok_or(InvalidRequest::Template)
     };
     // The steps of the sections before the range are skipped, and their
     // text with them.
@@ -1116,9 +1116,9 @@ fn walk(
         cursor += step.len as usize;
         if step.hole != NO_HOLE {
             let name = run(cursor, step.name as usize)?;
-            let hole = Hole::from_id(step.hole).ok_or(InvalidPlan::Template)?;
+            let hole = Hole::from_id(step.hole).ok_or(InvalidRequest::Template)?;
             if !write_hole(&mut state, hole, name, fill, out) {
-                return Err(InvalidPlan::Template.into());
+                return Err(InvalidRequest::Template.into());
             }
         }
         cursor += step.name as usize;
@@ -1239,7 +1239,7 @@ impl<'e, 'o, F: Fill> Encode<'e, 'o, F> {
     pub(crate) fn finish(&mut self) -> Result<Written> {
         self.end_until(SECTIONS);
         if self.failed || self.at != self.steps.len() {
-            return Err(InvalidPlan::Template.into());
+            return Err(InvalidRequest::Template.into());
         }
         let end = self.out.position();
         Ok(core::mem::take(self.state).written(self.table, end))

@@ -14,8 +14,8 @@ use crate::common::{finish_with_body, valid_header};
 use crate::template::WireRequest;
 use crate::{ConditionKind, ObjectItem, RestoreOptions};
 use crate::{
-    Failure, InvalidPlan, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result,
-    Timestamps,
+    Failure, InvalidRequest, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority,
+    Result, Timestamps,
 };
 
 /// Writes the template of rehydrations with `options` into `buf`: Set Blob
@@ -24,10 +24,10 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Option`] for [`RestorePriority::Bulk`], for no
+/// Returns [`InvalidRequest::Option`] for [`RestorePriority::Bulk`], for no
 /// tier, for days and for a checksum: a rehydration is for good, and has no
 /// body. A tier that is not one header value is
-/// [`InvalidPlan::ContentProperty`].
+/// [`InvalidRequest::ContentProperty`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -41,16 +41,16 @@ pub fn prepare_restore(
     let priority = match options.priority {
         RestorePriority::Standard => "Standard",
         RestorePriority::High => "High",
-        RestorePriority::Bulk => return Err(InvalidPlan::Option.into()),
+        RestorePriority::Bulk => return Err(InvalidRequest::Option.into()),
     };
     let Some(tier) = options.tier else {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     };
     if options.days.is_some() || options.checksum.is_some() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
-        return Err(InvalidPlan::ContentProperty.into());
+        return Err(InvalidRequest::ContentProperty.into());
     }
     let fields = [
         Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
@@ -77,7 +77,7 @@ pub fn prepare_restore(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a revision that is not the
 /// template's kind, for a condition value, and for a template of another
 /// operation.

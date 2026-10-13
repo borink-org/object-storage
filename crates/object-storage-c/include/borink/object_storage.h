@@ -54,7 +54,7 @@ typedef uint16_t borink_azure_namespace;
 /**
  * Which kind of failure a `borink_status` carries.
  *
- * These are the numbers that `borink-object-storage-proto`'s error code uses.
+ * These are the numbers that the protocol crate's error code uses.
  */
 enum borink_error_code
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -79,9 +79,9 @@ enum borink_error_code
      */
     BORINK_ERROR_CODE_INVALID_TOKEN = 3,
     /**
-     * The plan cannot become a request. `detail` says why.
+     * The request cannot be written. `detail` says why.
      */
-    BORINK_ERROR_CODE_INVALID_PLAN = 4,
+    BORINK_ERROR_CODE_INVALID_REQUEST = 4,
     /**
      * Output storage is too small. Grow it to `required` and call again.
      */
@@ -324,7 +324,7 @@ typedef uint16_t borink_condition_form;
 /**
  * The kind of checksum that every request of a template sends.
  *
- * These are the numbers that `borink-object-storage-proto`'s checksum kind uses. Azure
+ * These are the numbers that the protocol crate's checksum kind uses. Azure
  * takes an MD5 or a CRC64, and a template of any other is refused.
  */
 enum borink_checksum_kind
@@ -415,7 +415,7 @@ typedef uint32_t borink_list_include;
 /**
  * The category of a service failure.
  *
- * These are the numbers that `borink-object-storage-proto`'s failure class uses. A number
+ * These are the numbers that the protocol crate's failure class uses. A number
  * that is not listed here comes from a later version of that crate. It
  * crosses unchanged, never as a substitute.
  */
@@ -460,7 +460,7 @@ typedef uint16_t borink_failure_class;
 /**
  * The specific error that the service named.
  *
- * These are the numbers that `borink-object-storage-proto`'s service error kind uses, and
+ * These are the numbers that the protocol crate's service error kind uses, and
  * they cross unchanged in both directions.
  */
 enum borink_service_error
@@ -657,7 +657,7 @@ typedef uint16_t borink_entry_kind;
  * written under the properties element; the ones marked otherwise stand
  * beside it. Read anything not listed here with `borink_entry_property`.
  *
- * These are the numbers that `borink-object-storage-proto`'s `BlobProperty` uses. A
+ * These are the numbers that the protocol crate's `BlobProperty` uses. A
  * `const` block in `layout.rs` fails the build if the two lists drift.
  */
 enum borink_blob_property
@@ -847,7 +847,7 @@ typedef uint16_t borink_blob_property;
 #endif // __cplusplus
 
 /**
- * A failure, as the two numbers that describe every error of `borink-object-storage-proto`.
+ * A failure, as the two numbers that describe every error of the protocol crate.
  *
  * `code` is a `borink_error_code`, and `detail` is the discriminant of the
  * value inside it. A `code` of 0 means that nothing failed. Both numbers are
@@ -888,7 +888,7 @@ typedef struct borink_bytes {
 
 /**
  * The container that the requests of a template go to: what
- * `Container::new` and `Container::object` describe in `borink-object-storage-proto`.
+ * `Container::new` and `Container::object` describe in the protocol crate.
  *
  * Your program owns the values. They must stay valid for the call that
  * prepares a template, and no longer: a template holds no pointer.
@@ -926,12 +926,12 @@ typedef struct borink_container {
 
 /**
  * An instant, formatted for the dates that a request carries: what
- * `Timestamps` is in `borink-object-storage-proto`, as it stores itself.
+ * `Timestamps` is in the protocol crate, as it stores itself.
  *
  * `borink_timestamps_from_unix` writes one. Write one each second, and pass
  * it to every request of that second, so that no request formats its dates
  * again. It holds no pointer. One whose dates are not text is refused with
- * `InvalidPlan`.
+ * `InvalidRequest`.
  */
 typedef struct borink_timestamps {
     /**
@@ -966,7 +966,7 @@ typedef struct borink_azure_rejection {
  * pass both to each `borink_encode_*` call of its operation. You may copy
  * it, and store it with those bytes, such as in flash, to write requests
  * again without preparing again. It ends in a hash of the rest. A template
- * that was changed since it was written is refused with `InvalidPlan`, and
+ * that was changed since it was written is refused with `InvalidRequest`, and
  * so is one that another version of the library wrote.
  *
  * # Bytes
@@ -1142,11 +1142,11 @@ typedef struct borink_commit_options {
 } borink_commit_options;
 
 /**
- * A number that a plan may not carry.
+ * A number that a value may not carry.
  */
 typedef struct borink_maybe_u32 {
     /**
-     * Whether the plan carries this number.
+     * Whether the value carries this number.
      */
     bool present;
     /**
@@ -1617,7 +1617,7 @@ typedef struct borink_failure {
      * The category of the failure, as a `borink_failure_class`. Use it to
      * decide whether to retry.
      *
-     * This is `class` in `borink-object-storage-proto`, which C++ cannot spell.
+     * This is `class` in the protocol crate, which C++ cannot spell.
      */
     uint16_t class_;
     /**
@@ -2065,7 +2065,7 @@ extern "C" {
 
 /**
  * Reports what is wrong with `container`, if anything: what
- * `Container::new` refuses in `borink-object-storage-proto`.
+ * `Container::new` refuses in the protocol crate.
  *
  * A `code` of 0 means that a template can be prepared for it. Every
  * `borink_prepare_*` call makes the same check, so this exists to fail
@@ -2081,7 +2081,7 @@ struct borink_status borink_container_check(const struct borink_container *conta
 
 /**
  * Returns the instant `unix_seconds` after the Unix epoch, formatted for the
- * dates that a request carries: `Timestamps::from_unix` in `borink-object-storage-proto`.
+ * dates that a request carries: `Timestamps::from_unix` in the protocol crate.
  *
  * Call it once a second, and pass the result to every request of that
  * second. A value after `9999-12-31 23:59:59 UTC` becomes that instant.
@@ -2195,7 +2195,7 @@ struct borink_prepared borink_prepare_list(const struct borink_container *contai
  * Encoding trusts that they are, and checks nothing of them per request.
  * Check bytes once where they could be another template's, such as bytes
  * read back from storage. A `code` of 0 means that they are the template's
- * own, and `InvalidPlan` with `Template` that they are not.
+ * own, and `InvalidRequest` with `Template` that they are not.
  *
  * # Safety
  *
@@ -2212,7 +2212,7 @@ struct borink_status borink_template_check(const struct borink_template *templat
  * an empty `buf` to learn the size that the request needs.
  *
  * A key that Azure refuses, a range that the template does not take and a
- * suffix range are refused with `InvalidPlan`. A template of another
+ * suffix range are refused with `InvalidRequest`. A template of another
  * operation is refused with `Template`.
  *
  * # Safety
@@ -2496,7 +2496,7 @@ struct borink_outcome borink_accept_commit_blocks_error_body(struct borink_commi
  * Reads the response head of a listing.
  *
  * This call takes no shape: it checks nothing in the response against the
- * plan.
+ * request.
  *
  * # Safety
  *

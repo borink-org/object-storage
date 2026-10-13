@@ -586,7 +586,7 @@ pub enum GetHeadOutcome<'h> {
     },
     /// No body follows and the request is complete.
     ///
-    /// A [`GetKind::Head`](crate::GetKind::Head) plan ends here.
+    /// A [`GetKind::Head`](crate::GetKind::Head) request ends here.
     Complete {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,
@@ -687,7 +687,7 @@ pub enum PutHeadOutcome<'h> {
 pub enum DeleteHeadOutcome<'h> {
     /// Azure accepted the removal.
     ///
-    /// The object is gone unless the plan asked only for its snapshots: see
+    /// The object is gone unless the request asked only for its snapshots: see
     /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).
     Accepted,
     /// The condition did not hold, so the service removed nothing.
@@ -713,7 +713,7 @@ pub enum DeleteHeadOutcome<'h> {
     NeedErrorBody(Failure<'h>),
     /// The service refused the removal, or it failed to carry it out.
     ///
-    /// An object that has snapshots is refused here, unless the plan asked to
+    /// An object that has snapshots is refused here, unless the request asked to
     /// remove them too: see [`DeleteKind`](crate::DeleteKind).
     ServiceFailure(Failure<'h>),
 }

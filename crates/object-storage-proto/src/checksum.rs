@@ -21,7 +21,7 @@
 //! A checksum here detects corruption in transit and nothing else, a SHA-1 or
 //! a SHA-256 included.
 
-use crate::{InvalidPlan, Result};
+use crate::{InvalidRequest, Result};
 
 /// The checksums that a write can send.
 ///
@@ -114,7 +114,7 @@ pub(crate) fn check_base64_len(text: &str, len: usize) -> Result<()> {
         || !bytes[..chars].iter().all(alphabet)
         || !bytes[chars..].iter().all(|byte| *byte == b'=')
     {
-        return Err(InvalidPlan::Checksum.into());
+        return Err(InvalidRequest::Checksum.into());
     }
     Ok(())
 }

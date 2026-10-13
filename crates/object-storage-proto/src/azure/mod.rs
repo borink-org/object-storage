@@ -15,7 +15,7 @@ use crate::request::{ByteSink, HeaderValue};
 use crate::url::{self, Parameter};
 use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, InvalidPlan, ListEntry, ListHeadOutcome, ListInclude,
+    GetHeadOutcome, GetKind, GetShape, InvalidRequest, ListEntry, ListHeadOutcome, ListInclude,
     ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PropertySet, PropertyValues,
     PutHeadOutcome, PutShape, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
     ServiceErrorKind, Timestamps, WriteOptions,
@@ -83,7 +83,7 @@ pub const VERSION: &str = "2026-04-06";
 /// and the query together.
 ///
 /// Every encoding method refuses a longer URL with
-/// [`InvalidPlan::UrlTooLong`]. Azure answers one with HTTP 414 and no
+/// [`InvalidRequest::UrlTooLong`]. Azure answers one with HTTP 414 and no
 /// error code. Measured on a flat and on a hierarchical account, whose hosts
 /// differ in length: 32,759 bytes is answered and 32,760 is refused, in the
 /// path and in the query alike.
@@ -191,10 +191,10 @@ impl<'a> Container<'a> {
     /// A template prepared from it writes the key as fixed text, checked
     /// once, and so does each request's line: a request of it checks and
     /// encodes no key. Pass each encoding function an empty key, or this
-    /// one; any other is [`InvalidPlan::Template`]. Keep one template for
+    /// one; any other is [`InvalidRequest::Template`]. Keep one template for
     /// each object you read or write often, such as the files of a
     /// database. An operation that names no object, such as a listing,
-    /// refuses a container that names one with [`InvalidPlan::Option`].
+    /// refuses a container that names one with [`InvalidRequest::Option`].
     #[must_use]
     pub const fn object(self, key: &'a str) -> Self {
         Self {
@@ -207,8 +207,8 @@ impl<'a> Container<'a> {
 /// The kind of storage account that a client talks to.
 ///
 /// Pass it to each `prepare_*` function, such as [`prepare_get`].
-/// [`InvalidPlan::azure_rejection`] reads it. This crate never discovers it: no request or response says
-/// which kind of account answered.
+/// [`InvalidRequest::azure_rejection`] reads it. This crate never discovers
+/// it: no request or response says which kind of account answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u16)]
 pub enum AzureNamespace {
@@ -236,7 +236,7 @@ pub struct AzureRejection {
     pub code: &'static str,
 }
 
-impl InvalidPlan {
+impl InvalidRequest {
     /// Returns the known Azure rejection corresponding to this reason.
     ///
     /// Returns `None` when no mapping is established for the namespace,
@@ -245,8 +245,8 @@ impl InvalidPlan {
     /// precedence nor the outcome of a request containing other faults.
     ///
     /// ```
-    /// use borink_object_storage_proto::{AzureNamespace, InvalidPlan};
-    /// let reason = InvalidPlan::KeyTooLong;
+    /// use borink_object_storage_proto::{AzureNamespace, InvalidRequest};
+    /// let reason = InvalidRequest::KeyTooLong;
     /// let azure = reason.azure_rejection(AzureNamespace::Flat).unwrap();
     /// assert_eq!((azure.status, azure.code), (400, "OutOfRangeInput"));
     /// assert_eq!(reason.azure_rejection(AzureNamespace::Hierarchical), None);
@@ -422,7 +422,7 @@ pub(crate) fn names_existing_object(
         && kind == Some(ServiceErrorKind::AlreadyExists)
 }
 
-// Whether a 412 is the plan's failed condition: the plan carried one, and
+// Whether a 412 is the request's failed condition: the request carried one, and
 // Azure names the failure. Azure also answers 412 for other reasons, such as
 // `LeaseIdMissing` on a leased blob.
 pub(crate) fn names_failed_condition(
@@ -464,7 +464,7 @@ fn name_units(value: &str) -> usize {
 /// # Errors
 ///
 /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
-/// header value, and [`InvalidPlan::RangedHead`] for ranged HEADs.
+/// header value, and [`InvalidRequest::RangedHead`] for ranged HEADs.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -515,11 +515,11 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a read that the template
+/// Returns [`Error::InvalidRequest`] if `item` is not a read that the template
 /// writes, or not a key that Azure takes: see [Object keys](crate#object-keys).
-/// Azure serves no suffix range, which is [`InvalidPlan::UnsupportedRange`].
-/// A URL longer than [`MAX_URL_LEN`] is [`InvalidPlan::UrlTooLong`]. A
-/// template for another operation is [`InvalidPlan::Template`].
+/// Azure serves no suffix range, which is [`InvalidRequest::UnsupportedRange`].
+/// A URL longer than [`MAX_URL_LEN`] is [`InvalidRequest::UrlTooLong`]. A
+/// template for another operation is [`InvalidRequest::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -531,11 +531,11 @@ pub fn encode_get<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
     let Detail::Get(options) = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     if let RequestedRange::Suffix(_) = item.range {
-        return Err(InvalidPlan::UnsupportedRange.into());
+        return Err(InvalidRequest::UnsupportedRange.into());
     }
     validate_get_item(&options, item)?;
     let values = Values {
@@ -620,9 +620,9 @@ pub fn accept_get_error_body<'h>(
 /// # Errors
 ///
 /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
-/// header value. Returns [`Error::InvalidPlan`] for a metadata pair, a
+/// header value. Returns [`Error::InvalidRequest`] for a metadata pair, a
 /// content property or a tag that Azure would not store as given, or a
-/// checksum other than an MD5 or a CRC64, which is [`InvalidPlan::Option`].
+/// checksum other than an MD5 or a CRC64, which is [`InvalidRequest::Option`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -637,7 +637,7 @@ pub fn prepare_put(
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
     if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let mut fields = FieldList::new();
     fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")));
@@ -695,11 +695,11 @@ fn describe_put<'p>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a write that the template
+/// Returns [`Error::InvalidRequest`] if `item` is not a write that the template
 /// writes, not a key that Azure takes, or content longer than
-/// [`MAX_PUT_LEN`], which is [`InvalidPlan::PayloadTooLarge`]. A checksum
+/// [`MAX_PUT_LEN`], which is [`InvalidRequest::PayloadTooLarge`]. A checksum
 /// that is not the base64 of a digest of the template's kind is
-/// [`InvalidPlan::Checksum`].
+/// [`InvalidRequest::Checksum`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -715,11 +715,11 @@ pub fn encode_put<'r>(
         checksum,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     if item.content.len() > MAX_PUT_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
+        return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_condition(condition, item.condition_value)?;
     validate_checksum_item(checksum, item.checksum)?;
@@ -805,7 +805,7 @@ pub fn accept_put_error_body<'h>(
 ///
 /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
 /// header value. A removal of a snapshot or a version that takes more than
-/// the object is [`InvalidPlan::Revision`]: it has no snapshots of its
+/// the object is [`InvalidRequest::Revision`]: it has no snapshots of its
 /// own, and Azure refuses `x-ms-delete-snapshots` beside one.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -818,7 +818,7 @@ pub fn prepare_delete(
     buf: &mut [u8],
 ) -> Result<Template> {
     if options.revision != RevisionKind::Current && options.kind != DeleteKind::Object {
-        return Err(InvalidPlan::Revision.into());
+        return Err(InvalidRequest::Revision.into());
     }
     // Azure refuses an object with snapshots when the header is absent,
     // which is the outcome a removal of the object alone asks for.
@@ -851,11 +851,11 @@ pub fn prepare_delete(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a removal that the
+/// Returns [`Error::InvalidRequest`] if `item` is not a removal that the
 /// template writes, or not a key that Azure takes: see
 /// [Object keys](crate#object-keys). A URL longer than [`MAX_URL_LEN`] is
-/// [`InvalidPlan::UrlTooLong`]. A template for another operation is
-/// [`InvalidPlan::Template`].
+/// [`InvalidRequest::UrlTooLong`]. A template for another operation is
+/// [`InvalidRequest::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -885,10 +885,10 @@ pub(in crate::azure) fn encode_object<'r>(
         ..
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if template.operation != operation {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
@@ -1058,7 +1058,7 @@ pub struct SnapshotOptions<'o> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a metadata pair that [`prepare_put`]
+/// Returns [`Error::InvalidRequest`] for a metadata pair that [`prepare_put`]
 /// refuses.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -1092,7 +1092,7 @@ pub fn prepare_snapshot(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a condition value that the
 /// template's condition does not take, for a revision, and for a template
 /// of another operation.
@@ -1165,13 +1165,13 @@ pub fn accept_snapshot_error_body<'h>(
 /// # Errors
 ///
 /// Returns [`Error::InvalidToken`] if `token` is not usable as one HTTP
-/// header value. Returns [`Error::InvalidPlan`] if `options` cannot become
+/// header value. Returns [`Error::InvalidRequest`] if `options` cannot become
 /// an Azure request:
 ///
-/// - [`InvalidPlan::MaxResults`] for a page of no entries.
-/// - [`InvalidPlan::Delimiter`] for an empty delimiter, and for any but `/`
+/// - [`InvalidRequest::MaxResults`] for a page of no entries.
+/// - [`InvalidRequest::Delimiter`] for an empty delimiter, and for any but `/`
 ///   on a [`AzureNamespace::Hierarchical`] account.
-/// - [`InvalidPlan::Option`] for [`ListInclude::OWNER`]: Azure names no
+/// - [`InvalidRequest::Option`] for [`ListInclude::OWNER`]: Azure names no
 ///   owner.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -1184,14 +1184,14 @@ pub fn prepare_list(
     buf: &mut [u8],
 ) -> Result<Template> {
     if options.max_results == Some(0) {
-        return Err(InvalidPlan::MaxResults.into());
+        return Err(InvalidRequest::MaxResults.into());
     }
     // A flat account groups names at any text. A hierarchical one groups
     // them at `/` alone, and answers any other with 400
     // `DelimiterIsInvalidForHNS`.
     validate_delimiter(options.delimiter, namespace == AzureNamespace::Hierarchical)?;
     if options.include.contains(ListInclude::OWNER) {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let mut words = [""; INCLUDE_WORDS.len()];
     let mut word_count = 0;
@@ -1258,15 +1258,15 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` cannot become an Azure request:
+/// Returns [`Error::InvalidRequest`] if `item` cannot become an Azure request:
 ///
-/// - [`InvalidPlan::Marker`] for a marker that is not
+/// - [`InvalidRequest::Marker`] for a marker that is not
 ///   [`ListMarker::Text`], or is empty.
-/// - [`InvalidPlan::Option`] for [`ListItem::start_after`]: Azure starts a
+/// - [`InvalidRequest::Option`] for [`ListItem::start_after`]: Azure starts a
 ///   listing only at its own marker.
-/// - [`InvalidPlan::UrlTooLong`] for a URL longer than [`MAX_URL_LEN`].
+/// - [`InvalidRequest::UrlTooLong`] for a URL longer than [`MAX_URL_LEN`].
 ///   A prefix is bounded by the URL alone.
-/// - [`InvalidPlan::Template`] for a template for another operation.
+/// - [`InvalidRequest::Template`] for a template for another operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1278,7 +1278,7 @@ pub fn encode_list<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
     let Detail::List = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     // No rule of `validate_key` applies to a prefix. It is written into the
     // query, where nothing resolves a `..` and nothing drops a trailing dot,
@@ -1292,10 +1292,10 @@ pub fn encode_list<'r>(
     let marker = match item.marker {
         None => None,
         Some(ListMarker::Text(marker)) if !marker.is_empty() => Some(marker),
-        Some(_) => return Err(InvalidPlan::Marker.into()),
+        Some(_) => return Err(InvalidRequest::Marker.into()),
     };
     if item.start_after.is_some() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let values = Values {
         now: Some(now),
@@ -1453,11 +1453,11 @@ fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutc
         // encode_get.
         206 if matches!(shape.range, RequestedRange::Suffix(_)) => Err(ResponseFault::Range.into()),
         200 | 206 => accept_success(shape, head),
-        // A conditional status the plan did not ask for is a contradiction,
-        // not an outcome: nothing in the plan explains it.
+        // A conditional status the request did not ask for is a contradiction,
+        // not an outcome: nothing in the request explains it.
         304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
         304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-        // A 412 is the plan's failed condition only if the plan carried
+        // A 412 is the request's failed condition only if the request carried
         // one and Azure names it. Azure also answers 412 for other
         // reasons, which reach the caller as the service failure they are.
         412 if shape.condition != ConditionKind::None
@@ -1482,10 +1482,10 @@ fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutc
 // Reject unsupported names before encoding, without losing the reason.
 pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     if key.is_empty() {
-        return Err(InvalidPlan::EmptyKey.into());
+        return Err(InvalidRequest::EmptyKey.into());
     }
     if namespace == AzureNamespace::Flat && name_units(key) > MAX_BLOB_NAME_UNITS {
-        return Err(InvalidPlan::KeyTooLong.into());
+        return Err(InvalidRequest::KeyTooLong.into());
     }
     // Each pass over the bytes finds what one rule below looks for. None
     // stops early, so each tests many bytes at once. The `/` are counted in
@@ -1515,14 +1515,14 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     // testing the characters: every byte of a character outside ASCII is 0x80
     // or above, and none of those is an ASCII control.
     if control {
-        return Err(InvalidPlan::KeyControlCharacter.into());
+        return Err(InvalidRequest::KeyControlCharacter.into());
     }
     // Azure takes a name of 255 `/`-delimited segments and refuses 256,
     // whatever the 254 in its documentation says. Measured by bisection
     // against the live service.
     // At most one segment per byte plus one; str lengths fit isize.
     if slashes + 1 > MAX_BLOB_NAME_SEGMENTS {
-        return Err(InvalidPlan::KeyTooManySegments.into());
+        return Err(InvalidRequest::KeyTooManySegments.into());
     }
     // Azure drops a dot from the end of every segment of a name: `dot.` is
     // stored as `dot`, and `dotseg./x` as `dotseg/x`. Measured; see the live
@@ -1534,7 +1534,7 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     // requires, so those would name another object entirely; measured, as
     // `dots/../up` wrote `up`.
     if dot_ends {
-        return Err(InvalidPlan::KeyWouldBeNormalized.into());
+        return Err(InvalidRequest::KeyWouldBeNormalized.into());
     }
     Ok(())
 }
@@ -1542,7 +1542,7 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 /// The most bytes that Azure writes in one `Put Blob` request.
 ///
 /// [`encode_put`] refuses a longer payload with
-/// [`InvalidPlan::PayloadTooLarge`]. Write a longer object in blocks. This
+/// [`InvalidRequest::PayloadTooLarge`]. Write a longer object in blocks. This
 /// is a `u64` because it does not fit a 32-bit `usize`.
 pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
@@ -1554,7 +1554,7 @@ pub(crate) fn azure_tag_char(character: char) -> bool {
 // The content properties, tags and access tier that a write stores with the
 // object, which `validate_options` checked.
 // One header per pair, named with the prefix and the pair's own name. The
-// plan was validated, so each name and each value is usable in a header.
+// options were validated, so each name and each value is usable in a header.
 // Azure names a metadata pair with a C# identifier: ASCII letters, digits
 // and underscores, and no leading digit. It refuses anything else with 400
 // `InvalidMetadata`. The total size of the pairs is the service's to check;
@@ -1568,7 +1568,7 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
-            return Err(InvalidPlan::MetadataName.into());
+            return Err(InvalidRequest::MetadataName.into());
         }
         // A value is sent as one header value. HTTP drops the spaces at
         // either end of one, so a value with those would not be stored as it
@@ -1579,17 +1579,17 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
             || pair.value.starts_with(' ')
             || pair.value.ends_with(' ')
         {
-            return Err(InvalidPlan::MetadataValue.into());
+            return Err(InvalidRequest::MetadataValue.into());
         }
         // Azure matches a name without case, so two pairs that differ only in
         // case name the same pair and the request would say what it stores
-        // twice. A plan carries a handful of pairs, so each is compared
+        // twice. A request carries a handful of pairs, so each is compared
         // against the ones before it.
         if metadata[..index]
             .iter()
             .any(|earlier| earlier.name.eq_ignore_ascii_case(pair.name))
         {
-            return Err(InvalidPlan::MetadataDuplicate.into());
+            return Err(InvalidRequest::MetadataDuplicate.into());
         }
     }
     Ok(())

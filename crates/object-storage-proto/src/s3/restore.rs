@@ -13,7 +13,7 @@ use crate::s3::{Bucket, ObjectText, encode_object, prepare_object};
 use crate::s3::{Service, body_kind, failed};
 use crate::sigv4::Credentials;
 use crate::{
-    ConditionKind, Failure, InvalidPlan, ResponseFault, ResponseHead, RestoreHeadOutcome,
+    ConditionKind, Failure, InvalidRequest, ResponseFault, ResponseHead, RestoreHeadOutcome,
     RestorePriority, Result, Timestamps,
 };
 use crate::{ObjectItem, RestoreOptions};
@@ -51,9 +51,9 @@ fn write_restore_request(out: &mut dyn ByteSink, days: Option<u32>, priority: Re
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Option`] for a directory bucket, which archives
+/// Returns [`InvalidRequest::Option`] for a directory bucket, which archives
 /// nothing, for a tier, which S3 does not take, and for zero days;
-/// [`InvalidPlan::Revision`] for a snapshot.
+/// [`InvalidRequest::Revision`] for a snapshot.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -67,7 +67,7 @@ pub fn prepare_restore(
     // day.
     if bucket.service == Service::AwsDirectory || options.tier.is_some() || options.days == Some(0)
     {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let (days, priority) = (options.days, options.priority);
     let write = move |out: &mut dyn ByteSink| write_restore_request(out, days, priority);
@@ -91,7 +91,7 @@ pub fn prepare_restore(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that S3 refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that S3 refuses, see
 /// [Object keys](crate#object-keys), for a version that is not the
 /// template's kind, for a condition value, and for a template of another
 /// operation.

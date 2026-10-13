@@ -17,7 +17,7 @@ use crate::{ObjectItem, RevisionKind};
 // Only the links in the doc comments use this, so it is imported for rustdoc
 // alone: a normal build would report it unused.
 #[cfg(doc)]
-use crate::{Error, InvalidPlan};
+use crate::{Error, InvalidRequest};
 
 const TAGGING_OPEN: &[u8] = b"<Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 const TAGGING_CLOSE: &[u8] = b"</Tagging>";
@@ -38,8 +38,8 @@ fn write_tagging(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Tag`] for a tag that breaks the rules of [`Tag`],
-/// and [`InvalidPlan::Revision`] for a snapshot.
+/// Returns [`InvalidRequest::Tag`] for a tag that breaks the rules of [`Tag`],
+/// and [`InvalidRequest::Revision`] for a snapshot.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -74,7 +74,7 @@ pub fn prepare_put_tagging(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that S3 refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that S3 refuses, see
 /// [Object keys](crate#object-keys), for a version that is not the
 /// template's kind, for a condition value, and for a template of another
 /// operation.
@@ -118,7 +118,7 @@ pub fn accept_update_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> Update
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Revision`] for a snapshot.
+/// Returns [`InvalidRequest::Revision`] for a snapshot.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.

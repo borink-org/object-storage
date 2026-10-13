@@ -31,8 +31,8 @@ use crate::http::PlainHttp;
 use crate::template::{Body, Hole, ParamValue, Values, WireRequest};
 use crate::url::QueryValue;
 use crate::{
-    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidPlan, Method, ObjectMeta, Payload,
-    PutHeadOutcome, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
+    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidRequest, Method, ObjectMeta,
+    Payload, PutHeadOutcome, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
     UpdateHeadOutcome,
 };
 use crate::{CopyItem, CopyOptions, MetadataPair, Ranging, RevisionKind, WriteOptions};
@@ -99,26 +99,26 @@ fn validate_copy_options(
             || options.tags.is_some()
             || options.options != WriteOptions::default())
     {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     if !staged && options.source_ranging == Ranging::Ranged {
-        return Err(InvalidPlan::Range.into());
+        return Err(InvalidRequest::Range.into());
     }
     match options.metadata {
-        Some([]) => return Err(InvalidPlan::Option.into()),
+        Some([]) => return Err(InvalidRequest::Option.into()),
         Some(metadata) => validate_metadata(metadata)?,
         None => {}
     }
     // A copy names its tags apart, so that none can differ from the
     // source's, and has nothing of its own to sum.
     if !options.options.tags.is_empty() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     // A Copy Blob takes the source's content properties.
     if matches!(kind, CopyKind::Copy | CopyKind::CopyFromUrl)
         && !options.options.properties.is_empty()
     {
-        return Err(InvalidPlan::ContentProperty.into());
+        return Err(InvalidRequest::ContentProperty.into());
     }
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(
@@ -134,7 +134,7 @@ fn validate_source_location(endpoint: Option<&str>, container: Option<&str>) -> 
     if endpoint
         .is_some_and(|endpoint| !crate::http::valid_http_origin(endpoint, PlainHttp::Refused))
     {
-        return Err(InvalidPlan::CopySource.into());
+        return Err(InvalidRequest::CopySource.into());
     }
     crate::common::validate_source_container(container)
 }
@@ -275,10 +275,10 @@ fn encode_copy_kind<'r>(
         source_ranging,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if template.operation != kind.operation() {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key, template.namespace)?;
@@ -315,11 +315,11 @@ fn encode_copy_kind<'r>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for options that Azure refuses:
-/// [`InvalidPlan::CopySource`] for a source origin that is not one of TLS,
+/// Returns [`Error::InvalidRequest`] for options that Azure refuses:
+/// [`InvalidRequest::CopySource`] for a source origin that is not one of TLS,
 /// or a source container that is empty or holds `/`, `?` or `#`;
-/// [`InvalidPlan::ContentProperty`] for a content property, which a copy
-/// takes from its source; [`InvalidPlan::Option`] for a checksum, for tags
+/// [`InvalidRequest::ContentProperty`] for a content property, which a copy
+/// takes from its source; [`InvalidRequest::Option`] for a checksum, for tags
 /// in [`CopyOptions::options`], and for an empty set of metadata; and the
 /// refusals of [`prepare_put`](crate::azure::prepare_put) for metadata and
 /// tags.
@@ -391,7 +391,7 @@ pub fn prepare_put_from_url(
 /// # Errors
 ///
 /// As [`prepare_copy`]. A block stores nothing of its own, so options
-/// beyond the source's are [`InvalidPlan::Option`].
+/// beyond the source's are [`InvalidRequest::Option`].
 pub fn prepare_stage_block_from_url(
     container: &Container<'_>,
     token: &str,
@@ -414,7 +414,7 @@ pub fn prepare_stage_block_from_url(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key of the target or the source
+/// Returns [`Error::InvalidRequest`] for a key of the target or the source
 /// that Azure refuses, see [Object keys](crate#object-keys), for a revision
 /// or a condition value that the template does not take, and for a template
 /// of another operation.
@@ -472,7 +472,7 @@ pub fn encode_put_from_url<'r>(
 /// As [`encode_copy`], with a block ID that breaks the rules of
 /// [`BlockRef::id`](crate::azure::BlockRef::id), and a range of the source
 /// that is empty, or that is not bounded where the template names one:
-/// [`InvalidPlan::Range`], or [`InvalidPlan::UnsupportedRange`] for a
+/// [`InvalidRequest::Range`], or [`InvalidRequest::UnsupportedRange`] for a
 /// suffix or an offset.
 pub fn encode_stage_block_from_url<'r>(
     template: &Template,
@@ -644,9 +644,9 @@ fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
-/// [Object keys](crate#object-keys), [`InvalidPlan::Option`] for an empty
-/// copy ID, and [`InvalidPlan::Template`] for a template of another
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), [`InvalidRequest::Option`] for an empty
+/// copy ID, and [`InvalidRequest::Template`] for a template of another
 /// operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -659,11 +659,11 @@ pub fn encode_abort_copy<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
     if template.operation != Operation::AbortCopy {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     if item.copy_id.is_empty() {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let values = Values {
         now: Some(now),

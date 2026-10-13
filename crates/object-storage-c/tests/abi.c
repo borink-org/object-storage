@@ -396,7 +396,7 @@ static void an_unknown_number_is_refused(void) {
     const borink_prepared refused = borink_prepare_get(
         &container, as_bytes("token"), BORINK_AZURE_NAMESPACE_UNKNOWN, &options, (borink_bytes_mut){buffer, sizeof buffer});
 
-    CHECK(refused.status.code == BORINK_ERROR_CODE_INVALID_PLAN);
+    CHECK(refused.status.code == BORINK_ERROR_CODE_INVALID_REQUEST);
     CHECK(refused.required == 0);
 
     // A template that this library did not write is refused too.
@@ -406,7 +406,7 @@ static void an_unknown_number_is_refused(void) {
     const borink_wire_request request = borink_encode_get(
         &zeros, (borink_bytes){buffer, sizeof buffer}, &item, &now,
         (borink_bytes_mut){buffer, 0});
-    CHECK(request.status.code == BORINK_ERROR_CODE_INVALID_PLAN);
+    CHECK(request.status.code == BORINK_ERROR_CODE_INVALID_REQUEST);
 }
 
 // A blob written in blocks. Each block is staged on its own, and then one

@@ -423,7 +423,7 @@ impl PageSource for BlobPages<'_> {
     }
 }
 
-/// A listed blob, and whether the plan asked for its metadata, which the
+/// A listed blob, and whether the listing asked for its metadata, which the
 /// result reports as an empty set when the blob has none.
 #[derive(Clone, Copy, Default)]
 struct ListedBlob<'b> {
@@ -850,7 +850,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 /// Returns the reason the crate cannot express a call field, for the fields it lacks.
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
-        "lease_id" => Some("the crate's plans carry no lease ID"),
+        "lease_id" => Some("the crate's requests carry no lease ID"),
         _ => None,
     }
 }

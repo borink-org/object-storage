@@ -24,7 +24,7 @@ use crate::template::{
     self, Body, Builder, Fill, Hole, Param, ParamValue, Pass, Section, Table, Values, WireRequest,
     Written,
 };
-use crate::{Error, InvalidPlan, MetadataPair, Method, Payload, Result, Span, Tag, Timestamps};
+use crate::{Error, InvalidRequest, MetadataPair, Method, Payload, Result, Span, Tag, Timestamps};
 
 /// The operation that a template writes requests for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,12 +143,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
         match self.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -156,12 +156,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn put_shape(&self) -> Result<crate::PutShape> {
         match self.detail {
             Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -169,7 +169,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
         match (self.operation, self.detail) {
@@ -177,7 +177,7 @@ impl Template {
                 kind: crate::DeleteKind::Object,
                 condition,
             }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -185,12 +185,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
         match self.detail {
             Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -198,7 +198,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
         match self.detail {
@@ -210,7 +210,7 @@ impl Template {
                 condition,
                 source_condition,
             }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -219,7 +219,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] if they are not.
+    /// Returns [`InvalidRequest::Template`] if they are not.
     pub fn check(&self, bytes: &[u8]) -> Result<()> {
         self.table.check(bytes)
     }
@@ -244,7 +244,7 @@ impl Template {
 // The value of one field that every request sends alike.
 #[derive(Clone, Copy)]
 pub(super) enum Value<'p> {
-    // Text from the plan, which SigV4 signs with its spaces folded.
+    // Text from the options or the item, which SigV4 signs with its spaces folded.
     Bytes(&'p [u8]),
     // Text that this crate formats, which holds no space to fold.
     Formatted(&'p [u8]),
@@ -495,7 +495,7 @@ impl<'p> Sorted<'p> {
         let mut count = 1;
         for field in signed.iter().chain(extra) {
             if count == MAX_SIGNED {
-                return Err(InvalidPlan::RequestTooLarge.into());
+                return Err(InvalidRequest::RequestTooLarge.into());
             }
             let mut at = count;
             while at > 1
@@ -918,7 +918,7 @@ fn write_signed_names(out: &mut Writer<'_>, fixed: &Fixed<'_>, holes: &Holes<'_>
 ///
 /// A bucket that names an object makes a template of that object, whose text
 /// holds the key. An operation that names no object refuses such a bucket
-/// with [`InvalidPlan::Option`].
+/// with [`InvalidRequest::Option`].
 pub(super) fn prepare<const Q: usize>(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
@@ -930,7 +930,7 @@ pub(super) fn prepare<const Q: usize>(
             super::validate_key(key)?;
             Some(key)
         }
-        Some(_) => return Err(InvalidPlan::Option.into()),
+        Some(_) => return Err(InvalidRequest::Option.into()),
         None => None,
     };
     let token = credentials.token().header();
@@ -1058,7 +1058,7 @@ fn put(buf: &mut [u8], span: Span, text: &[u8]) {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Checksum`] for a digest of another kind than the
+/// Returns [`InvalidRequest::Checksum`] for a digest of another kind than the
 /// template's.
 pub fn set_body_checksum(
     unsigned: &Unsigned<'_>,
@@ -1069,7 +1069,7 @@ pub fn set_body_checksum(
         return Ok(());
     }
     if unsigned.body_checksum != Some(digest.kind()) {
-        return Err(InvalidPlan::Checksum.into());
+        return Err(InvalidRequest::Checksum.into());
     }
     let mut text = [0; crate::checksum::BASE64_LEN];
     // S3 reads a CRC64 in big-endian order.
@@ -1136,7 +1136,7 @@ impl Template {
             {
                 Ok(None)
             }
-            Some(_) => Err(InvalidPlan::Template.into()),
+            Some(_) => Err(InvalidRequest::Template.into()),
         }
     }
 }
@@ -1160,7 +1160,7 @@ pub fn string_to_sign_prefix<'o>(
     let scope = template.scope;
     let scope = bytes
         .get(scope.start..scope.start + scope.len)
-        .ok_or(InvalidPlan::Template)?;
+        .ok_or(InvalidRequest::Template)?;
     let mut at = 0;
     for piece in [
         ALGORITHM.as_bytes(),
@@ -1173,7 +1173,7 @@ pub fn string_to_sign_prefix<'o>(
     ] {
         let end = at + piece.len();
         out.get_mut(at..end)
-            .ok_or(InvalidPlan::Template)?
+            .ok_or(InvalidRequest::Template)?
             .copy_from_slice(piece);
         at = end;
     }
@@ -1205,7 +1205,7 @@ pub fn set_signature<'r>(
 /// # Errors
 ///
 /// Returns [`Error::InvalidCredentials`] if the secret of `credentials` is
-/// longer than [`MAX_SECRET_LEN`] bytes, and [`InvalidPlan::Template`] if
+/// longer than [`MAX_SECRET_LEN`] bytes, and [`InvalidRequest::Template`] if
 /// `bytes` are not the template's.
 pub fn signing_key(
     template: &Template,
@@ -1218,7 +1218,7 @@ pub fn signing_key(
     // The scope after its date and the `/` that follows it.
     let scope = bytes
         .get(scope.start + 1..scope.start + scope.len)
-        .ok_or(InvalidPlan::Template)?;
+        .ok_or(InvalidRequest::Template)?;
     let wipe = credentials.wipe();
     let secret = credentials.secret().as_bytes();
     if secret.len() > MAX_SECRET_LEN {

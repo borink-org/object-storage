@@ -8,7 +8,7 @@ use borink_object_storage_proto::s3::{self, Bucket, MAX_METADATA_LEN, PayloadSig
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
     BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions, Error,
-    GetHeadOutcome, InvalidPlan, MetadataPair, Payload, PutItem, PutOptions, ResponseFault,
+    GetHeadOutcome, InvalidRequest, MetadataPair, Payload, PutItem, PutOptions, ResponseFault,
     ResponseHead, Timestamps,
 };
 
@@ -196,16 +196,16 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
 
     assert_eq!(
         put(Service::Aws, &create, &etag),
-        Err(InvalidPlan::Condition.into())
+        Err(InvalidRequest::Condition.into())
     );
     assert_eq!(
         remove(Service::Aws, &delete),
-        Err(InvalidPlan::Condition.into())
+        Err(InvalidRequest::Condition.into())
     );
     assert_eq!(put(Service::Aws, &with(&fits), &plain), Ok(()));
     assert_eq!(
         put(Service::Aws, &with(&over), &plain),
-        Err(InvalidPlan::MetadataTooLarge.into())
+        Err(InvalidRequest::MetadataTooLarge.into())
     );
 
     assert_eq!(put(Service::Compatible, &create, &etag), Ok(()));
@@ -217,7 +217,7 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
     };
     assert_eq!(
         remove(Service::Compatible, &snapshots),
-        Err(InvalidPlan::Option.into())
+        Err(InvalidRequest::Option.into())
     );
     assert_eq!(put(Service::Compatible, &with(&over), &plain), Ok(()));
 }

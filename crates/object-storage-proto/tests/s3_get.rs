@@ -5,7 +5,7 @@ use borink_object_storage_proto::s3::{self, Addressing, Bucket, MAX_KEY_LEN, Ser
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
     BodyWindow, ConditionKind, Error, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
-    InvalidPlan, RequestedRange, ResponseFault, ResponseHead, Timestamps,
+    InvalidRequest, RequestedRange, ResponseFault, ResponseHead, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -42,10 +42,10 @@ fn url(bucket: Bucket<'_>, key: &str) -> String {
     encode(&bucket, GetOptions::new(), &GetItem::new(key)).unwrap()
 }
 
-fn refusal(result: Result<String, Error>) -> InvalidPlan {
+fn refusal(result: Result<String, Error>) -> InvalidRequest {
     match result {
-        Err(Error::InvalidPlan(reason)) => reason,
-        other => panic!("expected an invalid plan, got {other:?}"),
+        Err(Error::InvalidRequest(reason)) => reason,
+        other => panic!("expected an invalid request, got {other:?}"),
     }
 }
 
@@ -111,22 +111,22 @@ fn a_read_that_s3_cannot_take_is_refused() {
     let get = |options, item: GetItem<'_>| refusal(encode(&bucket, options, &item));
     let plain = GetOptions::new();
     let long = "k".repeat(MAX_KEY_LEN + 1);
-    assert_eq!(get(plain, GetItem::new("")), InvalidPlan::EmptyKey);
-    assert_eq!(get(plain, GetItem::new(&long)), InvalidPlan::KeyTooLong);
+    assert_eq!(get(plain, GetItem::new("")), InvalidRequest::EmptyKey);
+    assert_eq!(get(plain, GetItem::new(&long)), InvalidRequest::KeyTooLong);
     assert_eq!(
         get(plain, GetItem::new("a/../b")),
-        InvalidPlan::KeyWouldBeNormalized
+        InvalidRequest::KeyWouldBeNormalized
     );
     assert_eq!(
         get(plain, GetItem::new("./b")),
-        InvalidPlan::KeyWouldBeNormalized
+        InvalidRequest::KeyWouldBeNormalized
     );
     assert_eq!(
         get(
             plain.ranged(),
             GetItem::new("k").with_range(RequestedRange::Suffix(0))
         ),
-        InvalidPlan::Range
+        InvalidRequest::Range
     );
     assert_eq!(
         get(
@@ -136,23 +136,23 @@ fn a_read_that_s3_cannot_take_is_refused() {
             },
             GetItem::new("k")
         ),
-        InvalidPlan::Condition
+        InvalidRequest::Condition
     );
     // A template of ranged HEADs, or of snapshots, is never written.
     let mut bytes = [0; 1024];
     for (options, reason) in [
-        (GetOptions::head().ranged(), InvalidPlan::RangedHead),
+        (GetOptions::head().ranged(), InvalidRequest::RangedHead),
         (
             GetOptions {
                 revision: borink_object_storage_proto::RevisionKind::Snapshot,
                 ..plain
             },
-            InvalidPlan::Revision,
+            InvalidRequest::Revision,
         ),
     ] {
         assert_eq!(
             s3::prepare_get(&bucket, &credentials(), &options, &mut bytes).err(),
-            Some(Error::InvalidPlan(reason))
+            Some(Error::InvalidRequest(reason))
         );
     }
     // A key of exactly the limit is sent.

@@ -125,7 +125,7 @@
 //! [`metadata_name`], and its value to [`metadata_value`].
 //!
 //! A value that a read would not return exactly is refused with
-//! [`InvalidPlan::MetadataValue`].
+//! [`InvalidRequest::MetadataValue`].
 //! [`MetadataPair::value`](crate::MetadataPair::value) lists those values.
 //!
 //! # Listing
@@ -285,7 +285,7 @@
 //! - Requests are signed for the service `s3express`, and go to
 //!   virtual-hosted URLs.
 //! - A listing prefix ends in `/`. Any other is refused with
-//!   [`InvalidPlan::Prefix`].
+//!   [`InvalidRequest::Prefix`].
 //! - A directory bucket stores an RFC 2047 encoded word as it is sent. So a
 //!   metadata value that a general purpose bucket would store other than as
 //!   given, such as one with a line break, is sent as an encoded word rather
@@ -300,7 +300,7 @@
 //!   by your own credentials, not by a session's: AWS refuses the
 //!   credentials of a session for it. Write its template with your own
 //!   credentials, which sign it for `s3express` too. A template written
-//!   with a session's credentials is refused with [`InvalidPlan::Option`].
+//!   with a session's credentials is refused with [`InvalidRequest::Option`].
 //!
 //! # Content that is not signed
 //!
@@ -325,7 +325,7 @@ use crate::request::ByteSink;
 use crate::sigv4::{Credentials, MAX_REGION_LEN};
 use crate::{
     Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteShape,
-    Error, Failure, GetHeadOutcome, GetKind, GetShape, InvalidPlan, ListEntry, ListHeadOutcome,
+    Error, Failure, GetHeadOutcome, GetKind, GetShape, InvalidRequest, ListEntry, ListHeadOutcome,
     ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome,
     PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
     WriteOptions,
@@ -391,13 +391,13 @@ const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 /// The most bytes that an S3 object key holds.
 ///
 /// Every encoding method refuses a longer key with
-/// [`InvalidPlan::KeyTooLong`]. S3 counts the bytes of the key's UTF-8.
+/// [`InvalidRequest::KeyTooLong`]. S3 counts the bytes of the key's UTF-8.
 pub const MAX_KEY_LEN: usize = 1024;
 
 /// The most bytes that S3 writes in one `PutObject` request.
 ///
 /// [`encode_put`] refuses a longer payload with
-/// [`InvalidPlan::PayloadTooLarge`].
+/// [`InvalidRequest::PayloadTooLarge`].
 pub const MAX_PUT_LEN: u64 = 5 * 1024 * 1024 * 1024;
 
 /// The prefix of the header that carries one metadata pair.
@@ -477,7 +477,7 @@ impl Addressing {
 pub enum Service {
     /// Amazon S3, with a general purpose bucket.
     ///
-    /// The client refuses a plan that AWS refuses, and a response that AWS
+    /// This crate refuses a request that AWS refuses, and a response that AWS
     /// does not send:
     ///
     /// - A bucket name has 3 to 63 lowercase letters, digits, `.` and `-`.
@@ -498,7 +498,7 @@ pub enum Service {
     ///
     /// - A bucket name holds ASCII letters, digits, `-`, `.`, `_` and `~`.
     /// - A region name holds ASCII letters, digits, `-`, `.` and `_`.
-    /// - A condition is sent as the plan gives it, and the metadata of a write
+    /// - A condition is sent as the item gives it, and the metadata of a write
     ///   may be of any size.
     /// - A successful GET or HEAD may leave out `Content-Length`.
     /// - A removal succeeds with status 200 or 204.
@@ -672,11 +672,11 @@ impl<'a> Bucket<'a> {
     /// A template prepared from it writes the key as fixed text, checked
     /// once, and so does each request's line and canonical request: a
     /// request of it checks and encodes no key. Pass each encoding function
-    /// an empty key, or this one; any other is [`InvalidPlan::Template`].
+    /// an empty key, or this one; any other is [`InvalidRequest::Template`].
     /// Keep one template for each object you read or write often, such as
     /// the files of a database. An operation that names no object, such as
     /// a listing, refuses a bucket that names one with
-    /// [`InvalidPlan::Option`].
+    /// [`InvalidRequest::Option`].
     #[must_use]
     pub const fn object(self, key: &'a str) -> Self {
         Self {
@@ -1101,9 +1101,9 @@ pub fn accept_get_head<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if the reads cannot be S3 requests: a
-/// ranged HEAD is [`InvalidPlan::RangedHead`], and a snapshot is
-/// [`InvalidPlan::Revision`].
+/// Returns [`Error::InvalidRequest`] if the reads cannot be S3 requests: a
+/// ranged HEAD is [`InvalidRequest::RangedHead`], and a snapshot is
+/// [`InvalidRequest::Revision`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1146,9 +1146,9 @@ const fn version_param(revision: RevisionKind) -> Param<'static> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a read that the template
+/// Returns [`Error::InvalidRequest`] if `item` is not a read that the template
 /// writes, or not a key that S3 takes: see [Object keys](crate#object-keys).
-/// A template for another operation is [`InvalidPlan::Template`].
+/// A template for another operation is [`InvalidRequest::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1160,7 +1160,7 @@ pub fn encode_get(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     let Detail::Get(options) = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     validate_get_item(&options, item)?;
@@ -1220,9 +1220,9 @@ pub enum PayloadSigning {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a metadata pair, a content property,
+/// Returns [`Error::InvalidRequest`] for a metadata pair, a content property,
 /// a storage class or a tag that S3 would not store as given. For
-/// [`Service::Aws`], a date condition is [`InvalidPlan::Condition`].
+/// [`Service::Aws`], a date condition is [`InvalidRequest::Condition`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1238,7 +1238,7 @@ pub fn prepare_put(
     validate_stored(&options.options, service)?;
     let aws = matches!(service, Service::Aws | Service::AwsDirectory);
     if aws && options.condition.is_date() {
-        return Err(InvalidPlan::Condition.into());
+        return Err(InvalidRequest::Condition.into());
     }
     let mut signed = FieldList::new();
     push_stored(&mut signed, &options.options);
@@ -1287,13 +1287,13 @@ fn describe_put(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a write that the template
+/// Returns [`Error::InvalidRequest`] if `item` is not a write that the template
 /// writes, or not a key that S3 takes. Content longer than [`MAX_PUT_LEN`]
-/// is [`InvalidPlan::PayloadTooLarge`]. A checksum that is not the base64 of
-/// a digest of the template's kind is [`InvalidPlan::Checksum`]. A SHA-256
+/// is [`InvalidRequest::PayloadTooLarge`]. A checksum that is not the base64 of
+/// a digest of the template's kind is [`InvalidRequest::Checksum`]. A SHA-256
 /// that the template does not take, or one missing that it does, is
-/// [`InvalidPlan::Option`]. For [`Service::Aws`], `If-None-Match` with any
-/// value but `*` is [`InvalidPlan::Condition`].
+/// [`InvalidRequest::Option`]. For [`Service::Aws`], `If-None-Match` with any
+/// value but `*` is [`InvalidRequest::Condition`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1311,18 +1311,18 @@ pub fn encode_put<'i>(
         signing,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
     if item.content.len() > MAX_PUT_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
+        return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_write_condition(condition, item.condition_value, template.service)?;
     validate_checksum_item(checksum, item.checksum)?;
     let hex = match (signing, content_sha256) {
         (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex(digest)),
         (PayloadSigning::Unsigned, None) => None,
-        _ => return Err(InvalidPlan::Option.into()),
+        _ => return Err(InvalidRequest::Option.into()),
     };
     let mut text = [0; BASE64_LEN];
     let values = S3Values(Values {
@@ -1391,13 +1391,13 @@ pub fn accept_put_error_body<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `options` cannot become an S3
+/// Returns [`Error::InvalidRequest`] if `options` cannot become an S3
 /// request:
 ///
-/// - [`InvalidPlan::Option`] for a [`DeleteKind`] other than
+/// - [`InvalidRequest::Option`] for a [`DeleteKind`] other than
 ///   [`DeleteKind::Object`]. S3 keeps no snapshots.
-/// - [`InvalidPlan::Revision`] for a snapshot.
-/// - [`InvalidPlan::Condition`] for any condition but
+/// - [`InvalidRequest::Revision`] for a snapshot.
+/// - [`InvalidRequest::Condition`] for any condition but
 ///   [`ConditionKind::IfMatch`], for [`Service::Aws`] and
 ///   [`Service::AwsDirectory`]. AWS removes on `If-Match` only.
 ///
@@ -1410,7 +1410,7 @@ pub fn prepare_delete(
     buf: &mut [u8],
 ) -> Result<Template> {
     if options.kind != DeleteKind::Object {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     // AWS removes on `If-Match` alone.
     if bucket.service.is_aws()
@@ -1419,7 +1419,7 @@ pub fn prepare_delete(
             ConditionKind::None | ConditionKind::IfMatch
         )
     {
-        return Err(InvalidPlan::Condition.into());
+        return Err(InvalidRequest::Condition.into());
     }
     prepare_object(
         bucket,
@@ -1444,10 +1444,10 @@ pub fn prepare_delete(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` is not a removal that the
+/// Returns [`Error::InvalidRequest`] if `item` is not a removal that the
 /// template writes, or not a key that S3 takes: see
 /// [Object keys](crate#object-keys). A template for another operation is
-/// [`InvalidPlan::Template`].
+/// [`InvalidRequest::Template`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1515,11 +1515,11 @@ pub fn accept_delete_error_body<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `options` cannot become an S3 request:
+/// Returns [`Error::InvalidRequest`] if `options` cannot become an S3 request:
 ///
-/// - [`InvalidPlan::Delimiter`] for an empty delimiter, and for any but `/`
+/// - [`InvalidRequest::Delimiter`] for an empty delimiter, and for any but `/`
 ///   on a [directory bucket](self#directory-buckets).
-/// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`] and
+/// - [`InvalidRequest::Option`] for [`ListInclude::METADATA`] and
 ///   [`ListInclude::SNAPSHOTS`], which S3 does not list, and for
 ///   [`ListInclude::VERSIONS`] on a directory bucket, which keeps no
 ///   versions.
@@ -1543,7 +1543,7 @@ pub fn prepare_list(
         .intersects(ListInclude::METADATA | ListInclude::SNAPSHOTS)
         || (versions && directory)
     {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let detail = Detail::List {
         include: options.include,
@@ -1630,15 +1630,15 @@ fn describe_list<'p>(detail: Detail, options: Option<&ListOptions<'p>>) -> Descr
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] if `item` cannot become an S3 request:
+/// Returns [`Error::InvalidRequest`] if `item` cannot become an S3 request:
 ///
-/// - [`InvalidPlan::Marker`] for a marker of the other kind than the
+/// - [`InvalidRequest::Marker`] for a marker of the other kind than the
 ///   listing hands out, or an empty one.
-/// - [`InvalidPlan::Prefix`] for a prefix that does not end in `/`, on a
+/// - [`InvalidRequest::Prefix`] for a prefix that does not end in `/`, on a
 ///   [directory bucket](self#directory-buckets).
-/// - [`InvalidPlan::Option`] for [`ListItem::start_after`] in a listing of
+/// - [`InvalidRequest::Option`] for [`ListItem::start_after`] in a listing of
 ///   versions, which starts at its markers alone.
-/// - [`InvalidPlan::Template`] for a template for another operation.
+/// - [`InvalidRequest::Template`] for a template for another operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -1650,7 +1650,7 @@ pub fn encode_list(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     let detail @ Detail::List { include, .. } = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     // A listing continues from the kind of marker that its pages hand out,
     // and S3 hands out no empty one: a version marker names a key.
@@ -1663,17 +1663,17 @@ pub fn encode_list(
         {
             (Some(key), version)
         }
-        Some(_) => return Err(InvalidPlan::Marker.into()),
+        Some(_) => return Err(InvalidRequest::Marker.into()),
     };
     // A directory bucket lists only at a prefix that ends in `/`.
     if template.service == Service::AwsDirectory
         && !item.prefix.is_empty()
         && !item.prefix.ends_with('/')
     {
-        return Err(InvalidPlan::Prefix.into());
+        return Err(InvalidRequest::Prefix.into());
     }
     if versions && item.start_after.is_some_and(|key| !key.is_empty()) {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     let values = S3Values(Values {
         now: Some(now),
@@ -1870,7 +1870,7 @@ pub(crate) fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
     out.push(&value[start..]);
 }
 
-// The pairs in the order of their lowercase names. A plan carries a handful
+// The pairs in the order of their lowercase names. A request carries a handful
 // of pairs, and validation refused two with the same name, so each step
 // finds the least name after the previous one.
 fn sorted_metadata<'m>(
@@ -1946,15 +1946,15 @@ fn looks_like_ipv4(name: &str) -> bool {
 
 pub(crate) fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
-        return Err(InvalidPlan::EmptyKey.into());
+        return Err(InvalidRequest::EmptyKey.into());
     }
     if key.len() > MAX_KEY_LEN {
-        return Err(InvalidPlan::KeyTooLong.into());
+        return Err(InvalidRequest::KeyTooLong.into());
     }
     // A host resolves `.` and `..` segments out of the URL before it sends
     // it, which would address another object.
     if has_dot_segment(key.as_bytes()) {
-        return Err(InvalidPlan::KeyWouldBeNormalized.into());
+        return Err(InvalidRequest::KeyWouldBeNormalized.into());
     }
     Ok(())
 }
@@ -2012,7 +2012,7 @@ pub(crate) fn validate_write_condition(
             || (condition == ConditionKind::IfNoneMatch
                 && value != Some(ConditionValue::ETag(b"*"))))
     {
-        return Err(InvalidPlan::Condition.into());
+        return Err(InvalidRequest::Condition.into());
     }
     Ok(())
 }
@@ -2023,7 +2023,7 @@ pub(crate) fn validate_write_condition(
 pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
         if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
-            return Err(InvalidPlan::MetadataName.into());
+            return Err(InvalidRequest::MetadataName.into());
         }
         // An empty value is a pair with no text, which S3 stores. A value is
         // refused if a read would not return it exactly. A general purpose
@@ -2033,13 +2033,13 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service)
         // directory bucket stores an encoded word as it is sent, so
         // `encodes` sends each of these values as one.
         if !stores_encoded_words(service) && general_purpose_changes(pair.value) {
-            return Err(InvalidPlan::MetadataValue.into());
+            return Err(InvalidRequest::MetadataValue.into());
         }
         if metadata[..index]
             .iter()
             .any(|earlier| earlier.name.eq_ignore_ascii_case(pair.name))
         {
-            return Err(InvalidPlan::MetadataDuplicate.into());
+            return Err(InvalidRequest::MetadataDuplicate.into());
         }
     }
     let len = metadata.iter().fold(0usize, |len, pair| {
@@ -2048,7 +2048,7 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service)
     });
     let limited = service.is_aws();
     if limited && len > MAX_METADATA_LEN {
-        return Err(InvalidPlan::MetadataTooLarge.into());
+        return Err(InvalidRequest::MetadataTooLarge.into());
     }
     Ok(())
 }
@@ -2210,10 +2210,10 @@ pub(in crate::s3) fn encode_object(
         checksum,
     } = template.detail
     else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if template.operation != operation {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
@@ -2242,7 +2242,7 @@ pub(in crate::s3) fn encode_object(
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Option`] unless the bucket is of
+/// Returns [`InvalidRequest::Option`] unless the bucket is of
 /// [`Service::AwsDirectory`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -2253,7 +2253,7 @@ pub fn prepare_create_session(
     buf: &mut [u8],
 ) -> Result<Template> {
     if bucket.service != Service::AwsDirectory {
-        return Err(InvalidPlan::Option.into());
+        return Err(InvalidRequest::Option.into());
     }
     template::prepare(bucket, credentials, &describe_session(), buf)
 }
@@ -2279,7 +2279,7 @@ fn describe_session() -> Describe<'static, 4> {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Template`] for a template of another operation.
+/// Returns [`InvalidRequest::Template`] for a template of another operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -2290,7 +2290,7 @@ pub fn encode_create_session(
     buf: &mut [u8],
 ) -> Result<Unsigned<'static>> {
     if template.operation != Operation::CreateSession {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     }
     let values = S3Values(Values {
         now: Some(now),

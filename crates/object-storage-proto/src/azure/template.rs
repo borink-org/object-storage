@@ -16,7 +16,7 @@ use crate::template::{
     WireRequest,
 };
 use crate::{
-    ConditionKind, GetKind, GetOptions, InvalidPlan, MetadataPair, Method, Payload, Ranging,
+    ConditionKind, GetKind, GetOptions, InvalidRequest, MetadataPair, Method, Payload, Ranging,
     Result, RevisionKind, Span, Tag,
 };
 
@@ -134,7 +134,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] if they are not.
+    /// Returns [`InvalidRequest::Template`] if they are not.
     pub fn check(&self, bytes: &[u8]) -> Result<()> {
         self.table.check(bytes)
     }
@@ -149,12 +149,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
         match self.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -162,12 +162,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn put_shape(&self) -> Result<crate::PutShape> {
         match self.detail {
             Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -175,7 +175,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
         match (self.operation, self.detail) {
@@ -188,7 +188,7 @@ impl Template {
                 kind: delete,
                 condition,
             }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -196,12 +196,12 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
         match self.detail {
             Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -209,7 +209,7 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
     pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
         match self.detail {
@@ -221,7 +221,7 @@ impl Template {
                 condition,
                 source_condition,
             }),
-            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -317,16 +317,16 @@ impl Template {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPlan::Template`] if `stored` was changed since it
+    /// Returns [`InvalidRequest::Template`] if `stored` was changed since it
     /// was stored, or holds a value that no template holds.
     pub fn from_bytes(stored: &[u8; Self::STORED_LEN]) -> Result<Self> {
         let (values, hash) = stored
             .split_last_chunk::<8>()
-            .ok_or(InvalidPlan::Template)?;
+            .ok_or(InvalidRequest::Template)?;
         if template::fingerprint(values) != u64::from_le_bytes(*hash) {
-            return Err(InvalidPlan::Template.into());
+            return Err(InvalidRequest::Template.into());
         }
-        load(values).ok_or_else(|| InvalidPlan::Template.into())
+        load(values).ok_or_else(|| InvalidRequest::Template.into())
     }
 }
 
@@ -769,7 +769,7 @@ pub(super) fn layout<P: Pass, const Q: usize>(
 ///
 /// A container that names an object makes a template of that object, whose
 /// text holds the key. An operation that names no object refuses such a
-/// container with [`InvalidPlan::Option`].
+/// container with [`InvalidRequest::Option`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare<const Q: usize>(
     container: &Container<'_>,
@@ -787,13 +787,13 @@ pub(super) fn prepare<const Q: usize>(
     let (scheme, host) = container
         .endpoint
         .split_once("://")
-        .ok_or(InvalidPlan::Template)?;
+        .ok_or(InvalidRequest::Template)?;
     let object = match container.object {
         Some(key) if describe.key => {
             super::validate_key(key, namespace)?;
             Some(key)
         }
-        Some(_) => return Err(InvalidPlan::Option.into()),
+        Some(_) => return Err(InvalidRequest::Option.into()),
         None => None,
     };
     let fixed = Fixed {
@@ -841,7 +841,7 @@ pub(super) fn encode<'r, F: Fill, const Q: usize>(
     if !surely_short {
         let values = *fill.values();
         if template::url_len(&template.table, bytes, &values)? > MAX_URL_LEN {
-            return Err(InvalidPlan::UrlTooLong.into());
+            return Err(InvalidRequest::UrlTooLong.into());
         }
     }
     let mut out = Writer::new(buf);
@@ -878,7 +878,7 @@ impl Template {
             {
                 Ok(None)
             }
-            Some(_) => Err(InvalidPlan::Template.into()),
+            Some(_) => Err(InvalidRequest::Template.into()),
         }
     }
 }

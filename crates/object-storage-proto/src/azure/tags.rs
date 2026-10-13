@@ -1,7 +1,7 @@
 // The Azure requests that change what Azure stores about a blob without
 // writing its content: Set Blob Tags and Get Blob Tags, Set Blob Tier, Set
 // Blob Metadata and Set Blob Properties. A write stores each of these with
-// the blob as well, through its plan and its `WriteOptions`.
+// the blob as well, through its options and their `WriteOptions`.
 
 // Only the links in the doc comments use this, so it is imported for rustdoc
 // alone: a normal build would report it unused.
@@ -18,9 +18,9 @@ use crate::common::{
 };
 use crate::template::WireRequest;
 use crate::{
-    ConditionKind, ContentProperties, Failure, InvalidPlan, MetadataPair, ObjectItem, ObjectMeta,
-    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Tag, TagsHeadOutcome,
-    Timestamps, UpdateHeadOutcome, WriteOptions,
+    ConditionKind, ContentProperties, Failure, InvalidRequest, MetadataPair, ObjectItem,
+    ObjectMeta, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Tag,
+    TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WriteOptions,
 };
 
 // The document that Set Blob Tags sends and Get Blob Tags answers with.
@@ -34,7 +34,7 @@ fn write_tags_document(out: &mut dyn crate::request::ByteSink, tags: &[Tag<'_>])
 }
 
 // Reads the head of a request that changes the object and returns no body.
-// Azure names the error of a failure in its head. A 412 is the plan's failed
+// Azure names the error of a failure in its head. A 412 is the request's failed
 // `condition` only if it carried one and Azure names a failed condition.
 pub(super) fn accept_update<'h>(
     head: ResponseHead<'h>,
@@ -90,7 +90,7 @@ pub struct SetPropertiesOptions<'o> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidToken`] for a token that is not one header value,
-/// and [`InvalidPlan::ContentProperty`] for a tier that is not one either.
+/// and [`InvalidRequest::ContentProperty`] for a tier that is not one either.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
@@ -102,7 +102,7 @@ pub fn prepare_set_tier(
     buf: &mut [u8],
 ) -> Result<Template> {
     if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
-        return Err(InvalidPlan::ContentProperty.into());
+        return Err(InvalidRequest::ContentProperty.into());
     }
     let fields = [
         Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
@@ -128,7 +128,7 @@ pub fn prepare_set_tier(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a key that Azure refuses, see
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
 /// [Object keys](crate#object-keys), for a condition value or a revision,
 /// which the template does not carry, and for a template of another
 /// operation.
@@ -159,7 +159,7 @@ pub fn accept_set_tier_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutc
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a metadata pair that
+/// Returns [`Error::InvalidRequest`] for a metadata pair that
 /// [`prepare_put`](crate::azure::prepare_put) refuses.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -227,7 +227,7 @@ pub fn accept_set_metadata_head<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPlan`] for a content property that
+/// Returns [`Error::InvalidRequest`] for a content property that
 /// [`prepare_put`](crate::azure::prepare_put) refuses.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -306,7 +306,7 @@ pub fn accept_update_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> Update
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Tag`] for a tag that breaks the rules of [`Tag`].
+/// Returns [`InvalidRequest::Tag`] for a tag that breaks the rules of [`Tag`].
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.

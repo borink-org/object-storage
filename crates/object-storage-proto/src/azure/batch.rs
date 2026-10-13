@@ -31,7 +31,7 @@ use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
 use crate::url;
 use crate::url::QueryValue;
 use crate::{
-    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, InvalidPlan,
+    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, InvalidRequest,
     Method, ResponseFault, ResponseHead, Result, Timestamps,
 };
 
@@ -249,9 +249,9 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 ///
 /// # Errors
 ///
-/// Returns [`InvalidPlan::Keys`] for no object or more than
-/// [`MAX_BATCH_KEYS`], [`Error::InvalidPlan`] for a key or a revision that
-/// Azure refuses, and [`InvalidPlan::Template`] for a template of another
+/// Returns [`InvalidRequest::Keys`] for no object or more than
+/// [`MAX_BATCH_KEYS`], [`Error::InvalidRequest`] for a key or a revision that
+/// Azure refuses, and [`InvalidRequest::Template`] for a template of another
 /// operation.
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
@@ -264,10 +264,10 @@ pub fn encode_delete_many<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>> {
     let Detail::Batch { path, tail } = template.detail else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     if objects.is_empty() || objects.len() > MAX_BATCH_KEYS {
-        return Err(InvalidPlan::Keys.into());
+        return Err(InvalidRequest::Keys.into());
     }
     for object in objects {
         validate_key(object.key, template.namespace)?;
@@ -277,7 +277,7 @@ pub fn encode_delete_many<'r>(
         bytes.get(path.start..path.start + path.len),
         bytes.get(tail.start..tail.start + tail.len),
     ) else {
-        return Err(InvalidPlan::Template.into());
+        return Err(InvalidRequest::Template.into());
     };
     let fill = BatchFill {
         values: Values {
@@ -346,7 +346,7 @@ pub fn fill_delete_results<'b>(
     into: &mut [BatchResult<'b>],
 ) -> Result<usize> {
     if count == 0 || count > MAX_BATCH_KEYS {
-        return Err(InvalidPlan::Keys.into());
+        return Err(InvalidRequest::Keys.into());
     }
     if into.len() < count {
         return Err(crate::Error::Capacity(crate::CapacityError {

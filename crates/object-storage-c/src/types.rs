@@ -95,11 +95,11 @@ pub struct MaybeU64 {
     pub value: u64,
 }
 
-/// A number that a plan may not carry.
+/// A number that a value may not carry.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct MaybeU32 {
-    /// Whether the plan carries this number.
+    /// Whether the value carries this number.
     pub present: bool,
     /// The number.
     pub value: u32,
@@ -160,8 +160,8 @@ pub enum ErrorCode {
     InvalidContainer = 2,
     /// The token is not usable as one HTTP header value.
     InvalidToken = 3,
-    /// The plan cannot become a request. `detail` says why.
-    InvalidPlan = 4,
+    /// The request cannot be written. `detail` says why.
+    InvalidRequest = 4,
     /// Output storage is too small. Grow it to `required` and call again.
     Capacity = 5,
     /// The response cannot be read. `detail` says which part was wrong.
@@ -466,7 +466,7 @@ pub const TIMESTAMPS_LEN: usize = 53;
 /// `borink_timestamps_from_unix` writes one. Write one each second, and pass
 /// it to every request of that second, so that no request formats its dates
 /// again. It holds no pointer. One whose dates are not text is refused with
-/// `InvalidPlan`.
+/// `InvalidRequest`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Timestamps {
@@ -493,7 +493,7 @@ pub const TEMPLATE_LEN: usize = 80;
 /// pass both to each `borink_encode_*` call of its operation. You may copy
 /// it, and store it with those bytes, such as in flash, to write requests
 /// again without preparing again. It ends in a hash of the rest. A template
-/// that was changed since it was written is refused with `InvalidPlan`, and
+/// that was changed since it was written is refused with `InvalidRequest`, and
 /// so is one that another version of the library wrote.
 ///
 /// # Bytes

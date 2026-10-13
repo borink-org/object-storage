@@ -2,7 +2,7 @@
 //!
 //! Each one reads every pointer it was passed in one `unsafe` block, under
 //! the `# Safety` contract written above it. It hands the Rust values to
-//! [`crate::step`], [`crate::plan`] and [`crate::outcome`]. Those modules
+//! [`crate::step`], [`crate::inputs`] and [`crate::outcome`]. Those modules
 //! forbid `unsafe` code, so what a pointer read needs is checked here and
 //! nowhere else.
 //!
@@ -10,11 +10,11 @@
 //! is `azure::prepare_get`, `borink_encode_get` is `azure::encode_get`, and
 //! so on for each operation.
 
+use crate::inputs::{self, UNKNOWN};
 use crate::outcome::{
     bytes, commit_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number,
     properties_view, property_view, put_outcome, refused_fill, stage_outcome, status_of,
 };
-use crate::plan::{self, UNKNOWN};
 use crate::ptr;
 use crate::sentence::{describe, describe_status};
 use crate::step::{self, filling, filling_with, head_of, prepared, written};
@@ -65,7 +65,7 @@ pub extern "C" fn borink_azure_rejection_for(error: Status, namespace: u16) -> A
     };
     let reason = proto::ErrorCode::from_discriminant(error.code)
         .and_then(|code| proto::Error::from_parts(code, error.detail));
-    let Some(proto::Error::InvalidPlan(reason)) = reason else {
+    let Some(proto::Error::InvalidRequest(reason)) = reason else {
         return AzureRejection::default();
     };
     reason
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn borink_prepare_get(
         )
     };
     prepared(step::container(container).and_then(|container| {
-        let options = plan::get_options(options.ok_or(UNKNOWN)?)?;
+        let options = inputs::get_options(options.ok_or(UNKNOWN)?)?;
         azure::prepare_get(
             &container,
             step::token(token)?,
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn borink_prepare_put(
     };
     prepared(step::container(container).and_then(|container| {
         let (options, write) = options.ok_or(UNKNOWN)?;
-        let options = plan::put_options(options, write)?;
+        let options = inputs::put_options(options, write)?;
         azure::prepare_put(
             &container,
             step::token(token)?,
@@ -191,7 +191,7 @@ pub unsafe extern "C" fn borink_prepare_stage_block(
         )
     };
     prepared(step::container(container).and_then(|container| {
-        let options = plan::stage_options(options.ok_or(UNKNOWN)?)?;
+        let options = inputs::stage_options(options.ok_or(UNKNOWN)?)?;
         azure::prepare_stage_block(
             &container,
             step::token(token)?,
@@ -228,7 +228,7 @@ pub unsafe extern "C" fn borink_prepare_commit_blocks(
     };
     prepared(step::container(container).and_then(|container| {
         let (options, write) = options.ok_or(UNKNOWN)?;
-        let options = plan::commit_options(options, write)?;
+        let options = inputs::commit_options(options, write)?;
         azure::prepare_commit_blocks(
             &container,
             step::token(token)?,
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn borink_prepare_list(
     };
     prepared(step::container(container).and_then(|container| {
         let (options, delimiter) = options.ok_or(UNKNOWN)?;
-        let options = plan::list_options(options, delimiter)?;
+        let options = inputs::list_options(options, delimiter)?;
         azure::prepare_list(
             &container,
             step::token(token)?,
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn borink_prepare_list(
 /// Encoding trusts that they are, and checks nothing of them per request.
 /// Check bytes once where they could be another template's, such as bytes
 /// read back from storage. A `code` of 0 means that they are the template's
-/// own, and `InvalidPlan` with `Template` that they are not.
+/// own, and `InvalidRequest` with `Template` that they are not.
 ///
 /// # Safety
 ///
@@ -307,7 +307,7 @@ pub unsafe extern "C" fn borink_template_check(template: *const Template, bytes:
 /// an empty `buf` to learn the size that the request needs.
 ///
 /// A key that Azure refuses, a range that the template does not take and a
-/// suffix range are refused with `InvalidPlan`. A template of another
+/// suffix range are refused with `InvalidRequest`. A template of another
 /// operation is refused with `Template`.
 ///
 /// # Safety
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn borink_encode_get(
     };
     written(step::template(template).and_then(|template| {
         let (item, key, e_tag, revision) = item.ok_or(UNKNOWN)?;
-        let item = plan::get_item(item, key, e_tag, revision)?;
+        let item = inputs::get_item(item, key, e_tag, revision)?;
         azure::encode_get(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
@@ -387,7 +387,7 @@ pub unsafe extern "C" fn borink_encode_put(
     };
     written(step::template(template).and_then(|template| {
         let (item, key, e_tag, checksum) = item.ok_or(UNKNOWN)?;
-        let item = plan::put_item(item, key, e_tag, checksum)?;
+        let item = inputs::put_item(item, key, e_tag, checksum)?;
         azure::encode_put(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
@@ -427,7 +427,7 @@ pub unsafe extern "C" fn borink_encode_stage_block(
     };
     written(step::template(template).and_then(|template| {
         let (item, key, id, checksum) = item.ok_or(UNKNOWN)?;
-        let item = plan::stage_item(item, key, id, checksum)?;
+        let item = inputs::stage_item(item, key, id, checksum)?;
         azure::encode_stage_block(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
@@ -471,7 +471,7 @@ pub unsafe extern "C" fn borink_encode_commit_blocks(
     };
     written(step::template(template).and_then(|template| {
         let (item, key, e_tag, content_md5, blocks) = item.ok_or(UNKNOWN)?;
-        let item = plan::commit_item(item, key, e_tag, content_md5, blocks)?;
+        let item = inputs::commit_item(item, key, e_tag, content_md5, blocks)?;
         azure::encode_commit_blocks(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn borink_encode_list(
     };
     written(step::template(template).and_then(|template| {
         let (prefix, marker) = item.ok_or(UNKNOWN)?;
-        let item = plan::list_item(prefix, marker)?;
+        let item = inputs::list_item(prefix, marker)?;
         azure::encode_list(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
@@ -649,7 +649,7 @@ pub unsafe extern "C" fn borink_accept_get_head(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let headers = unsafe { ptr::headers(headers, header_count) };
-    plan::get_shape(&shape)
+    inputs::get_shape(&shape)
         .and_then(|shape| azure::accept_get_head(shape, head_of(status, headers)))
         .map_or_else(invalid, |outcome| get_outcome(&outcome))
 }
@@ -676,7 +676,7 @@ pub unsafe extern "C" fn borink_accept_get_error_body(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
-    plan::get_shape(&shape)
+    inputs::get_shape(&shape)
         .and_then(|shape| {
             Ok(azure::accept_get_error_body(
                 shape,
@@ -705,7 +705,7 @@ pub unsafe extern "C" fn borink_accept_put_head(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let headers = unsafe { ptr::headers(headers, header_count) };
-    plan::put_shape(&shape)
+    inputs::put_shape(&shape)
         .and_then(|shape| azure::accept_put_head(shape, head_of(status, headers)))
         .map_or_else(invalid, |outcome| put_outcome(&outcome))
 }
@@ -727,7 +727,7 @@ pub unsafe extern "C" fn borink_accept_put_error_body(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
-    plan::put_shape(&shape)
+    inputs::put_shape(&shape)
         .and_then(|shape| {
             Ok(azure::accept_put_error_body(
                 shape,
@@ -800,7 +800,7 @@ pub unsafe extern "C" fn borink_accept_commit_blocks_head(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let headers = unsafe { ptr::headers(headers, header_count) };
-    plan::commit_shape(&shape)
+    inputs::commit_shape(&shape)
         .and_then(|shape| azure::accept_commit_blocks_head(shape, head_of(status, headers)))
         .map_or_else(invalid, |outcome| commit_outcome(&outcome))
 }
@@ -822,7 +822,7 @@ pub unsafe extern "C" fn borink_accept_commit_blocks_error_body(
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
     let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
-    plan::commit_shape(&shape)
+    inputs::commit_shape(&shape)
         .and_then(|shape| {
             Ok(azure::accept_commit_blocks_error_body(
                 shape,
@@ -836,7 +836,7 @@ pub unsafe extern "C" fn borink_accept_commit_blocks_error_body(
 /// Reads the response head of a listing.
 ///
 /// This call takes no shape: it checks nothing in the response against the
-/// plan.
+/// request.
 ///
 /// # Safety
 ///

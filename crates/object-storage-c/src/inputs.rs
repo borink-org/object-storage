@@ -10,12 +10,12 @@ use crate::step::{optional, text};
 use crate::types::*;
 
 use borink_object_storage_proto as proto;
-use borink_object_storage_proto::{Error, InvalidPlan, azure};
+use borink_object_storage_proto::{Error, InvalidRequest, azure};
 
-// A number that names no value of the protocol crate's enum. It is refused as an
-// invalid plan, and the plan is never read as the value that happens to be
+// A number that names no value of the protocol crate's enum. It is refused
+// as an invalid request, and never read as the value that happens to be
 // oldest.
-pub(crate) const UNKNOWN: Error = Error::InvalidPlan(InvalidPlan::Unknown);
+pub(crate) const UNKNOWN: Error = Error::InvalidRequest(InvalidRequest::Unknown);
 
 pub(crate) fn condition_kind(condition: u16) -> proto::Result<proto::ConditionKind> {
     proto::ConditionKind::from_discriminant(condition).ok_or(UNKNOWN)
@@ -66,7 +66,7 @@ pub(crate) fn write_options(values: [&[u8]; 6]) -> proto::Result<proto::WriteOpt
         storage_class,
     ] = values.map(|value| {
         optional(value)
-            .map(|value| text(value, InvalidPlan::ContentProperty))
+            .map(|value| text(value, InvalidRequest::ContentProperty))
             .transpose()
     });
     Ok(proto::WriteOptions {
@@ -100,11 +100,11 @@ pub(crate) fn get_item<'a>(
     revision: &'a [u8],
 ) -> proto::Result<proto::GetItem<'a>> {
     Ok(proto::GetItem {
-        key: text(key, InvalidPlan::KeyNotUtf8)?,
+        key: text(key, InvalidRequest::KeyNotUtf8)?,
         range: range(&item.range)?,
         condition_value: condition_value(&item.condition_value, e_tag)?,
         revision: optional(revision)
-            .map(|revision| text(revision, InvalidPlan::Revision))
+            .map(|revision| text(revision, InvalidRequest::Revision))
             .transpose()?,
     })
 }
@@ -139,7 +139,7 @@ pub(crate) fn put_item<'a>(
     checksum: &'a [u8],
 ) -> proto::Result<proto::PutItem<'a>> {
     Ok(proto::PutItem {
-        key: text(key, InvalidPlan::KeyNotUtf8)?,
+        key: text(key, InvalidRequest::KeyNotUtf8)?,
         content: proto::Payload::Streamed {
             len: item.content_len,
         },
@@ -167,8 +167,8 @@ pub(crate) fn stage_item<'a>(
     checksum: &'a [u8],
 ) -> proto::Result<azure::StageBlockItem<'a>> {
     Ok(azure::StageBlockItem {
-        key: text(key, InvalidPlan::KeyNotUtf8)?,
-        id: text(id, InvalidPlan::PartId)?,
+        key: text(key, InvalidRequest::KeyNotUtf8)?,
+        id: text(id, InvalidRequest::PartId)?,
         content: proto::Payload::Streamed {
             len: item.content_len,
         },
@@ -204,18 +204,18 @@ where
     B: Iterator<Item = (&'a [u8], u16)> + Clone,
 {
     for (id, source) in blocks.clone() {
-        text(id, InvalidPlan::PartId)?;
+        text(id, InvalidRequest::PartId)?;
         azure::BlockSource::from_discriminant(source).ok_or(UNKNOWN)?;
     }
     Ok(azure::CommitItem {
-        key: text(key, InvalidPlan::KeyNotUtf8)?,
+        key: text(key, InvalidRequest::KeyNotUtf8)?,
         condition_value: condition_value(&item.condition_value, e_tag)?,
         blocks: blocks.map(|(id, source)| azure::BlockRef {
             id: core::str::from_utf8(id).unwrap_or_default(),
             source: azure::BlockSource::from_discriminant(source).unwrap_or_default(),
         }),
         content_md5: optional(content_md5)
-            .map(|md5| text(md5, InvalidPlan::Checksum))
+            .map(|md5| text(md5, InvalidRequest::Checksum))
             .transpose()?,
     })
 }
@@ -251,7 +251,7 @@ pub(crate) fn list_options<'a>(
     }
     Ok(proto::ListOptions {
         delimiter: optional(delimiter)
-            .map(|delimiter| text(delimiter, InvalidPlan::Delimiter))
+            .map(|delimiter| text(delimiter, InvalidRequest::Delimiter))
             .transpose()?,
         max_results: options
             .max_results
@@ -268,9 +268,9 @@ pub(crate) fn list_item<'a>(
     marker: &'a [u8],
 ) -> proto::Result<proto::ListItem<'a>> {
     Ok(proto::ListItem {
-        prefix: text(prefix, InvalidPlan::Prefix)?,
+        prefix: text(prefix, InvalidRequest::Prefix)?,
         marker: optional(marker)
-            .map(|marker| text(marker, InvalidPlan::Marker).map(proto::ListMarker::Text))
+            .map(|marker| text(marker, InvalidRequest::Marker).map(proto::ListMarker::Text))
             .transpose()?,
         start_after: None,
     })
@@ -280,6 +280,6 @@ pub(crate) fn list_item<'a>(
 // for an empty one.
 fn checksum_value(text_of: &[u8]) -> proto::Result<Option<proto::ChecksumValue<'_>>> {
     optional(text_of)
-        .map(|value| text(value, InvalidPlan::Checksum).map(proto::ChecksumValue::Base64))
+        .map(|value| text(value, InvalidRequest::Checksum).map(proto::ChecksumValue::Base64))
         .transpose()
 }

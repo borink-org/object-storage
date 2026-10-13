@@ -604,7 +604,7 @@ pub(crate) fn digest_of(kind: ChecksumKind, bytes: &[u8]) -> borink_object_stora
     }
 }
 
-/// The refusal of a write that names two checksums: a plan holds one, and
+/// The refusal of a write that names two checksums: a request carries one, and
 /// the services refuse a write with two as well.
 fn two_checksums_refused() -> Value {
     json!({
@@ -652,7 +652,7 @@ fn served_range(body: &BodyWindow) -> Option<String> {
 // The call this process was started for, whose fields a refusal names.
 static CURRENT_CALL: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
 
-/// The call field that the crate's reason for refusing a plan is about.
+/// The call field that the crate's reason for refusing a request is about.
 fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static str> {
     let named_field = |field: &'static str, alternative: &'static str| {
         if call.get(field).is_some() {
@@ -709,13 +709,13 @@ fn refused_call_parameter(reason_name: &str, call: &Value) -> Option<&'static st
 
 /// Returns the result for an error from the crate.
 ///
-/// A plan that the crate will not encode becomes a refusal to send. If the crate
+/// A request that the crate will not write becomes a refusal to send. If the crate
 /// names the answer the account would give, the refusal carries it. Any other
 /// error becomes a failed operation.
 fn result_for_crate_error(error: CrateError) -> Value {
     match error {
-        CrateError::InvalidPlan(invalid_plan) => {
-            let reason_name = format!("{invalid_plan:?}");
+        CrateError::InvalidRequest(invalid_request) => {
+            let reason_name = format!("{invalid_request:?}");
             let mut result = json!({
                 "outcome": "refused",
                 "kind": snake_case_name(&reason_name),
@@ -727,7 +727,7 @@ fn result_for_crate_error(error: CrateError) -> Value {
             // Only an Azure call sets the namespace, and only Azure names a
             // rejection.
             if let Some(&namespace) = azure::ACCOUNT_NAMESPACE.get()
-                && let Some(rejection) = invalid_plan.azure_rejection(namespace)
+                && let Some(rejection) = invalid_request.azure_rejection(namespace)
             {
                 result["status"] = json!(rejection.status);
                 result["code"] = json!(rejection.code);
