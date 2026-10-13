@@ -248,6 +248,27 @@ fn a_delimited_page_interleaves_groups_with_objects() {
     assert_eq!(entries[1].e_tag, None);
 }
 
+/// For speed, the reader checks a key as UTF-8 together with the bytes
+/// around it. Where those bytes end inside a character, it checks the key
+/// alone. Each
+/// key length here puts that end somewhere else in the text after the key.
+#[test]
+fn a_group_is_read_whatever_text_follows_its_key() {
+    for len in 1..=16 {
+        let key = format!("{}/", "k".repeat(len));
+        let mut body = page(
+            &format!("<BlobPrefix><Name>{key}</Name><X>\u{e9}\u{e9}\u{e9}\u{e9}</X></BlobPrefix>"),
+            "",
+        );
+        let mut entries = [ListEntry::default(); 1];
+        fill(&mut body, &mut entries);
+        assert_eq!(
+            (entries[0].kind, entries[0].key),
+            (EntryKind::Prefix, key.as_str())
+        );
+    }
+}
+
 #[test]
 fn a_hierarchical_account_reports_its_directories_as_such() {
     let mut body = page(

@@ -151,10 +151,18 @@ fn read_entries_into<'b>(
         }
         let captured = &mut spans[..slots];
         captured.fill(None);
-        // Nearly every entry of a page starts with `<Blob>`, which is one
-        // six-byte compare. Anything else takes the general path below.
-        let fields = if scan.lit(b"<Blob>") {
-            read_blob(scan, wanted, captured)?
+        // Nearly every entry of a page starts with `<Blob>` or, on a page of
+        // groups, `<BlobPrefix>`, each one compare. Anything else takes the
+        // general path below.
+        //
+        // The readers fill `fields` in place. Returned, and handed on by value,
+        // the struct of the entry's spans was copied three times per entry,
+        // with a call to `memcpy` each.
+        let mut fields = Fields::new(false);
+        if scan.lit(b"<Blob>") {
+            read_blob(scan, wanted, captured, &mut fields)?;
+        } else if scan.lit(b"<BlobPrefix>") {
+            read_blob_prefix(scan, &mut fields)?;
         } else {
             let tag = scan.open()?;
             // An entry with nothing in it has no name, so it is not an entry.
@@ -162,20 +170,20 @@ fn read_entries_into<'b>(
                 return body_fault();
             }
             match scan.text(tag.name) {
-                b"Blob" => read_blob(scan, wanted, captured)?,
+                b"Blob" => read_blob(scan, wanted, captured, &mut fields)?,
                 // A group of keys gives no values, so its slots stay empty.
-                b"BlobPrefix" => read_blob_prefix(scan)?,
+                b"BlobPrefix" => read_blob_prefix(scan, &mut fields)?,
                 // Any other element where an entry belongs makes this a page
                 // this crate cannot read. Skipping it would silently drop an
                 // entry that a later service version added.
                 _ => return body_fault(),
             }
-        };
+        }
         let chunk = scan.take();
         entries.held += 1;
         if entries.built < room {
             let prefix = fields.prefix;
-            let entry = build_entry(chunk, fields)?;
+            let entry = build_entry(chunk, &fields)?;
             if prefix {
                 // A group of keys captures nothing, so it gives no values.
                 values[..slots].fill(None);
@@ -228,10 +236,11 @@ impl Fields {
 // of line, which costs an eighth of the read. Measured; the bench has a row
 // through the C entry point for it.
 //
-// Reads a blob. `<Blob>` has been consumed. Each child the grammar wants is
-// matched twice: whole, as the service spells it, which is one compare, and
-// again by name on the general path, which any legal spelling reaches. A
-// field added to one list must be added to the other.
+// Reads a blob into `fields`, which hold nothing yet. `<Blob>` has been
+// consumed. Each child the grammar wants is matched twice: whole, as the
+// service spells it, which is one compare, and again by name on the general
+// path, which any legal spelling reaches. A field added to one list must be
+// added to the other.
 //
 // `captured` has one slot per member of `wanted`, and receives the span of
 // each wanted property's value that this blob writes.
@@ -239,8 +248,8 @@ fn read_blob(
     scan: &mut Scan<'_>,
     wanted: PropertySet,
     captured: &mut [Option<Span>],
-) -> Result<Fields> {
-    let mut fields = Fields::new(false);
+    fields: &mut Fields,
+) -> Result<()> {
     loop {
         scan.skip_space();
         let head = scan.head();
@@ -250,7 +259,7 @@ fn read_blob(
             continue;
         }
         if scan.lit_in(&head, b"<Properties>") {
-            read_properties(scan, &mut fields, wanted, captured)?;
+            read_properties(scan, fields, wanted, captured)?;
             continue;
         }
         if scan.lit_in(&head, b"</Blob>") {
@@ -266,12 +275,12 @@ fn read_blob(
         match scan.child(b"Blob")? {
             ChildTag::Close => break,
             ChildTag::Open(tag) => match scan.text(tag.name) {
-                b"Name" => read_name(scan, tag, &mut fields)?,
+                b"Name" => read_name(scan, tag, fields)?,
                 // Properties are read only under this element. A property
                 // that a later service version adds beside it is not
                 // mistaken for one of them.
                 b"Properties" if !tag.empty => {
-                    read_properties(scan, &mut fields, wanted, captured)?;
+                    read_properties(scan, fields, wanted, captured)?;
                 }
                 _ => read_unmatched(scan, tag, wanted, captured)?,
             },
@@ -281,7 +290,7 @@ fn read_blob(
     if fields.key.is_none() {
         return body_fault();
     }
-    Ok(fields)
+    Ok(())
 }
 
 // Reads the properties of a blob into `fields`. `<Properties>` has been
@@ -618,16 +627,37 @@ fn read_known_element(
     Ok(true)
 }
 
-// Reads a group of keys. `<BlobPrefix>` has been consumed. A
-// hierarchical-namespace account writes a `<Properties>` element here too. It
-// is skipped, because a group has no size and no entity tag.
-fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
-    let mut fields = Fields::new(true);
+// Reads a group of keys into `fields`, which hold nothing yet. `<BlobPrefix>`
+// has been consumed. A hierarchical-namespace account writes a `<Properties>`
+// element here too. It is skipped, because a group has no size and no entity
+// tag. As in `read_blob`, the children the service writes are matched whole
+// first, and again by name on the general path.
+fn read_blob_prefix(scan: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
+    fields.prefix = true;
     loop {
+        scan.skip_space();
+        let head = scan.head();
+        if scan.lit_in(&head, b"<Name>") {
+            let value = scan.value_of(b"Name")?;
+            set_once(&mut fields.key, value)?;
+            continue;
+        }
+        if scan.lit_in(&head, b"</BlobPrefix>") {
+            break;
+        }
+        if scan.lit_in(&head, b"<Properties>") {
+            read_properties(
+                scan,
+                &mut Fields::new(true),
+                PropertySet::default(),
+                &mut [],
+            )?;
+            continue;
+        }
         match scan.child(b"BlobPrefix")? {
             ChildTag::Close => break,
             ChildTag::Open(tag) => match scan.text(tag.name) {
-                b"Name" => read_name(scan, tag, &mut fields)?,
+                b"Name" => read_name(scan, tag, fields)?,
                 // A directory of an account with a hierarchical namespace
                 // writes the properties a blob has. A group reports none of
                 // them, but reading them as a blob's are read costs a third
@@ -647,7 +677,7 @@ fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
     if fields.key.is_none() {
         return body_fault();
     }
-    Ok(fields)
+    Ok(())
 }
 
 // Reads a `<Name>` element into `fields`, with its `Encoded` attribute, the
@@ -674,7 +704,7 @@ fn read_name(scan: &mut Scan<'_>, tag: StartTag, fields: &mut Fields) -> Result<
 // Builds one entry from the bytes it was written in, decoding its key, entity
 // tag and date in place. Every range below is a span the scanner recorded on
 // the chunk, or the part of one that decoding kept, which is never longer.
-fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
+fn build_entry<'c>(chunk: &'c mut [u8], fields: &Fields) -> Result<ListEntry<'c>> {
     let Some((key, key_flags)) = fields.key else {
         return body_fault();
     };

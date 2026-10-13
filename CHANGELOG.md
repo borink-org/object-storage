@@ -46,7 +46,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 ### Changed
 
-- Listings read faster. `azure::fill_listing` reads a page of blobs in about two thirds of the time. `azure::fill_listing_with` takes two thirds to three quarters, more as it keeps more properties. `s3::fill_listing` and `s3::fill_listing_with` read a page of versions in about four fifths of the time, and a page of objects in about nine tenths. A page of groups of keys reads about as fast as before. A listing body that holds only ASCII skips the UTF-8 check.
+- Listings read faster. `azure::fill_listing` reads a page of blobs in about two thirds of the time. `azure::fill_listing_with` takes two thirds to three quarters, more as it keeps more properties. `s3::fill_listing` and `s3::fill_listing_with` read a page of versions in about seven tenths of the time, and a page of objects in about three quarters. A page of groups of keys reads in about half the time, on either service. A listing body that holds only ASCII skips the UTF-8 check.
 - Moved the Azure items at the crate root into `azure`: `Container`, `AzureNamespace`, `AzureRejection`, `VERSION` and `classify_error` are `azure::Container` and so on, as their S3 counterparts are in `s3`.
 - Properties of a listing:
   - Moved enum `BlobProperty` to `azure::BlobProperty`.

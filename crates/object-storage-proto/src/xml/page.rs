@@ -242,8 +242,33 @@ pub(super) fn fields_text<'r>(raw: &'r [u8], spans: &[Option<Span>]) -> Result<(
     if start > end {
         return Ok(("", 0));
     }
+    // `from_utf8` reads two words a step only from an address that is a
+    // multiple of eight, and only while sixteen bytes are left. A key of
+    // sixteen bytes that begins anywhere else is read a byte at a time, at
+    // nine instructions each. So the bytes around the fields are checked
+    // too, out to such an address before them and to a whole number of steps
+    // after. They are the tags around the fields, which are ASCII. Should the
+    // wider range fail, the fields alone decide.
+    let (wide_start, wide_end) = utf8_check_range(raw, start, end);
+    if let Some(text) = raw
+        .get(wide_start..wide_end)
+        .and_then(|wide| core::str::from_utf8(wide).ok())
+    {
+        return Ok((text, wide_start));
+    }
     let text = raw.get(start..end).map_or_else(body_fault, decoded_text)?;
     Ok((text, start))
+}
+
+// The range `fields_text` checks for `start..end` of `raw`. It begins at the
+// last multiple of eight at or before `start`, and ends a whole number of
+// sixteen-byte steps after that, both within `raw`.
+#[inline(always)]
+fn utf8_check_range(raw: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let misaligned = (raw.as_ptr() as usize).wrapping_add(start) % 8;
+    let wide_start = start.saturating_sub(misaligned);
+    let wide_end = (wide_start + (end - wide_start).next_multiple_of(16)).min(raw.len());
+    (wide_start, wide_end)
 }
 
 // The text of the field `span` of an entry, from what `fields_text` gave.
@@ -253,21 +278,27 @@ pub(super) fn field_text((text, start): (&str, usize), (from, to): Span) -> Resu
 }
 
 // Trims one value, decodes it in place and returns the range of the decoded
-// text.
+// text. An absent value is told apart here, inline, rather than by a call: a
+// group of keys has none of the values an object has.
+#[inline(always)]
 pub(super) fn decode_value_in_place(
     chunk: &mut [u8],
     field: Option<(Span, u8)>,
 ) -> Result<Option<Span>> {
-    let Some((span, flags)) = field else {
-        return Ok(None);
-    };
+    match field {
+        Some((span, flags)) => decode_span_in_place(chunk, span, flags).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn decode_span_in_place(chunk: &mut [u8], span: Span, flags: u8) -> Result<Span> {
     let (start, end) = trim_span(chunk, span);
     let len = decode_scanned(&mut chunk[start..end], flags, false)?;
     // trim preserves start <= end <= chunk.len(); decode returns len <= end - start.
     if len < end - start {
         chunk[start + len..end].fill(0);
     }
-    Ok(Some((start, start + len)))
+    Ok((start, start + len))
 }
 
 // The value of a child element, if the entry wrote one: its span and the

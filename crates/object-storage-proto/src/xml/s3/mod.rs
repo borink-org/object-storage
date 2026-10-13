@@ -132,9 +132,17 @@ fn read_root_children_into<'b>(
         }
         let captured = &mut spans[..slots];
         captured.fill(None);
-        // Nearly every child of a page is an object, which is one compare.
-        let fields = if !versions && scan.lit(b"<Contents>") {
-            Some(read_object(&mut scan, wanted, captured, Entry::Object)?)
+        // The readers fill `fields` in place, as the Azure reader's do, and
+        // `entry` says whether the child was an entry.
+        let mut fields = Fields::new(false);
+        // Nearly every child of a page is an object or, on a page of groups,
+        // a group, each one compare.
+        let entry = if !versions && scan.lit(b"<Contents>") {
+            read_object(&mut scan, wanted, captured, Entry::Object, &mut fields)?;
+            true
+        } else if scan.lit(b"<CommonPrefixes>") {
+            read_group(&mut scan, &mut fields)?;
+            true
         } else {
             match scan.child(root)? {
                 ChildTag::Close => break,
@@ -142,18 +150,22 @@ fn read_root_children_into<'b>(
                     // An entry with nothing in it has no key.
                     OBJECT | GROUP | VERSION | DELETE_MARKER if tag.empty => return body_fault(),
                     OBJECT if !versions => {
-                        Some(read_object(&mut scan, wanted, captured, Entry::Object)?)
+                        read_object(&mut scan, wanted, captured, Entry::Object, &mut fields)?;
+                        true
                     }
                     VERSION if versions => {
-                        Some(read_object(&mut scan, wanted, captured, Entry::Version)?)
+                        read_object(&mut scan, wanted, captured, Entry::Version, &mut fields)?;
+                        true
                     }
-                    DELETE_MARKER if versions => Some(read_object(
-                        &mut scan,
-                        wanted,
-                        captured,
-                        Entry::DeleteMarker,
-                    )?),
-                    GROUP => Some(read_group(&mut scan)?),
+                    DELETE_MARKER if versions => {
+                        let marker = Entry::DeleteMarker;
+                        read_object(&mut scan, wanted, captured, marker, &mut fields)?;
+                        true
+                    }
+                    GROUP => {
+                        read_group(&mut scan, &mut fields)?;
+                        true
+                    }
                     b"EncodingType" => {
                         // A second one is refused, as a second key is.
                         if seen_encoding {
@@ -166,7 +178,7 @@ fn read_root_children_into<'b>(
                             return body_fault();
                         }
                         page.encoded = true;
-                        None
+                        false
                     }
                     b"IsTruncated" => {
                         let (span, _) = scan.value(tag)?;
@@ -176,7 +188,7 @@ fn read_root_children_into<'b>(
                             _ => return body_fault(),
                         };
                         set_once(&mut page.truncated, truncated)?;
-                        None
+                        false
                     }
                     b"NextKeyMarker" if versions => {
                         if seen_token {
@@ -196,7 +208,7 @@ fn read_root_children_into<'b>(
                             .filter(|marker| !marker.is_empty())
                             .map(decoded_text)
                             .transpose()?;
-                        None
+                        false
                     }
                     b"NextVersionIdMarker" if versions => {
                         if seen_version_token {
@@ -212,7 +224,7 @@ fn read_root_children_into<'b>(
                             .filter(|marker| !marker.is_empty())
                             .map(decoded_text)
                             .transpose()?;
-                        None
+                        false
                     }
                     b"NextContinuationToken" if !versions => {
                         if seen_token {
@@ -230,24 +242,24 @@ fn read_root_children_into<'b>(
                             .filter(|token| !token.is_empty())
                             .map(decoded_text)
                             .transpose()?;
-                        None
+                        false
                     }
                     // The echoed request values and the counts.
                     _ => {
                         scan.skip(tag)?;
-                        None
+                        false
                     }
                 },
             }
         };
-        let Some(fields) = fields else {
+        if !entry {
             continue;
-        };
+        }
         let chunk = scan.take();
         page.held += 1;
         if page.built < room {
             let prefix = fields.prefix;
-            let (entry, decoded) = build_entry(chunk, fields)?;
+            let (entry, decoded) = build_entry(chunk, &fields)?;
             page.decoded |= decoded;
             if prefix {
                 // A group of keys captures nothing, so it gives no values.
@@ -356,8 +368,8 @@ fn read_object(
     wanted: PropertySet,
     captured: &mut [Option<Span>],
     entry: Entry,
-) -> Result<Fields> {
-    let mut fields = Fields::new(false);
+    fields: &mut Fields,
+) -> Result<()> {
     fields.delete_marker = entry == Entry::DeleteMarker;
     loop {
         scan.skip_space();
@@ -408,14 +420,24 @@ fn read_object(
     if fields.key.is_none() || fields.size.is_none() != fields.delete_marker {
         return body_fault();
     }
-    Ok(fields)
+    Ok(())
 }
 
-// Reads a group of keys. `<CommonPrefixes>` has been consumed. S3 writes one
-// `Prefix` in each.
-fn read_group(scan: &mut Scan<'_>) -> Result<Fields> {
-    let mut fields = Fields::new(true);
+// Reads a group of keys into `fields`, which hold nothing yet.
+// `<CommonPrefixes>` has been consumed. S3 writes one `Prefix` in each. As in
+// `read_object`, its children are matched whole first, and again by name on
+// the general path.
+fn read_group(scan: &mut Scan<'_>, fields: &mut Fields) -> Result<()> {
+    fields.prefix = true;
     loop {
+        scan.skip_space();
+        if scan.lit(b"<Prefix>") {
+            set_once(&mut fields.key, scan.value_of(b"Prefix")?)?;
+            continue;
+        }
+        if scan.lit(b"</CommonPrefixes>") {
+            break;
+        }
         match scan.child(GROUP)? {
             ChildTag::Close => break,
             ChildTag::Open(tag) => match scan.text(tag.name) {
@@ -427,12 +449,12 @@ fn read_group(scan: &mut Scan<'_>) -> Result<Fields> {
     if fields.key.is_none() {
         return body_fault();
     }
-    Ok(fields)
+    Ok(())
 }
 
 // Builds one entry from its bytes, decoding its key, entity tag and date in
 // place. Also returns whether URL-decoding changed the key.
-fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)> {
+fn build_entry<'c>(chunk: &'c mut [u8], fields: &Fields) -> Result<(ListEntry<'c>, bool)> {
     let Some((key, key_flags)) = fields.key else {
         return body_fault();
     };
