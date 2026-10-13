@@ -1,0 +1,39 @@
+{
+  "large": {
+    "large/azure*/*": "the library speaks S3 alone",
+    "large/s3-express/*": "the library opens no sessions of directory buckets"
+  },
+  "management": {
+    "management/*": "the library manages no buckets"
+  },
+  "operations": {
+    "operations/azure*/*": "the library speaks S3 alone",
+    "operations/s3-express/*": "the library opens no sessions of directory buckets",
+    "operations/s3/abort*": "the library writes no object in parts",
+    "operations/s3/commit*": "the library writes no object in parts",
+    "operations/s3/complete-multipart-*": "the library writes no object in parts",
+    "operations/s3/list-uploads*": "the library writes no object in parts",
+    "operations/s3/stage*": "the library writes no object in parts",
+    "operations/s3/start*": "the library writes no object in parts",
+    "operations/s3/copy*": "the library has no copy operation",
+    "operations/s3/delete-many*": "the library has no delete_many operation",
+    "operations/s3/restore*": "the library has no restore operation",
+    "operations/s3/get-tagging*": "the library reads tags only as a write sets them",
+    "operations/s3/put-tagging*": "the library reads tags only as a write sets them",
+    "operations/s3/list-versions*": "the library lists no versions",
+    "operations/s3/get-checksum*": "the library checks no checksums",
+    "operations/s3/head-checksum": "the library checks no checksums",
+    "operations/s3/put-computing-*": "the library sends no checksums",
+    "operations/s3/put-md5-mismatch": "the library sends no checksums",
+    "operations/s3/put-two-checksums": "the library sends no checksums",
+    "operations/s3/put-with-crc*": "the library sends no checksums",
+    "operations/s3/put-with-md5": "the library sends no checksums",
+    "operations/s3/put-with-sha*": "the library sends no checksums"
+  },
+  "vectors": {
+    "azure/*": "the library speaks S3 alone",
+    "s3-express/*": "the library opens no sessions of directory buckets",
+    "s3/hmac-sha256-rfc4231": "the library hashes with Web Crypto and exports no digest",
+    "s3/sha256-*": "the library hashes with Web Crypto and exports no digest"
+  }
+}

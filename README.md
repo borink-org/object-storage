@@ -13,6 +13,8 @@ Currently we only provide the sans-I/O core as a library; you must provide the H
 
 We also provide C/C++ bindings, but these only implement a subset of the features the Rust crate do, and only Azure for now. They will be brought up to par before the 1.0 release.
 
+[`typescript`](https://github.com/borink-org/object-storage/tree/master/typescript) holds a separate TypeScript S3 client for the basic operations, built on `fetch` and Web Crypto, which runs in Cloudflare Workers. It does not use the Rust crates.
+
 ## Supported features
 
 ### Azure Blob Storage, S3 and S3-compatible services
