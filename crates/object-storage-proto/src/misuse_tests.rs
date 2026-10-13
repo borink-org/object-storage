@@ -8,6 +8,7 @@
 extern crate std;
 
 use std::boxed::Box;
+use std::rc::Rc;
 use std::vec;
 use std::vec::Vec;
 
@@ -78,12 +79,18 @@ type Check = Box<dyn Fn(&[u8]) -> bool>;
 // returns whether it was written.
 type Encode = Box<dyn Fn(&[u8], &mut [u8]) -> bool>;
 
+// Writes a request from the given Azure template and bytes, as `Encode`
+// does from its own template.
+type AzureEncode = Rc<dyn Fn(&azure::Template, &[u8], &mut [u8]) -> bool>;
+
 // One encoder and its template.
 struct Case {
     name: &'static str,
     bytes: Vec<u8>,
     check: Check,
     encode: Encode,
+    // An Azure case's template, and its encoder of any template.
+    azure: Option<(azure::Template, AzureEncode)>,
 }
 
 fn now() -> Timestamps {
@@ -150,11 +157,17 @@ fn azure(
     };
     let (template, bytes) = written(name, |buf| prepare(&container, buf));
     let key = if object { "" } else { KEY };
+    let encode: AzureEncode =
+        Rc::new(move |template, bytes, buf| encode(template, bytes, key, buf));
     Case {
         name,
         bytes,
         check: Box::new(move |bytes| template.check(bytes).is_ok()),
-        encode: Box::new(move |bytes, buf| encode(&template, bytes, key, buf)),
+        encode: {
+            let encode = encode.clone();
+            Box::new(move |bytes, buf| encode(&template, bytes, buf))
+        },
+        azure: Some((template, encode)),
     }
 }
 
@@ -189,6 +202,7 @@ fn s3(
             let _ = s3::string_to_sign_prefix(&template, bytes, &now(), &mut prefix);
             encode(&template, bytes, key, buf)
         }),
+        azure: None,
     }
 }
 
@@ -597,4 +611,58 @@ fn a_template_checks_its_own_bytes_and_no_others() {
             }
         }
     }
+}
+
+#[test]
+fn a_stored_template_reads_back_as_itself_and_a_changed_one_is_refused() {
+    let cases = cases();
+    let azure: Vec<_> = cases
+        .iter()
+        .filter_map(|case| case.azure.clone().map(|azure| (case, azure)))
+        .collect();
+    let mut random = XorShift(0x2545_F491_4F6C_DD1D);
+    let mut first = vec![0u8; 64 * 1024];
+    let mut again = vec![0u8; 64 * 1024];
+    for (case, (template, encode)) in &azure {
+        let stored = template.to_bytes();
+        let read = azure::Template::from_bytes(&stored)
+            .unwrap_or_else(|error| panic!("{}: refused when read back: {error:?}", case.name));
+        assert_eq!(
+            read.to_bytes(),
+            stored,
+            "{} reads back as another",
+            case.name
+        );
+        assert_eq!(read.bytes_len(), template.bytes_len(), "{}", case.name);
+        assert!(read.check(&case.bytes).is_ok(), "{}", case.name);
+        first.fill(0);
+        again.fill(0);
+        assert!(encode(template, &case.bytes, &mut first), "{}", case.name);
+        assert!(encode(&read, &case.bytes, &mut again), "{}", case.name);
+        assert!(
+            first == again,
+            "{} writes another request once read back",
+            case.name
+        );
+        // A change anywhere, to a value or to the hash that ends them, is
+        // refused.
+        for _ in 0..400 {
+            let mut changed = stored;
+            for _ in 0..=random.below(3) {
+                let at = random.below(stored.len());
+                changed[at] = match random.below(3) {
+                    0 => changed[at] ^ 1,
+                    1 => changed[at].wrapping_add(1),
+                    _ => random.next() as u8,
+                };
+            }
+            assert!(
+                changed == stored || azure::Template::from_bytes(&changed).is_err(),
+                "{} reads back changed",
+                case.name
+            );
+        }
+    }
+    let noise: [u8; azure::Template::STORED_LEN] = core::array::from_fn(|_| random.next() as u8);
+    assert!(azure::Template::from_bytes(&noise).is_err());
 }

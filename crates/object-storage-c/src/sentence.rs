@@ -44,7 +44,7 @@ pub(crate) fn describe(outcome: &Outcome, request_id: Option<&[u8]>, into: &mut 
         }
         // One literal per remaining kind. They say less than the core
         // crate's own sentences, which name the operation: one outcome type
-        // crosses for all three operations, so the sentence names none.
+        // crosses for every operation, so the sentence names none.
         settled => say(into, &settled_sentence(settled)),
     }
 }
@@ -56,8 +56,9 @@ pub(crate) fn settled_sentence(kind: Option<OutcomeKind>) -> &'static str {
         Some(OutcomeKind::Complete) => "the response carries no body and is complete",
         Some(OutcomeKind::NotModified) => "the object is not modified",
         Some(OutcomeKind::PreconditionFailed) => "the condition did not hold",
-        Some(OutcomeKind::Done) => "the service stored the object",
-        Some(OutcomeKind::Accepted) => "the service accepted the removal",
+        Some(OutcomeKind::Created) => "the service stored the object",
+        Some(OutcomeKind::Staged) => "the service staged the block",
+        Some(OutcomeKind::Committed) => "the service committed the object from its blocks",
         _ => "the core crate returned an outcome that this crate does not know",
     }
 }
@@ -111,13 +112,14 @@ pub(crate) fn outcome_kind_of(value: u16) -> Option<OutcomeKind> {
         K::PreconditionFailed,
         K::NotFound,
         K::RangeNotSatisfiable,
-        K::Done,
-        K::Accepted,
+        K::Created,
+        K::Staged,
         K::NeedErrorBody,
         K::ServiceFailure,
         K::Invalid,
         K::Unsupported,
         K::Page,
+        K::Committed,
     ]
     .into_iter()
     .find(|kind| *kind as u16 == value)

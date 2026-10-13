@@ -97,6 +97,12 @@ pub struct BlockRef<'a> {
     pub source: BlockSource,
 }
 
+impl<'a> From<&BlockRef<'a>> for BlockRef<'a> {
+    fn from(block: &BlockRef<'a>) -> Self {
+        *block
+    }
+}
+
 /// Which blocks to enumerate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -716,8 +722,12 @@ pub struct CommitOptions<'o> {
 }
 
 /// One Put Block List, which commits a blob from its blocks.
+///
+/// The blocks are a slice of [`BlockRef`], or any iterator of them that can
+/// be cloned. Such an iterator can name each block from its number as it
+/// goes. A commit reads the blocks more than once, and keeps none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommitItem<'i> {
+pub struct CommitItem<'i, B = &'i [BlockRef<'i>]> {
     /// The key of the blob, under the rules of
     /// [Object keys](crate#object-keys).
     pub key: &'i str,
@@ -725,7 +735,7 @@ pub struct CommitItem<'i> {
     /// the template carries one.
     pub condition_value: Option<ConditionValue<'i>>,
     /// The ordered blocks of the blob, at most 50,000.
-    pub blocks: &'i [BlockRef<'i>],
+    pub blocks: B,
     /// The base64 MD5 of the whole blob. Present exactly when the template's
     /// [`CommitOptions::content_md5`] is set.
     pub content_md5: Option<&'i str>,
@@ -741,7 +751,9 @@ impl<'i> CommitItem<'i> {
             content_md5: None,
         }
     }
+}
 
+impl<B> CommitItem<'_, B> {
     /// Returns the part of this commit that holds no borrows, for a
     /// template with `options`.
     pub const fn shape(&self, options: &CommitOptions<'_>) -> CommitShape {
@@ -950,12 +962,26 @@ fn describe_commit<'p>(
 }
 
 // Writes the block list of a commit as the body of its request.
-struct CommitFill<'i> {
+struct CommitFill<'i, B> {
     values: Values<'i>,
-    blocks: &'i [BlockRef<'i>],
+    blocks: B,
 }
 
-impl Fill for CommitFill<'_> {
+// Each block of `blocks` as its ID and its source.
+fn block_pairs<'b, B>(blocks: &B) -> impl Iterator<Item = (&'b str, BlockSource)> + use<'b, B>
+where
+    B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
+{
+    blocks.clone().into_iter().map(|block| {
+        let block = block.into();
+        (block.id, block.source)
+    })
+}
+
+impl<'b, B> Fill for CommitFill<'_, B>
+where
+    B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
+{
     const BODY: bool = true;
 
     fn values(&self) -> &Values<'_> {
@@ -966,17 +992,12 @@ impl Fill for CommitFill<'_> {
         if hole != Hole::Body {
             return false;
         }
-        write_block_list(
-            out,
-            self.blocks.iter().map(|block| (block.id, block.source)),
-        );
+        write_block_list(out, block_pairs(&self.blocks));
         true
     }
 
     fn body_len(&self) -> Option<usize> {
-        Some(block_list_len(
-            self.blocks.iter().map(|block| (block.id, block.source)),
-        ))
+        Some(block_list_len(block_pairs(&self.blocks)))
     }
 }
 
@@ -993,13 +1014,16 @@ impl Fill for CommitFill<'_> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_commit_blocks<'r>(
+pub fn encode_commit_blocks<'r, 'b, B>(
     template: &Template,
     bytes: &[u8],
-    item: &CommitItem<'_>,
+    item: &CommitItem<'_, B>,
     now: &Timestamps,
     buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+) -> Result<WireRequest<'r>>
+where
+    B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
+{
     let Detail::Commit {
         condition,
         content_md5,
@@ -1014,11 +1038,11 @@ pub fn encode_commit_blocks<'r>(
         (true, Some(text)) => ChecksumKind::Md5.check_base64(text)?,
         _ => return Err(InvalidPlan::Checksum.into()),
     }
-    if item.blocks.len() > MAX_BLOCKS {
+    if item.blocks.clone().into_iter().count() > MAX_BLOCKS {
         return Err(InvalidPlan::Parts.into());
     }
-    for block in item.blocks {
-        validate_block_id(block.id)?;
+    for (id, _) in block_pairs(&item.blocks) {
+        validate_block_id(id)?;
     }
     let fill = CommitFill {
         values: Values {
@@ -1028,7 +1052,7 @@ pub fn encode_commit_blocks<'r>(
             checksum: item.content_md5,
             ..Values::default()
         },
-        blocks: item.blocks,
+        blocks: item.blocks.clone(),
     };
     encode_template(
         template,

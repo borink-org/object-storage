@@ -5,7 +5,6 @@
 //
 //     borink-azure-curl get    <key>      writes the object to standard output
 //     borink-azure-curl put    <key>      stores standard input as the object
-//     borink-azure-curl delete <key>      removes the object
 //     borink-azure-curl list   <prefix>   writes every key under the prefix
 
 #include <cstdint>
@@ -59,7 +58,7 @@ void write_keys(std::span<const borink::ListEntry> entries) {
 int main(int argc, char **argv) {
     try {
         if (argc != 3) {
-            std::cerr << "usage: " << argv[0] << " get|put|delete <key> | list <prefix>\n";
+            std::cerr << "usage: " << argv[0] << " get|put <key> | list <prefix>\n";
             return 2;
         }
         const std::string_view command = argv[1];
@@ -73,17 +72,17 @@ int main(int argc, char **argv) {
                                        from_environment("AZURE_STORAGE_ACCESS_TOKEN"));
 
         if (command == "get") {
-            client.get(key, write_all);
+            client.get(borink::get_item(key), write_all);
         } else if (command == "put") {
             const std::vector<std::uint8_t> content = read_all(stdin);
-            client.put(key, content);
-        } else if (command == "delete") {
-            client.remove(key);
+            client.put(borink::put_item(key, content.size()), content);
         } else if (command == "list") {
             // The array holds a whole page: as many entries as each request
             // asks for.
             std::vector<borink::ListEntry> entries(1000);
-            client.list(key, entries, write_keys, borink::List{false, borink::at_most(1000), {}});
+            borink::ListOptions options = borink::list_options();
+            options.max_results = borink::at_most(1000);
+            client.list(key, entries, write_keys, options);
         } else {
             std::cerr << "unknown command " << command << "\n";
             return 2;

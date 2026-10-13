@@ -27,14 +27,18 @@ include = [
     "ErrorCode",
     "Method",
     "GetKind",
+    "Ranging",
+    "RevisionKind",
     "RangeForm",
     "Condition",
-    "DeleteKind",
+    "ConditionForm",
+    "ChecksumKind",
+    "BlockSource",
+    "ListInclude",
     "FailureClass",
     "ServiceError",
     "OutcomeKind",
     "EntryKind",
-    "FillKind",
     "BlobProperty",
 ]
 renaming_overrides_prefixing = true
@@ -51,20 +55,38 @@ renaming_overrides_prefixing = true
 "Status" = "borink_status"
 "AzureNamespace" = "borink_azure_namespace"
 "AzureRejection" = "borink_azure_rejection"
-"Session" = "borink_session"
+"Container" = "borink_container"
+"TIMESTAMPS_LEN" = "BORINK_TIMESTAMPS_LEN"
+"Timestamps" = "borink_timestamps"
+"TEMPLATE_LEN" = "BORINK_TEMPLATE_LEN"
+"Template" = "borink_template"
+"Prepared" = "borink_prepared"
+"ConditionValue" = "borink_condition_value"
 "Range" = "borink_range"
+"GetOptions" = "borink_get_options"
+"GetItem" = "borink_get_item"
 "GetShape" = "borink_get_shape"
+"ContentProperties" = "borink_content_properties"
+"WriteOptions" = "borink_write_options"
+"PutOptions" = "borink_put_options"
+"PutItem" = "borink_put_item"
 "PutShape" = "borink_put_shape"
-"DeleteShape" = "borink_delete_shape"
-"ListShape" = "borink_list_shape"
+"StageOptions" = "borink_stage_options"
+"StageBlockItem" = "borink_stage_block_item"
+"CommitOptions" = "borink_commit_options"
+"BlockRef" = "borink_block_ref"
+"CommitItem" = "borink_commit_item"
+"CommitShape" = "borink_commit_shape"
+"ListOptions" = "borink_list_options"
+"ListItem" = "borink_list_item"
+"WireRequest" = "borink_wire_request"
+"Header" = "borink_header"
+"MaybeSpan" = "borink_maybe_span"
 "ListEntry" = "borink_list_entry"
 "Properties" = "borink_properties"
 "Property" = "borink_property"
 "Fill" = "borink_fill"
 "PropertySet" = "borink_property_set"
-"RequestBuffer" = "borink_request_buffer"
-"RequestHeader" = "borink_request_header"
-"RequestHead" = "borink_request_head"
 "HeaderRef" = "borink_header_ref"
 "ObjectMeta" = "borink_object_meta"
 "BodyWindow" = "borink_body_window"
@@ -74,17 +96,22 @@ renaming_overrides_prefixing = true
 "ErrorCode" = "borink_error_code"
 "Method" = "borink_method"
 "GetKind" = "borink_get_kind"
+"Ranging" = "borink_ranging"
+"RevisionKind" = "borink_revision_kind"
 "RangeForm" = "borink_range_form"
 "Condition" = "borink_condition"
-"DeleteKind" = "borink_delete_kind"
+"ConditionForm" = "borink_condition_form"
+"ChecksumKind" = "borink_checksum_kind"
+"BlockSource" = "borink_block_source"
+"ListInclude" = "borink_list_include"
 "FailureClass" = "borink_failure_class"
 "ServiceError" = "borink_service_error"
 "OutcomeKind" = "borink_outcome_kind"
 "EntryKind" = "borink_entry_kind"
 "BlobProperty" = "borink_blob_property"
-"FillKind" = "borink_fill_kind"
-# `class` is a C++ keyword.
+# `class` and `template` are C++ keywords.
 "class" = "class_"
+"template" = "template_"
 
 # A variant is named after its type, so a C consumer reads
 # `BORINK_GET_KIND_BYTES` without a second table.

@@ -157,6 +157,12 @@ impl Template {
     pub const fn service(&self) -> Service {
         self.service
     }
+
+    /// Returns how many bytes at the start of its buffer the template
+    /// takes. Those are its bytes, which each request is written from.
+    pub const fn bytes_len(&self) -> usize {
+        self.table.len()
+    }
 }
 
 // The value of one field that every request sends alike.

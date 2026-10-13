@@ -12,7 +12,17 @@
 #include <stdint.h>
 
 /**
- * The account namespace used to interpret a local rejection.
+ * The length of a stored timestamp, in bytes.
+ */
+#define BORINK_TIMESTAMPS_LEN 53
+
+/**
+ * The length of a stored template, in bytes.
+ */
+#define BORINK_TEMPLATE_LEN 80
+
+/**
+ * The kind of storage account that the requests of a template go to.
  */
 enum borink_azure_namespace
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -20,7 +30,8 @@ enum borink_azure_namespace
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * The account's namespace is not known.
+     * The account's namespace is not known. A template refuses only what
+     * both kinds of account refuse.
      */
     BORINK_AZURE_NAMESPACE_UNKNOWN = 0,
     /**
@@ -72,8 +83,7 @@ enum borink_error_code
      */
     BORINK_ERROR_CODE_INVALID_PLAN = 4,
     /**
-     * Output storage is too small. Grow to the reported byte and slot
-     * requirements and call again.
+     * Output storage is too small. Grow it to `required` and call again.
      */
     BORINK_ERROR_CODE_CAPACITY = 5,
     /**
@@ -148,6 +158,66 @@ typedef uint16_t borink_get_kind;
 #endif // __cplusplus
 
 /**
+ * Whether every read of a template sends a range, or none does.
+ *
+ * A template fixes which fields its requests send, so a read with a range
+ * and a read without one come from two templates.
+ */
+enum borink_ranging
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * No read sends a range: each one's `range` is `Whole`.
+     */
+    BORINK_RANGING_WHOLE = 1,
+    /**
+     * Every read sends a range.
+     */
+    BORINK_RANGING_RANGED = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_ranging borink_ranging;
+#else
+typedef uint16_t borink_ranging;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Whether every read of a template names an earlier state of its object,
+ * and which kind. Each read names its own in `revision`.
+ */
+enum borink_revision_kind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * Every read names the object as it is now.
+     */
+    BORINK_REVISION_KIND_CURRENT = 1,
+    /**
+     * Every read names a snapshot, by the timestamp Azure returned in
+     * `x-ms-snapshot`.
+     */
+    BORINK_REVISION_KIND_SNAPSHOT = 2,
+    /**
+     * Every read names a version, by the identifier Azure returned in
+     * `x-ms-version-id`.
+     */
+    BORINK_REVISION_KIND_VERSION = 3,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_revision_kind borink_revision_kind;
+#else
+typedef uint16_t borink_revision_kind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
  * Which form of byte range a read requests.
  */
 enum borink_range_form
@@ -181,11 +251,9 @@ typedef uint16_t borink_range_form;
 #endif // __cplusplus
 
 /**
- * The precondition that a request carries.
+ * The precondition that every request of a template carries.
  *
- * A request that carries one passes the entity tag or the HTTP date as
- * `condition_value`. A request that carries none passes an empty
- * `condition_value`.
+ * Each request names what it compares against in its `condition_value`.
  */
 enum borink_condition
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
@@ -193,25 +261,25 @@ enum borink_condition
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * The request carries no precondition.
+     * The requests carry no precondition.
      */
     BORINK_CONDITION_NONE = 1,
     /**
-     * The request succeeds only if the current ETag matches.
+     * A request succeeds only if the current ETag matches.
      */
     BORINK_CONDITION_IF_MATCH = 2,
     /**
-     * The request succeeds only if the current ETag differs.
+     * A request succeeds only if the current ETag differs.
      */
     BORINK_CONDITION_IF_NONE_MATCH = 3,
     /**
-     * The request succeeds only if the object changed after the HTTP date
-     * in `condition_value`.
+     * A request succeeds only if the object changed after the instant it
+     * names.
      */
     BORINK_CONDITION_IF_MODIFIED_SINCE = 4,
     /**
-     * The request succeeds only if the object has not changed since the
-     * HTTP date in `condition_value`.
+     * A request succeeds only if the object has not changed since the
+     * instant it names.
      */
     BORINK_CONDITION_IF_UNMODIFIED_SINCE = 5,
 };
@@ -224,31 +292,123 @@ typedef uint16_t borink_condition;
 #endif // __cplusplus
 
 /**
- * What a removal takes with it.
+ * What a `borink_condition_value` holds.
  */
-enum borink_delete_kind
+enum borink_condition_form
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : uint16_t
 #endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
     /**
-     * Remove the object alone. Azure refuses this if it has snapshots.
+     * Nothing: the template carries no precondition.
      */
-    BORINK_DELETE_KIND_OBJECT = 1,
+    BORINK_CONDITION_FORM_NONE = 0,
     /**
-     * Remove the object and its snapshots.
+     * An entity tag, or `*` for any, in `e_tag`.
      */
-    BORINK_DELETE_KIND_OBJECT_AND_SNAPSHOTS = 2,
+    BORINK_CONDITION_FORM_E_TAG = 1,
     /**
-     * Remove the snapshots and keep the object.
+     * An instant, in `seconds` since the Unix epoch. Read a date that the
+     * service sent with `borink_http_date_ms` and divide by 1000.
      */
-    BORINK_DELETE_KIND_SNAPSHOTS_ONLY = 3,
+    BORINK_CONDITION_FORM_TIME = 2,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
-typedef enum borink_delete_kind borink_delete_kind;
+typedef enum borink_condition_form borink_condition_form;
 #else
-typedef uint16_t borink_delete_kind;
+typedef uint16_t borink_condition_form;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * The kind of checksum that every request of a template sends.
+ *
+ * These are the numbers that the core crate's checksum kind uses. Azure
+ * takes an MD5 or a CRC64, and a template of any other is refused.
+ */
+enum borink_checksum_kind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * No checksum.
+     */
+    BORINK_CHECKSUM_KIND_NONE = 0,
+    /**
+     * MD5, sent as `content-md5`.
+     */
+    BORINK_CHECKSUM_KIND_MD5 = 1,
+    /**
+     * CRC-64/NVME, sent as `x-ms-content-crc64`.
+     */
+    BORINK_CHECKSUM_KIND_CRC64 = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_checksum_kind borink_checksum_kind;
+#else
+typedef uint16_t borink_checksum_kind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Which stored version of a block a commit selects.
+ */
+enum borink_block_source
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint16_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * The block staged and not yet committed.
+     */
+    BORINK_BLOCK_SOURCE_UNCOMMITTED = 1,
+    /**
+     * The block the blob holds now.
+     */
+    BORINK_BLOCK_SOURCE_COMMITTED = 2,
+    /**
+     * The block staged last, else the one the blob holds.
+     */
+    BORINK_BLOCK_SOURCE_LATEST = 3,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_block_source borink_block_source;
+#else
+typedef uint16_t borink_block_source;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * The extra elements that a listing asks the service to write for each
+ * object, as bits of `borink_list_options.include`.
+ */
+enum borink_list_include
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+    /**
+     * The metadata pairs of each object, as a `Metadata` element.
+     */
+    BORINK_LIST_INCLUDE_METADATA = 1,
+    /**
+     * An entry for each snapshot of an object, beside the object's own.
+     */
+    BORINK_LIST_INCLUDE_SNAPSHOTS = 4,
+    /**
+     * An entry for each version of an object.
+     */
+    BORINK_LIST_INCLUDE_VERSIONS = 8,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum borink_list_include borink_list_include;
+#else
+typedef uint32_t borink_list_include;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -348,6 +508,15 @@ enum borink_service_error
      * The service failed, or it was unavailable.
      */
     BORINK_SERVICE_ERROR_SERVICE = 9,
+    /**
+     * The service refused the blocks of a commit: one is missing, or its ID
+     * is not one it takes.
+     */
+    BORINK_SERVICE_ERROR_INVALID_UPLOAD = 10,
+    /**
+     * The upload does not exist. Only S3 names one.
+     */
+    BORINK_SERVICE_ERROR_NO_SUCH_UPLOAD = 11,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -392,18 +561,19 @@ enum borink_outcome_kind
      */
     BORINK_OUTCOME_KIND_RANGE_NOT_SATISFIABLE = 6,
     /**
-     * Azure stored the object.
+     * Azure stored the object. `meta` holds what the head said of it.
      */
-    BORINK_OUTCOME_KIND_DONE = 7,
+    BORINK_OUTCOME_KIND_CREATED = 7,
     /**
-     * Azure accepted the removal.
+     * Azure staged the block. `meta.e_tag` holds the entity tag, if the head
+     * carried one.
      */
-    BORINK_OUTCOME_KIND_ACCEPTED = 8,
+    BORINK_OUTCOME_KIND_STAGED = 8,
     /**
      * The head reports a failure but names no error.
      *
      * Read the response body, cap what you read, and pass it with `failure`
-     * to `borink_finish_get_error_body` or one of its two siblings.
+     * to the operation's `borink_accept_*_error_body`.
      */
     BORINK_OUTCOME_KIND_NEED_ERROR_BODY = 9,
     /**
@@ -429,6 +599,11 @@ enum borink_outcome_kind
      * and the other two values of `body` are absent.
      */
     BORINK_OUTCOME_KIND_PAGE = 13,
+    /**
+     * Azure committed the blob from its blocks. `meta` holds what the head
+     * said of it.
+     */
+    BORINK_OUTCOME_KIND_COMMITTED = 14,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -712,37 +887,58 @@ typedef struct borink_bytes {
 } borink_bytes;
 
 /**
- * One container, and the token that opens it.
+ * The container that the requests of a template go to: what
+ * `Container::new` and `Container::object` describe in the core crate.
  *
- * Fill one in per client and keep it. Your program owns the three values, and
- * refreshing the token is assigning `token` again.
- *
- * # Lifetime
- *
- * The three values must stay valid for every call that takes this session.
+ * Your program owns the values. They must stay valid for the call that
+ * prepares a template, and no longer: a template holds no pointer.
  */
-typedef struct borink_session {
+typedef struct borink_container {
     /**
      * The HTTPS origin of the storage account, or with `allow_http` an
      * HTTP one.
      */
     struct borink_bytes endpoint;
     /**
-     * The container name.
+     * The container's name.
      */
-    struct borink_bytes container;
+    struct borink_bytes name;
     /**
-     * The Entra ID bearer token, without the `Bearer ` prefix.
-     */
-    struct borink_bytes token;
-    /**
-     * Whether `endpoint` may be an `http://` origin, such as an emulator's.
-     * Without TLS every request carries the token in clear, so leave this
-     * false, as a zeroed session has it, except for a local emulator or a
+     * Whether `endpoint` may be an `http://` origin, such as an emulator's:
+     * `Container::new_allowing_http` rather than `Container::new`.
+     *
+     * Without TLS every request carries the token in clear. Leave this
+     * false, as a zeroed container has it, except for a local emulator or a
      * network you trust.
      */
     bool allow_http;
-} borink_session;
+    /**
+     * The key of the one object that every request of a template names, or
+     * empty for templates whose requests each name their own.
+     *
+     * A template of one object holds its key as checked and encoded text,
+     * so each request writes it without checking it. Pass that key, or an
+     * empty one, as each request's `key`. A listing names no object, and a
+     * listing template of such a container is refused.
+     */
+    struct borink_bytes object;
+} borink_container;
+
+/**
+ * An instant, formatted for the dates that a request carries: what
+ * `Timestamps` is in the core crate, as it stores itself.
+ *
+ * `borink_timestamps_from_unix` writes one. Write one each second, and pass
+ * it to every request of that second, so that no request formats its dates
+ * again. It holds no pointer. One whose dates are not text is refused with
+ * `InvalidPlan`.
+ */
+typedef struct borink_timestamps {
+    /**
+     * The instant, as this library stores it.
+     */
+    uint8_t stored[BORINK_TIMESTAMPS_LEN];
+} borink_timestamps;
 
 /**
  * A corresponding Azure rejection, not a received response.
@@ -762,6 +958,230 @@ typedef struct borink_azure_rejection {
 } borink_azure_rejection;
 
 /**
+ * A template that a `borink_prepare_*` call wrote: the values that read the
+ * bytes it wrote into your buffer.
+ *
+ * Those bytes are the part of every request of one operation that is the
+ * same for each object. The template holds no pointer. Keep it beside the bytes it was written into, and
+ * pass both to each `borink_encode_*` call of its operation. You may copy
+ * it, and store it with those bytes, such as in flash, to write requests
+ * again without preparing again. It ends in a hash of the rest. A template
+ * that was changed since it was written is refused with `InvalidPlan`, and
+ * so is one that another version of the library wrote.
+ *
+ * # Bytes
+ *
+ * Encoding trusts that the bytes passed with a template are its own, and
+ * checks nothing of them that would cost each request time. Bytes that are
+ * not write a wrong request or are refused, but never make a call read
+ * outside them. Where bytes could be another template's, such as bytes read
+ * back from storage, check them once with `borink_template_check`.
+ */
+typedef struct borink_template {
+    /**
+     * The template, as this library stores it.
+     */
+    uint8_t stored[BORINK_TEMPLATE_LEN];
+} borink_template;
+
+/**
+ * What a `borink_prepare_*` call wrote.
+ */
+typedef struct borink_prepared {
+    /**
+     * Whether the template was written, and what stopped it.
+     *
+     * A `code` of 0 means that the template is in your buffer.
+     */
+    struct borink_status status;
+    /**
+     * The number of bytes at the start of your buffer that the template
+     * takes, or with `Capacity` the number it needs.
+     *
+     * Those are its bytes: pass them to each request of the template.
+     */
+    size_t required;
+    /**
+     * The template, when `status.code` is 0.
+     */
+    struct borink_template template_;
+} borink_prepared;
+
+/**
+ * What every read of a template does alike.
+ */
+typedef struct borink_get_options {
+    /**
+     * Whether the reads ask for bytes or for metadata, as a
+     * `borink_get_kind`.
+     */
+    uint16_t kind;
+    /**
+     * Whether every read sends a range, as a `borink_ranging`.
+     */
+    uint16_t ranging;
+    /**
+     * The precondition every read carries, as a `borink_condition`.
+     */
+    uint16_t condition;
+    /**
+     * Whether every read names a snapshot or a version, as a
+     * `borink_revision_kind`.
+     */
+    uint16_t revision;
+} borink_get_options;
+
+/**
+ * Storage that a call writes into.
+ *
+ * A `len` of 0 is an empty buffer, and `ptr` may then be null.
+ */
+typedef struct borink_bytes_mut {
+    /**
+     * The first byte.
+     */
+    uint8_t *ptr;
+    /**
+     * The number of bytes.
+     */
+    size_t len;
+} borink_bytes_mut;
+
+/**
+ * The content properties that a write stores with each blob. An empty
+ * value stores none.
+ */
+typedef struct borink_content_properties {
+    /**
+     * The media type, sent as `x-ms-blob-content-type`.
+     */
+    struct borink_bytes content_type;
+    /**
+     * The content encoding, sent as `x-ms-blob-content-encoding`.
+     */
+    struct borink_bytes content_encoding;
+    /**
+     * The content language, sent as `x-ms-blob-content-language`.
+     */
+    struct borink_bytes content_language;
+    /**
+     * The content disposition, sent as `x-ms-blob-content-disposition`.
+     */
+    struct borink_bytes content_disposition;
+    /**
+     * The cache control directives, sent as `x-ms-blob-cache-control`.
+     */
+    struct borink_bytes cache_control;
+} borink_content_properties;
+
+/**
+ * What every write of a template stores with each blob, beside its bytes.
+ *
+ * Metadata and tags do not cross this boundary yet.
+ */
+typedef struct borink_write_options {
+    /**
+     * The content properties.
+     */
+    struct borink_content_properties properties;
+    /**
+     * The access tier, such as `Hot` or `Cool`, or empty for the account's
+     * default.
+     */
+    struct borink_bytes storage_class;
+} borink_write_options;
+
+/**
+ * What every whole-object write of a template does alike.
+ */
+typedef struct borink_put_options {
+    /**
+     * The precondition every write carries, as a `borink_condition`.
+     */
+    uint16_t condition;
+    /**
+     * What every write stores with each blob.
+     */
+    struct borink_write_options options;
+    /**
+     * The checksum of the content that every write sends, as a
+     * `borink_checksum_kind`.
+     */
+    uint16_t checksum;
+} borink_put_options;
+
+/**
+ * What every Put Block of a template does alike.
+ */
+typedef struct borink_stage_options {
+    /**
+     * The checksum of each block that Azure checks, as a
+     * `borink_checksum_kind`.
+     */
+    uint16_t checksum;
+} borink_stage_options;
+
+/**
+ * What every Put Block List of a template does alike.
+ */
+typedef struct borink_commit_options {
+    /**
+     * The condition that each commit carries on the blob the key holds
+     * before, as a `borink_condition`.
+     */
+    uint16_t condition;
+    /**
+     * What every commit stores with each blob.
+     */
+    struct borink_write_options options;
+    /**
+     * Whether each commit declares the MD5 of the blob it commits, which
+     * Azure stores and returns on a read but does not check.
+     */
+    bool content_md5;
+} borink_commit_options;
+
+/**
+ * A number that a plan may not carry.
+ */
+typedef struct borink_maybe_u32 {
+    /**
+     * Whether the plan carries this number.
+     */
+    bool present;
+    /**
+     * The number.
+     */
+    uint32_t value;
+} borink_maybe_u32;
+
+/**
+ * What every page of a listing template asks for alike.
+ */
+typedef struct borink_list_options {
+    /**
+     * The text that groups keys after the prefix, such as `/`, or empty to
+     * list every key. A delimited listing reports each group once, as an
+     * entry of kind `Prefix`.
+     */
+    struct borink_bytes delimiter;
+    /**
+     * The most entries that one page reports.
+     *
+     * An absent number asks for the service's maximum. Azure applies that
+     * maximum to any larger number too: it answers 5,000 entries and a
+     * marker. The service may also report fewer entries than
+     * you asked for and still name a next page.
+     */
+    struct borink_maybe_u32 max_results;
+    /**
+     * What each entry carries beside the object's own properties, as the
+     * bits of `borink_list_include` values.
+     */
+    uint32_t include;
+} borink_list_options;
+
+/**
  * A range of bytes, as an offset from the start of your request buffer.
  */
 typedef struct borink_span {
@@ -776,34 +1196,38 @@ typedef struct borink_span {
 } borink_span;
 
 /**
- * One request header, as two ranges of the request buffer.
+ * A range of your request buffer that a request may not have.
  */
-typedef struct borink_request_header {
+typedef struct borink_maybe_span {
     /**
-     * The range that holds the header name.
+     * Whether the request has it.
      */
-    struct borink_span name;
+    bool present;
     /**
-     * The range that holds the header value.
+     * Where it is.
      */
-    struct borink_span value;
-} borink_request_header;
+    struct borink_span span;
+} borink_maybe_span;
 
 /**
- * A request head borrowing the caller's bytes and header slots.
+ * One request, written into your buffer.
+ *
+ * Every range is an offset into that buffer. Send `url` and each header
+ * with an HTTP client that takes them, or write `head` to a connection
+ * yourself. Then send the content: the body at `body` if the request has
+ * one, or the content you named in the item.
  */
-typedef struct borink_request_head {
+typedef struct borink_wire_request {
     /**
-     * Whether the head was written, and what stopped it.
+     * Whether the request was written, and what stopped it.
      *
-     * A `code` of 0 means that the head is in your buffer.
+     * A `code` of 0 means that the request is in your buffer.
      */
     struct borink_status status;
     /**
-     * The number of bytes that this request head needs.
-     *
-     * This is the exact size whenever the plan is valid, whether or not the
-     * head was written. Size one buffer by it and reuse that buffer.
+     * The number of bytes at the start of your buffer that the request
+     * takes, or with `Capacity` the number it needs. Size one buffer by
+     * the largest and reuse it.
      */
     size_t required;
     /**
@@ -811,26 +1235,31 @@ typedef struct borink_request_head {
      */
     uint16_t method;
     /**
-     * The range that holds the complete object URL.
+     * The URL.
      */
     struct borink_span url;
     /**
-     * The number of meaningful entries in `headers`; zero on failure.
+     * The HTTP/1.1 head: the request line, `host`, every field line and the
+     * empty line that ends the head.
      */
-    size_t header_count;
+    struct borink_span head;
     /**
-     * Points at the slots passed in `RequestBuffer::headers` on success.
-     *
-     * Only `header_count` entries are meaningful. Keep that array alive and
-     * unmoved until the request has been consumed. The pointer is meaningless
-     * when the supplied capacity was zero or encoding failed.
+     * The field lines in the head, other than `host`, each written as
+     * `name: value` and a CRLF. Read them one by one with
+     * `borink_next_header`.
      */
-    const struct borink_request_header *headers;
+    struct borink_span fields;
     /**
-     * Header slots required, including on capacity failure.
+     * The body that this library wrote, such as the block list of a
+     * commit, or absent for a request whose content you send.
      */
-    size_t required_headers;
-} borink_request_head;
+    struct borink_maybe_span body;
+    /**
+     * The length of the content that follows the head: the body's, or the
+     * content's that the item named.
+     */
+    uint64_t payload_len;
+} borink_wire_request;
 
 /**
  * The byte range that a read requests.
@@ -851,11 +1280,192 @@ typedef struct borink_range {
 } borink_range;
 
 /**
- * The part of a read plan that holds no borrows.
+ * What a request's precondition compares against.
  *
- * Store one of these while the request is in flight, and pass it to
- * `borink_accept_get_head` when the response arrives. It is the whole
- * per-request context: this crate keeps none of its own.
+ * A template that carries a condition takes one in each request, and one
+ * that carries none takes none.
+ */
+typedef struct borink_condition_value {
+    /**
+     * Which of the values below this holds, as a `borink_condition_form`.
+     */
+    uint16_t form;
+    /**
+     * The entity tag, or `*` for any, as `If-Match` and `If-None-Match`
+     * carry it.
+     */
+    struct borink_bytes e_tag;
+    /**
+     * The instant, in seconds since the Unix epoch, which the request
+     * writes as an HTTP date.
+     */
+    uint64_t seconds;
+} borink_condition_value;
+
+/**
+ * What one read of a template reads.
+ */
+typedef struct borink_get_item {
+    /**
+     * The object key, before percent-encoding. Empty for a template of one
+     * object.
+     */
+    struct borink_bytes key;
+    /**
+     * The bytes to read: `Whole` exactly when the template's `ranging` is.
+     */
+    struct borink_range range;
+    /**
+     * What the template's precondition compares against.
+     */
+    struct borink_condition_value condition_value;
+    /**
+     * The snapshot or version to read, as Azure wrote it, when the
+     * template's `revision` names one; empty otherwise.
+     */
+    struct borink_bytes revision;
+} borink_get_item;
+
+/**
+ * What one whole-object write of a template writes.
+ *
+ * The content stays in your program, and you send it after the head. Only
+ * its length reaches the request.
+ */
+typedef struct borink_put_item {
+    /**
+     * The object key. Empty for a template of one object.
+     */
+    struct borink_bytes key;
+    /**
+     * The length of the content.
+     */
+    uint64_t content_len;
+    /**
+     * What the template's precondition compares against.
+     */
+    struct borink_condition_value condition_value;
+    /**
+     * The base64 checksum of the content, of the template's kind, or empty
+     * for a template that sends none.
+     */
+    struct borink_bytes checksum;
+} borink_put_item;
+
+/**
+ * One Put Block, which stages one block of a blob.
+ *
+ * The content stays in your program, as for a `borink_put_item`.
+ */
+typedef struct borink_stage_block_item {
+    /**
+     * The key of the blob. Empty for a template of one object.
+     */
+    struct borink_bytes key;
+    /**
+     * The block ID: base64 text of at most 64 bytes, of one length for
+     * every block of the blob.
+     */
+    struct borink_bytes id;
+    /**
+     * The length of the block.
+     */
+    uint64_t content_len;
+    /**
+     * The base64 checksum of the block, of the template's kind, or empty
+     * for a template that sends none.
+     */
+    struct borink_bytes checksum;
+} borink_stage_block_item;
+
+/**
+ * One block of a commit.
+ */
+typedef struct borink_block_ref {
+    /**
+     * The block ID, as it was staged.
+     */
+    struct borink_bytes id;
+    /**
+     * Which stored version of the block to select, as a
+     * `borink_block_source`.
+     */
+    uint16_t source;
+} borink_block_ref;
+
+/**
+ * One Put Block List, which commits a blob from its blocks.
+ */
+typedef struct borink_commit_item {
+    /**
+     * The key of the blob. Empty for a template of one object.
+     */
+    struct borink_bytes key;
+    /**
+     * What the template's precondition compares against.
+     */
+    struct borink_condition_value condition_value;
+    /**
+     * The blocks of the blob, in order: `block_count` of them, at most
+     * 50,000. The request's body is written from them, and they are not
+     * copied anywhere else.
+     */
+    const struct borink_block_ref *blocks;
+    /**
+     * The number of blocks.
+     */
+    size_t block_count;
+    /**
+     * The base64 MD5 of the whole blob when the template's `content_md5`
+     * is set, and empty otherwise.
+     */
+    struct borink_bytes content_md5;
+} borink_commit_item;
+
+/**
+ * One page of a listing.
+ */
+typedef struct borink_list_item {
+    /**
+     * The start of every key the listing names. Empty lists the whole
+     * container.
+     */
+    struct borink_bytes prefix;
+    /**
+     * The `next_marker` of the page before, or empty for the first page.
+     */
+    struct borink_bytes marker;
+} borink_list_item;
+
+/**
+ * One header field of a request.
+ *
+ * # Lifetime
+ *
+ * Both values point into your request buffer.
+ */
+typedef struct borink_header {
+    /**
+     * Whether the walk read one. A walk that has ended reports `false`.
+     */
+    bool present;
+    /**
+     * The field name.
+     */
+    struct borink_bytes name;
+    /**
+     * The field value.
+     */
+    struct borink_bytes value;
+} borink_header;
+
+/**
+ * The part of a read that holds no pointer.
+ *
+ * `borink_get_item_shape` returns it. Keep it while the request is in
+ * flight, and pass it to `borink_accept_get_head` when the response
+ * arrives. It is the whole per-request context: this crate keeps none of its
+ * own.
  */
 typedef struct borink_get_shape {
     /**
@@ -874,46 +1484,7 @@ typedef struct borink_get_shape {
 } borink_get_shape;
 
 /**
- * Storage that a call writes into.
- *
- * A `len` of 0 is an empty buffer, and `ptr` may then be null.
- */
-typedef struct borink_bytes_mut {
-    /**
-     * The first byte.
-     */
-    uint8_t *ptr;
-    /**
-     * The number of bytes.
-     */
-    size_t len;
-} borink_bytes_mut;
-
-/**
- * Caller-owned storage for an encoded request.
- *
- * Both regions must be disjoint from all input strings and records.
- */
-typedef struct borink_request_buffer {
-    /**
-     * Writable byte storage.
-     */
-    struct borink_bytes_mut bytes;
-    /**
-     * Writable descriptor slots, disjoint from the byte storage.
-     *
-     * The encoder initializes these slots; uninitialized storage is allowed.
-     * The pointer is ignored when `header_capacity` is zero.
-     */
-    struct borink_request_header *headers;
-    /**
-     * Number of descriptor slots.
-     */
-    size_t header_capacity;
-} borink_request_buffer;
-
-/**
- * The part of a write plan that holds no borrows.
+ * The part of a write that holds no pointer.
  */
 typedef struct borink_put_shape {
     /**
@@ -923,18 +1494,14 @@ typedef struct borink_put_shape {
 } borink_put_shape;
 
 /**
- * The part of a removal plan that holds no borrows.
+ * The part of a commit that holds no pointer.
  */
-typedef struct borink_delete_shape {
+typedef struct borink_commit_shape {
     /**
-     * What the removal takes with it, as a `borink_delete_kind`.
-     */
-    uint16_t kind;
-    /**
-     * The precondition that the removal carries, as a `borink_condition`.
+     * The precondition that the commit carries, as a `borink_condition`.
      */
     uint16_t condition;
-} borink_delete_shape;
+} borink_commit_shape;
 
 /**
  * A number that a response head may not carry.
@@ -1029,8 +1596,8 @@ typedef struct borink_body_window {
 /**
  * A response head that reports a failure.
  *
- * Store one of these and pass it back to `borink_finish_get_error_body` to
- * finish a `NeedErrorBody`.
+ * Pass it back to the operation's `borink_accept_*_error_body` to finish a
+ * `NeedErrorBody`.
  *
  * A `NotFound` fills `kind` alone. A missing object is not a failure of the
  * head: it names an error and carries no status and no category, so both are
@@ -1067,7 +1634,7 @@ typedef struct borink_failure {
 /**
  * The result of reading one response head.
  *
- * One value describes a read, a write and a removal. The fields that the
+ * One value describes the outcome of every operation. The fields that the
  * operation does not fill are absent.
  *
  * # Lifetime
@@ -1119,42 +1686,6 @@ typedef struct borink_header_ref {
      */
     struct borink_bytes value;
 } borink_header_ref;
-
-/**
- * A number that a plan may not carry.
- */
-typedef struct borink_maybe_u32 {
-    /**
-     * Whether the plan carries this number.
-     */
-    bool present;
-    /**
-     * The number.
-     */
-    uint32_t value;
-} borink_maybe_u32;
-
-/**
- * The part of a listing plan that holds no borrows.
- */
-typedef struct borink_list_shape {
-    /**
-     * Whether the listing groups the keys at each `/` after the prefix.
-     *
-     * A delimited listing reports each group once, as an entry of kind
-     * `Prefix`, instead of reporting every key in it.
-     */
-    bool delimited;
-    /**
-     * The most entries that one page reports.
-     *
-     * An absent number asks for the service's maximum, which Azure also
-     * applies to any larger number: it answers 5,000 entries and a marker
-     * rather than refusing. The service may also report fewer entries than
-     * you asked for and still name a next page.
-     */
-    struct borink_maybe_u32 max_results;
-} borink_list_shape;
 
 /**
  * What one call to `borink_fill_listing` read.
@@ -1316,77 +1847,192 @@ typedef struct borink_layout {
     size_t alignof_azure_rejection;
     size_t offsetof_azure_rejection_status;
     size_t offsetof_azure_rejection_code;
-    size_t sizeof_request_buffer;
-    size_t alignof_request_buffer;
-    size_t offsetof_request_buffer_bytes;
-    size_t offsetof_request_buffer_headers;
-    size_t offsetof_request_buffer_header_capacity;
-    size_t offsetof_request_head_required_headers;
     size_t sizeof_bytes;
     size_t alignof_bytes;
+    size_t offsetof_bytes_ptr;
     size_t offsetof_bytes_len;
     size_t sizeof_bytes_mut;
     size_t alignof_bytes_mut;
+    size_t offsetof_bytes_mut_ptr;
+    size_t offsetof_bytes_mut_len;
     size_t sizeof_span;
+    size_t alignof_span;
+    size_t offsetof_span_start;
     size_t offsetof_span_len;
+    size_t sizeof_maybe_span;
+    size_t alignof_maybe_span;
+    size_t offsetof_maybe_span_present;
+    size_t offsetof_maybe_span_span;
     size_t sizeof_maybe_bytes;
     size_t alignof_maybe_bytes;
+    size_t offsetof_maybe_bytes_present;
     size_t offsetof_maybe_bytes_bytes;
     size_t sizeof_maybe_u64;
     size_t alignof_maybe_u64;
+    size_t offsetof_maybe_u64_present;
     size_t offsetof_maybe_u64_value;
+    size_t sizeof_maybe_u32;
+    size_t alignof_maybe_u32;
+    size_t offsetof_maybe_u32_present;
+    size_t offsetof_maybe_u32_value;
     size_t sizeof_status;
+    size_t alignof_status;
+    size_t offsetof_status_code;
     size_t offsetof_status_detail;
-    size_t sizeof_session;
-    size_t offsetof_session_container;
-    size_t offsetof_session_token;
+    size_t sizeof_container;
+    size_t alignof_container;
+    size_t offsetof_container_endpoint;
+    size_t offsetof_container_name;
+    size_t offsetof_container_allow_http;
+    size_t offsetof_container_object;
+    size_t sizeof_timestamps;
+    size_t alignof_timestamps;
+    size_t offsetof_timestamps_stored;
+    size_t sizeof_template;
+    size_t alignof_template;
+    size_t offsetof_template_stored;
+    size_t sizeof_prepared;
+    size_t alignof_prepared;
+    size_t offsetof_prepared_status;
+    size_t offsetof_prepared_required;
+    size_t offsetof_prepared_template;
+    size_t sizeof_condition_value;
+    size_t alignof_condition_value;
+    size_t offsetof_condition_value_form;
+    size_t offsetof_condition_value_e_tag;
+    size_t offsetof_condition_value_seconds;
     size_t sizeof_range;
     size_t alignof_range;
+    size_t offsetof_range_form;
     size_t offsetof_range_start;
     size_t offsetof_range_end;
+    size_t sizeof_get_options;
+    size_t alignof_get_options;
+    size_t offsetof_get_options_kind;
+    size_t offsetof_get_options_ranging;
+    size_t offsetof_get_options_condition;
+    size_t offsetof_get_options_revision;
+    size_t sizeof_get_item;
+    size_t alignof_get_item;
+    size_t offsetof_get_item_key;
+    size_t offsetof_get_item_range;
+    size_t offsetof_get_item_condition_value;
+    size_t offsetof_get_item_revision;
     size_t sizeof_get_shape;
+    size_t alignof_get_shape;
+    size_t offsetof_get_shape_kind;
     size_t offsetof_get_shape_range;
     size_t offsetof_get_shape_condition;
+    size_t sizeof_content_properties;
+    size_t alignof_content_properties;
+    size_t offsetof_content_properties_content_type;
+    size_t offsetof_content_properties_content_encoding;
+    size_t offsetof_content_properties_content_language;
+    size_t offsetof_content_properties_content_disposition;
+    size_t offsetof_content_properties_cache_control;
+    size_t sizeof_write_options;
+    size_t alignof_write_options;
+    size_t offsetof_write_options_properties;
+    size_t offsetof_write_options_storage_class;
+    size_t sizeof_put_options;
+    size_t alignof_put_options;
+    size_t offsetof_put_options_condition;
+    size_t offsetof_put_options_options;
+    size_t offsetof_put_options_checksum;
+    size_t sizeof_put_item;
+    size_t alignof_put_item;
+    size_t offsetof_put_item_key;
+    size_t offsetof_put_item_content_len;
+    size_t offsetof_put_item_condition_value;
+    size_t offsetof_put_item_checksum;
     size_t sizeof_put_shape;
-    size_t sizeof_delete_shape;
-    size_t offsetof_delete_shape_condition;
-    size_t sizeof_request_header;
-    size_t offsetof_request_header_value;
-    size_t sizeof_request_head;
-    size_t alignof_request_head;
-    size_t offsetof_request_head_required;
-    size_t offsetof_request_head_method;
-    size_t offsetof_request_head_url;
-    size_t offsetof_request_head_header_count;
-    size_t offsetof_request_head_headers;
+    size_t alignof_put_shape;
+    size_t offsetof_put_shape_condition;
+    size_t sizeof_stage_options;
+    size_t alignof_stage_options;
+    size_t offsetof_stage_options_checksum;
+    size_t sizeof_stage_block_item;
+    size_t alignof_stage_block_item;
+    size_t offsetof_stage_block_item_key;
+    size_t offsetof_stage_block_item_id;
+    size_t offsetof_stage_block_item_content_len;
+    size_t offsetof_stage_block_item_checksum;
+    size_t sizeof_commit_options;
+    size_t alignof_commit_options;
+    size_t offsetof_commit_options_condition;
+    size_t offsetof_commit_options_options;
+    size_t offsetof_commit_options_content_md5;
+    size_t sizeof_block_ref;
+    size_t alignof_block_ref;
+    size_t offsetof_block_ref_id;
+    size_t offsetof_block_ref_source;
+    size_t sizeof_commit_item;
+    size_t alignof_commit_item;
+    size_t offsetof_commit_item_key;
+    size_t offsetof_commit_item_condition_value;
+    size_t offsetof_commit_item_blocks;
+    size_t offsetof_commit_item_block_count;
+    size_t offsetof_commit_item_content_md5;
+    size_t sizeof_commit_shape;
+    size_t alignof_commit_shape;
+    size_t offsetof_commit_shape_condition;
+    size_t sizeof_list_options;
+    size_t alignof_list_options;
+    size_t offsetof_list_options_delimiter;
+    size_t offsetof_list_options_max_results;
+    size_t offsetof_list_options_include;
+    size_t sizeof_list_item;
+    size_t alignof_list_item;
+    size_t offsetof_list_item_prefix;
+    size_t offsetof_list_item_marker;
+    size_t sizeof_wire_request;
+    size_t alignof_wire_request;
+    size_t offsetof_wire_request_status;
+    size_t offsetof_wire_request_required;
+    size_t offsetof_wire_request_method;
+    size_t offsetof_wire_request_url;
+    size_t offsetof_wire_request_head;
+    size_t offsetof_wire_request_fields;
+    size_t offsetof_wire_request_body;
+    size_t offsetof_wire_request_payload_len;
+    size_t sizeof_header;
+    size_t alignof_header;
+    size_t offsetof_header_present;
+    size_t offsetof_header_name;
+    size_t offsetof_header_value;
     size_t sizeof_header_ref;
+    size_t alignof_header_ref;
+    size_t offsetof_header_ref_name;
     size_t offsetof_header_ref_value;
     size_t sizeof_object_meta;
+    size_t alignof_object_meta;
+    size_t offsetof_object_meta_size;
     size_t offsetof_object_meta_e_tag;
     size_t offsetof_object_meta_last_modified;
     size_t offsetof_object_meta_version;
     size_t offsetof_object_meta_content_encoding;
     size_t offsetof_object_meta_content_type;
     size_t sizeof_body_window;
+    size_t alignof_body_window;
+    size_t offsetof_body_window_object_offset;
     size_t offsetof_body_window_expected_len;
     size_t offsetof_body_window_object_size;
     size_t sizeof_failure;
+    size_t alignof_failure;
+    size_t offsetof_failure_status;
     size_t offsetof_failure_class;
     size_t offsetof_failure_kind;
     size_t offsetof_failure_request_id;
     size_t sizeof_outcome;
     size_t alignof_outcome;
+    size_t offsetof_outcome_kind;
     size_t offsetof_outcome_meta;
     size_t offsetof_outcome_body;
     size_t offsetof_outcome_failure;
     size_t offsetof_outcome_error;
-    size_t sizeof_maybe_u32;
-    size_t alignof_maybe_u32;
-    size_t offsetof_maybe_u32_value;
-    size_t sizeof_list_shape;
-    size_t offsetof_list_shape_max_results;
     size_t sizeof_list_entry;
     size_t alignof_list_entry;
+    size_t offsetof_list_entry_kind;
     size_t offsetof_list_entry_key;
     size_t offsetof_list_entry_size;
     size_t offsetof_list_entry_e_tag;
@@ -1395,18 +2041,22 @@ typedef struct borink_layout {
     size_t offsetof_list_entry_raw;
     size_t sizeof_properties;
     size_t alignof_properties;
+    size_t offsetof_properties_remaining;
     size_t offsetof_properties_within;
     size_t sizeof_property;
     size_t alignof_property;
+    size_t offsetof_property_present;
     size_t offsetof_property_name;
     size_t offsetof_property_value;
+    size_t sizeof_property_set;
+    size_t alignof_property_set;
+    size_t offsetof_property_set_mask;
     size_t sizeof_fill;
     size_t alignof_fill;
+    size_t offsetof_fill_status;
     size_t offsetof_fill_filled;
     size_t offsetof_fill_required;
     size_t offsetof_fill_next_marker;
-    size_t sizeof_property_set;
-    size_t alignof_property_set;
 } borink_layout;
 
 #ifdef __cplusplus
@@ -1414,17 +2064,29 @@ extern "C" {
 #endif // __cplusplus
 
 /**
- * Reports what is wrong with `session`, if anything.
+ * Reports what is wrong with `container`, if anything: what
+ * `Container::new` refuses in the core crate.
  *
- * A `code` of 0 means that the session can build requests. Every other call
- * makes the same check, so this exists to fail early.
+ * A `code` of 0 means that a template can be prepared for it. Every
+ * `borink_prepare_*` call makes the same check, so this exists to fail
+ * early. The key of `object`, and the token, are checked when a template is
+ * prepared.
  *
  * # Safety
  *
- * `session` must be null or point at one readable `borink_session` whose
- * three values are each readable for their length.
+ * `container` must be null or point at one readable value whose values each
+ * address their stated length.
  */
-struct borink_status borink_validate(const struct borink_session *session);
+struct borink_status borink_container_check(const struct borink_container *container);
+
+/**
+ * Returns the instant `unix_seconds` after the Unix epoch, formatted for the
+ * dates that a request carries: `Timestamps::from_unix` in the core crate.
+ *
+ * Call it once a second, and pass the result to every request of that
+ * second. A value after `9999-12-31 23:59:59 UTC` becomes that instant.
+ */
+struct borink_timestamps borink_timestamps_from_unix(uint64_t unix_seconds);
 
 /**
  * Looks up Azure's corresponding rejection for a local validation failure.
@@ -1437,188 +2099,398 @@ struct borink_azure_rejection borink_azure_rejection_for(struct borink_status er
                                                          uint16_t namespace_);
 
 /**
- * Writes the request head of a read into `buf`.
+ * Writes the template of reads with `options` from `container`, sent with
+ * the bearer `token`, into `buf`.
  *
- * Pass an empty `condition_value` if `shape` carries no condition. Pass an
- * empty `buf` to learn the size that this request needs.
+ * `token` is an Entra ID token, without the `Bearer ` prefix. The template
+ * holds it, so a new token means preparing again.
+ *
+ * `namespace` is a `borink_azure_namespace`: the kind of account the reads
+ * go to. Pass `Unknown` if you do not know it, and each read refuses only
+ * the keys that both kinds refuse.
+ *
+ * Pass an empty `buf` to learn the size that the template needs. A ranged
+ * HEAD is refused with `RangedHead`.
  *
  * # Safety
  *
- * `session` and `shape` must each be null or point at one readable value.
- * `key`, `condition_value` and `buf` must each address their stated length,
- * and `buf` must be reached through nothing else during the call.
- * Byte storage and header slots must be exclusive and disjoint from all
- * inputs. Header slots need only be writable; this call initializes them.
+ * `container` and `options` must each be null or point at one readable
+ * value. Each value of `container`, and `token`, must address its stated
+ * length. `buf` must address its stated length and be reached through
+ * nothing else during the call.
  */
-struct borink_request_head borink_encode_get(const struct borink_session *session,
-                                             const struct borink_get_shape *shape,
-                                             struct borink_bytes key,
-                                             struct borink_bytes condition_value,
-                                             struct borink_request_buffer buf,
-                                             uint64_t unix_seconds);
+struct borink_prepared borink_prepare_get(const struct borink_container *container,
+                                          struct borink_bytes token,
+                                          uint16_t namespace_,
+                                          const struct borink_get_options *options,
+                                          struct borink_bytes_mut buf);
 
 /**
- * Writes the request head of a write into `buf`.
+ * Writes the template of whole-object writes with `options` into `buf`.
  *
- * The head states `content_len`. You send those bytes yourself.
+ * Every write sends `x-ms-blob-type: BlockBlob`, and the content properties
+ * and the access tier of `options`. A checksum other than an MD5 or a CRC64
+ * is refused with `Option`.
+ *
+ * # Safety
+ *
+ * As `borink_prepare_get`, and each value of `options` must address its
+ * stated length.
+ */
+struct borink_prepared borink_prepare_put(const struct borink_container *container,
+                                          struct borink_bytes token,
+                                          uint16_t namespace_,
+                                          const struct borink_put_options *options,
+                                          struct borink_bytes_mut buf);
+
+/**
+ * Writes the template of Put Blocks with `options` into `buf`.
+ *
+ * A checksum other than an MD5 or a CRC64 is refused with `Option`.
+ *
+ * # Safety
+ *
+ * As `borink_prepare_get`.
+ */
+struct borink_prepared borink_prepare_stage_block(const struct borink_container *container,
+                                                  struct borink_bytes token,
+                                                  uint16_t namespace_,
+                                                  const struct borink_stage_options *options,
+                                                  struct borink_bytes_mut buf);
+
+/**
+ * Writes the template of Put Block Lists with `options` into `buf`.
+ *
+ * # Safety
+ *
+ * As `borink_prepare_put`.
+ */
+struct borink_prepared borink_prepare_commit_blocks(const struct borink_container *container,
+                                                    struct borink_bytes token,
+                                                    uint16_t namespace_,
+                                                    const struct borink_commit_options *options,
+                                                    struct borink_bytes_mut buf);
+
+/**
+ * Writes the template of the pages of a listing with `options` into `buf`.
+ *
+ * A page of no entries is refused with `MaxResults`, and a delimiter other
+ * than `/` on a hierarchical account with `Delimiter`. A container that names
+ * one object is refused with `Option`: a listing names none.
+ *
+ * # Safety
+ *
+ * As `borink_prepare_get`, and `options->delimiter` must address its stated
+ * length.
+ */
+struct borink_prepared borink_prepare_list(const struct borink_container *container,
+                                           struct borink_bytes token,
+                                           uint16_t namespace_,
+                                           const struct borink_list_options *options,
+                                           struct borink_bytes_mut buf);
+
+/**
+ * Checks that `bytes` are the bytes that `template` was written into.
+ *
+ * Encoding trusts that they are, and checks nothing of them per request.
+ * Check bytes once where they could be another template's, such as bytes
+ * read back from storage. A `code` of 0 means that they are the template's
+ * own, and `InvalidPlan` with `Template` that they are not.
+ *
+ * # Safety
+ *
+ * `template` must be null or point at one readable value. `bytes` must
+ * address its stated length.
+ */
+struct borink_status borink_template_check(const struct borink_template *template_,
+                                           struct borink_bytes bytes);
+
+/**
+ * Writes the read `item` at `now` from `template` into `buf`.
+ *
+ * `bytes` are the template's own, as `borink_prepare_get` wrote them. Pass
+ * an empty `buf` to learn the size that the request needs.
+ *
+ * A key that Azure refuses, a range that the template does not take and a
+ * suffix range are refused with `InvalidPlan`. A template of another
+ * operation is refused with `Template`.
+ *
+ * # Safety
+ *
+ * `template`, `item` and `now` must each be null or point at one readable
+ * value, and each value of `item` must address its stated length. `bytes` must
+ * address its stated length. `buf` must address its stated length and be
+ * reached through nothing else during the call: not through `bytes`, nor
+ * through a value of `item`.
+ */
+struct borink_wire_request borink_encode_get(const struct borink_template *template_,
+                                             struct borink_bytes bytes,
+                                             const struct borink_get_item *item,
+                                             const struct borink_timestamps *now,
+                                             struct borink_bytes_mut buf);
+
+/**
+ * Writes the whole-object write `item` at `now` from `template`
+ * into `buf`.
+ *
+ * The head states `item->content_len`, and you send that content after
+ * it. Content longer than Azure takes in one write is refused with
+ * `PayloadTooLarge`. A checksum that is not the base64 of a digest of the
+ * template's kind is refused with `Checksum`.
  *
  * # Safety
  *
  * As `borink_encode_get`.
  */
-struct borink_request_head borink_encode_put(const struct borink_session *session,
-                                             const struct borink_put_shape *shape,
-                                             struct borink_bytes key,
-                                             struct borink_bytes condition_value,
-                                             struct borink_request_buffer buf,
-                                             uint64_t content_len,
-                                             uint64_t unix_seconds);
+struct borink_wire_request borink_encode_put(const struct borink_template *template_,
+                                             struct borink_bytes bytes,
+                                             const struct borink_put_item *item,
+                                             const struct borink_timestamps *now,
+                                             struct borink_bytes_mut buf);
 
 /**
- * Writes the request head of a removal into `buf`.
+ * Writes the Put Block `item` at `now` from `template` into `buf`.
+ *
+ * The head states `item->content_len`, and you send that block after it. A
+ * block ID that is not base64 of at most 64 bytes is refused with `PartId`.
  *
  * # Safety
  *
  * As `borink_encode_get`.
  */
-struct borink_request_head borink_encode_delete(const struct borink_session *session,
-                                                const struct borink_delete_shape *shape,
-                                                struct borink_bytes key,
-                                                struct borink_bytes condition_value,
-                                                struct borink_request_buffer buf,
-                                                uint64_t unix_seconds);
+struct borink_wire_request borink_encode_stage_block(const struct borink_template *template_,
+                                                     struct borink_bytes bytes,
+                                                     const struct borink_stage_block_item *item,
+                                                     const struct borink_timestamps *now,
+                                                     struct borink_bytes_mut buf);
+
+/**
+ * Writes the Put Block List `item` at `now` from `template` into
+ * `buf`, with its block list as the body after the head.
+ *
+ * More than 50,000 blocks are refused with `Parts`, and a block ID that is
+ * not base64 of at most 64 bytes with `PartId`.
+ *
+ * # Safety
+ *
+ * As `borink_encode_get`, and `item->blocks` must address
+ * `item->block_count` readable values whose IDs each address their stated
+ * length.
+ */
+struct borink_wire_request borink_encode_commit_blocks(const struct borink_template *template_,
+                                                       struct borink_bytes bytes,
+                                                       const struct borink_commit_item *item,
+                                                       const struct borink_timestamps *now,
+                                                       struct borink_bytes_mut buf);
+
+/**
+ * Writes the page `item` of a listing at `now` from `template`
+ * into `buf`.
+ *
+ * An empty `prefix` lists the whole container. Pass an empty `marker` for
+ * the first page, and the `next_marker` of the last fill for every page
+ * after it.
+ *
+ * # Safety
+ *
+ * As `borink_encode_get`.
+ */
+struct borink_wire_request borink_encode_list(const struct borink_template *template_,
+                                              struct borink_bytes bytes,
+                                              const struct borink_list_item *item,
+                                              const struct borink_timestamps *now,
+                                              struct borink_bytes_mut buf);
+
+/**
+ * Reads the next header field of a request, and steps `fields` past it.
+ *
+ * Start with the bytes that a request's `fields` addresses in your buffer.
+ * Each call reports one name and its value, as the request wrote them.
+ * Write each one, unchanged and none twice; your HTTP client writes `host`
+ * from the URL. A walk that has ended reports an absent header, and stays
+ * ended.
+ *
+ * # Safety
+ *
+ * `fields` must be null or point at one writable value that addresses its
+ * stated length.
+ *
+ * # Lifetime
+ *
+ * The name and the value point into the bytes that `fields` addressed.
+ */
+struct borink_header borink_next_header(struct borink_bytes *fields);
+
+/**
+ * Returns the part of a read that holds no pointer, for a template with
+ * `options`: its kind, its range and its condition.
+ *
+ * Keep it while the request is in flight, and pass it to
+ * `borink_accept_get_head` when the response arrives. A null `item` or
+ * `options` gives a shape of zeros, which every call refuses.
+ *
+ * # Safety
+ *
+ * `item` and `options` must each be null or point at one readable value.
+ */
+struct borink_get_shape borink_get_item_shape(const struct borink_get_item *item,
+                                              const struct borink_get_options *options);
+
+/**
+ * Returns the part of a write that holds no pointer, for a template with
+ * `options`: its condition, which is the template's.
+ *
+ * # Safety
+ *
+ * As `borink_get_item_shape`.
+ */
+struct borink_put_shape borink_put_item_shape(const struct borink_put_item *item,
+                                              const struct borink_put_options *options);
+
+/**
+ * Returns the part of a commit that holds no pointer, for a template with
+ * `options`: its condition, which is the template's.
+ *
+ * # Safety
+ *
+ * As `borink_get_item_shape`.
+ */
+struct borink_commit_shape borink_commit_item_shape(const struct borink_commit_item *item,
+                                                    const struct borink_commit_options *options);
 
 /**
  * Reads the response head of a read.
  *
- * Pass the same `shape` that you passed to `borink_encode_get`, and one
- * `borink_header_ref` per response header. The outcome points into the same
- * bytes as those headers.
+ * Pass the `shape` of the read, and one `borink_header_ref` per response
+ * header. The outcome points into the same bytes as those headers.
  *
  * # Safety
  *
- * `session` and `shape` must each be null or point at one readable value.
- * `headers` must address `header_count` readable values.
+ * `headers` must address `header_count` readable values, each of whose
+ * values addresses its stated length.
  *
  * # Lifetime
  *
  * The bytes that `headers` points at must stay valid, and must not move, for
  * as long as you use the returned outcome.
  */
-struct borink_outcome borink_accept_get_head(const struct borink_session *session,
-                                             const struct borink_get_shape *shape,
+struct borink_outcome borink_accept_get_head(struct borink_get_shape shape,
                                              uint16_t status,
                                              const struct borink_header_ref *headers,
                                              size_t header_count);
-
-/**
- * Reads the response head of a write.
- *
- * # Safety
- *
- * As `borink_accept_get_head`.
- *
- * # Lifetime
- *
- * As `borink_accept_get_head`.
- */
-struct borink_outcome borink_accept_put_head(const struct borink_session *session,
-                                             const struct borink_put_shape *shape,
-                                             uint16_t status,
-                                             const struct borink_header_ref *headers,
-                                             size_t header_count);
-
-/**
- * Reads the response head of a removal.
- *
- * # Safety
- *
- * As `borink_accept_get_head`.
- *
- * # Lifetime
- *
- * As `borink_accept_get_head`.
- */
-struct borink_outcome borink_accept_delete_head(const struct borink_session *session,
-                                                const struct borink_delete_shape *shape,
-                                                uint16_t status,
-                                                const struct borink_header_ref *headers,
-                                                size_t header_count);
 
 /**
  * Finishes a read whose head asked for the error body.
  *
  * Pass the `shape` that the head was read against, the `failure` of that
- * outcome and the body that you read. Pass an empty body if you read none: the
- * outcome is then final with the error unnamed.
+ * outcome and the body that you read. Pass an empty body if you read none:
+ * the outcome is then final with the error unnamed.
  *
  * # Safety
  *
- * `session`, `shape` and `failure` must each be null or point at one
- * readable value. `body` must address its stated length.
+ * `failure.request_id` and `body` must each address their stated length.
  *
  * # Lifetime
  *
- * `failure->request_id` must still point at valid bytes, and they must stay
+ * `failure.request_id` must still point at valid bytes, and they must stay
  * valid for as long as you use the returned outcome. So must `body`.
  */
-struct borink_outcome borink_finish_get_error_body(const struct borink_session *session,
-                                                   const struct borink_get_shape *shape,
-                                                   const struct borink_failure *failure,
+struct borink_outcome borink_accept_get_error_body(struct borink_get_shape shape,
+                                                   struct borink_failure failure,
                                                    struct borink_bytes body);
 
 /**
- * Finishes a write whose head asked for the error body.
+ * Reads the response head of a whole-object write.
  *
  * # Safety
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_head`.
  *
  * # Lifetime
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_head`.
  */
-struct borink_outcome borink_finish_put_error_body(const struct borink_session *session,
-                                                   const struct borink_put_shape *shape,
-                                                   const struct borink_failure *failure,
+struct borink_outcome borink_accept_put_head(struct borink_put_shape shape,
+                                             uint16_t status,
+                                             const struct borink_header_ref *headers,
+                                             size_t header_count);
+
+/**
+ * Finishes a whole-object write whose head asked for the error body.
+ *
+ * # Safety
+ *
+ * As `borink_accept_get_error_body`.
+ *
+ * # Lifetime
+ *
+ * As `borink_accept_get_error_body`.
+ */
+struct borink_outcome borink_accept_put_error_body(struct borink_put_shape shape,
+                                                   struct borink_failure failure,
                                                    struct borink_bytes body);
 
 /**
- * Finishes a removal whose head asked for the error body.
+ * Reads the response head of a Put Block.
+ *
+ * This call takes no shape: a Put Block carries no condition.
  *
  * # Safety
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_head`.
  *
  * # Lifetime
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_head`.
  */
-struct borink_outcome borink_finish_delete_error_body(const struct borink_session *session,
-                                                      const struct borink_delete_shape *shape,
-                                                      const struct borink_failure *failure,
-                                                      struct borink_bytes body);
+struct borink_outcome borink_accept_stage_block_head(uint16_t status,
+                                                     const struct borink_header_ref *headers,
+                                                     size_t header_count);
 
 /**
- * Writes the request head of one page of a listing into `buf`.
- *
- * An empty `prefix` lists the whole container. Pass an empty `marker` for the
- * first page, and the `next_marker` of the last fill for every page after it.
+ * Finishes a Put Block whose head asked for the error body.
  *
  * # Safety
  *
- * `session` and `shape` must each be null or point at one readable value.
- * `prefix`, `marker` and `buf` must each address their stated length, and
- * `buf` must be reached through nothing else during the call.
- * Byte storage and header slots must be exclusive and disjoint from all
- * inputs. Header slots need only be writable; this call initializes them.
+ * As `borink_accept_get_error_body`.
+ *
+ * # Lifetime
+ *
+ * As `borink_accept_get_error_body`.
  */
-struct borink_request_head borink_encode_list(const struct borink_session *session,
-                                              const struct borink_list_shape *shape,
-                                              struct borink_bytes prefix,
-                                              struct borink_bytes marker,
-                                              struct borink_request_buffer buf,
-                                              uint64_t unix_seconds);
+struct borink_outcome borink_accept_stage_block_error_body(struct borink_failure failure,
+                                                           struct borink_bytes body);
+
+/**
+ * Reads the response head of a Put Block List.
+ *
+ * # Safety
+ *
+ * As `borink_accept_get_head`.
+ *
+ * # Lifetime
+ *
+ * As `borink_accept_get_head`.
+ */
+struct borink_outcome borink_accept_commit_blocks_head(struct borink_commit_shape shape,
+                                                       uint16_t status,
+                                                       const struct borink_header_ref *headers,
+                                                       size_t header_count);
+
+/**
+ * Finishes a Put Block List whose head asked for the error body.
+ *
+ * # Safety
+ *
+ * As `borink_accept_get_error_body`.
+ *
+ * # Lifetime
+ *
+ * As `borink_accept_get_error_body`.
+ */
+struct borink_outcome borink_accept_commit_blocks_error_body(struct borink_commit_shape shape,
+                                                             struct borink_failure failure,
+                                                             struct borink_bytes body);
 
 /**
  * Reads the response head of a listing.
@@ -1628,16 +2500,13 @@ struct borink_request_head borink_encode_list(const struct borink_session *sessi
  *
  * # Safety
  *
- * `session` must be null or point at one readable value. `headers` must
- * address `header_count` readable values.
+ * As `borink_accept_get_head`.
  *
  * # Lifetime
  *
- * The bytes that `headers` points at must stay valid, and must not move, for
- * as long as you use the returned outcome.
+ * As `borink_accept_get_head`.
  */
-struct borink_outcome borink_accept_list_head(const struct borink_session *session,
-                                              uint16_t status,
+struct borink_outcome borink_accept_list_head(uint16_t status,
                                               const struct borink_header_ref *headers,
                                               size_t header_count);
 
@@ -1646,14 +2515,13 @@ struct borink_outcome borink_accept_list_head(const struct borink_session *sessi
  *
  * # Safety
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_error_body`.
  *
  * # Lifetime
  *
- * As `borink_finish_get_error_body`.
+ * As `borink_accept_get_error_body`.
  */
-struct borink_outcome borink_finish_list_error_body(const struct borink_session *session,
-                                                    const struct borink_failure *failure,
+struct borink_outcome borink_accept_list_error_body(struct borink_failure failure,
                                                     struct borink_bytes body);
 
 /**
@@ -1670,17 +2538,15 @@ struct borink_outcome borink_finish_list_error_body(const struct borink_session 
  *
  * # Safety
  *
- * `session` must be null or point at one readable value. `body` must address
- * its stated length and be reached through nothing else during the call.
- * `into` must address `capacity` writable entries.
+ * `body` must address its stated length and be reached through nothing else
+ * during the call. `into` must address `capacity` writable entries.
  *
  * # Lifetime
  *
  * Every entry, and `next_marker`, point into `body`. They are valid until you
  * release or reuse that buffer.
  */
-struct borink_fill borink_fill_listing(const struct borink_session *session,
-                                       struct borink_bytes_mut body,
+struct borink_fill borink_fill_listing(struct borink_bytes_mut body,
                                        struct borink_list_entry *into,
                                        size_t capacity);
 
@@ -1708,8 +2574,7 @@ struct borink_fill borink_fill_listing(const struct borink_session *session,
  *
  * Every value points into `body`, like the entries.
  */
-struct borink_fill borink_fill_listing_with(const struct borink_session *session,
-                                            struct borink_bytes_mut body,
+struct borink_fill borink_fill_listing_with(struct borink_bytes_mut body,
                                             struct borink_list_entry *into,
                                             size_t capacity,
                                             struct borink_property_set wanted,
@@ -1736,7 +2601,7 @@ size_t borink_property_set_len(struct borink_property_set set);
  * set's members, in the order of their numbers.
  *
  * For a property the set does not hold, or a number that names none, this
- * is the length of the row, which is one past its last value.
+ * is the length of the row: one past its last value.
  */
 size_t borink_property_slot(struct borink_property_set set, uint16_t property);
 

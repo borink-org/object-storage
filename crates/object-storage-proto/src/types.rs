@@ -286,6 +286,20 @@ pub enum Ranging {
     Ranged = 2,
 }
 
+impl Ranging {
+    /// Returns the value with this discriminant.
+    ///
+    /// Returns [`None`](Option::None) for a discriminant that this version
+    /// does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Whole,
+            2 => Self::Ranged,
+            _ => return None,
+        })
+    }
+}
+
 /// Whether every request of a template names an earlier state of its
 /// object, and which kind.
 ///
@@ -302,6 +316,21 @@ pub enum RevisionKind {
     /// Every request names a version, sent as `versionid` on Azure and
     /// `versionId` on S3.
     Version = 3,
+}
+
+impl RevisionKind {
+    /// Returns the value with this discriminant.
+    ///
+    /// Returns [`None`](Option::None) for a discriminant that this version
+    /// does not define.
+    pub const fn from_discriminant(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::Current,
+            2 => Self::Snapshot,
+            3 => Self::Version,
+            _ => return None,
+        })
+    }
 }
 
 /// What every read of a template does alike.

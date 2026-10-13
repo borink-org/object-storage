@@ -98,12 +98,12 @@ class Handle {
     std::string line_;
 };
 
-// Gives libcurl the URL and the headers that the library named.
-void apply(Handle &handle, const Client &client, const RequestHead &request) {
+// Gives libcurl the URL and the header fields that the library wrote.
+void apply(Handle &handle, const Client &client, const WireRequest &request) {
     handle.url(client.part(request.url));
-    for (std::size_t index = 0; index < request.header_count; index += 1) {
-        handle.header(client.part(request.headers[index].name),
-                      client.part(request.headers[index].value));
+    Bytes fields = client.fields();
+    for (Header field = next_header(fields); field.present; field = next_header(fields)) {
+        handle.header(text_of(field.name), text_of(field.value));
     }
     // Azure needs no expectation, and a 100 Continue only costs a round trip.
     handle.header("Expect:");
@@ -158,7 +158,6 @@ std::size_t keep(std::vector<std::uint8_t> &bytes, std::size_t cap, const char *
 
 // A read, which has to know what the head means before the body arrives.
 struct Reading {
-    const Session &session;
     GetShape shape;
     const Sink &sink;
     const CollectedHead &head;
@@ -170,8 +169,7 @@ struct Reading {
     std::exception_ptr failure;
 
     void decide() {
-        outcome = borink_accept_get_head(&session, &shape, head.status(), head.refs(),
-                                         head.count());
+        outcome = borink_accept_get_head(shape, head.status(), head.refs(), head.count());
     }
 
     std::size_t take(const char *data, std::size_t length) {
@@ -209,8 +207,7 @@ std::size_t read_body(char *data, std::size_t size, std::size_t count, void *use
     }
 }
 
-// A body that only ever carries a diagnostic, which a write and a removal
-// answer with.
+// A body that only ever carries a diagnostic, which a write answers with.
 struct Diagnostic {
     std::vector<std::uint8_t> &bytes;
     std::size_t cap;
@@ -249,17 +246,18 @@ std::size_t send_content(char *data, std::size_t size, std::size_t count, void *
 
 const std::string_view client = "libcurl";
 
-void Client::get(std::string_view key, const Sink &sink, const Read &read) {
-    const std::uint64_t now = now_unix();
-    const Session session = this->session();
-    const GetShape shape = read.shape();
-    const RequestHead &request = encode([&] {
-        return borink_encode_get(&session, &shape, as_bytes(key),
-                                 as_bytes(read.condition_value), request_buffer(), now);
+void Client::get(const GetItem &item, const Sink &sink, const GetOptions &options) {
+    const Timestamps &now = timestamps();
+    const Container container = this->container();
+    const Prepared &reads = prepare([&](BytesMut buf) {
+        return borink_prepare_get(&container, token(), AzureNamespaceUnknown, &options, buf);
+    });
+    const WireRequest &request = encode([&](BytesMut buf) {
+        return borink_encode_get(&reads.template_, template_bytes(), &item, &now, buf);
     });
 
-    Reading reading{session,     shape,               sink,         head_,
-                    diagnostic_, limits_.error_bytes, std::nullopt, nullptr};
+    Reading reading{shape(item, options), sink,         head_,  diagnostic_,
+                    limits_.error_bytes,  std::nullopt, nullptr};
     Handle handle;
     apply(handle, *this, request);
     // A metadata read sends HEAD, which carries no body at all.
@@ -294,7 +292,7 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     // Azure names the error in the head when it can. When it did not, the
     // diagnostic body names it, and the library finishes the outcome from it.
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_get_error_body(&session, &shape, &outcome_.failure, kept_body());
+        outcome_ = borink_accept_get_error_body(reading.shape, outcome_.failure, kept_body());
     }
     switch (outcome_.kind) {
     case OutcomeKindBody:
@@ -305,21 +303,11 @@ void Client::get(std::string_view key, const Sink &sink, const Read &read) {
     }
 }
 
-void Client::put(std::string_view key, std::span<const std::uint8_t> content,
-                 const Write &write) {
-    const std::uint64_t now = now_unix();
-    const std::uint64_t length = content.size();
-    const Session session = this->session();
-    const PutShape shape = write.shape();
-    const RequestHead &request = encode([&] {
-        return borink_encode_put(&session, &shape, as_bytes(key),
-                                 as_bytes(write.condition_value), request_buffer(), length, now);
-    });
-
+void Client::upload(std::span<const std::uint8_t> content) {
     Content sending{content, 0};
     Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
     Handle handle;
-    apply(handle, *this, request);
+    apply(handle, *this, request_);
     handle.set(CURLOPT_UPLOAD, 1L);
     handle.set(CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(content.size()));
     handle.set(CURLOPT_READFUNCTION, send_content);
@@ -329,25 +317,82 @@ void Client::put(std::string_view key, std::span<const std::uint8_t> content,
     handle.set(CURLOPT_WRITEFUNCTION, collect_diagnostic);
     handle.set(CURLOPT_WRITEDATA, &diagnostic);
     handle.send();
-
     checked_head();
-    outcome_ = borink_accept_put_head(&session, &shape, head_.status(), head_.refs(),
-                                      head_.count());
+}
+
+void Client::put(PutItem item, std::span<const std::uint8_t> content, const PutOptions &options) {
+    const Timestamps &now = timestamps();
+    const Container container = this->container();
+    item.content_len = content.size();
+    const Prepared &writes = prepare([&](BytesMut buf) {
+        return borink_prepare_put(&container, token(), AzureNamespaceUnknown, &options, buf);
+    });
+    encode([&](BytesMut buf) {
+        return borink_encode_put(&writes.template_, template_bytes(), &item, &now, buf);
+    });
+    upload(content);
+
+    const PutShape writing = shape(item, options);
+    outcome_ = borink_accept_put_head(writing, head_.status(), head_.refs(), head_.count());
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_put_error_body(&session, &shape, &outcome_.failure, kept_body());
+        outcome_ = borink_accept_put_error_body(writing, outcome_.failure, kept_body());
     }
-    if (outcome_.kind != OutcomeKindDone) {
+    if (outcome_.kind != OutcomeKindCreated) {
         fail("Azure stored no object");
     }
 }
 
+void Client::stage(StageBlockItem item, std::span<const std::uint8_t> content,
+                   const StageOptions &options) {
+    const Timestamps &now = timestamps();
+    const Container container = this->container();
+    item.content_len = content.size();
+    const Prepared &stages = prepare([&](BytesMut buf) {
+        return borink_prepare_stage_block(&container, token(), AzureNamespaceUnknown, &options, buf);
+    });
+    encode([&](BytesMut buf) {
+        return borink_encode_stage_block(&stages.template_, template_bytes(), &item, &now, buf);
+    });
+    upload(content);
+
+    outcome_ = borink_accept_stage_block_head(head_.status(), head_.refs(), head_.count());
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
+        outcome_ = borink_accept_stage_block_error_body(outcome_.failure, kept_body());
+    }
+    if (outcome_.kind != OutcomeKindStaged) {
+        fail("Azure staged no block");
+    }
+}
+
+void Client::commit(const CommitItem &item, const CommitOptions &options) {
+    const Timestamps &now = timestamps();
+    const Container container = this->container();
+    const Prepared &commits = prepare([&](BytesMut buf) {
+        return borink_prepare_commit_blocks(&container, token(), AzureNamespaceUnknown, &options, buf);
+    });
+    encode([&](BytesMut buf) {
+        return borink_encode_commit_blocks(&commits.template_, template_bytes(), &item, &now, buf);
+    });
+    // The block list is the body that the library wrote after the head.
+    upload(body());
+
+    const CommitShape committing = shape(item, options);
+    outcome_ = borink_accept_commit_blocks_head(committing, head_.status(), head_.refs(),
+                                                head_.count());
+    if (outcome_.kind == OutcomeKindNeedErrorBody) {
+        outcome_ = borink_accept_commit_blocks_error_body(committing, outcome_.failure,
+                                                          kept_body());
+    }
+    if (outcome_.kind != OutcomeKindCommitted) {
+        fail("Azure committed no object");
+    }
+}
+
 void Client::list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
-                  const List &plan) {
-    List asking = plan;
-    marker_.assign(plan.marker);
+                  const ListOptions &options) {
+    marker_.clear();
     for (;;) {
-        asking.marker = marker_;
-        const Page current = page(prefix, entries, asking);
+        const Page current = page(list_item(prefix, marker_), entries, options);
         sink(current.entries);
         if (current.next_marker.empty()) {
             return;
@@ -357,13 +402,15 @@ void Client::list(std::string_view prefix, std::span<ListEntry> entries, const E
     }
 }
 
-Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const List &plan) {
-    const std::uint64_t now = now_unix();
-    const Session session = this->session();
-    const ListShape shape = plan.shape();
-    const RequestHead &request = encode([&] {
-        return borink_encode_list(&session, &shape, as_bytes(prefix), as_bytes(plan.marker),
-                                  request_buffer(), now);
+Page Client::page(const ListItem &item, std::span<ListEntry> entries,
+                  const ListOptions &options) {
+    const Timestamps &now = timestamps();
+    const Container container = this->container();
+    const Prepared &pages = prepare([&](BytesMut buf) {
+        return borink_prepare_list(&container, token(), AzureNamespaceUnknown, &options, buf);
+    });
+    const WireRequest &request = encode([&](BytesMut buf) {
+        return borink_encode_list(&pages.template_, template_bytes(), &item, &now, buf);
     });
 
     page_.clear();
@@ -376,20 +423,18 @@ Page Client::page(std::string_view prefix, std::span<ListEntry> entries, const L
     handle.send();
 
     checked_head();
-    outcome_ = borink_accept_list_head(&session, head_.status(), head_.refs(), head_.count());
+    outcome_ = borink_accept_list_head(head_.status(), head_.refs(), head_.count());
     if (outcome_.kind == OutcomeKindNeedErrorBody) {
         // The page buffer holds the error body too. Only the first bytes of it
         // name the error, so the library reads no more than a diagnostic.
         const std::size_t kept = std::min(page_.size(), limits_.error_bytes);
-        outcome_ = borink_finish_list_error_body(
-            &session, &outcome_.failure,
-            borrow(std::span<const std::uint8_t>(page_.data(), kept)));
+        outcome_ = borink_accept_list_error_body(
+            outcome_.failure, borrow(std::span<const std::uint8_t>(page_.data(), kept)));
     }
     if (outcome_.kind != OutcomeKindPage) {
         fail("Azure listed no keys");
     }
-    return read(borink_fill_listing(&session, page_buffer(), entries.data(), entries.size()),
-                entries);
+    return read(borink_fill_listing(page_buffer(), entries.data(), entries.size()), entries);
 }
 
 Page Client::read(const Fill &fill, std::span<ListEntry> entries) {
@@ -397,37 +442,6 @@ Page Client::read(const Fill &fill, std::span<ListEntry> entries) {
         throw std::runtime_error(std::string(describe_whole(message_, fill.status)));
     }
     return Page{entries_of(entries, fill), text_of(fill.next_marker)};
-}
-
-void Client::remove(std::string_view key, const Removal &removal) {
-    const std::uint64_t now = now_unix();
-    const Session session = this->session();
-    const DeleteShape shape = removal.shape();
-    const RequestHead &request = encode([&] {
-        return borink_encode_delete(&session, &shape, as_bytes(key),
-                                    as_bytes(removal.condition_value), request_buffer(), now);
-    });
-
-    Diagnostic diagnostic{diagnostic_, limits_.error_bytes};
-    Handle handle;
-    apply(handle, *this, request);
-    handle.set(CURLOPT_CUSTOMREQUEST, "DELETE");
-    handle.set(CURLOPT_HEADERFUNCTION, collect_head);
-    handle.set(CURLOPT_HEADERDATA, &head_);
-    handle.set(CURLOPT_WRITEFUNCTION, collect_diagnostic);
-    handle.set(CURLOPT_WRITEDATA, &diagnostic);
-    handle.send();
-
-    checked_head();
-    outcome_ = borink_accept_delete_head(&session, &shape, head_.status(), head_.refs(),
-                                         head_.count());
-    if (outcome_.kind == OutcomeKindNeedErrorBody) {
-        outcome_ = borink_finish_delete_error_body(&session, &shape, &outcome_.failure,
-                                                   kept_body());
-    }
-    if (outcome_.kind != OutcomeKindAccepted) {
-        fail("Azure removed no object");
-    }
 }
 
 } // namespace borink::host

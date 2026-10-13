@@ -103,6 +103,38 @@ impl Timestamps {
     pub(crate) fn date(&self) -> &[u8] {
         &self.iso8601[..8]
     }
+
+    /// The length of a timestamp stored with [`Self::to_bytes`].
+    pub const STORED_LEN: usize = 53;
+
+    /// Returns the timestamp as bytes, which [`Self::from_bytes`] reads
+    /// back: the seconds, then both dates as text. They hold no pointer.
+    pub fn to_bytes(&self) -> [u8; Self::STORED_LEN] {
+        let mut stored = [0; Self::STORED_LEN];
+        let unix = self.unix.to_le_bytes();
+        let values = unix.iter().chain(&self.iso8601).chain(&self.rfc1123);
+        for (slot, value) in stored.iter_mut().zip(values) {
+            *slot = *value;
+        }
+        stored
+    }
+
+    /// Reads a timestamp that [`Self::to_bytes`] stored, or [`None`] for
+    /// bytes whose dates are not ASCII text.
+    ///
+    /// It checks nothing else: bytes that [`Self::to_bytes`] did not write
+    /// give a timestamp whose dates are those bytes, which a request then
+    /// carries.
+    pub fn from_bytes(stored: &[u8; Self::STORED_LEN]) -> Option<Self> {
+        let (unix, dates) = stored.split_first_chunk::<8>()?;
+        let (iso8601, rfc1123) = dates.split_first_chunk::<16>()?;
+        let rfc1123: [u8; 29] = rfc1123.try_into().ok()?;
+        (iso8601.is_ascii() && rfc1123.is_ascii()).then_some(Self {
+            rfc1123,
+            iso8601: *iso8601,
+            unix: u64::from_le_bytes(*unix),
+        })
+    }
 }
 
 // Date fields have a width fixed by RFC 1123, so leading zeroes are retained.
@@ -118,6 +150,25 @@ mod tests {
     extern crate std;
 
     use super::{MAX_UNIX_SECONDS, MONTHS, Timestamps, WEEKDAYS};
+
+    #[test]
+    fn a_stored_timestamp_reads_back_as_itself_and_needs_text() {
+        let now = Timestamps::from_unix(1_787_400_000);
+        let stored = now.to_bytes();
+        assert_eq!(Timestamps::from_bytes(&stored), Some(now));
+        for at in [8, 23, 24, 52] {
+            let mut changed = stored;
+            changed[at] = 0xC3;
+            assert_eq!(Timestamps::from_bytes(&changed), None, "{at}");
+        }
+        // The seconds are a number, whatever their bytes.
+        let mut later = stored;
+        later[0] ^= 1;
+        assert_eq!(
+            Timestamps::from_bytes(&later).map(|time| time.unix()),
+            Some(1_787_400_001)
+        );
+    }
 
     #[test]
     fn civil_conversion_matches_a_simple_calendar_for_every_day() {

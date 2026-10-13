@@ -33,7 +33,7 @@ namespace borink::host {
 extern const std::string_view client;
 
 // The clock is the host's, not the library's: the library reads no clock and
-// takes the time as a number. <chrono> is what this costs, and it is paid
+// formats the time it is given. <chrono> is what this costs, and it is paid
 // here rather than by everyone who includes `borink/object_storage.hpp`.
 inline std::uint64_t now_unix() {
     const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
@@ -56,11 +56,13 @@ using EntrySink = std::function<void(std::span<const ListEntry>)>;
 
 // How much memory one client may use.
 struct Limits {
-    // The most that one request head may take. A request that needs more is
+    // The most that one template may take. A template that needs more is
     // refused rather than served.
-    std::size_t request_bytes = 8 * 1024;
-    // The most header slots to reserve; a request needing more is refused.
-    std::size_t request_headers = 256;
+    std::size_t template_bytes = 8 * 1024;
+    // The most that one request may take: its head, and the body that the
+    // library writes for a commit. A request that needs more is refused
+    // rather than served.
+    std::size_t request_bytes = 64 * 1024;
     // The most of an error body to read. An error body is a diagnostic, and
     // the service decides how long it is: one that does not arrive costs the
     // name of the error, not the outcome.
@@ -72,8 +74,9 @@ struct Limits {
     std::size_t head_bytes = 8 * 1024;
     // There is no limit on a listing page. libcurl keeps none of the body, so
     // this client holds the whole page while it reads the entries out of it,
-    // and how large that is follows from `List::max_results`: the service
-    // sends no more entries than you asked for. Ask for fewer to hold less.
+    // and how large that is follows from `ListOptions::max_results`: the
+    // service sends no more entries than you asked for. Ask for fewer to hold
+    // less.
 };
 
 // Where this host keeps the response head, and one `HeaderRef` per
@@ -155,10 +158,17 @@ struct Page {
     std::string_view next_marker;
 };
 
-// One session, and the memory that every request through it reuses.
+// One container and its token, and the memory that every request through it
+// reuses.
 //
-// Build one per client and keep it. Its buffers grow to the largest request
-// that this client has made, up to `limits`, and stay that size.
+// Build one per client and keep it. Its buffers grow to the largest template
+// and the largest request that this client has written, up to `limits`, and
+// stay that size.
+//
+// Each request prepares its template again, into the same buffer. That keeps
+// this host short, and costs about as much again as the request. A program
+// that sends many requests alike prepares once, and keeps the template and
+// its bytes for the next.
 class Client {
   public:
     Client(std::string endpoint, std::string container, std::string token, Limits limits,
@@ -171,62 +181,68 @@ class Client {
     // Opens a client against one container. The endpoint is an HTTPS origin,
     // or with `PlainHttp::Allowed` an HTTP one: see `borink::PlainHttp`.
     //
-    // Throws std::runtime_error if the endpoint, the container or the token
-    // cannot be used. The message is the sentence that the core crate wrote.
+    // Throws std::runtime_error if the endpoint or the container cannot be
+    // used. The message is the sentence that the core crate wrote. A token
+    // that cannot be used is reported by the first request.
     static Client open(std::string_view endpoint, std::string_view container,
                        std::string_view token, Limits limits = {},
                        PlainHttp plain = PlainHttp::Refused);
 
-    // Reads the object that `read` describes, passing its stored bytes to
-    // `sink` as they arrive.
+    // Reads `item` with a template of `options`, passing the object's stored
+    // bytes to `sink` as they arrive.
     //
     // A head read returns no bytes and calls `sink` not at all. Read the
     // properties from `outcome()` and `head()` afterwards.
     //
     // Throws std::runtime_error if Azure returned no object. The message is
     // the sentence that the core crate wrote for the outcome.
-    void get(std::string_view key, const Sink &sink, const Read &read = {});
+    void get(const GetItem &item, const Sink &sink, const GetOptions &options = get_options());
 
-    // Writes `content` as the whole object. The bytes stay where the caller
-    // put them, and the host sends them from there.
-    void put(std::string_view key, std::span<const std::uint8_t> content,
-             const Write &write = {});
+    // Writes `content` as the whole object that `item` names, with a
+    // template of `options`. The bytes stay where the caller put them, and
+    // the host sends them from there; `item.content_len` is their length.
+    void put(PutItem item, std::span<const std::uint8_t> content,
+             const PutOptions &options = put_options());
 
-    // Removes what `removal` names.
-    //
-    // Reports a missing object rather than treating it as success: only the
-    // caller knows whether it meant to remove an object that is already gone.
-    void remove(std::string_view key, const Removal &removal = {});
+    // Stages `content` as the block that `item` names.
+    void stage(StageBlockItem item, std::span<const std::uint8_t> content,
+               const StageOptions &options = {});
+
+    // Commits the object that `item` names from its staged blocks.
+    void commit(const CommitItem &item, const CommitOptions &options = commit_options());
 
     // Reads every key under `prefix`, passing the entries to `sink`.
     //
-    // This client asks for one page after another, and reads each page in as
-    // many rounds as `entries` takes. `entries` is your budget for the entries
-    // themselves, however many keys the container holds. The page they are
-    // read out of is one buffer of this client, and `List::max_results` is
+    // This client asks for one page after another, each into `entries`.
+    // `entries` is your budget for the entries themselves, however many keys
+    // the container holds, and must hold a whole page. The page they are
+    // read out of is one buffer of this client, and `options.max_results` is
     // what decides how large it grows.
     //
     // Throws std::runtime_error if Azure listed nothing.
     void list(std::string_view prefix, std::span<ListEntry> entries, const EntrySink &sink,
-              const List &plan = {});
+              const ListOptions &options = list_options());
 
-    // Reads one page of the keys under `prefix` into `entries`.
+    // Reads the page of a listing that `item` names into `entries`.
     //
     // Use this instead of `list` to hold a page across other work, or to ask
     // for one page and stop. The entries point into this client's page buffer,
     // and stay valid until the next request through it. Copy what you keep.
     //
     // Throws what `list` throws.
-    Page page(std::string_view prefix, std::span<ListEntry> entries, const List &plan = {});
+    Page page(const ListItem &item, std::span<ListEntry> entries,
+              const ListOptions &options = list_options());
 
-    // The session, built from this client's own strings.
+    // The container, built from this client's own strings.
     //
-    // The three values point into them, so it is built where it is used rather
-    // than stored: moving this client would move the strings out from under a
-    // stored one. Refreshing the token is `token()` returning the new one.
-    Session session() const {
-        return borink::session(endpoint_, container_, token_, plain_);
-    }
+    // Its values point into those strings. This client builds it where it is
+    // used and stores none, because moving the client moves the strings.
+    Container container() const { return borink::container(endpoint_, container_, plain_); }
+
+    // The token that each template holds, from this client's own string.
+    // Each request prepares its template again, so a new token takes effect
+    // with the next request.
+    Bytes token() const { return as_bytes(token_); }
 
     // The head of the response to the last request.
     const CollectedHead &head() const { return head_; }
@@ -237,39 +253,80 @@ class Client {
     // next request through this client. Read `bytes_of` for one such value.
     const Outcome &outcome() const { return outcome_; }
 
-    // Reads one range of the request buffer, such as the URL or a header.
-    std::string_view part(const Span &range) const {
-        return {reinterpret_cast<const char *>(request_.data()) + range.start, range.len};
+    // Reads one range of the request buffer, such as the URL.
+    std::string_view part(const Span &range) const { return borink::part(buffer_, range); }
+
+    // The header fields of the last request, for `next_header` to read.
+    Bytes fields() const { return fields_of(buffer_, request_); }
+
+    // Returns the body that the library wrote for the last request, such as
+    // the block list of a commit. Returns nothing for a request whose content
+    // you send.
+    std::span<const std::uint8_t> body() const {
+        if (!request_.body.present) {
+            return {};
+        }
+        return std::span<const std::uint8_t>(buffer_).subspan(request_.body.span.start,
+                                                              request_.body.span.len);
     }
 
   private:
-    // Writes one request head into this client's buffer.
+    // Writes a template into this client's template buffer.
     //
-    // `encode` calls the library, which reports the size that the head needs.
-    // The buffer grows to that size once and is reused from then on.
-    template <typename Encode> const RequestHead &encode(Encode encode) {
+    // `prepare` calls the library, which reports the size that the template
+    // needs. The buffer grows to that size once and is reused from then on.
+    template <typename Prepare> const Prepared &prepare(Prepare prepare) {
+        prepared_ = prepare(into(template_));
+        if (prepared_.status.code == ErrorCodeCapacity) {
+            if (prepared_.required > limits_.template_bytes) {
+                throw std::runtime_error("the template is larger than this client allows");
+            }
+            template_.resize(prepared_.required);
+            prepared_ = prepare(into(template_));
+        }
+        if (prepared_.status.code != 0) {
+            throw std::runtime_error(std::string(describe_whole(message_, prepared_.status)));
+        }
+        return prepared_;
+    }
+
+    // The bytes of the template that `prepare` wrote last.
+    Bytes template_bytes() const { return borink::template_bytes(template_, prepared_); }
+
+    // The timestamps of the current second. The library formats them, and
+    // this client asks it to once a second rather than for each request.
+    const Timestamps &timestamps() {
+        const std::uint64_t now = now_unix();
+        if (now != stamped_) {
+            stamped_ = now;
+            timestamps_ = borink_timestamps_from_unix(now);
+        }
+        return timestamps_;
+    }
+
+    // Writes one request into this client's buffer, as `prepare` writes a
+    // template into its own.
+    template <typename Encode> const WireRequest &encode(Encode encode) {
         head_.restart(0);
         diagnostic_.clear();
         outcome_ = Outcome{};
-        request_head_ = encode();
-        if (request_head_.status.code == ErrorCodeCapacity) {
-            if (request_head_.required > limits_.request_bytes ||
-                request_head_.required_headers > limits_.request_headers) {
-                throw std::runtime_error("the request head is larger than this client allows");
+        request_ = encode(into(buffer_));
+        if (request_.status.code == ErrorCodeCapacity) {
+            if (request_.required > limits_.request_bytes) {
+                throw std::runtime_error("the request is larger than this client allows");
             }
-            request_.resize(request_head_.required);
-            request_headers_.resize(request_head_.required_headers);
-            request_head_ = encode();
+            buffer_.resize(request_.required);
+            request_ = encode(into(buffer_));
         }
-        if (request_head_.status.code != 0) {
-            throw std::runtime_error(std::string(describe_whole(message_, request_head_.status)));
+        if (request_.status.code != 0) {
+            throw std::runtime_error(std::string(describe_whole(message_, request_.status)));
         }
-        return request_head_;
+        return request_;
     }
 
-    RequestBuffer request_buffer() {
-        return {into(request_), request_headers_.data(), request_headers_.size()};
-    }
+    // Sends the last request, a PUT, with `content` after its head, and
+    // collects the response head and at most `error_bytes` of its body.
+    void upload(std::span<const std::uint8_t> content);
 
     // The page of the last listing, as the buffer that the entries are read
     // out of. Reading decodes the text where it stands, so it is writable.
@@ -301,9 +358,14 @@ class Client {
     std::string token_;
     Limits limits_;
     PlainHttp plain_;
-    std::vector<std::uint8_t> request_;
-    std::vector<RequestHeader> request_headers_;
-    RequestHead request_head_{};
+    std::vector<std::uint8_t> template_;
+    Prepared prepared_{};
+    // The second that `timestamps_` were formatted for, which no clock
+    // reads before the first request.
+    std::uint64_t stamped_ = ~std::uint64_t{0};
+    Timestamps timestamps_{};
+    std::vector<std::uint8_t> buffer_;
+    WireRequest request_{};
     std::vector<std::uint8_t> message_;
     CollectedHead head_;
     std::vector<std::uint8_t> diagnostic_;

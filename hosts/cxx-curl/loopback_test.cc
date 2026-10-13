@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstdint>
 #include <cctype>
 #include <cstdlib>
@@ -169,7 +170,7 @@ void reads_an_object() {
                   "Connection: close\r\n\r\nbody");
     std::vector<std::uint8_t> object;
     borink::host::Client client = open(server);
-    client.get("a key", [&](std::span<const std::uint8_t> part) {
+    client.get(borink::get_item("a key"), [&](std::span<const std::uint8_t> part) {
         object.insert(object.end(), part.begin(), part.end());
     });
 
@@ -180,18 +181,22 @@ void reads_an_object() {
 }
 
 // A read names its range, its precondition and whether it wants the bytes at
-// all. Each of those reaches the wire through the shape that C++ stores.
+// all. Each of those reaches the wire through its options and its item.
 void reads_a_range_of_an_object() {
     Server server("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-5/10\r\n"
                   "Content-Length: 4\r\nConnection: close\r\n\r\npart");
     std::vector<std::uint8_t> object;
     borink::host::Client client = open(server);
+    borink::GetOptions ranged = borink::get_options();
+    ranged.ranging = borink::RangingRanged;
+    borink::GetItem item = borink::get_item("a key");
+    item.range = borink::bounded(2, 6);
     client.get(
-        "a key",
+        item,
         [&](std::span<const std::uint8_t> part) {
             object.insert(object.end(), part.begin(), part.end());
         },
-        borink::Read{borink::GetKindBytes, borink::bounded(2, 6), borink::ConditionNone, {}});
+        ranged);
 
     CHECK(std::string(object.begin(), object.end()) == "part");
     CHECK(lowercase(std::string(server.head())).find("range: bytes=2-5\r\n") !=
@@ -208,10 +213,11 @@ void reads_an_object_only_if_it_changed() {
     borink::host::Client client = open(server);
     std::string reported;
     try {
-        client.get(
-            "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-            borink::Read{borink::GetKindBytes, borink::whole(), borink::ConditionIfNoneMatch,
-                         "\"tag\""});
+        borink::GetOptions changed = borink::get_options();
+        changed.condition = borink::ConditionIfNoneMatch;
+        borink::GetItem item = borink::get_item("a key");
+        item.condition_value = borink::condition_tag("\"tag\"");
+        client.get(item, [](std::span<const std::uint8_t>) { CHECK(false); }, changed);
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -228,8 +234,8 @@ void reads_the_metadata_of_an_object() {
                   "Connection: close\r\n\r\n");
     borink::host::Client client = open(server);
     client.get(
-        "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-        borink::Read{borink::GetKindHead, borink::whole(), borink::ConditionNone, {}});
+        borink::get_item("a key"), [](std::span<const std::uint8_t>) { CHECK(false); },
+        borink::head_options());
 
     CHECK(server.head().starts_with("HEAD /container/a%20key HTTP/1.1\r\n"));
     CHECK(client.outcome().kind == borink::OutcomeKindComplete);
@@ -243,7 +249,7 @@ void writes_an_object() {
     const std::string content = "contents";
     const std::span<const std::uint8_t> bytes(
         reinterpret_cast<const std::uint8_t *>(content.data()), content.size());
-    open(server).put("a key", bytes);
+    open(server).put(borink::put_item("a key", 0), bytes);
 
     CHECK(server.head().starts_with("PUT /container/a%20key HTTP/1.1\r\n"));
     CHECK(lowercase(std::string(server.head())).find("content-length: 8\r\n") != std::string::npos);
@@ -252,21 +258,35 @@ void writes_an_object() {
     CHECK(server.body() == content);
 }
 
-void removes_an_object() {
-    Server server("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    open(server).remove("a key");
+// A blob written in blocks: each block is staged with its bytes, and the
+// commit sends the block list that the library wrote after its head.
+void writes_an_object_in_blocks() {
+    const std::string created = "HTTP/1.1 201 Created\r\nETag: \"tag\"\r\nContent-Length: 0\r\n"
+                                "Connection: close\r\n\r\n";
+    Server server(std::vector<std::string>{created, created, created});
+    borink::host::Client client = open(server);
+    const std::string first = "first";
+    const std::string second = "second";
+    const auto bytes = [](const std::string &text) {
+        return std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(text.data()),
+                                             text.size());
+    };
+    client.stage(borink::stage_block_item("a key", "YmxvY2stMDA=", 0), bytes(first));
+    CHECK(client.outcome().kind == borink::OutcomeKindStaged);
+    CHECK(borink::text_of(client.outcome().meta.e_tag) == "\"tag\"");
+    client.stage(borink::stage_block_item("a key", "YmxvY2stMDE=", 0), bytes(second));
+    const std::array<borink::BlockRef, 2> blocks{borink::block("YmxvY2stMDA="),
+                                                 borink::block("YmxvY2stMDE=")};
+    client.commit(borink::commit_item("a key", blocks));
+    CHECK(client.outcome().kind == borink::OutcomeKindCommitted);
 
-    CHECK(server.head().starts_with("DELETE /container/a%20key HTTP/1.1\r\n"));
-}
-
-// A removal says what it takes with it, and Azure refuses to guess.
-void removes_an_object_and_its_snapshots() {
-    Server server("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    open(server).remove("a key", borink::Removal{borink::DeleteKindObjectAndSnapshots,
-                                                 borink::ConditionNone, {}});
-
-    CHECK(lowercase(std::string(server.head())).find("x-ms-delete-snapshots: include\r\n") !=
-          std::string::npos);
+    CHECK(server.head(0).starts_with(
+        "PUT /container/a%20key?comp=block&blockid=YmxvY2stMDA%3D HTTP/1.1\r\n"));
+    CHECK(server.body(0) == first);
+    CHECK(server.body(1) == second);
+    CHECK(server.head(2).starts_with("PUT /container/a%20key?comp=blocklist HTTP/1.1\r\n"));
+    CHECK(server.body(2).ends_with(
+        "<BlockList><Latest>YmxvY2stMDA=</Latest><Latest>YmxvY2stMDE=</Latest></BlockList>"));
 }
 
 // One page of a listing: the request names the container rather than a key,
@@ -283,12 +303,14 @@ void lists_one_page_of_keys() {
 
     borink::host::Client client = open(server);
     std::vector<borink::ListEntry> entries(4);
-    const borink::host::Page page =
-        client.page("directory/", entries, borink::List{true, borink::at_most(1000), {}});
+    borink::ListOptions delimited = borink::list_options();
+    delimited.delimiter = borink::as_bytes("/");
+    delimited.max_results = borink::at_most(1000);
+    const borink::host::Page page = client.page(borink::list_item("directory/"), entries, delimited);
 
     CHECK(server.head().starts_with(
-        "GET /container?restype=container&comp=list&prefix=directory%2F"
-        "&delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"));
+        "GET /container?restype=container&comp=list&delimiter=%2F&maxresults=1000"
+        "&prefix=directory%2F HTTP/1.1\r\n"));
     CHECK(page.entries.size() == 2);
     CHECK(borink::text_of(page.entries[0].key) == "directory/a.txt");
     CHECK(page.entries[0].kind == borink::EntryKindObject);
@@ -315,7 +337,7 @@ void an_array_smaller_than_the_page_is_refused() {
     std::vector<borink::ListEntry> entries(1);
     std::string reported;
     try {
-        client.page("", entries);
+        client.page(borink::list_item(""), entries);
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -371,7 +393,7 @@ void reports_a_container_that_is_not_there() {
     std::vector<borink::ListEntry> entries(4);
     std::string reported;
     try {
-        client.page("", entries);
+        client.page(borink::list_item(""), entries);
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -390,7 +412,7 @@ void names_an_error_that_only_the_body_carries() {
 
     std::string reported;
     try {
-        open(server).put("a key", std::span<const std::uint8_t>());
+        open(server).put(borink::put_item("a key", 0), std::span<const std::uint8_t>());
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -410,7 +432,7 @@ void names_an_error_that_only_a_read_body_carries() {
     borink::host::Client client = open(server);
     std::string reported;
     try {
-        client.get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        client.get(borink::get_item("a key"), [](std::span<const std::uint8_t>) { CHECK(false); });
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -428,7 +450,8 @@ void reports_a_missing_object() {
 
     std::string reported;
     try {
-        open(server).get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        open(server).get(borink::get_item("a key"),
+                         [](std::span<const std::uint8_t>) { CHECK(false); });
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -446,7 +469,7 @@ void refuses_a_request_over_the_limit() {
 
     std::string reported;
     try {
-        client.get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        client.get(borink::get_item("a key"), [](std::span<const std::uint8_t>) { CHECK(false); });
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -461,18 +484,17 @@ void refuses_a_request_over_the_limit() {
 void reads_a_head_that_lives_in_two_buffers() {
     const std::string first = "\"tag\"";
     const std::string second = "request-123";
-    const borink::Session session =
-        borink::session("https://account.example", "container", "token");
-    CHECK(borink_validate(&session).code == 0);
+    const borink::Container container = borink::container("https://account.example", "container");
+    CHECK(borink_container_check(&container).code == 0);
 
     const borink::HeaderRef headers[] = {
         borink::HeaderRef{borink::as_bytes("ETag"), borink::as_bytes(first)},
         borink::HeaderRef{borink::as_bytes("x-ms-request-id"), borink::as_bytes(second)},
         borink::HeaderRef{borink::as_bytes("Content-Length"), borink::as_bytes("10")},
     };
-    const borink::GetShape shape = borink::Read{}.shape();
-    const borink::Outcome outcome = borink_accept_get_head(
-        &session, &shape, 200, headers, sizeof headers / sizeof headers[0]);
+    const borink::GetShape shape{borink::GetKindBytes, borink::whole(), borink::ConditionNone};
+    const borink::Outcome outcome =
+        borink_accept_get_head(shape, 200, headers, sizeof headers / sizeof headers[0]);
 
     CHECK(outcome.kind == borink::OutcomeKindBody);
     CHECK(borink::text_of(outcome.meta.e_tag) == first);
@@ -492,7 +514,7 @@ void refuses_a_head_over_the_limit() {
 
     std::string reported;
     try {
-        client.get("a key", [](std::span<const std::uint8_t>) { CHECK(false); });
+        client.get(borink::get_item("a key"), [](std::span<const std::uint8_t>) { CHECK(false); });
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -512,8 +534,8 @@ void refuses_an_overflowed_head_on_a_read_with_no_body() {
     std::string reported;
     try {
         client.get(
-            "a key", [](std::span<const std::uint8_t>) { CHECK(false); },
-            borink::Read{borink::GetKindHead, borink::whole(), borink::ConditionNone, {}});
+            borink::get_item("a key"), [](std::span<const std::uint8_t>) { CHECK(false); },
+            borink::head_options());
         CHECK(false);
     } catch (const std::exception &failure) {
         reported = failure.what();
@@ -530,8 +552,7 @@ int main() {
         reads_an_object_only_if_it_changed();
         reads_the_metadata_of_an_object();
         writes_an_object();
-        removes_an_object();
-        removes_an_object_and_its_snapshots();
+        writes_an_object_in_blocks();
         lists_one_page_of_keys();
         an_array_smaller_than_the_page_is_refused();
         lists_every_key_over_two_pages();

@@ -5,8 +5,7 @@
 # inferred from an edition.
 resolver = "3"
 members = [
-    "crates/object-storage-proto",
-    "crates/object-storage-crypto",
+    "crates/*",
     "checks/no-allocator",
     "hosts/ureq",
     "hosts/object-tests",

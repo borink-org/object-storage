@@ -250,9 +250,9 @@ pub(crate) struct Table {
 
 /// One run of a request's layout.
 ///
-/// An operation writes its layout once, generic over the pass: the
-/// template's pass ([`Builder`]) writes the fixed text and leaves the holes,
-/// and a request's pass ([`Encode`]) copies that text from the template and
+/// An operation writes its layout once, generic over the pass. The
+/// template's pass ([`Builder`]) writes the fixed text and leaves the holes.
+/// A request's pass ([`Encode`]) copies that text from the template and
 /// fills the holes. The compiler writes each operation's request pass as
 /// straight-line code, so a request walks no table. What decides the holes,
 /// the sections and the query parameters is the same in both passes: the
@@ -439,7 +439,7 @@ impl<'t> Builder<'t> {
 
 // A hash of a template's bytes, its text and its table: not a check against
 // tampering, but against bytes that are another template's or were changed.
-fn seal(bytes: &[u8]) -> u64 {
+pub(crate) fn seal(bytes: &[u8]) -> u64 {
     let (words, rest) = bytes.as_chunks::<8>();
     let mut last = [0; 8];
     last[..rest.len()].copy_from_slice(rest);
@@ -451,6 +451,127 @@ fn seal(bytes: &[u8]) -> u64 {
                 .wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 .rotate_left(23)
         })
+}
+
+// Writes the values of a stored template one after another, as
+// `Template::to_bytes` of each service stores them.
+pub(crate) struct Store<'s> {
+    bytes: &'s mut [u8],
+    at: usize,
+}
+
+impl<'s> Store<'s> {
+    pub(crate) fn new(bytes: &'s mut [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+
+    pub(crate) fn put(&mut self, part: &[u8]) {
+        if let Some(slot) = self.bytes.get_mut(self.at..self.at + part.len()) {
+            slot.copy_from_slice(part);
+        }
+        self.at += part.len();
+    }
+
+    pub(crate) fn u32(&mut self, value: u32) {
+        self.put(&value.to_le_bytes());
+    }
+}
+
+// Reads the values of a stored template back, in the order `Store` wrote
+// them. Past the end, it reads zeros. Every read is inlined, so that a
+// template read back reads each value at an offset the compiler knows.
+pub(crate) struct Load<'s> {
+    bytes: &'s [u8],
+    at: usize,
+}
+
+impl<'s> Load<'s> {
+    #[inline(always)]
+    pub(crate) fn new(bytes: &'s [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+
+    #[inline(always)]
+    pub(crate) fn take<const N: usize>(&mut self) -> [u8; N] {
+        let part = self
+            .bytes
+            .get(self.at..self.at + N)
+            .and_then(|part| part.try_into().ok())
+            .unwrap_or([0; N]);
+        self.at += N;
+        part
+    }
+
+    #[inline(always)]
+    pub(crate) fn u8(&mut self) -> u8 {
+        let [byte] = self.take();
+        byte
+    }
+
+    #[inline(always)]
+    pub(crate) fn u32(&mut self) -> u32 {
+        u32::from_le_bytes(self.take())
+    }
+}
+
+impl Table {
+    // The bytes that `store` writes.
+    pub(crate) const STORED_LEN: usize = 34;
+
+    // The length of the template's bytes, the table included.
+    pub(crate) const fn len(&self) -> usize {
+        self.end as usize
+    }
+
+    pub(crate) fn store(&self, into: &mut Store<'_>) {
+        into.u32(self.start);
+        into.put(&self.counts);
+        into.put(&[self.total, self.params]);
+        into.u32(self.end);
+        into.u32(self.url_fixed);
+        into.put(&[self.fields.0]);
+        into.u32(self.fields.1);
+        into.put(&[u8::from(self.body)]);
+        into.put(&self.seal.to_le_bytes());
+    }
+
+    // Reads a table that `store` wrote, or `None` for one that no template
+    // has: its steps are those of its sections, and fill its bytes from
+    // `start` to `end`.
+    #[inline(always)]
+    pub(crate) fn load(from: &mut Load<'_>) -> Option<Self> {
+        let start = from.u32();
+        let counts: [u8; SECTIONS] = from.take();
+        let [total, params] = from.take();
+        let end = from.u32();
+        let url_fixed = from.u32();
+        let fields = (from.u8(), from.u32());
+        let body = match from.u8() {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        let seal = u64::from_le_bytes(from.take());
+        let steps: usize = counts.iter().map(|&count| usize::from(count)).sum();
+        if steps != usize::from(total)
+            || steps > MAX_STEPS
+            || end.checked_sub(start) != Some(u32::from(total) * 8)
+            || fields.0 > total
+        {
+            return None;
+        }
+        Some(Self {
+            start,
+            counts,
+            total,
+            params,
+            end,
+            url_fixed,
+            fields,
+            body,
+            seal,
+        })
+    }
 }
 
 impl Pass for Builder<'_> {
@@ -864,8 +985,8 @@ fn write_hole(
 }
 
 /// Writes a request by walking its template's table, one function for
-/// every operation: what an encoder does in place of its layout, built with
-/// the feature `compact`.
+/// every operation. With the feature `compact`, an encoder calls this in
+/// place of its layout.
 #[cfg(feature = "compact")]
 pub(crate) fn walk_request(
     table: &Table,
@@ -1022,9 +1143,9 @@ fn walk(
 /// and the end of each section copies the step of text alone that ends it.
 /// So where each step is follows from the layout alone, and the compiler
 /// writes each as straight-line code. The pass does not check that each
-/// step holds the hole that the layout names: bytes that are not the
-/// template's write a wrong request, or fail where they run out, but they
-/// cannot make the pass read outside them or panic.
+/// step holds the hole that the layout names. Bytes that are not the
+/// template's write a wrong request, or fail where they run out. They cannot
+/// make the pass read outside them or panic.
 #[cfg_attr(feature = "compact", allow(dead_code))]
 pub(crate) struct Encode<'e, 'o, F: Fill> {
     steps: &'e [[u8; 8]],

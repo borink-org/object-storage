@@ -37,18 +37,35 @@ using MaybeU32      = borink_maybe_u32;
 using Status        = borink_status;
 using AzureNamespace = borink_azure_namespace;
 using AzureRejection = borink_azure_rejection;
-using Session       = borink_session;
+using MaybeSpan     = borink_maybe_span;
+using Container     = borink_container;
+using Timestamps    = borink_timestamps;
+using Template      = borink_template;
+using Prepared      = borink_prepared;
+using ConditionValue = borink_condition_value;
 using Range         = borink_range;
+using GetOptions    = borink_get_options;
+using GetItem       = borink_get_item;
 using GetShape      = borink_get_shape;
+using ContentProperties = borink_content_properties;
+using WriteOptions  = borink_write_options;
+using PutOptions    = borink_put_options;
+using PutItem       = borink_put_item;
 using PutShape      = borink_put_shape;
-using DeleteShape   = borink_delete_shape;
-using ListShape     = borink_list_shape;
+using StageOptions  = borink_stage_options;
+using StageBlockItem = borink_stage_block_item;
+using CommitOptions = borink_commit_options;
+using BlockRef      = borink_block_ref;
+using CommitItem    = borink_commit_item;
+using CommitShape   = borink_commit_shape;
+using ListOptions   = borink_list_options;
+using ListItem      = borink_list_item;
+using WireRequest   = borink_wire_request;
+using Header        = borink_header;
 using ListEntry     = borink_list_entry;
 using Properties    = borink_properties;
 using Property      = borink_property;
 using Fill          = borink_fill;
-using RequestHeader = borink_request_header;
-using RequestHead   = borink_request_head;
 using HeaderRef     = borink_header_ref;
 using ObjectMeta    = borink_object_meta;
 using BodyWindow    = borink_body_window;
@@ -58,9 +75,14 @@ using Layout        = borink_layout;
 using ErrorCode     = borink_error_code;
 using Method        = borink_method;
 using GetKind       = borink_get_kind;
+using Ranging       = borink_ranging;
+using RevisionKind  = borink_revision_kind;
 using RangeForm     = borink_range_form;
 using Condition     = borink_condition;
-using DeleteKind    = borink_delete_kind;
+using ConditionForm = borink_condition_form;
+using ChecksumKind  = borink_checksum_kind;
+using BlockSource   = borink_block_source;
+using ListInclude   = borink_list_include;
 using FailureClass  = borink_failure_class;
 using ServiceError  = borink_service_error;
 using OutcomeKind   = borink_outcome_kind;
@@ -68,7 +90,8 @@ using EntryKind     = borink_entry_kind;
 using BlobProperty  = borink_blob_property;
 using PropertySet   = borink_property_set;
 
-using RequestBuffer = borink_request_buffer;
+inline constexpr std::size_t TemplateLen = BORINK_TEMPLATE_LEN;
+inline constexpr std::size_t TimestampsLen = BORINK_TIMESTAMPS_LEN;
 
 inline constexpr ErrorCode ErrorCodeNone             = BORINK_ERROR_CODE_NONE;
 inline constexpr ErrorCode ErrorCodeCapacity         = BORINK_ERROR_CODE_CAPACITY;
@@ -90,6 +113,13 @@ inline constexpr Method MethodDelete = BORINK_METHOD_DELETE;
 inline constexpr GetKind GetKindBytes    = BORINK_GET_KIND_BYTES;
 inline constexpr GetKind GetKindHead     = BORINK_GET_KIND_HEAD;
 
+inline constexpr Ranging RangingWhole  = BORINK_RANGING_WHOLE;
+inline constexpr Ranging RangingRanged = BORINK_RANGING_RANGED;
+
+inline constexpr RevisionKind RevisionKindCurrent  = BORINK_REVISION_KIND_CURRENT;
+inline constexpr RevisionKind RevisionKindSnapshot = BORINK_REVISION_KIND_SNAPSHOT;
+inline constexpr RevisionKind RevisionKindVersion  = BORINK_REVISION_KIND_VERSION;
+
 inline constexpr RangeForm RangeFormWhole   = BORINK_RANGE_FORM_WHOLE;
 inline constexpr RangeForm RangeFormBounded = BORINK_RANGE_FORM_BOUNDED;
 inline constexpr RangeForm RangeFormOffset  = BORINK_RANGE_FORM_OFFSET;
@@ -101,9 +131,21 @@ inline constexpr Condition ConditionIfNoneMatch       = BORINK_CONDITION_IF_NONE
 inline constexpr Condition ConditionIfModifiedSince   = BORINK_CONDITION_IF_MODIFIED_SINCE;
 inline constexpr Condition ConditionIfUnmodifiedSince = BORINK_CONDITION_IF_UNMODIFIED_SINCE;
 
-inline constexpr DeleteKind DeleteKindObject             = BORINK_DELETE_KIND_OBJECT;
-inline constexpr DeleteKind DeleteKindObjectAndSnapshots = BORINK_DELETE_KIND_OBJECT_AND_SNAPSHOTS;
-inline constexpr DeleteKind DeleteKindSnapshotsOnly      = BORINK_DELETE_KIND_SNAPSHOTS_ONLY;
+inline constexpr ConditionForm ConditionFormNone = BORINK_CONDITION_FORM_NONE;
+inline constexpr ConditionForm ConditionFormETag = BORINK_CONDITION_FORM_E_TAG;
+inline constexpr ConditionForm ConditionFormTime = BORINK_CONDITION_FORM_TIME;
+
+inline constexpr ChecksumKind ChecksumKindNone  = BORINK_CHECKSUM_KIND_NONE;
+inline constexpr ChecksumKind ChecksumKindMd5   = BORINK_CHECKSUM_KIND_MD5;
+inline constexpr ChecksumKind ChecksumKindCrc64 = BORINK_CHECKSUM_KIND_CRC64;
+
+inline constexpr BlockSource BlockSourceUncommitted = BORINK_BLOCK_SOURCE_UNCOMMITTED;
+inline constexpr BlockSource BlockSourceCommitted   = BORINK_BLOCK_SOURCE_COMMITTED;
+inline constexpr BlockSource BlockSourceLatest      = BORINK_BLOCK_SOURCE_LATEST;
+
+inline constexpr ListInclude ListIncludeMetadata  = BORINK_LIST_INCLUDE_METADATA;
+inline constexpr ListInclude ListIncludeSnapshots = BORINK_LIST_INCLUDE_SNAPSHOTS;
+inline constexpr ListInclude ListIncludeVersions  = BORINK_LIST_INCLUDE_VERSIONS;
 
 inline constexpr FailureClass FailureClassNone      = BORINK_FAILURE_CLASS_NONE;
 inline constexpr FailureClass FailureClassAuth      = BORINK_FAILURE_CLASS_AUTH;
@@ -122,11 +164,14 @@ inline constexpr ServiceError ServiceErrorUnauthorized        = BORINK_SERVICE_E
 inline constexpr ServiceError ServiceErrorThrottled           = BORINK_SERVICE_ERROR_THROTTLED;
 inline constexpr ServiceError ServiceErrorTimeout             = BORINK_SERVICE_ERROR_TIMEOUT;
 inline constexpr ServiceError ServiceErrorService             = BORINK_SERVICE_ERROR_SERVICE;
+inline constexpr ServiceError ServiceErrorInvalidUpload       = BORINK_SERVICE_ERROR_INVALID_UPLOAD;
+inline constexpr ServiceError ServiceErrorNoSuchUpload        = BORINK_SERVICE_ERROR_NO_SUCH_UPLOAD;
 
-inline constexpr OutcomeKind OutcomeKindDone                = BORINK_OUTCOME_KIND_DONE;
+inline constexpr OutcomeKind OutcomeKindCreated             = BORINK_OUTCOME_KIND_CREATED;
+inline constexpr OutcomeKind OutcomeKindStaged              = BORINK_OUTCOME_KIND_STAGED;
+inline constexpr OutcomeKind OutcomeKindCommitted           = BORINK_OUTCOME_KIND_COMMITTED;
 inline constexpr OutcomeKind OutcomeKindBody                = BORINK_OUTCOME_KIND_BODY;
 inline constexpr OutcomeKind OutcomeKindComplete            = BORINK_OUTCOME_KIND_COMPLETE;
-inline constexpr OutcomeKind OutcomeKindAccepted            = BORINK_OUTCOME_KIND_ACCEPTED;
 inline constexpr OutcomeKind OutcomeKindNotFound            = BORINK_OUTCOME_KIND_NOT_FOUND;
 inline constexpr OutcomeKind OutcomeKindNotModified         = BORINK_OUTCOME_KIND_NOT_MODIFIED;
 inline constexpr OutcomeKind OutcomeKindPreconditionFailed  = BORINK_OUTCOME_KIND_PRECONDITION_FAILED;
@@ -222,75 +267,141 @@ inline BytesMut into(std::span<std::uint8_t> bytes) {
     return BytesMut{bytes.empty() ? nullptr : bytes.data(), bytes.size()};
 }
 
-// Whether a session takes an `http://` endpoint. Without TLS every request
-// carries the token in clear, so allow it only for a local emulator or a
-// network you trust.
+// Whether a container takes an `http://` endpoint. Without TLS every
+// request carries the token in clear, so allow it only for a local emulator
+// or a network you trust.
 enum class PlainHttp { Refused, Allowed };
 
-// Returns a session for one container, with the token that opens it. The
-// endpoint is an HTTPS origin, or with `PlainHttp::Allowed` an HTTP one.
+// Returns the container `name` at `endpoint`, which is an HTTPS origin, or
+// with `PlainHttp::Allowed` an HTTP one.
 //
-// The three values stay where you put them. Keep them for as long as you make
-// requests through this session.
-inline Session session(std::string_view endpoint, std::string_view container,
-                       std::string_view token, PlainHttp plain = PlainHttp::Refused) {
-    return Session{as_bytes(endpoint), as_bytes(container), as_bytes(token),
-                   plain == PlainHttp::Allowed};
+// The values stay where you put them. Keep them for as long as you prepare
+// templates for this container; a template holds none of them.
+inline Container container(std::string_view endpoint, std::string_view name,
+                           PlainHttp plain = PlainHttp::Refused) {
+    return Container{as_bytes(endpoint), as_bytes(name), plain == PlainHttp::Allowed,
+                     Bytes{nullptr, 0}};
 }
 
-// The settings of one read.
+// Returns `container` for templates of the one object `key`, which hold its
+// key as checked and encoded text. Each request of such a template passes
+// that key, or an empty one.
+inline Container object(Container container, std::string_view key) {
+    container.object = as_bytes(key);
+    return container;
+}
+
+// Returns the bytes of a template: the start of the buffer that it was
+// prepared into, as long as `prepared.required` says.
+inline Bytes template_bytes(std::span<const std::uint8_t> buffer, const Prepared &prepared) {
+    return borrow(buffer.first(prepared.required < buffer.size() ? prepared.required
+                                                                 : buffer.size()));
+}
+
+// Returns what a precondition compares against: an entity tag, or `*` for
+// any.
+inline ConditionValue condition_tag(std::string_view e_tag) {
+    return ConditionValue{ConditionFormETag, as_bytes(e_tag), 0};
+}
+
+// Returns what a precondition compares against: an instant, in seconds since
+// the Unix epoch.
+inline ConditionValue condition_time(std::uint64_t seconds) {
+    return ConditionValue{ConditionFormTime, Bytes{nullptr, 0}, seconds};
+}
+
+// Returns options for reads of every byte of an object as it is now, with no
+// precondition.
+inline GetOptions get_options() {
+    return GetOptions{GetKindBytes, RangingWhole, ConditionNone, RevisionKindCurrent};
+}
+
+// Returns options for reads of the properties and the metadata of an
+// object, without its bytes.
+inline GetOptions head_options() {
+    GetOptions options = get_options();
+    options.kind = GetKindHead;
+    return options;
+}
+
+// Returns a read of every byte of `key`, as it is now.
+inline GetItem get_item(std::string_view key) {
+    return GetItem{as_bytes(key), whole(), ConditionValue{}, Bytes{nullptr, 0}};
+}
+
+// Returns options for whole-object writes with no precondition and no
+// checksum, which store nothing beside the bytes.
+inline PutOptions put_options() { return PutOptions{ConditionNone, WriteOptions{}, ChecksumKindNone}; }
+
+// Returns a write of `content_len` bytes as `key`. You send the bytes.
+inline PutItem put_item(std::string_view key, std::uint64_t content_len) {
+    return PutItem{as_bytes(key), content_len, ConditionValue{}, Bytes{nullptr, 0}};
+}
+
+// Returns a Put Block of `content_len` bytes, as the block `id` of `key`.
+inline StageBlockItem stage_block_item(std::string_view key, std::string_view id,
+                                       std::uint64_t content_len) {
+    return StageBlockItem{as_bytes(key), as_bytes(id), content_len, Bytes{nullptr, 0}};
+}
+
+// Returns options for commits with no precondition.
+inline CommitOptions commit_options() { return CommitOptions{ConditionNone, WriteOptions{}, false}; }
+
+// Returns one block of a commit.
+inline BlockRef block(std::string_view id, BlockSource source = BlockSourceLatest) {
+    return BlockRef{as_bytes(id), source};
+}
+
+// Returns a commit of `blocks` as `key`. The blocks stay where they are.
+inline CommitItem commit_item(std::string_view key, std::span<const BlockRef> blocks) {
+    return CommitItem{as_bytes(key), ConditionValue{}, blocks.data(), blocks.size(),
+                      Bytes{nullptr, 0}};
+}
+
+// Returns options for the pages of a listing of every key, in pages of the
+// size that the service chooses.
+inline ListOptions list_options() { return ListOptions{Bytes{nullptr, 0}, MaybeU32{}, 0}; }
+
+// Returns the page of a listing of the keys under `prefix` after `marker`,
+// or the first page for an empty one.
+inline ListItem list_item(std::string_view prefix, std::string_view marker = {}) {
+    return ListItem{as_bytes(prefix), as_bytes(marker)};
+}
+
+// Returns the part of a read that holds no pointer. Keep it while the
+// request is in flight.
+inline GetShape shape(const GetItem &item, const GetOptions &options) {
+    return borink_get_item_shape(&item, &options);
+}
+
+// Returns the part of a write that holds no pointer.
+inline PutShape shape(const PutItem &item, const PutOptions &options) {
+    return borink_put_item_shape(&item, &options);
+}
+
+// Returns the part of a commit that holds no pointer.
+inline CommitShape shape(const CommitItem &item, const CommitOptions &options) {
+    return borink_commit_item_shape(&item, &options);
+}
+
+// Returns a range of a buffer that a request was written into, as text.
+inline std::string_view part(std::span<const std::uint8_t> buffer, Span range) {
+    return std::string_view(reinterpret_cast<const char *>(buffer.data()) + range.start,
+                            range.len);
+}
+
+// Returns the header fields of a request, for `next_header` to read.
+inline Bytes fields_of(std::span<const std::uint8_t> buffer, const WireRequest &request) {
+    return borrow(buffer.subspan(request.fields.start, request.fields.len));
+}
+
+// Reads the next header field of a request, and steps `fields` past it:
 //
-// The defaults ask for every byte of the object, with no precondition.
-struct Read {
-    // Whether the read asks for bytes or for metadata.
-    GetKind kind = GetKindBytes;
-    // The byte range that the read requests.
-    Range range = whole();
-    // The precondition that the read carries.
-    Condition condition = ConditionNone;
-    // The entity tag that the precondition compares against.
-    std::string_view condition_value;
-
-    GetShape shape() const { return GetShape{kind, range, condition}; }
-};
-
-// The settings of one write.
-struct Write {
-    // The precondition that the write carries.
-    Condition condition = ConditionNone;
-    // The entity tag that the precondition compares against.
-    std::string_view condition_value;
-
-    PutShape shape() const { return PutShape{condition}; }
-};
-
-// The settings of one page of a listing.
-//
-// The defaults ask for every key under the prefix, in pages of the size that
-// the service chooses.
-struct List {
-    // Whether the listing groups the keys at each `/` after the prefix.
-    bool delimited = false;
-    // The most entries that one page reports.
-    MaybeU32 max_results = {};
-    // The text that the last page gave for the next one. Empty asks for the
-    // first page.
-    std::string_view marker;
-
-    ListShape shape() const { return ListShape{delimited, max_results}; }
-};
-
-// The settings of one removal.
-struct Removal {
-    // What the removal takes with it.
-    DeleteKind kind = DeleteKindObject;
-    // The precondition that the removal carries.
-    Condition condition = ConditionNone;
-    // The entity tag that the precondition compares against.
-    std::string_view condition_value;
-
-    DeleteShape shape() const { return DeleteShape{kind, condition}; }
-};
+//     Bytes fields = fields_of(buffer, request);
+//     for (Header field = next_header(fields); field.present; field = next_header(fields)) {
+//         // text_of(field.name), text_of(field.value)
+//     }
+inline Header next_header(Bytes &fields) { return borink_next_header(&fields); }
 
 // Returns the bytes of a value, or nothing when the head did not carry it.
 //

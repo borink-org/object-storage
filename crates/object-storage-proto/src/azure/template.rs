@@ -8,12 +8,17 @@
 // a request is ready as soon as it is written.
 
 use super::{AzureNamespace, Bearer, Container, MAX_URL_LEN, METADATA_PREFIX, VERSION};
+use crate::checksum::ChecksumKind;
 use crate::common::write_tags;
 use crate::request::{HeaderValue, Writer};
 use crate::template::{
-    self, Body, Builder, Fill, Hole, Param, ParamValue, Pass, Section, Table, WireRequest,
+    self, Body, Builder, Fill, Hole, Load, Param, ParamValue, Pass, Section, Store, Table,
+    WireRequest,
 };
-use crate::{InvalidPlan, MetadataPair, Method, Payload, Result, RevisionKind, Span, Tag};
+use crate::{
+    ConditionKind, GetKind, GetOptions, InvalidPlan, MetadataPair, Method, Payload, Ranging,
+    Result, RevisionKind, Span, Tag,
+};
 
 /// The operation that a template writes requests for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +145,240 @@ impl Template {
     pub const fn namespace(&self) -> AzureNamespace {
         self.namespace
     }
+
+    /// Returns how many bytes at the start of its buffer the template
+    /// takes. Those are its bytes, which each request is written from.
+    pub const fn bytes_len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// The length of a template stored with [`Self::to_bytes`].
+    pub const STORED_LEN: usize = 80;
+
+    /// Returns the template as bytes, which [`Self::from_bytes`] reads back.
+    ///
+    /// Store them beside the template's own bytes, such as in a file or in
+    /// flash, to write requests again without writing the template again.
+    /// They hold no pointer, and end in a hash of the rest. Only this version
+    /// of the crate reads them.
+    pub fn to_bytes(&self) -> [u8; Self::STORED_LEN] {
+        let mut stored = [0; Self::STORED_LEN];
+        let mut into = Store::new(&mut stored);
+        self.table.store(&mut into);
+        into.put(&[
+            self.operation as u8,
+            self.method as u8,
+            self.namespace as u8,
+        ]);
+        let object = self.object.unwrap_or_default();
+        into.put(&[u8::from(self.object.is_some())]);
+        into.u32(object.start as u32);
+        into.u32(object.len as u32);
+        let detail = match self.detail {
+            Detail::Get(options) => [
+                0,
+                options.kind as u8,
+                options.ranging as u8,
+                options.condition as u8,
+                options.revision as u8,
+            ],
+            Detail::Put {
+                condition,
+                checksum,
+            } => [1, condition as u8, checksum_number(checksum), 0, 0],
+            Detail::Object {
+                condition,
+                revision,
+            } => [2, condition as u8, revision as u8, 0, 0],
+            Detail::List => [3, 0, 0, 0, 0],
+            Detail::Stage(checksum) => [4, checksum_number(checksum), 0, 0, 0],
+            Detail::Commit {
+                condition,
+                content_md5,
+            } => [5, condition as u8, u8::from(content_md5), 0, 0],
+            Detail::Batch { .. } => [6, 0, 0, 0, 0],
+            Detail::Copy {
+                condition,
+                source_revision,
+                source_condition,
+                source_ranging,
+            } => [
+                7,
+                condition as u8,
+                source_revision as u8,
+                source_condition as u8,
+                source_ranging as u8,
+            ],
+        };
+        into.put(&detail);
+        let (path, tail) = match self.detail {
+            Detail::Batch { path, tail } => (path, tail),
+            _ => (Span::default(), Span::default()),
+        };
+        for span in [path, tail] {
+            into.u32(span.start as u32);
+            into.u32(span.len as u32);
+        }
+        if let Some((values, hash)) = stored.split_last_chunk_mut::<8>() {
+            *hash = template::seal(values).to_le_bytes();
+        }
+        stored
+    }
+
+    /// Reads a template that [`Self::to_bytes`] stored.
+    ///
+    /// This checks the stored bytes and not the template's own: where those
+    /// could be another template's, check them with [`Self::check`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] if `stored` was changed since it
+    /// was stored, or holds a value that no template holds.
+    pub fn from_bytes(stored: &[u8; Self::STORED_LEN]) -> Result<Self> {
+        let (values, hash) = stored
+            .split_last_chunk::<8>()
+            .ok_or(InvalidPlan::Template)?;
+        if template::seal(values) != u64::from_le_bytes(*hash) {
+            return Err(InvalidPlan::Template.into());
+        }
+        load(values).ok_or_else(|| InvalidPlan::Template.into())
+    }
+}
+
+// The operations, at the number that `as u8` gives each.
+const OPERATIONS: [Operation; 20] = [
+    Operation::Get,
+    Operation::Put,
+    Operation::Delete,
+    Operation::SetTier,
+    Operation::SetMetadata,
+    Operation::SetProperties,
+    Operation::SetTags,
+    Operation::GetTags,
+    Operation::Snapshot,
+    Operation::StageBlock,
+    Operation::CommitBlocks,
+    Operation::ListBlocks,
+    Operation::Copy,
+    Operation::CopyFromUrl,
+    Operation::PutFromUrl,
+    Operation::StageBlockFromUrl,
+    Operation::AbortCopy,
+    Operation::Restore,
+    Operation::DeleteMany,
+    Operation::List,
+];
+
+const _: () = {
+    let mut at = 0;
+    while at < OPERATIONS.len() {
+        assert!(OPERATIONS[at] as usize == at);
+        at += 1;
+    }
+};
+
+// What `Template::to_bytes` stores fits: the table, three numbers, the
+// object, the detail, two spans and the hash of them all.
+const _: () = assert!(Table::STORED_LEN + 3 + 9 + 5 + 16 + 8 <= Template::STORED_LEN);
+
+// A checksum kind as one byte, and none as 0.
+fn checksum_number(kind: Option<ChecksumKind>) -> u8 {
+    kind.map_or(0, |kind| kind as u8)
+}
+
+fn checksum_kind(number: u8) -> Option<Option<ChecksumKind>> {
+    match number {
+        0 => Some(None),
+        number => ChecksumKind::from_discriminant(u16::from(number)).map(Some),
+    }
+}
+
+// Reads what `Template::to_bytes` stored, or `None` for a value that no
+// template holds. A span must lie within the template's bytes.
+#[inline(always)]
+fn load(stored: &[u8]) -> Option<Template> {
+    let mut from = Load::new(stored);
+    let table = Table::load(&mut from)?;
+    let [operation, method, namespace] = from.take();
+    let operation = *OPERATIONS.get(usize::from(operation))?;
+    let method = match method {
+        1 => Method::Get,
+        2 => Method::Head,
+        3 => Method::Put,
+        4 => Method::Delete,
+        5 => Method::Post,
+        _ => return None,
+    };
+    let namespace = match namespace {
+        0 => AzureNamespace::Unknown,
+        1 => AzureNamespace::Flat,
+        2 => AzureNamespace::Hierarchical,
+        _ => return None,
+    };
+    let within = |start: u32, len: u32| {
+        let end = start.checked_add(len)?;
+        (end as usize <= table.len()).then_some(Span {
+            start: start as usize,
+            len: len as usize,
+        })
+    };
+    let object = match from.u8() {
+        0 => {
+            let _ = (from.u32(), from.u32());
+            None
+        }
+        1 => Some(within(from.u32(), from.u32())?),
+        _ => return None,
+    };
+    let [tag, a, b, c, d] = from.take();
+    let condition = |number: u8| ConditionKind::from_discriminant(u16::from(number));
+    let revision = |number: u8| RevisionKind::from_discriminant(u16::from(number));
+    let ranging = |number: u8| Ranging::from_discriminant(u16::from(number));
+    let detail = match tag {
+        0 => Detail::Get(GetOptions {
+            kind: GetKind::from_discriminant(u16::from(a))?,
+            ranging: ranging(b)?,
+            condition: condition(c)?,
+            revision: revision(d)?,
+        }),
+        1 => Detail::Put {
+            condition: condition(a)?,
+            checksum: checksum_kind(b)?,
+        },
+        2 => Detail::Object {
+            condition: condition(a)?,
+            revision: revision(b)?,
+        },
+        3 => Detail::List,
+        4 => Detail::Stage(checksum_kind(a)?),
+        5 => Detail::Commit {
+            condition: condition(a)?,
+            content_md5: match b {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
+        },
+        6 => Detail::Batch {
+            path: within(from.u32(), from.u32())?,
+            tail: within(from.u32(), from.u32())?,
+        },
+        7 => Detail::Copy {
+            condition: condition(a)?,
+            source_revision: revision(b)?,
+            source_condition: condition(c)?,
+            source_ranging: ranging(d)?,
+        },
+        _ => return None,
+    };
+    Some(Template {
+        table,
+        operation,
+        method,
+        namespace,
+        detail,
+        object,
+    })
 }
 
 // The value of one field that every request sends alike.

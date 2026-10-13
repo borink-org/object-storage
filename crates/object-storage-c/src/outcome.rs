@@ -9,7 +9,8 @@ use crate::types::*;
 
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, Error, GetHeadOutcome, ListHeadOutcome, PutHeadOutcome, ServiceErrorKind,
+    CommitHeadOutcome, Error, GetHeadOutcome, ListHeadOutcome, PutHeadOutcome, ServiceErrorKind,
+    StageHeadOutcome,
 };
 
 pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
@@ -51,7 +52,7 @@ pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
     match *outcome {
         PutHeadOutcome::Created { meta } => Outcome {
             meta: meta_view(&meta),
-            ..only(OutcomeKind::Done)
+            ..only(OutcomeKind::Created)
         },
         PutHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
         PutHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
@@ -60,14 +61,35 @@ pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
     }
 }
 
-pub(crate) fn delete_outcome(outcome: &DeleteHeadOutcome<'_>) -> Outcome {
+// A Put Block. Azure answers one with a result body never: only S3 does, so
+// that outcome is one this crate does not report.
+pub(crate) fn stage_outcome(outcome: &StageHeadOutcome<'_>) -> Outcome {
     match *outcome {
-        // A removal returns no object, so Azure sends no metadata for one.
-        DeleteHeadOutcome::Accepted => only(OutcomeKind::Accepted),
-        DeleteHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
-        DeleteHeadOutcome::NotFound { kind } => not_found(kind),
-        DeleteHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
-        DeleteHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        StageHeadOutcome::Staged { e_tag } => Outcome {
+            meta: ObjectMeta {
+                e_tag: maybe_bytes(e_tag),
+                ..Default::default()
+            },
+            ..only(OutcomeKind::Staged)
+        },
+        StageHeadOutcome::NotFound { kind } => not_found(kind),
+        StageHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        StageHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
+        _ => only(OutcomeKind::Unsupported),
+    }
+}
+
+// A Put Block List, which Azure answers in the head alone, as a stage.
+pub(crate) fn commit_outcome(outcome: &CommitHeadOutcome<'_>) -> Outcome {
+    match *outcome {
+        CommitHeadOutcome::Committed { meta } => Outcome {
+            meta: meta_view(&meta),
+            ..only(OutcomeKind::Committed)
+        },
+        CommitHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        CommitHeadOutcome::NotFound { kind } => not_found(kind),
+        CommitHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
+        CommitHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
         _ => only(OutcomeKind::Unsupported),
     }
 }
@@ -221,7 +243,7 @@ pub(crate) fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
     })
 }
 
-fn bytes(value: &[u8]) -> Bytes {
+pub(crate) fn bytes(value: &[u8]) -> Bytes {
     Bytes {
         ptr: value.as_ptr(),
         len: value.len(),

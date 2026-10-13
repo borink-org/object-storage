@@ -179,6 +179,9 @@ fn signs_a_conditional_read_of_a_suffix() {
 
 #[test]
 fn a_batch_is_signed_as_each_request_is() {
+    #[cfg(not(feature = "sha256-rustcrypto"))]
+    use borink_object_storage_crypto::Sha256Minimal as S;
+    #[cfg(feature = "sha256-rustcrypto")]
     use borink_object_storage_crypto::Sha256RustCrypto as S;
     let bucket = Bucket::new(
         "https://fly.storage.tigris.dev",
