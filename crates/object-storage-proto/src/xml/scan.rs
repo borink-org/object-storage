@@ -266,10 +266,35 @@ fn close_tag(bytes: &[u8], from: usize, name: &[u8]) -> Result<usize> {
     let end = start + name.len();
     // The range is in bounds once `end` is below the length, and `start`
     // is at most `end` because `end` is `start` plus a length.
-    if bytes.len() > end && &bytes[start..end] == name && bytes[end] == b'>' {
+    if bytes.len() > end && eq_short(&bytes[start..end], name) && bytes[end] == b'>' {
         return Ok(end + 1);
     }
     close_tag_slow(bytes, from, name)
+}
+
+// Whether `a` and `b`, which are as long, hold the same bytes. A compare of up
+// to 32 bytes is two overlapping compares of a fixed length, which compile to
+// a few loads, where `==` on slices of a length known only at run time calls
+// the C library's `memcmp`, which costs more than the compare for a tag name.
+// As `copy_short` does for a copy.
+#[inline(always)]
+fn eq_short(a: &[u8], b: &[u8]) -> bool {
+    fn ends<const N: usize>(a: &[u8], b: &[u8]) -> bool {
+        a.first_chunk::<N>() == b.first_chunk::<N>() && a.last_chunk::<N>() == b.last_chunk::<N>()
+    }
+    match a.len() {
+        _ if a.len() != b.len() => false,
+        0 => true,
+        1..=3 => {
+            a.first() == b.first()
+                && a.get(a.len() / 2) == b.get(a.len() / 2)
+                && a.last() == b.last()
+        }
+        4..=7 => ends::<4>(a, b),
+        8..=16 => ends::<8>(a, b),
+        17..=32 => ends::<16>(a, b),
+        _ => a == b,
+    }
 }
 
 #[inline(never)]
@@ -534,6 +559,43 @@ impl<'b> Scan<'b> {
     // handful of known tags, so this avoids scanning names: `<Name>` is one
     // six-byte compare, and anything else falls through to `child`.
     #[inline(always)]
+    // The next 32 bytes from the cursor, with zeros past the end, which no
+    // literal holds. Take it once at an element and try each start tag in it
+    // with `Self::lit_in`. Every compare is then against a fixed length.
+    // Compared against the bytes that are left, as `Self::lit` does, each
+    // start tag needs a length of its own. The compiler then works out all
+    // of them again at every element.
+    pub(crate) fn head(&self) -> [u8; 32] {
+        // In range because the cursor never passes the end.
+        let rest = &self.bytes[self.cursor..];
+        match rest.first_chunk::<32>() {
+            Some(head) => *head,
+            None => {
+                let mut head = [0; 32];
+                head[..rest.len()].copy_from_slice(rest);
+                head
+            }
+        }
+    }
+
+    // Moves past `len` bytes that the caller matched in a head taken at the
+    // cursor. A head holds zeros past the end, which no literal holds, so the
+    // bytes matched were there and the cursor stays in range.
+    pub(crate) fn advance(&mut self, len: usize) {
+        self.cursor += len;
+    }
+
+    // Moves past `lit` if `head`, taken at the cursor, starts with it.
+    pub(crate) fn lit_in<const N: usize>(&mut self, head: &[u8; 32], lit: &[u8; N]) -> bool {
+        const { assert!(N <= 32, "a literal longer than the head") };
+        if head.starts_with(lit) {
+            self.cursor += N;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn lit(&mut self, lit: &[u8]) -> bool {
         // In range because the cursor never passes the end.
         if self.bytes[self.cursor..].starts_with(lit) {

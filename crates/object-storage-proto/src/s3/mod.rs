@@ -835,10 +835,18 @@ impl ObjectProperty {
 
     // The property that an element name stands for, if it is one of these.
     pub(crate) fn identify(name: &[u8]) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|property| property.name().as_bytes() == name)
+        // The names of `Self::name`, matched whole: a switch on the length
+        // and one compare.
+        Some(match name {
+            b"StorageClass" => Self::StorageClass,
+            b"ChecksumAlgorithm" => Self::ChecksumAlgorithm,
+            b"ChecksumType" => Self::ChecksumType,
+            b"Owner" => Self::Owner,
+            b"RestoreStatus" => Self::RestoreStatus,
+            b"VersionId" => Self::VersionId,
+            b"IsLatest" => Self::IsLatest,
+            _ => return None,
+        })
     }
 }
 

@@ -160,16 +160,24 @@ pub(super) fn check_body(body: &[u8]) -> Result<()> {
     // UTF-8. The key is checked again after it is decoded and refused then,
     // but a `str` could not hold the bytes in between. The decoded values are
     // handed out as `str` once each is known to be text.
-    if core::str::from_utf8(body).is_err() {
-        return fault();
-    }
+    //
     // XML forbids a zero byte in a document, and the reader writes zero over
     // the bytes a decoded value no longer needs, so that the walk over an
     // entry can find where the decoded text ends. A document that held a zero
-    // byte of its own would defeat that. Written as a minimum so that it
-    // compiles to one vector instruction per sixteen bytes; a search that
-    // stops at the first hit does not, and costs ten times as much.
-    if body.iter().fold(u8::MAX, |lowest, &byte| lowest.min(byte)) == 0 {
+    // byte of its own would defeat that.
+    //
+    // One pass finds the lowest byte and every bit that any byte sets. It is
+    // written as a fold so that it compiles to two vector instructions per
+    // sixteen bytes. A search that stops at the first hit does not, and costs
+    // ten times as much. A body without a byte above 0x7F is ASCII, which is
+    // UTF-8, so only a body with one is validated as UTF-8 as well.
+    // Azure begins a body with the byte order mark, which is UTF-8 and the
+    // only byte above 0x7F of an ASCII page; it is left out of the fold.
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let (lowest, bits) = body.iter().fold((u8::MAX, 0), |(lowest, bits), &byte| {
+        (lowest.min(byte), bits | byte)
+    });
+    if lowest == 0 || (bits >= 0x80 && core::str::from_utf8(body).is_err()) {
         return fault();
     }
     Ok(())
@@ -214,6 +222,31 @@ pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
 // to a character, so only a percent-decoded key can fail this.
 pub(super) fn text(bytes: &[u8]) -> Result<&str> {
     core::str::from_utf8(bytes).or_else(|_| fault())
+}
+
+// The fields of an entry as text, after their values were decoded: the
+// bytes of `raw` from the first field to the end of the last, checked as
+// UTF-8 once, and where they begin. Take each field with `field`. Checked
+// one by one, a field of a few dozen bytes is too short for `from_utf8` to
+// read a word at a time, and costs a byte at a time and a misread branch or
+// two. Checked whole, the entry would include every property as well.
+pub(super) fn fields_text<'r>(raw: &'r [u8], spans: &[Option<Span>]) -> Result<(&'r str, usize)> {
+    let (start, end) = spans
+        .iter()
+        .flatten()
+        .fold((usize::MAX, 0), |(start, end), span| {
+            (start.min(span.0), end.max(span.1))
+        });
+    if start > end {
+        return Ok(("", 0));
+    }
+    let text = raw.get(start..end).map_or_else(fault, text)?;
+    Ok((text, start))
+}
+
+// The text of the field `span` of an entry, from what `fields_text` gave.
+pub(super) fn field((text, start): (&str, usize), (from, to): Span) -> Result<&str> {
+    text.get(from - start..to - start).map_or_else(fault, Ok)
 }
 
 // Trims one value, decodes it in place and returns the range of the decoded

@@ -27,8 +27,8 @@ use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
 use crate::url::form_decode_in_place;
 use crate::xml::decode::decode;
 use crate::xml::page::{
-    ListProperty, check_body, check_room, decode_value_in_place, end_decoded_key,
-    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
+    ListProperty, check_body, check_room, decode_value_in_place, end_decoded_key, field,
+    fields_text, open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, fault, trim};
 use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
@@ -244,9 +244,15 @@ fn read_root_children_into<'b>(
         let chunk = scan.take();
         page.held += 1;
         if page.built < room {
+            let prefix = fields.prefix;
             let (entry, decoded) = build_entry(chunk, fields)?;
             page.decoded |= decoded;
-            values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+            if prefix {
+                // A group of keys captures nothing, so it gives no values.
+                values[..slots].fill(None);
+            } else {
+                values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+            }
             sink(entry, PropertyValues::new(wanted, &values[..slots]));
             page.built += 1;
         }
@@ -376,6 +382,12 @@ fn read_object(
             b'R' if scan.lit(b"<RestoreStatus>") => {
                 read_known(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
             }
+            b'V' if scan.lit(b"<VersionId>") => {
+                read_known(scan, ObjectProperty::VersionId, wanted, captured)?;
+            }
+            b'I' if scan.lit(b"<IsLatest>") => {
+                read_known(scan, ObjectProperty::IsLatest, wanted, captured)?;
+            }
             b'/' if scan.lit(entry.close()) => break,
             _ => match scan.child(entry.name())? {
                 Child::Close => break,
@@ -438,6 +450,10 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
     let last_modified = decode_value_in_place(chunk, fields.last_modified)?;
 
     let raw: &[u8] = chunk;
+    // A decoded value can be any bytes, so the fields are checked as UTF-8
+    // again, once, after decoding.
+    let key = (key.0, key.0 + key_len);
+    let texts = fields_text(raw, &[Some(key), e_tag, last_modified])?;
     let entry = ListEntry {
         kind: if fields.prefix {
             EntryKind::Prefix
@@ -446,14 +462,10 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
         } else {
             EntryKind::Object
         },
-        key: text(&raw[key.0..key.0 + key_len])?,
+        key: field(texts, key)?,
         size,
-        e_tag: e_tag
-            .map(|(start, end)| text(&raw[start..end]))
-            .transpose()?,
-        last_modified: last_modified
-            .map(|(start, end)| text(&raw[start..end]))
-            .transpose()?,
+        e_tag: e_tag.map(|span| field(texts, span)).transpose()?,
+        last_modified: last_modified.map(|span| field(texts, span)).transpose()?,
         content_type: None,
         raw,
     };

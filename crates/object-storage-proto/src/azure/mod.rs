@@ -1815,13 +1815,57 @@ impl BlobProperty {
     pub const COUNT: usize = Self::ALL.len();
 
     // The property that an element name stands for, if it is one of these.
-    // This is the slow way to find out and is used only where a tag was not
-    // matched whole: an unusual spelling, or an element that is none of them.
+    // Used where a tag was not matched whole: an unusual spelling, or an
+    // element that is none of them.
     pub(crate) fn identify(name: &[u8]) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|property| property.name().as_bytes() == name)
+        // The names of `Self::name`, matched whole: a switch on the length
+        // and one compare.
+        Some(match name {
+            b"AccessTier" => Self::AccessTier,
+            b"AccessTierInferred" => Self::AccessTierInferred,
+            b"AccessTierChangeTime" => Self::AccessTierChangeTime,
+            b"ArchiveStatus" => Self::ArchiveStatus,
+            b"Acl" => Self::Acl,
+            b"BlobType" => Self::BlobType,
+            b"Creation-Time" => Self::CreationTime,
+            b"Content-Type" => Self::ContentType,
+            b"Content-Encoding" => Self::ContentEncoding,
+            b"Content-Language" => Self::ContentLanguage,
+            b"Content-CRC64" => Self::ContentCrc64,
+            b"Content-MD5" => Self::ContentMd5,
+            b"Cache-Control" => Self::CacheControl,
+            b"Content-Disposition" => Self::ContentDisposition,
+            b"CopyId" => Self::CopyId,
+            b"CopyStatus" => Self::CopyStatus,
+            b"CopySource" => Self::CopySource,
+            b"CopyProgress" => Self::CopyProgress,
+            b"CopyCompletionTime" => Self::CopyCompletionTime,
+            b"CopyStatusDescription" => Self::CopyStatusDescription,
+            b"DeletedTime" => Self::DeletedTime,
+            b"Deleted" => Self::Deleted,
+            b"EncryptionScope" => Self::EncryptionScope,
+            b"Expiry-Time" => Self::ExpiryTime,
+            b"Group" => Self::Group,
+            b"IsCurrentVersion" => Self::IsCurrentVersion,
+            b"IncrementalCopy" => Self::IncrementalCopy,
+            b"ImmutabilityPolicyUntilDate" => Self::ImmutabilityPolicyUntilDate,
+            b"ImmutabilityPolicyMode" => Self::ImmutabilityPolicyMode,
+            b"LeaseStatus" => Self::LeaseStatus,
+            b"LeaseState" => Self::LeaseState,
+            b"LeaseDuration" => Self::LeaseDuration,
+            b"LegalHold" => Self::LegalHold,
+            b"Owner" => Self::Owner,
+            b"Permissions" => Self::Permissions,
+            b"RemainingRetentionDays" => Self::RemainingRetentionDays,
+            b"RehydratePriority" => Self::RehydratePriority,
+            b"ServerEncrypted" => Self::ServerEncrypted,
+            b"Snapshot" => Self::Snapshot,
+            b"TagCount" => Self::TagCount,
+            b"VersionId" => Self::VersionId,
+            b"x-ms-blob-sequence-number" => Self::BlobSequenceNumber,
+            b"Metadata" => Self::Metadata,
+            _ => return None,
+        })
     }
 }
 

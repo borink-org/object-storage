@@ -242,6 +242,15 @@ pub(crate) fn form_decode_in_place(bytes: &mut [u8]) -> (usize, bool) {
 // `form_urlencoded` replaces every `+` before it percent-decodes. One pass
 // does the same, because a `+` is never a hexadecimal digit of an escape.
 fn decode_in_place(b: &mut [u8], plus_is_space: bool) -> (usize, bool) {
+    // Most text holds nothing to decode. One pass that finds no `%` and no
+    // `+` compiles to a few vector compares, where the loop below stops at
+    // each byte to ask.
+    let escapes = b.iter().fold(false, |found, &byte| {
+        found | (byte == b'%') | (plus_is_space & (byte == b'+'))
+    });
+    if !escapes {
+        return (b.len(), false);
+    }
     // `r` reads and `w` writes. The two are equal up to the first change, so
     // nothing moves until something has shrunk. `w` never passes `r`.
     let (mut r, mut w) = (0, 0);

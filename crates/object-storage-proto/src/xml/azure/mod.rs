@@ -11,8 +11,8 @@ pub(crate) mod blocks;
 use crate::azure::{BlobProperty, PropertySet, PropertyValues};
 use crate::xml::decode::decode;
 use crate::xml::page::{
-    ListProperty, capture, check_body, check_room, decode_value_in_place, end_decoded_key,
-    open_root_element, read_known, read_other, read_size, set_once, text, values_of,
+    ListProperty, capture, check_body, check_room, decode_value_in_place, end_decoded_key, field,
+    fields_text, open_root_element, read_known, read_other, read_size, set_once, text, values_of,
 };
 use crate::xml::scan::{Child, Scan, Span, Tag, fault, trim};
 use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
@@ -173,8 +173,14 @@ fn read_entries_into<'b>(
         let chunk = scan.take();
         entries.held += 1;
         if entries.built < room {
+            let prefix = fields.prefix;
             let entry = build_entry(chunk, fields)?;
-            values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+            if prefix {
+                // A group of keys captures nothing, so it gives no values.
+                values[..slots].fill(None);
+            } else {
+                values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+            }
             if wanted.contains(BlobProperty::ContentType) {
                 // This fixed field was decoded, so use its shortened slice.
                 let slot = wanted.slot(BlobProperty::ContentType);
@@ -236,21 +242,24 @@ fn read_blob(
     let mut fields = Fields::new(false);
     loop {
         scan.skip_space();
-        if scan.lit(b"<Name>") {
+        let head = scan.head();
+        if scan.lit_in(&head, b"<Name>") {
             let value = scan.value_of(b"Name")?;
             set_once(&mut fields.key, value)?;
             continue;
         }
-        if scan.lit(b"<Properties>") {
+        if scan.lit_in(&head, b"<Properties>") {
             read_properties(scan, &mut fields, wanted, captured)?;
             continue;
         }
-        if scan.lit(b"</Blob>") {
+        if scan.lit_in(&head, b"</Blob>") {
             break;
         }
         // The element beside the properties that every blob carries, and
         // the versioning elements an account that keeps versions adds.
-        if scan.lit(b"<OrMetadata />") || read_known_element(scan, wanted, captured)? {
+        if scan.lit_in(&head, b"<OrMetadata />")
+            || read_known_element(scan, &head, wanted, captured)?
+        {
             continue;
         }
         match scan.child(b"Blob")? {
@@ -287,34 +296,39 @@ fn read_properties(
 ) -> Result<()> {
     loop {
         scan.skip_space();
+        let head = scan.head();
         // The children the service writes, matched whole. The byte after the
-        // `<` picks the compare, so one child costs one compare.
-        match scan.peek(1) {
-            b'L' if scan.lit(b"<Last-Modified>") => {
+        // `<` picks the compare, so one child costs one compare. The content
+        // headers share `<Content-`, and the byte after it picks among them.
+        match (head[1], head[9]) {
+            (b'L', _) if scan.lit_in(&head, b"<Last-Modified>") => {
                 let value = scan.value_of(b"Last-Modified")?;
                 set_once(&mut fields.last_modified, value)?;
             }
-            b'E' if scan.lit(b"<Etag>") => {
+            (b'E', _) if scan.lit_in(&head, b"<Etag>") => {
                 let value = scan.value_of(b"Etag")?;
                 set_once(&mut fields.e_tag, value)?;
             }
-            b'C' if scan.lit(b"<Content-Length>") => {
+            (b'C', b'L') if scan.lit_in(&head, b"<Content-Length>") => {
                 let value = scan.value_of(b"Content-Length")?;
                 set_once(&mut fields.size, value.0)?;
             }
-            b'C' if scan.lit(b"<Content-Type>") => {
+            (b'C', b'T') if scan.lit_in(&head, b"<Content-Type>") => {
                 let value = scan.value_of(b"Content-Type")?;
                 set_once(&mut fields.content_type, value)?;
             }
-            b'C' if scan.lit(b"<Content-Type />") || scan.lit(b"<Content-Type/>") => {
+            (b'C', b'T')
+                if scan.lit_in(&head, b"<Content-Type />")
+                    || scan.lit_in(&head, b"<Content-Type/>") =>
+            {
                 set_once(&mut fields.content_type, ((0, 0), 0))?;
             }
-            b'R' if scan.lit(b"<ResourceType>") => {
+            (b'R', _) if scan.lit_in(&head, b"<ResourceType>") => {
                 let value = scan.value_of(b"ResourceType")?;
                 set_once(&mut fields.resource_type, value.0)?;
             }
-            b'/' if scan.lit(b"</Properties>") => return Ok(()),
-            _ if read_known_element(scan, wanted, captured)? => {}
+            (b'/', _) if scan.lit_in(&head, b"</Properties>") => return Ok(()),
+            _ if read_known_element(scan, &head, wanted, captured)? => {}
             _ => match scan.child(b"Properties")? {
                 Child::Close => return Ok(()),
                 Child::Open(tag) => match scan.text(tag.name) {
@@ -345,249 +359,262 @@ fn read_properties(
     }
 }
 
-// Reads past a property that `read_known_element` matched, and returns true
-// for it.
-#[inline(always)]
-fn known(
-    scan: &mut Scan<'_>,
-    property: BlobProperty,
-    wanted: PropertySet,
-    captured: &mut [Option<Span>],
-) -> Result<bool> {
-    read_known(scan, property, wanted, captured)?;
-    Ok(true)
-}
-
-// The same for the empty spelling, `<Name />`, which has no value to read
-// past. The empty span stands for an element written empty.
-#[inline(always)]
-fn known_empty(property: BlobProperty, wanted: PropertySet, captured: &mut [Option<Span>]) -> bool {
-    capture(property, (0, 0), wanted, captured);
-    true
-}
-
-// Reads past one known element if the bytes at the cursor are its start tag
-// as the service spells it, keeping its value if the caller asked for it,
-// and returns whether it did. The byte after the `<` picks the group, and
-// the names of that group are compared whole in the order a page writes
-// them, so the common ones cost one compare. A tag that is none of them is
-// left for the general path.
+// Returns the known element that `head` starts with, as the service spells
+// its start tag, and whether the service wrote it empty, as `<Name />`. Take
+// `head` at the cursor. The byte after the `<` picks the group, and the names of
+// that group are compared whole in the order a page writes them, so the
+// common ones cost one compare. A tag that is none of them is left for the
+// general path.
 //
 // Every member of `BlobProperty::ALL` has an arm here. The content headers,
 // which the service writes as `<Name />` when the blob has no such value,
 // have a second arm for that spelling, so a page from Azure never reaches
 // the general path for them. The tests below check both.
+//
+// This only names the element. The caller reads past it in one place, by a
+// length it works out at run time. If each arm read past its own tag, each
+// would need the length of the bytes left after that tag, and the compiler
+// would work out all of them again at every element.
+fn known_tag(head: &[u8; 32]) -> Option<(BlobProperty, bool)> {
+    use BlobProperty::*;
+    match head[1] {
+        b'A' => {
+            if head.starts_with(b"<AccessTier>") {
+                return Some((AccessTier, false));
+            }
+            if head.starts_with(b"<AccessTierInferred>") {
+                return Some((AccessTierInferred, false));
+            }
+            if head.starts_with(b"<AccessTierChangeTime>") {
+                return Some((AccessTierChangeTime, false));
+            }
+            if head.starts_with(b"<ArchiveStatus>") {
+                return Some((ArchiveStatus, false));
+            }
+            if head.starts_with(b"<Acl>") {
+                return Some((Acl, false));
+            }
+            None
+        }
+        b'B' => {
+            if head.starts_with(b"<BlobType>") {
+                return Some((BlobType, false));
+            }
+            None
+        }
+        // The content headers share `<Content-`, and the byte after it tells
+        // them apart: each then costs the compares of its own two spellings,
+        // not those of every content header written before it.
+        b'C' if head.starts_with(b"<Content-") => match head[9] {
+            b'T' => spelled(head, b"<Content-Type />", b"<Content-Type>", ContentType),
+            b'E' => spelled(
+                head,
+                b"<Content-Encoding />",
+                b"<Content-Encoding>",
+                ContentEncoding,
+            ),
+            b'L' => spelled(
+                head,
+                b"<Content-Language />",
+                b"<Content-Language>",
+                ContentLanguage,
+            ),
+            b'C' => spelled(head, b"<Content-CRC64 />", b"<Content-CRC64>", ContentCrc64),
+            b'M' => spelled(head, b"<Content-MD5 />", b"<Content-MD5>", ContentMd5),
+            b'D' => spelled(
+                head,
+                b"<Content-Disposition />",
+                b"<Content-Disposition>",
+                ContentDisposition,
+            ),
+            _ => None,
+        },
+        b'C' => {
+            if head.starts_with(b"<Creation-Time>") {
+                return Some((CreationTime, false));
+            }
+            if let Some(known) =
+                spelled(head, b"<Cache-Control />", b"<Cache-Control>", CacheControl)
+            {
+                return Some(known);
+            }
+            if head.starts_with(b"<CopyId>") {
+                return Some((CopyId, false));
+            }
+            if head.starts_with(b"<CopyStatus>") {
+                return Some((CopyStatus, false));
+            }
+            if head.starts_with(b"<CopySource>") {
+                return Some((CopySource, false));
+            }
+            if head.starts_with(b"<CopyProgress>") {
+                return Some((CopyProgress, false));
+            }
+            if head.starts_with(b"<CopyCompletionTime>") {
+                return Some((CopyCompletionTime, false));
+            }
+            if head.starts_with(b"<CopyStatusDescription>") {
+                return Some((CopyStatusDescription, false));
+            }
+            None
+        }
+        b'D' => {
+            if head.starts_with(b"<DeletedTime>") {
+                return Some((DeletedTime, false));
+            }
+            if head.starts_with(b"<Deleted>") {
+                return Some((Deleted, false));
+            }
+            None
+        }
+        b'E' => {
+            if head.starts_with(b"<EncryptionScope>") {
+                return Some((EncryptionScope, false));
+            }
+            if head.starts_with(b"<Expiry-Time>") {
+                return Some((ExpiryTime, false));
+            }
+            None
+        }
+        b'G' => {
+            if head.starts_with(b"<Group>") {
+                return Some((Group, false));
+            }
+            None
+        }
+        b'I' => {
+            if head.starts_with(b"<IsCurrentVersion>") {
+                return Some((IsCurrentVersion, false));
+            }
+            if head.starts_with(b"<IncrementalCopy>") {
+                return Some((IncrementalCopy, false));
+            }
+            if head.starts_with(b"<ImmutabilityPolicyUntilDate>") {
+                return Some((ImmutabilityPolicyUntilDate, false));
+            }
+            if head.starts_with(b"<ImmutabilityPolicyMode>") {
+                return Some((ImmutabilityPolicyMode, false));
+            }
+            None
+        }
+        b'L' => {
+            if head.starts_with(b"<LeaseStatus>") {
+                return Some((LeaseStatus, false));
+            }
+            if head.starts_with(b"<LeaseState>") {
+                return Some((LeaseState, false));
+            }
+            if head.starts_with(b"<LeaseDuration>") {
+                return Some((LeaseDuration, false));
+            }
+            if head.starts_with(b"<LegalHold>") {
+                return Some((LegalHold, false));
+            }
+            None
+        }
+        b'O' => {
+            if head.starts_with(b"<Owner>") {
+                return Some((Owner, false));
+            }
+            None
+        }
+        b'P' => {
+            if head.starts_with(b"<Permissions>") {
+                return Some((Permissions, false));
+            }
+            None
+        }
+        b'R' => {
+            if head.starts_with(b"<RemainingRetentionDays>") {
+                return Some((RemainingRetentionDays, false));
+            }
+            if head.starts_with(b"<RehydratePriority>") {
+                return Some((RehydratePriority, false));
+            }
+            None
+        }
+        b'S' => {
+            if head.starts_with(b"<ServerEncrypted>") {
+                return Some((ServerEncrypted, false));
+            }
+            if head.starts_with(b"<Snapshot>") {
+                return Some((Snapshot, false));
+            }
+            None
+        }
+        b'T' => {
+            if head.starts_with(b"<TagCount>") {
+                return Some((TagCount, false));
+            }
+            None
+        }
+        b'V' => {
+            if head.starts_with(b"<VersionId>") {
+                return Some((VersionId, false));
+            }
+            None
+        }
+        b'M' => {
+            if head.starts_with(b"<Metadata />") {
+                return Some((Metadata, true));
+            }
+            if head.starts_with(b"<Metadata>") {
+                return Some((Metadata, false));
+            }
+            None
+        }
+        b'x' => {
+            if head.starts_with(b"<x-ms-blob-sequence-number>") {
+                return Some((BlobSequenceNumber, false));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+// The element `property` if `head` starts with its start tag, written empty,
+// as `empty`, or not, as `open`.
+#[inline(always)]
+fn spelled(
+    head: &[u8; 32],
+    empty: &[u8],
+    open: &[u8],
+    property: BlobProperty,
+) -> Option<(BlobProperty, bool)> {
+    if head.starts_with(empty) {
+        Some((property, true))
+    } else if head.starts_with(open) {
+        Some((property, false))
+    } else {
+        None
+    }
+}
+
+// Reads past one known element if `head`, taken at the cursor, starts with
+// its start tag. Keeps the element's value if the caller asked for it, and
+// returns whether it read one.
 #[inline(always)]
 fn read_known_element(
     scan: &mut Scan<'_>,
+    head: &[u8; 32],
     wanted: PropertySet,
     captured: &mut [Option<Span>],
 ) -> Result<bool> {
-    use BlobProperty::*;
-    match scan.peek(1) {
-        b'A' => {
-            if scan.lit(b"<AccessTier>") {
-                return known(scan, AccessTier, wanted, captured);
-            }
-            if scan.lit(b"<AccessTierInferred>") {
-                return known(scan, AccessTierInferred, wanted, captured);
-            }
-            if scan.lit(b"<AccessTierChangeTime>") {
-                return known(scan, AccessTierChangeTime, wanted, captured);
-            }
-            if scan.lit(b"<ArchiveStatus>") {
-                return known(scan, ArchiveStatus, wanted, captured);
-            }
-            if scan.lit(b"<Acl>") {
-                return known(scan, Acl, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'B' => {
-            if scan.lit(b"<BlobType>") {
-                return known(scan, BlobType, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'C' => {
-            if scan.lit(b"<Creation-Time>") {
-                return known(scan, CreationTime, wanted, captured);
-            }
-            if scan.lit(b"<Content-Type />") {
-                return Ok(known_empty(ContentType, wanted, captured));
-            }
-            if scan.lit(b"<Content-Type>") {
-                return known(scan, ContentType, wanted, captured);
-            }
-            if scan.lit(b"<Content-Encoding />") {
-                return Ok(known_empty(ContentEncoding, wanted, captured));
-            }
-            if scan.lit(b"<Content-Encoding>") {
-                return known(scan, ContentEncoding, wanted, captured);
-            }
-            if scan.lit(b"<Content-Language />") {
-                return Ok(known_empty(ContentLanguage, wanted, captured));
-            }
-            if scan.lit(b"<Content-Language>") {
-                return known(scan, ContentLanguage, wanted, captured);
-            }
-            if scan.lit(b"<Content-CRC64 />") {
-                return Ok(known_empty(ContentCrc64, wanted, captured));
-            }
-            if scan.lit(b"<Content-CRC64>") {
-                return known(scan, ContentCrc64, wanted, captured);
-            }
-            if scan.lit(b"<Content-MD5 />") {
-                return Ok(known_empty(ContentMd5, wanted, captured));
-            }
-            if scan.lit(b"<Content-MD5>") {
-                return known(scan, ContentMd5, wanted, captured);
-            }
-            if scan.lit(b"<Cache-Control />") {
-                return Ok(known_empty(CacheControl, wanted, captured));
-            }
-            if scan.lit(b"<Cache-Control>") {
-                return known(scan, CacheControl, wanted, captured);
-            }
-            if scan.lit(b"<Content-Disposition />") {
-                return Ok(known_empty(ContentDisposition, wanted, captured));
-            }
-            if scan.lit(b"<Content-Disposition>") {
-                return known(scan, ContentDisposition, wanted, captured);
-            }
-            if scan.lit(b"<CopyId>") {
-                return known(scan, CopyId, wanted, captured);
-            }
-            if scan.lit(b"<CopyStatus>") {
-                return known(scan, CopyStatus, wanted, captured);
-            }
-            if scan.lit(b"<CopySource>") {
-                return known(scan, CopySource, wanted, captured);
-            }
-            if scan.lit(b"<CopyProgress>") {
-                return known(scan, CopyProgress, wanted, captured);
-            }
-            if scan.lit(b"<CopyCompletionTime>") {
-                return known(scan, CopyCompletionTime, wanted, captured);
-            }
-            if scan.lit(b"<CopyStatusDescription>") {
-                return known(scan, CopyStatusDescription, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'D' => {
-            if scan.lit(b"<DeletedTime>") {
-                return known(scan, DeletedTime, wanted, captured);
-            }
-            if scan.lit(b"<Deleted>") {
-                return known(scan, Deleted, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'E' => {
-            if scan.lit(b"<EncryptionScope>") {
-                return known(scan, EncryptionScope, wanted, captured);
-            }
-            if scan.lit(b"<Expiry-Time>") {
-                return known(scan, ExpiryTime, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'G' => {
-            if scan.lit(b"<Group>") {
-                return known(scan, Group, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'I' => {
-            if scan.lit(b"<IsCurrentVersion>") {
-                return known(scan, IsCurrentVersion, wanted, captured);
-            }
-            if scan.lit(b"<IncrementalCopy>") {
-                return known(scan, IncrementalCopy, wanted, captured);
-            }
-            if scan.lit(b"<ImmutabilityPolicyUntilDate>") {
-                return known(scan, ImmutabilityPolicyUntilDate, wanted, captured);
-            }
-            if scan.lit(b"<ImmutabilityPolicyMode>") {
-                return known(scan, ImmutabilityPolicyMode, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'L' => {
-            if scan.lit(b"<LeaseStatus>") {
-                return known(scan, LeaseStatus, wanted, captured);
-            }
-            if scan.lit(b"<LeaseState>") {
-                return known(scan, LeaseState, wanted, captured);
-            }
-            if scan.lit(b"<LeaseDuration>") {
-                return known(scan, LeaseDuration, wanted, captured);
-            }
-            if scan.lit(b"<LegalHold>") {
-                return known(scan, LegalHold, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'O' => {
-            if scan.lit(b"<Owner>") {
-                return known(scan, Owner, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'P' => {
-            if scan.lit(b"<Permissions>") {
-                return known(scan, Permissions, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'R' => {
-            if scan.lit(b"<RemainingRetentionDays>") {
-                return known(scan, RemainingRetentionDays, wanted, captured);
-            }
-            if scan.lit(b"<RehydratePriority>") {
-                return known(scan, RehydratePriority, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'S' => {
-            if scan.lit(b"<ServerEncrypted>") {
-                return known(scan, ServerEncrypted, wanted, captured);
-            }
-            if scan.lit(b"<Snapshot>") {
-                return known(scan, Snapshot, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'T' => {
-            if scan.lit(b"<TagCount>") {
-                return known(scan, TagCount, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'V' => {
-            if scan.lit(b"<VersionId>") {
-                return known(scan, VersionId, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'M' => {
-            if scan.lit(b"<Metadata />") {
-                return Ok(known_empty(Metadata, wanted, captured));
-            }
-            if scan.lit(b"<Metadata>") {
-                return known(scan, Metadata, wanted, captured);
-            }
-            Ok(false)
-        }
-        b'x' => {
-            if scan.lit(b"<x-ms-blob-sequence-number>") {
-                return known(scan, BlobSequenceNumber, wanted, captured);
-            }
-            Ok(false)
-        }
-        _ => Ok(false),
+    let Some((property, empty)) = known_tag(head) else {
+        return Ok(false);
+    };
+    // The tag is `<Name>`, or `<Name />` for an element written empty,
+    // and `head` held it whole.
+    if empty {
+        scan.advance(property.name().len() + 4);
+        // The empty span stands for an element written empty.
+        capture(property, (0, 0), wanted, captured);
+    } else {
+        scan.advance(property.name().len() + 2);
+        read_known(scan, property, wanted, captured)?;
     }
+    Ok(true)
 }
 
 // Reads a group of keys. `<BlobPrefix>` has been consumed. A
@@ -600,6 +627,18 @@ fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
             Child::Close => break,
             Child::Open(tag) => match scan.text(tag.name) {
                 b"Name" => read_name(scan, tag, &mut fields)?,
+                // A directory of an account with a hierarchical namespace
+                // writes the properties a blob has. A group reports none of
+                // them, but reading them as a blob's are read costs a third
+                // of skipping them, which reads every name a byte at a time.
+                b"Properties" if !tag.empty => {
+                    read_properties(
+                        scan,
+                        &mut Fields::new(true),
+                        PropertySet::default(),
+                        &mut [],
+                    )?;
+                }
                 _ => scan.skip(tag)?,
             },
         }
@@ -676,19 +715,17 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let content_type = decode_value_in_place(chunk, fields.content_type)?;
 
     let raw: &[u8] = chunk;
+    // A decoded value can be any bytes, so the fields are checked as UTF-8
+    // again, once, after decoding.
+    let key = (key.0, key.0 + key_len);
+    let texts = fields_text(raw, &[Some(key), e_tag, content_type, last_modified])?;
     Ok(ListEntry {
         kind,
-        key: text(&raw[key.0..key.0 + key_len])?,
+        key: field(texts, key)?,
         size: if directory { None } else { size },
-        e_tag: e_tag
-            .map(|(start, end)| text(&raw[start..end]))
-            .transpose()?,
-        content_type: content_type
-            .map(|(start, end)| text(&raw[start..end]))
-            .transpose()?,
-        last_modified: last_modified
-            .map(|(start, end)| text(&raw[start..end]))
-            .transpose()?,
+        e_tag: e_tag.map(|span| field(texts, span)).transpose()?,
+        content_type: content_type.map(|span| field(texts, span)).transpose()?,
+        last_modified: last_modified.map(|span| field(texts, span)).transpose()?,
         raw,
     })
 }
@@ -787,7 +824,8 @@ mod tests {
         let mut captured = [None; 1];
         let mut bytes = std::vec::Vec::from(document.as_bytes());
         let mut scan = Scan::new(&mut bytes);
-        let taken = read_known_element(&mut scan, wanted, &mut captured).unwrap();
+        let head = scan.head();
+        let taken = read_known_element(&mut scan, &head, wanted, &mut captured).unwrap();
         (taken, captured[0])
     }
 
