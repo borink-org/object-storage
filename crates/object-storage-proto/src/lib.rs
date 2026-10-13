@@ -295,7 +295,7 @@ pub use outcome::{
     ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
 };
 pub use request::{HeaderSpan, LegacyRequest, Method, RequestSize, Span};
-pub use template::WireRequest;
+pub use template::{Placement, WireRequest};
 pub use time::Timestamps;
 pub use types::{
     BlobProperty, ChecksumValue, CommitShape, Condition, ConditionKind, ConditionValue,

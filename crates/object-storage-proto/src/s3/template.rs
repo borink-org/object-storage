@@ -138,6 +138,82 @@ pub(super) enum Detail {
 }
 
 impl Template {
+    /// Returns the shape of the read `item` from this template, which
+    /// [`s3::accept_get_head`](super::accept_get_head) reads its response against.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
+        match self.detail {
+            Detail::Get(options) => Ok(item.shape(&options)),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every whole-object write of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn put_shape(&self) -> Result<crate::PutShape> {
+        match self.detail {
+            Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every removal of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
+        match (self.operation, self.detail) {
+            (Operation::Delete, Detail::Object { condition, .. }) => Ok(crate::DeleteShape {
+                kind: crate::DeleteKind::Object,
+                condition,
+            }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every commit of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
+        match self.detail {
+            Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every copy of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
+        match self.detail {
+            Detail::Copy {
+                condition,
+                source_condition,
+                ..
+            } => Ok(crate::CopyShape {
+                condition,
+                source_condition,
+            }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
     /// Checks that `bytes` are the bytes that this template was written
     /// into, as its `prepare_*` function wrote them. See [Bytes](Self#bytes).
     ///

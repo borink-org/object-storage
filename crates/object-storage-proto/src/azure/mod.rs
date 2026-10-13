@@ -792,7 +792,9 @@ pub fn encode_get<'r>(
 /// [`GetHeadOutcome`], including the heads that report a failure. Azure
 /// names its errors in the `x-ms-error-code` header, so a failure needs the
 /// body only when that header is missing: the outcome is then
-/// [`GetHeadOutcome::NeedErrorBody`].
+/// [`GetHeadOutcome::NeedErrorBody`]. The answer to a HEAD has no body, so
+/// a failure of a HEAD is final, and names no error if the header is
+/// missing.
 ///
 /// # Errors
 ///
@@ -805,7 +807,12 @@ pub fn encode_get<'r>(
 /// `If-Match` or `If-Unmodified-Since` and Azure names a failed condition.
 /// Any other 412 is a service failure that names its code.
 pub fn accept_get_head<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutcome<'h>> {
-    accept_get(shape, head)
+    Ok(match accept_get(shape, head)? {
+        GetHeadOutcome::NeedErrorBody(failure) if shape.kind == GetKind::Head => {
+            accept_get_error_body(shape, failure, &[])
+        }
+        outcome => outcome,
+    })
 }
 
 /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
@@ -1043,7 +1050,7 @@ pub fn prepare_delete(
     // which is the outcome a removal of the object alone asks for.
     let snapshots = delete_snapshots(options.kind)
         .map(|snapshots| Field::new("x-ms-delete-snapshots", Value::Bytes(snapshots.as_bytes())));
-    prepare_object(
+    let mut template = prepare_object(
         container,
         token,
         namespace,
@@ -1055,7 +1062,11 @@ pub fn prepare_delete(
             ..ObjectText::default()
         },
         buf,
-    )
+    )?;
+    if let Detail::Object { delete, .. } = &mut template.detail {
+        *delete = options.kind;
+    }
+    Ok(template)
 }
 
 /// Writes the removal `item` at `now` from `template` into `buf`, and
@@ -1097,6 +1108,7 @@ pub(in crate::azure) fn encode_object<'r>(
     let Detail::Object {
         condition,
         revision,
+        ..
     } = template.detail
     else {
         return Err(InvalidPlan::Template.into());
@@ -1157,6 +1169,7 @@ pub(in crate::azure) fn prepare_object(
         Detail::Object {
             condition,
             revision,
+            delete: DeleteKind::Object,
         },
         buf,
         |_| {},

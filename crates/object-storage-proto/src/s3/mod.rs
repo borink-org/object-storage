@@ -79,7 +79,7 @@
 //! };
 //! let body = b"<Error><Code>NoSuchKey</Code></Error>";
 //! assert!(matches!(
-//!     s3::accept_get_error_body(failure, body),
+//!     s3::accept_get_error_body(get.shape(&options), failure, body),
 //!     GetHeadOutcome::NotFound { .. }
 //! ));
 //! # Ok(())
@@ -1774,8 +1774,16 @@ pub fn encode_get(
 ///
 /// Pass the [`Failure`] of that outcome and the body that you read. Pass
 /// an empty body if you could not read one: the outcome is then final with
-/// the error unnamed. S3 reports a failed condition in the head.
-pub fn accept_get_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> GetHeadOutcome<'h> {
+/// the error unnamed.
+///
+/// It takes the [`GetShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_get_error_body<'h>(
+    _shape: GetShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> GetHeadOutcome<'h> {
     finish_with_body(failure, body_kind(body))
 }
 
@@ -1955,7 +1963,15 @@ pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<Pu
 ///
 /// Pass the [`Failure`] of that outcome and the body that you read, or an
 /// empty body if you could not read one.
-pub fn accept_put_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> PutHeadOutcome<'h> {
+///
+/// It takes the [`PutShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_put_error_body<'h>(
+    _shape: PutShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> PutHeadOutcome<'h> {
     finish_with_body(failure, body_kind(body))
 }
 
@@ -2067,7 +2083,15 @@ pub fn accept_delete_head<'h>(
 /// This is [`accept_get_error_body`] for a removal, and reads the body the
 /// same way. A 404 names a missing bucket, or a missing object under an
 /// `If-Match` condition.
-pub fn accept_delete_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> DeleteHeadOutcome<'h> {
+///
+/// It takes the [`DeleteShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_delete_error_body<'h>(
+    _shape: DeleteShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> DeleteHeadOutcome<'h> {
     finish_with_body(failure, body_kind(body))
 }
 

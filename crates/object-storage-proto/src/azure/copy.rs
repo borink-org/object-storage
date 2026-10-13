@@ -1044,6 +1044,7 @@ pub fn prepare_abort_copy(
         Detail::Object {
             condition: ConditionKind::None,
             revision: RevisionKind::Current,
+            delete: crate::DeleteKind::Object,
         },
         buf,
         |_| {},

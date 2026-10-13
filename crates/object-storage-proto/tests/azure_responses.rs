@@ -183,3 +183,49 @@ fn classifies_the_offline_azure_response_corpus() {
         );
     }
 }
+
+#[test]
+fn a_head_that_fails_needs_no_body() {
+    let head = GetShape {
+        kind: borink_object_storage_proto::GetKind::Head,
+        ..GetShape::default()
+    };
+    // The answer to a HEAD has no body to name the error in.
+    match accept(head, ResponseHead::new(500)) {
+        Ok(GetHeadOutcome::ServiceFailure(failure)) => assert_eq!(failure.status, 500),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        accept(GetShape::default(), ResponseHead::new(500)),
+        Ok(GetHeadOutcome::NeedErrorBody(_))
+    ));
+}
+
+#[test]
+fn a_template_states_the_shape_of_its_responses() {
+    use borink_object_storage_proto::{
+        AzureNamespace, Container, DeleteKind, DeleteOptions, GetItem, InvalidPlan,
+    };
+    let container = Container::new("https://account.blob.core.windows.net", "container").unwrap();
+    let options = DeleteOptions {
+        kind: DeleteKind::ObjectAndSnapshots,
+        condition: ConditionKind::IfMatch,
+        ..DeleteOptions::new()
+    };
+    let mut bytes = [0; 1024];
+    let removals = azure::prepare_delete(
+        &container,
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut bytes,
+    )
+    .unwrap();
+    // The shape outlives storing the template.
+    let stored = azure::Template::from_bytes(&removals.to_bytes()).unwrap();
+    assert_eq!(stored.delete_shape(), Ok(options.shape()));
+    assert_eq!(
+        stored.get_shape(&GetItem::new("key")),
+        Err(Error::InvalidPlan(InvalidPlan::Template))
+    );
+}

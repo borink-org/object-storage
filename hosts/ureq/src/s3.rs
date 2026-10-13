@@ -48,11 +48,13 @@ pub fn get(
 
     let (parts, mut body) = crate::send(&request, None)?;
     let service = template.service();
-    match s3::accept_get_head(service, item.shape(&options), crate::head(&parts))? {
+    let shape = item.shape(&options);
+    match s3::accept_get_head(service, shape, crate::head(&parts))? {
         GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
         // S3 names every error in the body.
         GetHeadOutcome::NeedErrorBody(failure) => Err(no_object(s3::accept_get_error_body(
+            shape,
             failure,
             &crate::error_body(&mut body),
         ))),
@@ -90,9 +92,11 @@ pub fn put(
     let request = sigv4::sign(&stamp, &unsigned, &mut buf);
 
     let (parts, mut body) = crate::send(&request, None)?;
-    match s3::accept_put_head(item.shape(&options), crate::head(&parts))? {
+    let shape = item.shape(&options);
+    match s3::accept_put_head(shape, crate::head(&parts))? {
         PutHeadOutcome::Created { .. } => Ok(()),
         PutHeadOutcome::NeedErrorBody(failure) => Err(not_stored(s3::accept_put_error_body(
+            shape,
             failure,
             &crate::error_body(&mut body),
         ))),
@@ -129,7 +133,7 @@ pub fn delete(
     match s3::accept_delete_head(template.service(), options.shape(), head)? {
         DeleteHeadOutcome::Accepted => Ok(()),
         DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(
-            s3::accept_delete_error_body(failure, &crate::error_body(&mut body)),
+            s3::accept_delete_error_body(options.shape(), failure, &crate::error_body(&mut body)),
         )),
         outcome => Err(not_removed(outcome)),
     }

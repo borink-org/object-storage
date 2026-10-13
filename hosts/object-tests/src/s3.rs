@@ -295,7 +295,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
     ));
     let outcome = match head_outcome {
         GetHeadOutcome::NeedErrorBody(failure) => {
-            s3::accept_get_error_body(failure, &exchange.body)
+            s3::accept_get_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -399,7 +399,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let head_outcome = crate_step!(s3::accept_put_head(shape, exchange.response_head()));
     let outcome = match head_outcome {
         PutHeadOutcome::NeedErrorBody(failure) => {
-            s3::accept_put_error_body(failure, &exchange.body)
+            s3::accept_put_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -442,7 +442,7 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
     ));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            s3::accept_delete_error_body(failure, &exchange.body)
+            s3::accept_delete_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };

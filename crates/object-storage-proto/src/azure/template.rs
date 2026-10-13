@@ -104,6 +104,9 @@ pub(super) enum Detail {
     Object {
         condition: crate::ConditionKind,
         revision: crate::RevisionKind,
+        // What a removal takes with it, and `Object` for every other
+        // operation.
+        delete: crate::DeleteKind,
     },
     List,
     Stage(Option<crate::checksum::ChecksumKind>),
@@ -139,6 +142,87 @@ impl Template {
     /// Returns the operation this template writes requests for.
     pub const fn operation(&self) -> Operation {
         self.operation
+    }
+
+    /// Returns the shape of the read `item` from this template, which
+    /// [`azure::accept_get_head`](super::accept_get_head) reads its response against.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
+        match self.detail {
+            Detail::Get(options) => Ok(item.shape(&options)),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every whole-object write of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn put_shape(&self) -> Result<crate::PutShape> {
+        match self.detail {
+            Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every removal of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
+        match (self.operation, self.detail) {
+            (
+                Operation::Delete,
+                Detail::Object {
+                    condition, delete, ..
+                },
+            ) => Ok(crate::DeleteShape {
+                kind: delete,
+                condition,
+            }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every commit of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
+        match self.detail {
+            Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
+    }
+
+    /// Returns the shape of every copy of this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPlan::Template`] for a template of another
+    /// operation.
+    pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
+        match self.detail {
+            Detail::Copy {
+                condition,
+                source_condition,
+                ..
+            } => Ok(crate::CopyShape {
+                condition,
+                source_condition,
+            }),
+            _ => Err(crate::Error::InvalidPlan(InvalidPlan::Template)),
+        }
     }
 
     /// Returns the kind of account the requests go to.
@@ -189,7 +273,8 @@ impl Template {
             Detail::Object {
                 condition,
                 revision,
-            } => [2, condition as u8, revision as u8, 0, 0],
+                delete,
+            } => [2, condition as u8, revision as u8, delete as u8, 0],
             Detail::List => [3, 0, 0, 0, 0],
             Detail::Stage(checksum) => [4, checksum_number(checksum), 0, 0, 0],
             Detail::Commit {
@@ -348,6 +433,7 @@ fn load(stored: &[u8]) -> Option<Template> {
         2 => Detail::Object {
             condition: condition(a)?,
             revision: revision(b)?,
+            delete: crate::DeleteKind::from_discriminant(u16::from(c))?,
         },
         3 => Detail::List,
         4 => Detail::Stage(checksum_kind(a)?),

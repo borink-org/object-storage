@@ -1429,12 +1429,108 @@ impl<'r> WireRequest<'r> {
         self.body
     }
 
+    /// Returns where this request is in its buffer, without a borrow of
+    /// the buffer. See [`Placement`].
+    pub fn placement(&self) -> Placement {
+        Placement {
+            method: self.method,
+            url: self.url,
+            head: self.head,
+            fields: self.fields,
+            body: self.body,
+            content_len: self.payload.len(),
+        }
+    }
+
     // The bytes of `span`. A request finished in a buffer that is not its
     // own may have spans past that buffer's end, which hold nothing.
     fn slice(&self, span: Span) -> &'r [u8] {
         self.bytes
             .get(span.start..span.start + span.len)
             .unwrap_or_default()
+    }
+}
+
+/// Where the parts of a request are in the buffer it was written into.
+///
+/// This is a [`WireRequest`] without its borrow of the buffer, so a host
+/// can keep it while it borrows the buffer again. Write a request, and grow
+/// the buffer and write it again if it was too small, in one function that
+/// returns the placement:
+///
+/// ```
+/// use borink_object_storage_proto::azure;
+/// use borink_object_storage_proto::{
+///     AzureNamespace, Container, Error, Payload, Placement, PutItem, PutOptions, Result,
+///     Timestamps,
+/// };
+///
+/// fn write(buf: &mut Vec<u8>, encode: impl Fn(&mut [u8]) -> Result<Placement>) -> Result<Placement> {
+///     match encode(buf) {
+///         Err(Error::Capacity(capacity)) => {
+///             buf.resize(capacity.required, 0);
+///             encode(buf)
+///         }
+///         placed => placed,
+///     }
+/// }
+///
+/// # fn main() -> Result<()> {
+/// let container = Container::new("https://account.blob.core.windows.net", "container")?;
+/// let options = PutOptions::default();
+/// let mut bytes = vec![0; 1024];
+/// let template = azure::prepare_put(&container, "token", AzureNamespace::Unknown, &options, &mut bytes)?;
+/// let content = b"hello";
+/// let item = PutItem::new("greeting.txt", Payload::Slice(content));
+/// let now = Timestamps::from_unix(1_787_400_000);
+/// let mut buf = Vec::new();
+/// let placed = write(&mut buf, |buf| {
+///     azure::encode_put(&template, &bytes, &item, &now, buf).map(|request| request.placement())
+/// })?;
+/// let request = placed.request(&buf);
+/// assert!(request.head().starts_with(b"PUT /container/greeting.txt HTTP/1.1\r\n"));
+/// assert_eq!(request.payload(), Payload::Streamed { len: 5 });
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Then [`Self::request`] gives the request back from the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    method: Method,
+    url: Span,
+    head: Span,
+    fields: Span,
+    body: Option<Span>,
+    content_len: u64,
+}
+
+impl Placement {
+    /// Returns the request placed in `buf`, the buffer it was written into.
+    ///
+    /// Content that you lent as [`Payload::Slice`] is not kept: the
+    /// request states its length as [`Payload::Streamed`], and you send the
+    /// bytes. A body that this crate wrote is in the buffer, and the request
+    /// lends it. Another buffer gives a wrong request, but never a panic.
+    pub fn request<'r>(&self, buf: &'r [u8]) -> WireRequest<'r> {
+        let payload = match self.body {
+            Some(body) => Payload::Slice(
+                buf.get(body.start..body.start + body.len)
+                    .unwrap_or_default(),
+            ),
+            None => Payload::Streamed {
+                len: self.content_len,
+            },
+        };
+        WireRequest {
+            bytes: buf,
+            method: self.method,
+            url: self.url,
+            head: self.head,
+            fields: self.fields,
+            payload,
+            body: self.body,
+        }
     }
 }
 
