@@ -1,23 +1,24 @@
-// Azure templates: what an Azure request is built from.
-//
-// An operation describes its request as a `Describe`: the method, whether
-// the path ends in a key, the query, the fields that each request fills,
-// and the fields that every request sends alike. `layout` writes the
-// request from it, once as the template's pass and once as each request's:
-// see `crate::template::Pass`. Azure signs nothing under a bearer token, so
-// a request is ready as soon as it is written.
+// Azure's templates. `crate::template` says what a template is and how a
+// request is written from one. This module adds what is Azure's own: the
+// `Template`, the request that each operation writes, and how a template is
+// stored as bytes. Azure signs nothing under a bearer token, so a request is
+// ready to send as soon as it is written.
 
-use super::{AzureNamespace, Bearer, Container, MAX_URL_LEN, METADATA_PREFIX, VERSION};
-use crate::checksum::ChecksumKind;
-use crate::common::write_tags;
-use crate::request::{HeaderValue, Writer};
-use crate::template::{
-    self, Body, Builder, Fill, Hole, Load, Param, ParamValue, Pass, Section, Store, Table,
-    WireRequest,
+use crate::azure::{
+    AzureNamespace, Bearer, Container, MAX_URL_LEN, METADATA_PREFIX, VERSION, validate_key,
 };
+use crate::checksum::ChecksumKind;
+use crate::request::{HeaderValue, Writer, write_tags_as_query};
+use crate::template::{
+    self, Builder, Fill, Hole, Param, ParamValue, Pass, Section, StoredReader, StoredWriter, Table,
+    TemplateBody, WireRequest,
+};
+use crate::url::{encode_object_key, write_query_value};
+use crate::validate::is_header_value;
 use crate::{
-    ConditionKind, GetKind, GetOptions, InvalidRequest, MetadataPair, Method, Payload, Ranging,
-    Result, RevisionKind, Span, Tag,
+    CommitShape, ConditionKind, CopyShape, DeleteKind, DeleteShape, Error, GetItem, GetKind,
+    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, PutShape, Ranging, Result,
+    RevisionKind, Span, Tag,
 };
 
 /// The operation that a template writes requests for.
@@ -94,37 +95,37 @@ pub struct Template {
 // What an operation keeps in its template to check each request against.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Detail {
-    Get(crate::GetOptions),
+    Get(GetOptions),
     Put {
-        condition: crate::ConditionKind,
-        checksum: Option<crate::checksum::ChecksumKind>,
+        condition: ConditionKind,
+        checksum: Option<ChecksumKind>,
     },
     // A request that names one object: the condition it carries, and the
     // kind of revision it names.
     Object {
-        condition: crate::ConditionKind,
-        revision: crate::RevisionKind,
+        condition: ConditionKind,
+        revision: RevisionKind,
         // What a removal takes with it, and `Object` for every other
         // operation.
-        delete: crate::DeleteKind,
+        delete: DeleteKind,
     },
     List,
-    Stage(Option<crate::checksum::ChecksumKind>),
+    Stage(Option<ChecksumKind>),
     Commit {
-        condition: crate::ConditionKind,
+        condition: ConditionKind,
         content_md5: bool,
     },
     // A batch: where the template holds the start of each part's path, and
     // the fields that end each part.
     Batch {
-        path: crate::Span,
-        tail: crate::Span,
+        path: Span,
+        tail: Span,
     },
     Copy {
-        condition: crate::ConditionKind,
-        source_revision: crate::RevisionKind,
-        source_condition: crate::ConditionKind,
-        source_ranging: crate::Ranging,
+        condition: ConditionKind,
+        source_revision: RevisionKind,
+        source_condition: ConditionKind,
+        source_ranging: Ranging,
     },
 }
 
@@ -145,16 +146,16 @@ impl Template {
     }
 
     /// Returns the shape of the read `item` from this template, which
-    /// [`azure::accept_get_head`](super::accept_get_head) reads its response against.
+    /// [`azure::accept_get_head`](crate::azure::accept_get_head) reads its response against.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
+    pub const fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
         match self.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -164,10 +165,10 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn put_shape(&self) -> Result<crate::PutShape> {
+    pub const fn put_shape(&self) -> Result<PutShape> {
         match self.detail {
-            Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            Detail::Put { condition, .. } => Ok(PutShape { condition }),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -177,18 +178,18 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
+    pub const fn delete_shape(&self) -> Result<DeleteShape> {
         match (self.operation, self.detail) {
             (
                 Operation::Delete,
                 Detail::Object {
                     condition, delete, ..
                 },
-            ) => Ok(crate::DeleteShape {
+            ) => Ok(DeleteShape {
                 kind: delete,
                 condition,
             }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -198,10 +199,10 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
+    pub const fn commit_shape(&self) -> Result<CommitShape> {
         match self.detail {
-            Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            Detail::Commit { condition, .. } => Ok(CommitShape { condition }),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -211,17 +212,17 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
+    pub const fn copy_shape(&self) -> Result<CopyShape> {
         match self.detail {
             Detail::Copy {
                 condition,
                 source_condition,
                 ..
-            } => Ok(crate::CopyShape {
+            } => Ok(CopyShape {
                 condition,
                 source_condition,
             }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -247,7 +248,7 @@ impl Template {
     /// of the crate reads them.
     pub fn to_bytes(&self) -> [u8; Self::STORED_LEN] {
         let mut stored = [0; Self::STORED_LEN];
-        let mut into = Store::new(&mut stored);
+        let mut into = StoredWriter::new(&mut stored);
         self.table.store(&mut into);
         into.put(&[
             self.operation as u8,
@@ -326,7 +327,7 @@ impl Template {
         if template::fingerprint(values) != u64::from_le_bytes(*hash) {
             return Err(InvalidRequest::Template.into());
         }
-        load(values).ok_or_else(|| InvalidRequest::Template.into())
+        load_stored(values).ok_or_else(|| InvalidRequest::Template.into())
     }
 }
 
@@ -381,8 +382,8 @@ fn checksum_kind(number: u8) -> Option<Option<ChecksumKind>> {
 // Reads what `Template::to_bytes` stored, or `None` for a value that no
 // template holds. A span must lie within the template's bytes.
 #[inline(always)]
-fn load(stored: &[u8]) -> Option<Template> {
-    let mut from = Load::new(stored);
+fn load_stored(stored: &[u8]) -> Option<Template> {
+    let mut from = StoredReader::new(stored);
     let table = Table::load(&mut from)?;
     let [operation, method, namespace] = from.take();
     let operation = *OPERATIONS.get(usize::from(operation))?;
@@ -433,7 +434,7 @@ fn load(stored: &[u8]) -> Option<Template> {
         2 => Detail::Object {
             condition: condition(a)?,
             revision: revision(b)?,
-            delete: crate::DeleteKind::from_discriminant(u16::from(c))?,
+            delete: DeleteKind::from_discriminant(u16::from(c))?,
         },
         3 => Detail::List,
         4 => Detail::Stage(checksum_kind(a)?),
@@ -469,7 +470,7 @@ fn load(stored: &[u8]) -> Option<Template> {
 
 // The value of one field that every request sends alike.
 #[derive(Clone, Copy)]
-pub(super) enum Value<'p> {
+pub(super) enum FieldValue<'p> {
     Bytes(&'p [u8]),
     Tags(&'p [Tag<'p>]),
     // `Bearer` and a token, as the field of a copy that reads its source
@@ -480,11 +481,11 @@ pub(super) enum Value<'p> {
 #[derive(Clone, Copy)]
 pub(super) struct Field<'p> {
     pub(super) name: &'p str,
-    pub(super) value: Value<'p>,
+    pub(super) value: FieldValue<'p>,
 }
 
 impl<'p> Field<'p> {
-    pub(super) const fn new(name: &'p str, value: Value<'p>) -> Self {
+    pub(super) const fn new(name: &'p str, value: FieldValue<'p>) -> Self {
         Self { name, value }
     }
 }
@@ -499,7 +500,7 @@ pub(super) struct FieldList<'p> {
 impl<'p> FieldList<'p> {
     pub(super) const fn new() -> Self {
         Self {
-            fields: [Field::new("", Value::Bytes(b"")); 16],
+            fields: [Field::new("", FieldValue::Bytes(b"")); 16],
             count: 0,
         }
     }
@@ -553,7 +554,7 @@ pub(super) struct Describe<'p, const Q: usize> {
     pub(super) holes: Holes<'p>,
     pub(super) fields: &'p [Field<'p>],
     pub(super) metadata: &'p [MetadataPair<'p>],
-    pub(super) body: Body<'p>,
+    pub(super) body: TemplateBody<'p>,
 }
 
 // What a template's text is written from, which a request's pass does not
@@ -566,11 +567,11 @@ pub(super) struct Fixed<'p> {
     host: &'p str,
 }
 
-fn write_value(out: &mut Writer<'_>, value: Value<'_>) {
+fn write_value(out: &mut Writer<'_>, value: FieldValue<'_>) {
     match value {
-        Value::Bytes(bytes) => out.push(bytes),
-        Value::Tags(tags) => write_tags(out, tags),
-        Value::Bearer(token) => Bearer(token).write_to(out),
+        FieldValue::Bytes(bytes) => out.push(bytes),
+        FieldValue::Tags(tags) => write_tags_as_query(out, tags),
+        FieldValue::Bearer(token) => Bearer(token).write_to(out),
     }
 }
 
@@ -582,7 +583,7 @@ fn write_fixed_query(out: &mut Writer<'_>, query: &[Param<'_>]) {
         out.push(name.as_bytes());
         out.push(b"=");
         if let ParamValue::Fixed(value) = value {
-            crate::url::write_query_value(out, *value);
+            write_query_value(out, *value);
         }
     }
 }
@@ -594,7 +595,7 @@ fn write_path(out: &mut Writer<'_>, fixed: Fixed<'_>, key: bool) {
     out.push(fixed.container.name.as_bytes());
     if key {
         out.push(b"/");
-        for part in crate::url::encode_object_key(fixed.container.object.unwrap_or_default()) {
+        for part in encode_object_key(fixed.container.object.unwrap_or_default()) {
             out.push(part);
         }
     }
@@ -602,7 +603,7 @@ fn write_path(out: &mut Writer<'_>, fixed: Fixed<'_>, key: bool) {
 
 // A field that each request fills with `hole`.
 #[inline(always)]
-fn field(p: &mut impl Pass, name: &str, hole: Hole) {
+fn filled_field(p: &mut impl Pass, name: &str, hole: Hole) {
     p.text(|out| {
         out.push(name.as_bytes());
         out.push(b": ");
@@ -642,9 +643,7 @@ pub(super) fn layout<P: Pass, const Q: usize>(
         if object {
             p.text(|out| {
                 if let Some(fixed) = fixed {
-                    for part in
-                        crate::url::encode_object_key(fixed.container.object.unwrap_or_default())
-                    {
+                    for part in encode_object_key(fixed.container.object.unwrap_or_default()) {
                         out.push(part);
                     }
                 }
@@ -734,22 +733,22 @@ pub(super) fn layout<P: Pass, const Q: usize>(
         p.bytes(b"\r\n");
     }
     if holes.source_range {
-        field(p, "x-ms-source-range", Hole::SourceRange);
+        filled_field(p, "x-ms-source-range", Hole::SourceRange);
     }
     if let Some(name) = holes.source_condition {
-        field(p, name, Hole::SourceCondition);
+        filled_field(p, name, Hole::SourceCondition);
     }
     if let Some(hole) = holes.content_length {
-        field(p, "content-length", hole);
+        filled_field(p, "content-length", hole);
     }
     if let Some(name) = holes.checksum {
-        field(p, name, Hole::Checksum);
+        filled_field(p, name, Hole::Checksum);
     }
     if holes.range {
-        field(p, "range", Hole::Range);
+        filled_field(p, "range", Hole::Range);
     }
     if let Some(name) = holes.condition {
-        field(p, name, Hole::Condition);
+        filled_field(p, name, Hole::Condition);
     }
     p.bytes(b"\r\n");
     p.body(d.body);
@@ -762,7 +761,7 @@ pub(super) fn layout<P: Pass, const Q: usize>(
 /// text holds the key. An operation that names no object refuses such a
 /// container with [`InvalidRequest::Option`].
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare<const Q: usize>(
+pub(super) fn prepare_template<const Q: usize>(
     container: &Container<'_>,
     token: &str,
     namespace: AzureNamespace,
@@ -772,8 +771,8 @@ pub(super) fn prepare<const Q: usize>(
     buf: &mut [u8],
     stash: impl FnOnce(&mut Builder<'_>),
 ) -> Result<Template> {
-    if !crate::common::valid_header(token.as_bytes()) {
-        return Err(crate::Error::InvalidToken);
+    if !is_header_value(token.as_bytes()) {
+        return Err(Error::InvalidToken);
     }
     let (scheme, host) = container
         .endpoint
@@ -781,7 +780,7 @@ pub(super) fn prepare<const Q: usize>(
         .ok_or(InvalidRequest::Template)?;
     let object = match container.object {
         Some(key) if describe.key => {
-            super::validate_key(key, namespace)?;
+            validate_key(key, namespace)?;
             Some(key)
         }
         Some(_) => return Err(InvalidRequest::Option.into()),
@@ -812,7 +811,7 @@ pub(super) fn prepare<const Q: usize>(
 /// writes, and returns it. `describe` is the template's, without its text.
 /// Inlined into each operation's encoder, which so runs its own layout.
 #[inline(always)]
-pub(super) fn encode<'r, F: Fill, const Q: usize>(
+pub(super) fn encode_template<'r, F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
@@ -838,8 +837,9 @@ pub(super) fn encode<'r, F: Fill, const Q: usize>(
     let mut out = Writer::new(buf);
     #[cfg(not(feature = "compact"))]
     let written = {
-        let mut state = template::State::default();
-        let mut pass = template::Encode::new(&template.table, bytes, fill, &mut out, &mut state);
+        let mut state = template::WriteState::default();
+        let mut pass =
+            template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
         layout(&mut pass, describe, None, template.object.is_some());
         pass.finish()?
     };
@@ -848,7 +848,7 @@ pub(super) fn encode<'r, F: Fill, const Q: usize>(
         let _ = describe;
         template::walk_request(&template.table, bytes, fill, &mut out)?
     };
-    let written = template::fitted(&template.table, bytes, fill, &out, written)?;
+    let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
     let bytes: &'r [u8] = buf;
     Ok(WireRequest::new(bytes, template.method, &written, payload))
 }
@@ -860,7 +860,7 @@ impl Template {
     pub(super) fn request_key<'k>(&self, bytes: &[u8], key: &'k str) -> Result<Option<&'k str>> {
         match self.object {
             None => {
-                super::validate_key(key, self.namespace)?;
+                validate_key(key, self.namespace)?;
                 Ok(Some(key))
             }
             Some(span)

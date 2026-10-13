@@ -839,7 +839,7 @@ impl Outgoing for WireRequest<'_> {
 }
 
 /// The URL and the fields of a request, owned.
-pub(crate) fn owned(request: &impl Outgoing) -> (String, Vec<(String, String)>) {
+pub(crate) fn owned_url_and_fields(request: &impl Outgoing) -> (String, Vec<(String, String)>) {
     (
         request.url().to_owned(),
         request
@@ -848,18 +848,6 @@ pub(crate) fn owned(request: &impl Outgoing) -> (String, Vec<(String, String)>) 
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect(),
     )
-}
-
-/// The bytes that `encode` needs: it refuses an empty buffer with the
-/// number.
-pub(crate) fn required<T>(
-    encode: impl FnOnce(&mut [u8]) -> Result<T, CrateError>,
-) -> Result<usize, CrateError> {
-    match encode(&mut []) {
-        Err(CrateError::Capacity(capacity)) => Ok(capacity.required),
-        Err(error) => Err(error),
-        Ok(_) => Ok(0),
-    }
 }
 
 /// Sends a request whose streamed payload, if any, is `body`, and reads its

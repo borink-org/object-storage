@@ -13,7 +13,11 @@ use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{Error, GetHeadOutcome, ServiceErrorKind};
 
 // `request_id` is the bytes that `outcome.failure.request_id` addresses.
-pub(crate) fn describe(outcome: &Outcome, request_id: Option<&[u8]>, into: &mut [u8]) -> usize {
+pub(crate) fn describe_outcome(
+    outcome: &Outcome,
+    request_id: Option<&[u8]>,
+    into: &mut [u8],
+) -> usize {
     match outcome_kind_of(outcome.kind) {
         Some(OutcomeKind::Invalid) => describe_status(outcome.error, into),
         // The protocol crate wrote the sentence for a failure and for an
@@ -31,7 +35,7 @@ pub(crate) fn describe(outcome: &Outcome, request_id: Option<&[u8]>, into: &mut 
         Some(OutcomeKind::RangeNotSatisfiable) => say(
             into,
             &GetHeadOutcome::RangeNotSatisfiable {
-                object_size: number(outcome.body.object_size),
+                object_size: optional_u64(outcome.body.object_size),
             },
         ),
         // A missing object names an error and carries nothing else, so the
@@ -141,6 +145,6 @@ pub(crate) fn failure_of<'a>(
     })
 }
 
-pub(crate) fn number(value: MaybeU64) -> Option<u64> {
+pub(crate) fn optional_u64(value: MaybeU64) -> Option<u64> {
     value.present.then_some(value.value)
 }

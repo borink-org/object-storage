@@ -169,15 +169,15 @@ pub fn http_date_ms(value: &str) -> Option<u64> {
     {
         return None;
     }
-    let day = number(&value[5..7])?;
+    let day = parse_digits(&value[5..7])?;
     let month = MONTHS
         .iter()
         .position(|name| name.as_slice() == &value[8..11])? as u64
         + 1;
-    let year = number(&value[12..16])? as i64;
-    let hour = number(&value[17..19])?;
-    let minute = number(&value[20..22])?;
-    let second = number(&value[23..25])?;
+    let year = parse_digits(&value[12..16])? as i64;
+    let hour = parse_digits(&value[17..19])?;
+    let minute = parse_digits(&value[20..22])?;
+    let second = parse_digits(&value[23..25])?;
     if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
@@ -207,12 +207,12 @@ pub fn iso8601_ms(value: &str) -> Option<u64> {
     {
         return None;
     }
-    let year = number(&value[..4])? as i64;
-    let month = number(&value[5..7])?;
-    let day = number(&value[8..10])?;
-    let hour = number(&value[11..13])?;
-    let minute = number(&value[14..16])?;
-    let second = number(&value[17..19])?;
+    let year = parse_digits(&value[..4])? as i64;
+    let month = parse_digits(&value[5..7])?;
+    let day = parse_digits(&value[8..10])?;
+    let hour = parse_digits(&value[11..13])?;
+    let minute = parse_digits(&value[14..16])?;
+    let second = parse_digits(&value[17..19])?;
     // The fraction, if any, between the seconds and the `Z`.
     let millis = match &value[19..value.len() - 1] {
         [] => 0,
@@ -243,7 +243,7 @@ pub fn iso8601_ms(value: &str) -> Option<u64> {
         .checked_add(millis)
 }
 
-fn number(bytes: &[u8]) -> Option<u64> {
+fn parse_digits(bytes: &[u8]) -> Option<u64> {
     // The date readers pass only two- or four-byte fields, so the sum is <= 9999.
     bytes.iter().try_fold(0, |value, byte| {
         byte.checked_sub(b'0')

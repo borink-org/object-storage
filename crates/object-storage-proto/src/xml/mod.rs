@@ -31,7 +31,7 @@ pub(crate) mod tags;
 
 pub(crate) use decode::decode_text;
 
-use scan::{find_byte, trim};
+use scan::{find_byte, trim_span};
 
 /// Returns the error code that a service wrote into a response body.
 ///
@@ -39,7 +39,7 @@ use scan::{find_byte, trim};
 /// body that was cut short yields whatever part of the code was written before
 /// the cut. [`classify_error`](crate::classify_error) knows the body was cut
 /// short and reports such a code as incomplete rather than unknown.
-pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
+pub(crate) fn read_error_code(body: &[u8]) -> Option<&str> {
     // The code is returned as `&str`, so a body that is not valid UTF-8 has
     // no code.
     core::str::from_utf8(body).ok()?;
@@ -58,7 +58,7 @@ pub(crate) fn error_code(body: &[u8]) -> Option<&str> {
             .unwrap_or_default();
         if name == b"Code" && !tag.ends_with(b"/") {
             let end = find_byte(body, close + 1, b'<');
-            let (start, end) = trim(body, (close + 1, end));
+            let (start, end) = trim_span(body, (close + 1, end));
             // An empty element is not the code. A later one may still be.
             if start < end {
                 return core::str::from_utf8(&body[start..end]).ok();
@@ -316,12 +316,12 @@ fn opening_tag_end(after: &[u8]) -> Option<usize> {
 mod tests {
     extern crate std;
 
-    use super::error_code;
+    use super::read_error_code;
 
     #[test]
     fn reads_the_code_from_an_azure_error_body() {
         assert_eq!(
-            error_code(b"<?xml version=\"1.0\"?><Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.</Message></Error>"),
+            read_error_code(b"<?xml version=\"1.0\"?><Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.</Message></Error>"),
             Some("BlobNotFound")
         );
     }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn trims_surrounding_whitespace() {
         assert_eq!(
-            error_code(b"<Error>\n  <Code>\n    ServerBusy\n  </Code>\n</Error>"),
+            read_error_code(b"<Error>\n  <Code>\n    ServerBusy\n  </Code>\n</Error>"),
             Some("ServerBusy")
         );
     }
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn finds_the_code_at_any_depth() {
         assert_eq!(
-            error_code(b"<Error><Detail><Code>InternalError</Code></Detail></Error>"),
+            read_error_code(b"<Error><Detail><Code>InternalError</Code></Detail></Error>"),
             Some("InternalError")
         );
     }
@@ -345,17 +345,17 @@ mod tests {
     #[test]
     fn returns_nothing_without_a_code_element() {
         assert_eq!(
-            error_code(b"<Error><Message>no code here</Message></Error>"),
+            read_error_code(b"<Error><Message>no code here</Message></Error>"),
             None
         );
-        assert_eq!(error_code(b""), None);
+        assert_eq!(read_error_code(b""), None);
     }
 
     #[test]
     fn returns_nothing_for_a_code_element_with_no_text() {
-        assert_eq!(error_code(b"<Error><Code /></Error>"), None);
+        assert_eq!(read_error_code(b"<Error><Code /></Error>"), None);
         assert_eq!(
-            error_code(b"<Error><Code></Code><Code>Late</Code></Error>"),
+            read_error_code(b"<Error><Code></Code><Code>Late</Code></Error>"),
             Some("Late")
         );
     }
@@ -363,21 +363,23 @@ mod tests {
     #[test]
     fn ignores_text_outside_the_code_element() {
         assert_eq!(
-            error_code(b"<Error><Message>BlobNotFound</Message><Code>ServerBusy</Code></Error>"),
+            read_error_code(
+                b"<Error><Message>BlobNotFound</Message><Code>ServerBusy</Code></Error>"
+            ),
             Some("ServerBusy")
         );
     }
 
     #[test]
     fn returns_nothing_for_a_body_that_is_not_utf_8() {
-        assert_eq!(error_code(b"<Error><Code>\xff</Code></Error>"), None);
+        assert_eq!(read_error_code(b"<Error><Code>\xff</Code></Error>"), None);
     }
 
     #[test]
     fn a_body_cut_short_yields_at_most_a_partial_code() {
         // `classify_error` is told separately that the body was truncated, so a
         // partial code that matches nothing becomes `Incomplete`, not `Unknown`.
-        assert_eq!(error_code(b"<Error><Code>BlobNot"), Some("BlobNot"));
-        assert_eq!(error_code(b"<Error><Cod"), None);
+        assert_eq!(read_error_code(b"<Error><Code>BlobNot"), Some("BlobNot"));
+        assert_eq!(read_error_code(b"<Error><Cod"), None);
     }
 }

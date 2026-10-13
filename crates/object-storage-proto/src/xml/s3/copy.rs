@@ -3,17 +3,17 @@
 // of what the copy wrote, decoded in place.
 
 use crate::Result;
-use crate::xml::s3::read_values;
-use crate::xml::scan::fault;
+use crate::xml::s3::read_root_values;
+use crate::xml::scan::body_fault;
 
 // Reads a `CopyObjectResult` and returns the entity tag of the copy.
 pub(crate) fn read_copied(body: &mut [u8]) -> Result<&str> {
-    let [e_tag] = read_values(body, b"CopyObjectResult", [b"ETag"])?;
-    e_tag.map_or_else(fault, Ok)
+    let [e_tag] = read_root_values(body, b"CopyObjectResult", [b"ETag"])?;
+    e_tag.map_or_else(body_fault, Ok)
 }
 
 // Reads a `CopyPartResult` and returns the entity tag of the part.
 pub(crate) fn read_part_copied(body: &mut [u8]) -> Result<&str> {
-    let [e_tag] = read_values(body, b"CopyPartResult", [b"ETag"])?;
-    e_tag.map_or_else(fault, Ok)
+    let [e_tag] = read_root_values(body, b"CopyPartResult", [b"ETag"])?;
+    e_tag.map_or_else(body_fault, Ok)
 }

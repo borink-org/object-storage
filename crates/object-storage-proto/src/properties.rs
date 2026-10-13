@@ -11,6 +11,8 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
+use crate::xml::decode_text;
+
 /// A property that a listing can report for each entry: an
 /// [`azure::BlobProperty`](crate::azure::BlobProperty) or an
 /// [`s3::ObjectProperty`](crate::s3::ObjectProperty).
@@ -23,8 +25,11 @@ pub trait Property: Copy + sealed::Sealed {
 }
 
 pub(crate) mod sealed {
-    // Only this crate's property types are properties: a set's bits are
-    // numbered by the order that the page readers match them in.
+    // `Sealed` is public, so that it can bound the public `Property`, but it
+    // sits in a module that no other crate can name, so no other crate can
+    // implement `Property`. A set relies on what each property type
+    // promises: fewer than 64 properties, numbered from 0 below `COUNT`. And
+    // this crate can add to `Property` without breaking a caller.
     pub trait Sealed {}
 }
 
@@ -179,4 +184,31 @@ impl<P> fmt::Debug for PropertyValues<'_, '_, P> {
             .field("values", &self.values)
             .finish()
     }
+}
+
+/// Writes the text of a listed value with its references resolved.
+///
+/// Use this on a value that
+/// [`ListEntry::property`](crate::ListEntry::property) returned, which holds
+/// the bytes that the service wrote. XML writes an `&` as `&amp;`, and a
+/// character that the document cannot carry as `&#233;`. This writes what
+/// those stand for.
+///
+/// Copies `value` into `into` and returns what it wrote, which is never longer
+/// than `value`. Returns [`None`] if `into` is shorter than `value`, and for a
+/// reference that no listing declares.
+///
+/// This undoes XML references and nothing else. It does not percent-decode.
+/// Azure escapes the metadata it returns for XML but never percent-encodes
+/// it, so `already%80escaped` is the text itself and not an escape. Only a
+/// name that the service marked as encoded is percent-decoded, and reading
+/// the page did that already.
+///
+/// The fields of a [`ListEntry`](crate::ListEntry) do not need this. Reading
+/// the page decoded them in place.
+pub fn decode_property<'a>(value: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
+    let into = into.get_mut(..value.len())?;
+    into.copy_from_slice(value);
+    let len = decode_text(into, false).ok()?;
+    Some(&into[..len])
 }

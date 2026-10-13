@@ -5,31 +5,29 @@
 // its number within an upload that S3 created, and by the entity tag that S3
 // returned when it staged the part.
 
-use crate::checksum::{BASE64_LEN, ChecksumKind};
-use crate::common::{FailureOutcome, decimal_header, failure, finish_with_body, valid_header};
-use crate::common::{checksum_text, validate_checksum_item};
-use crate::encoding;
+use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
+use crate::head::read_decimal_header;
+use crate::outcome::{container_failure_outcome, finish_with_body};
 use crate::request::{ByteSink, U64Decimal, Writer};
 use crate::s3::template::{
-    self, Describe, Detail, Field, FieldList, Operation, Template, Unsigned, Value,
-    encode as encode_template,
+    self, Describe, Detail, Field, FieldList, FieldValue, Operation, Template, Unsigned,
+    encode_template,
 };
 use crate::s3::{
-    Bucket, ObjectText, PayloadSigning, S3Values, encode_object, prepare_object, push_stored,
-    validate_stored,
-};
-use crate::s3::{
-    Service, body_kind, failed, is_error_document, refuse_error_document, validate_metadata,
-    validate_write_condition,
+    Bucket, ObjectText, PayloadSigning, S3Values, Service, UNSIGNED_PAYLOAD, encode_object,
+    is_error_document, kind_in_body, prepare_object, push_stored_fields, read_failure_head,
+    refuse_error_document, validate_metadata, validate_stored_properties, validate_write_condition,
 };
 use crate::sigv4::Credentials;
-use crate::template::{Body, Fill, Hole, ParamValue, Values};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody};
 use crate::url::QueryValue;
-use crate::{ChecksumValue, ConditionValue, ObjectItem, RevisionKind, StageOptions};
+use crate::validate::{is_header_value, validate_checksum_item};
+use crate::xml::s3::parts::read_committed;
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, DeleteHeadOutcome, Failure, InvalidRequest,
-    ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectMeta, Payload, ResponseFault,
-    ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
+    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue,
+    DeleteHeadOutcome, Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair,
+    Method, ObjectItem, ObjectMeta, Payload, ResponseFault, ResponseHead, Result, RevisionKind,
+    ServiceErrorKind, StageHeadOutcome, StageOptions, Timestamps, WriteOptions, encoding,
 };
 
 /// The most bytes that S3 takes in one part.
@@ -117,7 +115,7 @@ pub enum CreateUploadHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-crate::common::container_failure_outcome!(CreateUploadHeadOutcome<'h>);
+container_failure_outcome!(CreateUploadHeadOutcome<'h>);
 
 impl core::fmt::Display for CreateUploadHeadOutcome<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -158,7 +156,7 @@ fn validate_parts<E: AsRef<[u8]>>(
     let mut previous = None;
     for (number, e_tag) in parts {
         validate_part_number(number, service)?;
-        if !valid_header(e_tag.as_ref()) {
+        if !is_header_value(e_tag.as_ref()) {
             return Err(InvalidRequest::PartId.into());
         }
         if ordered && previous.is_some_and(|previous| number <= previous) {
@@ -333,9 +331,9 @@ pub fn prepare_create_upload(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_metadata(options.metadata, bucket.service)?;
-    validate_stored(&options.options, bucket.service)?;
+    validate_stored_properties(&options.options, bucket.service)?;
     let mut signed = FieldList::new();
-    push_stored(&mut signed, &options.options);
+    push_stored_fields(&mut signed, &options.options);
     prepare_object(
         bucket,
         credentials,
@@ -346,7 +344,7 @@ pub fn prepare_create_upload(
         &ObjectText {
             signed: signed.as_slice(),
             // A POST states its length even when it has no content.
-            unsigned: &[Field::new("content-length", Value::Formatted(b"0"))],
+            unsigned: &[Field::new("content-length", FieldValue::Formatted(b"0"))],
             metadata: options.metadata,
             body: None,
         },
@@ -388,10 +386,10 @@ pub fn accept_create_upload_head<'h>(
 ) -> Result<CreateUploadHeadOutcome<'h>> {
     match head.status {
         200 => Ok(CreateUploadHeadOutcome::Created {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -401,7 +399,7 @@ pub fn accept_create_upload_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> CreateUploadHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the ID of the upload out of the response body of a
@@ -430,7 +428,7 @@ pub fn prepare_stage_part(
     signing: PayloadSigning,
     buf: &mut [u8],
 ) -> Result<Template> {
-    template::prepare(
+    template::prepare_template(
         bucket,
         credentials,
         &describe_stage(options.checksum, signing),
@@ -453,7 +451,7 @@ fn describe_stage(checksum: Option<ChecksumKind>, signing: PayloadSigning) -> De
     }
     match signing {
         PayloadSigning::Unsigned => {
-            describe.content_sha256 = super::UNSIGNED_PAYLOAD.as_bytes();
+            describe.content_sha256 = UNSIGNED_PAYLOAD.as_bytes();
         }
         PayloadSigning::Signed => describe.holes.content_sha256 = Some(Hole::PayloadHash),
     }
@@ -494,20 +492,20 @@ pub fn encode_stage_part<'i>(
     }
     validate_checksum_item(checksum, item.checksum)?;
     let hex = match (signing, content_sha256) {
-        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex(digest)),
+        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex_digest(digest)),
         (PayloadSigning::Unsigned, None) => None,
         _ => return Err(InvalidRequest::Option.into()),
     };
     let mut text = [0; BASE64_LEN];
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         upload_id: Some(item.upload_id),
         part_number: Some(item.number),
         content_length: Some(item.content.len()),
-        checksum: checksum_text(item.checksum, &mut text, true),
+        checksum: checksum_base64(item.checksum, &mut text, true),
         payload_hash: hex.as_ref(),
-        ..Values::default()
+        ..HoleValues::default()
     });
     encode_template(
         template,
@@ -532,13 +530,13 @@ pub fn accept_stage_part_head<'h>(head: ResponseHead<'h>) -> Result<StageHeadOut
         200 if head.e_tag.is_none() => Err(ResponseFault::Head.into()),
         200 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes a [`StageHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_stage_part_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> StageHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of CompleteMultipartUploads with `options` into
@@ -565,7 +563,7 @@ pub fn prepare_commit_parts(
     if bucket.service.is_aws() && options.condition.is_date() {
         return Err(InvalidRequest::Condition.into());
     }
-    template::prepare(
+    template::prepare_template(
         bucket,
         credentials,
         &describe_commit(options.condition, options.checksum, options.sized),
@@ -593,7 +591,7 @@ fn describe_commit(
     describe.query[0] = Some(("uploadId", ParamValue::Hole(Hole::UploadId)));
     describe.condition(condition);
     describe.holes.object_size = sized;
-    describe.with_body(Body::Each, checksum);
+    describe.with_body(TemplateBody::Each, checksum);
     describe
 }
 
@@ -606,7 +604,7 @@ struct CommitFill<'i> {
 impl Fill for CommitFill<'_> {
     const BODY: bool = true;
 
-    fn values(&self) -> &Values<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         &self.values.0
     }
 
@@ -663,14 +661,14 @@ pub fn encode_commit_parts(
         return Err(InvalidRequest::Option.into());
     }
     let fill = CommitFill {
-        values: S3Values(Values {
+        values: S3Values(HoleValues {
             now: Some(now),
             key,
             condition: item.condition_value,
             upload_id: Some(item.upload_id),
             object_size: item.size,
             body_checksum: checksum,
-            ..Values::default()
+            ..HoleValues::default()
         }),
         parts: item.parts,
     };
@@ -699,12 +697,12 @@ pub fn accept_commit_parts_head<'h>(
 ) -> Result<CommitHeadOutcome<'h>> {
     match head.status {
         200 => Ok(CommitHeadOutcome::NeedResultBody {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
         412 => Ok(CommitHeadOutcome::PreconditionFailed),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -726,16 +724,16 @@ pub fn accept_commit_parts_body<'h>(
     // A directory bucket reports under status 200 what a general purpose
     // bucket reports under 404 or 412, so those become the same outcomes.
     if is_error_document(body) {
-        let kind = body_kind(body);
+        let kind = kind_in_body(body);
         return Ok(match kind {
             Some(ServiceErrorKind::Precondition) if shape.condition != ConditionKind::None => {
                 CommitHeadOutcome::PreconditionFailed
             }
             Some(ServiceErrorKind::NoSuchUpload) => CommitHeadOutcome::NotFound { kind },
-            _ => finish_with_body(failure(head.status, None, head.request_id), kind),
+            _ => finish_with_body(Failure::new(head.status, None, head.request_id), kind),
         });
     }
-    let e_tag = crate::xml::s3::parts::read_committed(body)?;
+    let e_tag = read_committed(body)?;
     Ok(CommitHeadOutcome::Committed {
         meta: ObjectMeta {
             e_tag: Some(e_tag.as_bytes()),
@@ -753,7 +751,7 @@ pub fn accept_commit_parts_error_body<'h>(
     body: &[u8],
 ) -> CommitHeadOutcome<'h> {
     let _ = shape;
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of AbortMultipartUploads into `buf`, signed with
@@ -768,7 +766,7 @@ pub fn prepare_abort_upload(
     credentials: &Credentials<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    template::prepare(bucket, credentials, &describe_abort_upload(), buf)
+    template::prepare_template(bucket, credentials, &describe_abort_upload(), buf)
 }
 
 // The request of an AbortMultipartUpload.
@@ -802,11 +800,11 @@ pub fn encode_abort_upload(
     }
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         upload_id: Some(item.upload_id),
-        ..Values::default()
+        ..HoleValues::default()
     });
     encode_template(
         template,
@@ -824,8 +822,8 @@ pub fn encode_abort_upload(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be read. Any other success
-/// status is [`ResponseFault::Status`].
+/// Returns [`Error::Response`](crate::Error::Response) if the head cannot be
+/// read. Any other success status is [`ResponseFault::Status`].
 pub fn accept_abort_upload_head<'h>(
     service: Service,
     head: ResponseHead<'h>,
@@ -835,7 +833,7 @@ pub fn accept_abort_upload_head<'h>(
         204 => Ok(DeleteHeadOutcome::Accepted),
         200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -845,7 +843,7 @@ pub fn accept_abort_upload_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> DeleteHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of ListParts into `buf`, signed with `credentials`,
@@ -861,7 +859,7 @@ pub fn prepare_list_parts(
     max_parts: Option<u32>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    template::prepare(bucket, credentials, &describe_list_parts(max_parts), buf)
+    template::prepare_template(bucket, credentials, &describe_list_parts(max_parts), buf)
 }
 
 // The request of a page of a ListParts. `max_parts` is the template's, and
@@ -905,12 +903,12 @@ pub fn encode_list_parts(
     if item.marker.is_some_and(str::is_empty) {
         return Err(InvalidRequest::Marker.into());
     }
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         upload_id: Some(item.upload_id),
         marker: item.marker,
-        ..Values::default()
+        ..HoleValues::default()
     });
     encode_template(
         template,
@@ -932,10 +930,10 @@ pub fn accept_list_parts_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHea
     match head.status {
         200 => Ok(ListPartsHeadOutcome::Parts {
             meta: ObjectMeta::default(),
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -944,7 +942,7 @@ pub fn accept_list_parts_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> ListPartsHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the parts out of the response body of a ListParts into `into`. The
@@ -952,9 +950,10 @@ pub fn accept_list_parts_error_body<'h>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Capacity`](crate::Error::Capacity) if the page holds more parts than the array,
-/// [`Error::Service`](crate::Error::Service) for an error document, and [`Error::Response`](crate::Error::Response) for a
-/// body that is not a page of parts.
+/// Returns [`Error::Capacity`](crate::Error::Capacity) if the page holds more
+/// parts than the array, [`Error::Service`](crate::Error::Service) for an
+/// error document, and [`Error::Response`](crate::Error::Response) for a body
+/// that is not a page of parts.
 pub fn fill_parts<'b, E: From<Part<'b>>>(
     body: &'b mut [u8],
     into: &mut [E],

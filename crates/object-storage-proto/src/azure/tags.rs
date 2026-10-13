@@ -7,16 +7,17 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::template::{Field, FieldList, Operation, Template, Value};
+use crate::azure::template::{Field, FieldList, FieldValue, Operation, Template};
 use crate::azure::{
-    AzureNamespace, Container, ObjectText, azure_tag_char, body_kind, encode_object, failed, named,
-    prepare_object, stored_fields, utf8_properties, validate_metadata,
+    AzureNamespace, Container, ObjectText, azure_tag_char, encode_object, kind_in_body,
+    kind_in_head, prepare_object, push_stored_fields, read_failure_head, utf8_properties,
+    validate_metadata,
 };
-use crate::common::{
-    decimal_header, finish_with_body, meta_of, text_header, valid_header, validate_properties,
-    validate_tags, write_tag_set,
-};
+use crate::head::{read_decimal_header, read_text_header};
+use crate::outcome::finish_with_body;
+use crate::request::{ByteSink, write_tag_set};
 use crate::template::WireRequest;
+use crate::validate::{is_header_value, validate_properties, validate_tags};
 use crate::{
     ConditionKind, ContentProperties, Failure, InvalidRequest, MetadataPair, ObjectItem,
     ObjectMeta, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Tag,
@@ -27,7 +28,7 @@ use crate::{
 const TAGS_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><Tags>";
 const TAGS_CLOSE: &[u8] = b"</Tags>";
 
-fn write_tags_document(out: &mut dyn crate::request::ByteSink, tags: &[Tag<'_>]) {
+fn write_tags_document(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
     out.push(TAGS_OPEN);
     write_tag_set(out, tags);
     out.push(TAGS_CLOSE);
@@ -36,7 +37,7 @@ fn write_tags_document(out: &mut dyn crate::request::ByteSink, tags: &[Tag<'_>])
 // Reads the head of a request that changes the object and returns no body.
 // Azure names the error of a failure in its head. A 412 is the request's failed
 // `condition` only if it carried one and Azure names a failed condition.
-pub(super) fn accept_update<'h>(
+pub(super) fn accept_update_head<'h>(
     head: ResponseHead<'h>,
     success: &[u16],
     condition: ConditionKind,
@@ -44,17 +45,17 @@ pub(super) fn accept_update<'h>(
     match head.status {
         status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated {
             meta: ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             },
         }),
         412 if condition != ConditionKind::None
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(UpdateHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -101,12 +102,12 @@ pub fn prepare_set_tier(
     tier: &str,
     buf: &mut [u8],
 ) -> Result<Template> {
-    if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
+    if !is_header_value(tier.as_bytes()) || tier.trim_ascii() != tier {
         return Err(InvalidRequest::ContentProperty.into());
     }
     let fields = [
-        Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
-        Field::new("content-length", Value::Bytes(b"0")),
+        Field::new("x-ms-access-tier", FieldValue::Bytes(tier.as_bytes())),
+        Field::new("content-length", FieldValue::Bytes(b"0")),
     ];
     prepare_object(
         container,
@@ -152,7 +153,7 @@ pub fn encode_set_tier<'r>(
 /// Returns [`Error::Response`] if the head cannot be read. A success status
 /// other than 200 and 202 is [`ResponseFault::Status`].
 pub fn accept_set_tier_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
-    accept_update(head, &[200, 202], ConditionKind::None)
+    accept_update_head(head, &[200, 202], ConditionKind::None)
 }
 
 /// Writes the template of Set Blob Metadatas with `options` into `buf`.
@@ -180,7 +181,7 @@ pub fn prepare_set_metadata(
         options.condition,
         RevisionKind::Current,
         &ObjectText {
-            fields: &[Field::new("content-length", Value::Bytes(b"0"))],
+            fields: &[Field::new("content-length", FieldValue::Bytes(b"0"))],
             metadata: options.metadata,
             ..ObjectText::default()
         },
@@ -220,7 +221,7 @@ pub fn accept_set_metadata_head<'h>(
     condition: ConditionKind,
     head: ResponseHead<'h>,
 ) -> Result<UpdateHeadOutcome<'h>> {
-    accept_update(head, &[200], condition)
+    accept_update_head(head, &[200], condition)
 }
 
 /// Writes the template of Set Blob Properties with `options` into `buf`.
@@ -245,8 +246,8 @@ pub fn prepare_set_properties(
     };
     validate_properties(&stored, utf8_properties(namespace))?;
     let mut fields = FieldList::new();
-    stored_fields(&mut fields, &stored);
-    fields.push(Field::new("content-length", Value::Bytes(b"0")));
+    push_stored_fields(&mut fields, &stored);
+    fields.push(Field::new("content-length", FieldValue::Bytes(b"0")));
     prepare_object(
         container,
         token,
@@ -288,14 +289,14 @@ pub fn accept_set_properties_head<'h>(
     condition: ConditionKind,
     head: ResponseHead<'h>,
 ) -> Result<UpdateHeadOutcome<'h>> {
-    accept_update(head, &[200], condition)
+    accept_update_head(head, &[200], condition)
 }
 
 /// Finishes an [`UpdateHeadOutcome::NeedErrorBody`] of a Set Blob Tier, a
 /// Set Blob Tags, a Set Blob Metadata, a Set Blob Properties or an Abort
 /// Copy Blob with the response body.
 pub fn accept_update_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> UpdateHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of Set Blob Tags that give objects `tags` and no
@@ -319,7 +320,7 @@ pub fn prepare_set_tags(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_tags(tags, azure_tag_char, Some((10, 128, 256)))?;
-    let write = |out: &mut dyn crate::request::ByteSink| write_tags_document(out, tags);
+    let write = |out: &mut dyn ByteSink| write_tags_document(out, tags);
     prepare_object(
         container,
         token,
@@ -328,7 +329,10 @@ pub fn prepare_set_tags(
         ConditionKind::None,
         revision,
         &ObjectText {
-            fields: &[Field::new("content-type", Value::Bytes(b"application/xml"))],
+            fields: &[Field::new(
+                "content-type",
+                FieldValue::Bytes(b"application/xml"),
+            )],
             body: Some(&write),
             ..ObjectText::default()
         },
@@ -361,7 +365,7 @@ pub fn encode_set_tags<'r>(
 /// Returns [`Error::Response`] if the head cannot be read. A success status
 /// other than 204 is [`ResponseFault::Status`].
 pub fn accept_set_tags_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
-    accept_update(head, &[204], ConditionKind::None)
+    accept_update_head(head, &[204], ConditionKind::None)
 }
 
 /// Writes the template of Get Blob Tags into `buf`. Each request names a
@@ -415,16 +419,16 @@ pub fn encode_get_tags<'r>(
 pub fn accept_get_tags_head<'h>(head: ResponseHead<'h>) -> Result<TagsHeadOutcome<'h>> {
     match head.status {
         200 => Ok(TagsHeadOutcome::Tags {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes a [`TagsHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_get_tags_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> TagsHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the tags out of the response body of a Get Blob Tags into `into`,

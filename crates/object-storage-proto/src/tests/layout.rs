@@ -10,8 +10,7 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
-use crate::azure::AzureNamespace;
-use crate::azure::{self, BlockListKind, BlockRef, BlockSource, Container};
+use crate::azure::{self, AzureNamespace, BlockListKind, BlockRef, BlockSource, Container};
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
@@ -19,7 +18,7 @@ use crate::{
     CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
     ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, PutItem,
     PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind,
-    StageOptions, Tag, Timestamps, WriteOptions,
+    StageOptions, Tag, Timestamps, WireRequest, WriteOptions,
 };
 
 const KEY: &str = "dir/file name.sst";
@@ -92,7 +91,7 @@ fn azure_one(
 }
 
 // The URL, the head and the content of an Azure request.
-fn azure_request(request: Result<crate::WireRequest<'_>>) -> Vec<u8> {
+fn azure_request(request: Result<WireRequest<'_>>) -> Vec<u8> {
     let request = request.expect("the request is written");
     let mut text = request.url().as_bytes().to_vec();
     text.extend_from_slice(request.head());
@@ -178,7 +177,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 let request = azure::encode_put(template, bytes, &item, &now, &mut buf);
                 // A write sends the content it was given.
                 assert!(matches!(
-                    request.as_ref().map(crate::WireRequest::payload),
+                    request.as_ref().map(WireRequest::payload),
                     Ok(Payload::Streamed { len: 4096 })
                 ));
                 azure_request(request)

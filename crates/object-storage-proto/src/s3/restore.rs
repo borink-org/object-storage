@@ -6,24 +6,24 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::common::finish_with_body;
+use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, U64Decimal};
 use crate::s3::template::{Operation, Template, Unsigned};
-use crate::s3::{Bucket, ObjectText, encode_object, prepare_object};
-use crate::s3::{Service, body_kind, failed};
+use crate::s3::{
+    Bucket, ObjectText, Service, encode_object, kind_in_body, prepare_object, read_failure_head,
+};
 use crate::sigv4::Credentials;
 use crate::{
-    ConditionKind, Failure, InvalidRequest, ResponseFault, ResponseHead, RestoreHeadOutcome,
-    RestorePriority, Result, Timestamps,
+    ConditionKind, Failure, InvalidRequest, ObjectItem, ResponseFault, ResponseHead,
+    RestoreHeadOutcome, RestoreOptions, RestorePriority, Result, Timestamps,
 };
-use crate::{ObjectItem, RestoreOptions};
 
 const RESTORE_OPEN: &[u8] = b"<RestoreRequest xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 const RESTORE_CLOSE: &[u8] = b"</RestoreRequest>";
 
-// The body of a RestoreObject. S3 takes the days only for a storage class
-// that it restores a copy of, so the element is left out without them.
-// The body of a RestoreObject of `days`, at `priority`.
+// Writes the body of a RestoreObject of `days`, at `priority`. S3 takes the
+// days only for a storage class that it restores a copy of, so the element
+// is left out without them.
 fn write_restore_request(out: &mut dyn ByteSink, days: Option<u32>, priority: RestorePriority) {
     out.push(RESTORE_OPEN);
     if let Some(days) = days {
@@ -69,8 +69,7 @@ pub fn prepare_restore(
     {
         return Err(InvalidRequest::Option.into());
     }
-    let (days, priority) = (options.days, options.priority);
-    let write = move |out: &mut dyn ByteSink| write_restore_request(out, days, priority);
+    let write = |out: &mut dyn ByteSink| write_restore_request(out, options.days, options.priority);
     prepare_object(
         bucket,
         credentials,
@@ -121,11 +120,11 @@ pub fn accept_restore_head<'h>(head: ResponseHead<'h>) -> Result<RestoreHeadOutc
         202 => Ok(RestoreHeadOutcome::Started),
         200 => Ok(RestoreHeadOutcome::Readable),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_restore_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> RestoreHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }

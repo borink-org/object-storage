@@ -7,9 +7,9 @@
 // leftover bytes to zero, so that the walk over an entry can find where the
 // decoded text ends.
 
-use super::scan::{AMP, PCT, fault, find_byte};
 use crate::Result;
 use crate::url::percent_decode_in_place;
+use crate::xml::scan::{AMP, PCT, body_fault, find_byte};
 
 /// Undoes both encodings, in the order a document applies them.
 pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
@@ -24,7 +24,7 @@ pub(crate) fn decode_text(bytes: &mut [u8], percent: bool) -> Result<usize> {
 // The same, for a value the scanner has already seen. The scanner's flags say
 // whether there is anything to undo. In an ordinary listing no text holds an
 // `&` or a `%`, so nothing is undone.
-pub(crate) fn decode(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize> {
+pub(crate) fn decode_scanned(bytes: &mut [u8], flags: u8, percent: bool) -> Result<usize> {
     let mut len = bytes.len();
     if flags & AMP != 0 {
         len = decode_references(bytes)?;
@@ -81,13 +81,13 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         }
         // The numeric form. A longer reference cannot name a character.
         let Some(len) = rest.iter().take(10).position(|c| *c == b';') else {
-            return fault();
+            return body_fault();
         };
         let name = &b[r + 1..r + 1 + len];
         let code = match name {
-            [b'#', b'x', hex @ ..] if !hex.is_empty() => digits(hex, 16)?,
-            [b'#', decimal @ ..] if !decimal.is_empty() => digits(decimal, 10)?,
-            _ => return fault(),
+            [b'#', b'x', hex @ ..] if !hex.is_empty() => parse_reference_number(hex, 16)?,
+            [b'#', decimal @ ..] if !decimal.is_empty() => parse_reference_number(decimal, 10)?,
+            _ => return body_fault(),
         };
         // A reference to a character that XML forbids in a document is a
         // fault, whatever it would decode to. Accepting it would put a byte
@@ -101,7 +101,7 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
         // unless the listing asks for `encoding-type=url`, writes it as
         // `&#x1;`. An S3 listing asks for URL encoding, which writes `%01`.
         let Some(ch) = char::from_u32(code).filter(|c| xml_char(*c as u32)) else {
-            return fault();
+            return body_fault();
         };
         let mut buffer = [0u8; 4];
         let encoded = ch.encode_utf8(&mut buffer).as_bytes();
@@ -114,14 +114,14 @@ fn decode_references(b: &mut [u8]) -> Result<usize> {
     Ok(w)
 }
 
-fn digits(bytes: &[u8], radix: u32) -> Result<u32> {
+fn parse_reference_number(bytes: &[u8], radix: u32) -> Result<u32> {
     bytes.iter().try_fold(0u32, |value, byte| {
         let Some(digit) = (*byte as char).to_digit(radix) else {
-            return fault();
+            return body_fault();
         };
         match value.checked_mul(radix).and_then(|v| v.checked_add(digit)) {
             Some(value) => Ok(value),
-            None => fault(),
+            None => body_fault(),
         }
     })
 }

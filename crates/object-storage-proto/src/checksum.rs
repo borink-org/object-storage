@@ -21,7 +21,8 @@
 //! A checksum here detects corruption in transit and nothing else, a SHA-1 or
 //! a SHA-256 included.
 
-use crate::{InvalidRequest, Result};
+use crate::encoding::{base64_into, base64_len};
+use crate::{ChecksumValue, InvalidRequest, Result};
 
 /// The checksums that a write can send.
 ///
@@ -99,7 +100,7 @@ impl ChecksumKind {
     // Checks that `text` is the padded base64 of a digest of this kind.
     // Azure refuses any other text with 400 `InvalidHeaderValue`.
     pub(crate) fn check_base64(self, text: &str) -> Result<()> {
-        if crate::encoding::base64_len(text.as_bytes()) != Some(self.digest_len()) {
+        if base64_len(text.as_bytes()) != Some(self.digest_len()) {
             return Err(InvalidRequest::Checksum.into());
         }
         Ok(())
@@ -207,6 +208,19 @@ impl Digest {
     /// A CRC64 is written in the little-endian order that Azure reads.
     pub fn base64<'a>(&self, into: &'a mut [u8; BASE64_LEN]) -> &'a str {
         let (chars, padding) = self.kind.base64_shape();
-        crate::encoding::base64_into(self.as_bytes(), &mut into[..chars + padding])
+        base64_into(self.as_bytes(), &mut into[..chars + padding])
+    }
+}
+
+// The base64 text of a write's checksum, written into `into` from a digest.
+// S3 reads a CRC64 in big-endian order, Azure in little-endian order.
+pub(crate) fn checksum_base64<'a>(
+    value: Option<ChecksumValue<'a>>,
+    into: &'a mut [u8; BASE64_LEN],
+    crc64_big_endian: bool,
+) -> Option<&'a str> {
+    match value? {
+        ChecksumValue::Base64(text) => Some(text),
+        ChecksumValue::Digest(digest) => Some(digest.base64_for(into, crc64_big_endian)),
     }
 }

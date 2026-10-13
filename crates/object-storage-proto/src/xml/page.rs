@@ -2,9 +2,10 @@
 // keeping the values of wanted properties, and building an entry taken off
 // the body.
 
-use super::decode::decode;
-use super::scan::{Scan, Span, Tag, fault, trim};
+use crate::encoding::parse_decimal;
 use crate::properties::{Property, PropertySet};
+use crate::xml::decode::decode_scanned;
+use crate::xml::scan::{Scan, Span, StartTag, body_fault, trim_span};
 use crate::{CapacityError, Error, Result};
 
 // A property whose value a page reader can keep: `azure::BlobProperty` or
@@ -22,7 +23,7 @@ pub(super) trait ListProperty: Property {
 // Keeps the span of a property's value if `wanted` holds the property. A
 // property written twice keeps the first.
 #[inline(always)]
-pub(super) fn capture<P: ListProperty>(
+pub(super) fn keep_value<P: ListProperty>(
     property: P,
     span: Span,
     wanted: PropertySet<P>,
@@ -42,7 +43,7 @@ pub(super) fn capture<P: ListProperty>(
 // value if it is wanted. An element that holds other elements is read to its
 // close tag, and its value is everything between its tags.
 #[inline(always)]
-pub(super) fn read_known<P: ListProperty>(
+pub(super) fn read_matched<P: ListProperty>(
     scan: &mut Scan<'_>,
     property: P,
     wanted: PropertySet<P>,
@@ -54,16 +55,16 @@ pub(super) fn read_known<P: ListProperty>(
     } else {
         scan.value_of(name)?.0
     };
-    capture(property, span, wanted, captured);
+    keep_value(property, span, wanted, captured);
     Ok(())
 }
 
 // Reads past an element that no whole-tag match took: one this crate does
 // not know, or a known one in another spelling, such as `<AccessTier >`.
 // Keeps the value of a wanted one.
-pub(super) fn read_other<P: ListProperty>(
+pub(super) fn read_unmatched<P: ListProperty>(
     scan: &mut Scan<'_>,
-    tag: Tag,
+    tag: StartTag,
     wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) -> Result<()> {
@@ -77,7 +78,7 @@ pub(super) fn read_other<P: ListProperty>(
             } else {
                 scan.value(tag)?.0
             };
-            capture(property, span, wanted, captured);
+            keep_value(property, span, wanted, captured);
             Ok(())
         }
         _ => scan.skip(tag),
@@ -86,7 +87,7 @@ pub(super) fn read_other<P: ListProperty>(
 
 // Writes into `values` the part of an entry's bytes that each captured span
 // names. The spans were recorded on those bytes.
-pub(super) fn values_of<'b>(
+pub(super) fn captured_values<'b>(
     raw: &'b [u8],
     spans: &[Option<Span>],
     values: &mut [Option<&'b [u8]>],
@@ -108,10 +109,10 @@ pub(super) fn check_room(held: usize, room: usize) -> Result<()> {
 // Reads the size of an object.
 #[inline]
 pub(super) fn read_size(chunk: &[u8], span: Span) -> Result<u64> {
-    let (start, end) = trim(chunk, span);
-    match crate::common::decimal(&chunk[start..end]) {
+    let (start, end) = trim_span(chunk, span);
+    match parse_decimal(&chunk[start..end]) {
         Some(size) => Ok(size),
-        None => fault(),
+        None => body_fault(),
     }
 }
 
@@ -132,7 +133,7 @@ pub(super) fn end_decoded_key(
     if len < key.1 - key.0 {
         chunk[key.0 + len..key.1].fill(0);
         if escaped && chunk[key.0..key.0 + len].contains(&0) {
-            return fault();
+            return body_fault();
         }
     }
     Ok(())
@@ -178,7 +179,7 @@ pub(super) fn check_body(body: &[u8]) -> Result<()> {
         (lowest.min(byte), bits | byte)
     });
     if lowest == 0 || (bits >= 0x80 && core::str::from_utf8(body).is_err()) {
-        return fault();
+        return body_fault();
     }
     Ok(())
 }
@@ -193,7 +194,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
     loop {
         scan.skip_space();
         if scan.cur() != b'<' {
-            return fault();
+            return body_fault();
         }
         if !scan.skip_misc()? {
             break;
@@ -203,7 +204,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
     // A service can answer a listing with an error document under a success
     // status. That is not a page.
     if scan.text(tag.name) != root || tag.empty {
-        return fault();
+        return body_fault();
     }
     Ok(())
 }
@@ -212,7 +213,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
 // crate made up.
 pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
     if slot.is_some() {
-        return fault();
+        return body_fault();
     }
     *slot = Some(value);
     Ok(())
@@ -220,16 +221,17 @@ pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
 
 // Returns a decoded value as text. The body was UTF-8 and a reference decodes
 // to a character, so only a percent-decoded key can fail this.
-pub(super) fn text(bytes: &[u8]) -> Result<&str> {
-    core::str::from_utf8(bytes).or_else(|_| fault())
+pub(super) fn decoded_text(bytes: &[u8]) -> Result<&str> {
+    core::str::from_utf8(bytes).or_else(|_| body_fault())
 }
 
 // The fields of an entry as text, after their values were decoded: the
 // bytes of `raw` from the first field to the end of the last, checked as
-// UTF-8 once, and where they begin. Take each field with `field`. Checked
-// one by one, a field of a few dozen bytes is too short for `from_utf8` to
-// read a word at a time, and costs a byte at a time and a misread branch or
-// two. Checked whole, the entry would include every property as well.
+// UTF-8 once, and where they begin. Take each field with `field_text`.
+// Checked one by one, a field of a few dozen bytes is too short for
+// `from_utf8` to read a word at a time, and costs a byte at a time and a
+// misread branch or two. Checked whole, the entry would include every
+// property as well.
 pub(super) fn fields_text<'r>(raw: &'r [u8], spans: &[Option<Span>]) -> Result<(&'r str, usize)> {
     let (start, end) = spans
         .iter()
@@ -240,13 +242,14 @@ pub(super) fn fields_text<'r>(raw: &'r [u8], spans: &[Option<Span>]) -> Result<(
     if start > end {
         return Ok(("", 0));
     }
-    let text = raw.get(start..end).map_or_else(fault, text)?;
+    let text = raw.get(start..end).map_or_else(body_fault, decoded_text)?;
     Ok((text, start))
 }
 
 // The text of the field `span` of an entry, from what `fields_text` gave.
-pub(super) fn field((text, start): (&str, usize), (from, to): Span) -> Result<&str> {
-    text.get(from - start..to - start).map_or_else(fault, Ok)
+pub(super) fn field_text((text, start): (&str, usize), (from, to): Span) -> Result<&str> {
+    text.get(from - start..to - start)
+        .map_or_else(body_fault, Ok)
 }
 
 // Trims one value, decodes it in place and returns the range of the decoded
@@ -258,11 +261,15 @@ pub(super) fn decode_value_in_place(
     let Some((span, flags)) = field else {
         return Ok(None);
     };
-    let (start, end) = trim(chunk, span);
-    let len = decode(&mut chunk[start..end], flags, false)?;
+    let (start, end) = trim_span(chunk, span);
+    let len = decode_scanned(&mut chunk[start..end], flags, false)?;
     // trim preserves start <= end <= chunk.len(); decode returns len <= end - start.
     if len < end - start {
         chunk[start + len..end].fill(0);
     }
     Ok(Some((start, start + len)))
 }
+
+// The value of a child element, if the entry wrote one: its span and the
+// scanner's flags for what it holds to decode.
+pub(super) type ElementValue = Option<(Span, u8)>;

@@ -29,6 +29,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - New module `sigv4` in `borink-object-storage-crypto`, whose functions `sign` and `sign_batch` sign one request or many with any SHA-256. `sign` writes the body's SHA-256 too.
 - New enum `ChecksumValue`. It passes a checksum that you computed, as base64 text or as a `Digest`, which a request writes in its service's byte order.
 - New constructors `Ranging::from_discriminant` and `RevisionKind::from_discriminant`.
+- New associated function `CapacityError::required_by`. It calls a function that writes a template or a request with an empty buffer, and returns the bytes that the function needs.
 
 ### Removed
 

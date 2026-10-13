@@ -3,7 +3,7 @@
 // element. None allocates. Each writes into a buffer or a callback that the
 // caller passes.
 
-use crate::request::ByteSink;
+use crate::request::{ByteSink, written_text};
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -21,7 +21,7 @@ static SEXTETS: [u8; 256] = {
 };
 
 // Writes 32 bytes as lowercase hexadecimal, as SigV4 writes a digest.
-pub(crate) fn hex(bytes: &[u8; 32]) -> [u8; 64] {
+pub(crate) fn hex_digest(bytes: &[u8; 32]) -> [u8; 64] {
     let mut out = [0; 64];
     for (pair, byte) in out.chunks_exact_mut(2).zip(bytes) {
         pair.copy_from_slice(&HEX_PAIRS[usize::from(*byte)]);
@@ -70,7 +70,7 @@ pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
         }
     }
     // Every byte written is from the alphabet or padding, so this is ASCII.
-    crate::request::text(into)
+    written_text(into)
 }
 
 // The number of bytes that padded standard base64 `text` holds, or `None`
@@ -223,6 +223,25 @@ pub(crate) fn write_xml_text(out: &mut dyn ByteSink, text: &[u8]) {
         start = at + 1;
     }
     out.push(&text[start..]);
+}
+
+// Reads ASCII digits as a number. Returns `None` for no digits, for any other
+// byte, and for a number that does not fit.
+pub(crate) fn parse_decimal(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    // Up to 19 digits cannot overflow, so they need no checked arithmetic.
+    if bytes.len() <= 19 {
+        return bytes.iter().try_fold(0u64, |value, byte| {
+            let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+            Some(value * 10 + u64::from(digit))
+        });
+    }
+    bytes.iter().try_fold(0u64, |value, byte| {
+        let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+        value.checked_mul(10)?.checked_add(digit as u64)
+    })
 }
 
 #[cfg(test)]

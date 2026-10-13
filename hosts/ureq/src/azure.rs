@@ -3,8 +3,9 @@
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteOptions, GetHeadOutcome, GetItem, GetOptions, ListEntry,
-    ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem, PutOptions,
+    CapacityError, DeleteHeadOutcome, DeleteOptions, GetHeadOutcome, GetItem, GetOptions,
+    ListEntry, ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem,
+    PutOptions,
 };
 
 /// Builds and executes one GET request, returning an owned response body.
@@ -21,15 +22,15 @@ pub fn get(
     let prepare = |buf: &mut [u8]| {
         azure::prepare_get(container, token, AzureNamespace::Unknown, &options, buf)
     };
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let item = GetItem::new(key);
     let encode = |buf: &mut [u8]| azure::encode_get(&template, &bytes, &item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let request = azure::encode_get(&template, &bytes, &item, &now, &mut buf)?;
 
     let (parts, mut body) = crate::send(&request, None)?;
     let shape = item.shape(&options);
-    match azure::accept_get_head(shape, crate::head(&parts))? {
+    match azure::accept_get_head(shape, crate::response_head(&parts))? {
         GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
         // Azure named no error in the head, so the body names it.
@@ -58,15 +59,15 @@ pub fn put(
     let prepare = |buf: &mut [u8]| {
         azure::prepare_put(container, token, AzureNamespace::Unknown, &options, buf)
     };
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let item = PutItem::new(key, Payload::Slice(content));
     let encode = |buf: &mut [u8]| azure::encode_put(&template, &bytes, &item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let request = azure::encode_put(&template, &bytes, &item, &now, &mut buf)?;
 
     let (parts, mut body) = crate::send(&request, None)?;
     let shape = item.shape(&options);
-    match azure::accept_put_head(shape, crate::head(&parts))? {
+    match azure::accept_put_head(shape, crate::response_head(&parts))? {
         PutHeadOutcome::Created { .. } => Ok(()),
         PutHeadOutcome::NeedErrorBody(failure) => Err(not_stored(azure::accept_put_error_body(
             shape,
@@ -95,16 +96,16 @@ pub fn delete(
     let prepare = |buf: &mut [u8]| {
         azure::prepare_delete(container, token, AzureNamespace::Unknown, &options, buf)
     };
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let item = ObjectItem::new(key);
     let encode =
         |buf: &mut [u8]| azure::encode_delete(&template, &bytes, &item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let request = azure::encode_delete(&template, &bytes, &item, &now, &mut buf)?;
 
     let (parts, mut body) = crate::send(&request, None)?;
     let shape = options.shape();
-    match azure::accept_delete_head(shape, crate::head(&parts))? {
+    match azure::accept_delete_head(shape, crate::response_head(&parts))? {
         DeleteHeadOutcome::Accepted => Ok(()),
         DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(
             azure::accept_delete_error_body(shape, failure, &crate::error_body(&mut body)),
@@ -139,11 +140,11 @@ pub fn list<'b>(
 ) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
     let now = crate::now()?;
     let encode = |buf: &mut [u8]| azure::encode_list(template, bytes, item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let request = azure::encode_list(template, bytes, item, &now, &mut buf)?;
 
     let (parts, mut incoming) = crate::send(&request, None)?;
-    match azure::accept_list_head(crate::head(&parts))? {
+    match azure::accept_list_head(crate::response_head(&parts))? {
         ListHeadOutcome::Page { .. } => {
             // The whole page, in one buffer. The entries point into it, and
             // reading it decodes the text where it stands.

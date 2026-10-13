@@ -8,9 +8,9 @@ use borink_object_storage_crypto::{Sha256RustCrypto, sigv4};
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Template};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions, ListEntry,
-    ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem, PutOptions,
-    Timestamps,
+    CapacityError, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
+    ListEntry, ListHeadOutcome, ListItem, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem,
+    PutOptions, Timestamps,
 };
 
 // The day's signing key and the start of the string to sign at `now`,
@@ -38,18 +38,18 @@ pub fn get(
     let now = crate::now()?;
     let options = GetOptions::new();
     let prepare = |buf: &mut [u8]| s3::prepare_get(bucket, credentials, &options, buf);
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let stamp = stamp(&template, &bytes, credentials, &now)?;
     let item = GetItem::new(key);
     let encode = |buf: &mut [u8]| s3::encode_get(&template, &bytes, &item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let unsigned = s3::encode_get(&template, &bytes, &item, &now, &mut buf)?;
     let request = sigv4::sign(&stamp, &unsigned, &mut buf);
 
     let (parts, mut body) = crate::send(&request, None)?;
     let service = template.service();
     let shape = item.shape(&options);
-    match s3::accept_get_head(service, shape, crate::head(&parts))? {
+    match s3::accept_get_head(service, shape, crate::response_head(&parts))? {
         GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
         GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
         // S3 names every error in the body.
@@ -80,20 +80,20 @@ pub fn put(
     let options = PutOptions::default();
     let signing = PayloadSigning::Signed;
     let prepare = |buf: &mut [u8]| s3::prepare_put(bucket, credentials, &options, signing, buf);
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let stamp = stamp(&template, &bytes, credentials, &now)?;
     let item = PutItem::new(key, Payload::Slice(content));
     let digest = sigv4::sha256::<Sha256RustCrypto>(content);
     let encode = |buf: &mut [u8]| {
         s3::encode_put(&template, &bytes, &item, Some(&digest), &now, buf).map(drop)
     };
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let unsigned = s3::encode_put(&template, &bytes, &item, Some(&digest), &now, &mut buf)?;
     let request = sigv4::sign(&stamp, &unsigned, &mut buf);
 
     let (parts, mut body) = crate::send(&request, None)?;
     let shape = item.shape(&options);
-    match s3::accept_put_head(shape, crate::head(&parts))? {
+    match s3::accept_put_head(shape, crate::response_head(&parts))? {
         PutHeadOutcome::Created { .. } => Ok(()),
         PutHeadOutcome::NeedErrorBody(failure) => Err(not_stored(s3::accept_put_error_body(
             shape,
@@ -120,16 +120,16 @@ pub fn delete(
     let now = crate::now()?;
     let options = DeleteOptions::new();
     let prepare = |buf: &mut [u8]| s3::prepare_delete(bucket, credentials, &options, buf);
-    let (template, bytes) = crate::template(prepare)?;
+    let (template, bytes) = crate::sized_template(prepare)?;
     let stamp = stamp(&template, &bytes, credentials, &now)?;
     let item = ObjectItem::new(key);
     let encode = |buf: &mut [u8]| s3::encode_delete(&template, &bytes, &item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let unsigned = s3::encode_delete(&template, &bytes, &item, &now, &mut buf)?;
     let request = sigv4::sign(&stamp, &unsigned, &mut buf);
 
     let (parts, mut body) = crate::send(&request, None)?;
-    let head = crate::head(&parts);
+    let head = crate::response_head(&parts);
     match s3::accept_delete_head(template.service(), options.shape(), head)? {
         DeleteHeadOutcome::Accepted => Ok(()),
         DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(
@@ -168,12 +168,12 @@ pub fn list<'b>(
     let now = crate::now()?;
     let stamp = stamp(template, bytes, credentials, &now)?;
     let encode = |buf: &mut [u8]| s3::encode_list(template, bytes, item, &now, buf).map(drop);
-    let mut buf = vec![0; crate::required(encode)?];
+    let mut buf = vec![0; CapacityError::required_by(encode)?];
     let unsigned = s3::encode_list(template, bytes, item, &now, &mut buf)?;
     let request = sigv4::sign(&stamp, &unsigned, &mut buf);
 
     let (parts, mut incoming) = crate::send(&request, None)?;
-    match s3::accept_list_head(crate::head(&parts))? {
+    match s3::accept_list_head(crate::response_head(&parts))? {
         ListHeadOutcome::Page { .. } => {
             // S3 often sends a page without its length, so the read is
             // capped whatever the head says.

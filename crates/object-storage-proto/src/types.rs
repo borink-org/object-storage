@@ -1,3 +1,6 @@
+use crate::checksum::{ChecksumKind, Digest};
+use crate::xml::{after_opening_tag, next_pair, next_property};
+
 /// What a read asks the service to return.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -662,7 +665,7 @@ pub struct PutOptions<'o> {
     /// write names its value: see [`PutItem::checksum`].
     ///
     /// Azure takes an MD5 and a CRC64. S3 takes every kind.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
+    pub checksum: Option<ChecksumKind>,
 }
 
 /// The value of one checksum: its base64 as the service takes it, or its
@@ -676,7 +679,7 @@ pub enum ChecksumValue<'i> {
     Base64(&'i str),
     /// The digest, which the encoder writes in base64 in the byte order of
     /// the service.
-    Digest(crate::checksum::Digest),
+    Digest(Digest),
 }
 
 /// What one write of a whole object from a template writes.
@@ -919,7 +922,7 @@ impl<'i> ObjectItem<'i> {
 pub struct StageOptions {
     /// The checksum of each part that the service checks, or [`None`].
     /// Azure takes an MD5 or a CRC64, and S3 any kind.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
+    pub checksum: Option<ChecksumKind>,
 }
 
 /// What every restore of a template does alike: an S3 RestoreObject, or the
@@ -942,7 +945,7 @@ pub struct RestoreOptions<'o> {
     pub revision: RevisionKind,
     /// The checksum of the body of each S3 request. Azure sends no body,
     /// and takes none.
-    pub checksum: Option<crate::checksum::ChecksumKind>,
+    pub checksum: Option<ChecksumKind>,
 }
 
 /// Where the sources of a template's copies are, and what every copy does
@@ -1346,6 +1349,34 @@ impl<'b> ListEntry<'b> {
     }
 }
 
+/// Writes an entity tag from a listing in the quoted form that HTTP defines.
+///
+/// A listing writes an entity tag without the quotes that the `ETag` header
+/// carries. Azure conditions a request on either form; this writes the quoted
+/// one.
+///
+/// Copies `listed` into `into`, adding the quotes unless it already carries
+/// them or is a weak tag, and returns what it wrote. Returns [`None`] if
+/// `into` is too small; it needs at most two bytes more than `listed`.
+///
+/// Use it on [`ListEntry::e_tag`](crate::ListEntry::e_tag) to turn an entry of
+/// a listing into a
+/// [`GetItem::condition_value`](crate::GetItem::condition_value).
+pub fn quoted_etag<'a>(listed: &[u8], into: &'a mut [u8]) -> Option<&'a [u8]> {
+    let quoted = listed.starts_with(b"\"") && listed.ends_with(b"\"") && listed.len() >= 2;
+    if quoted || listed.starts_with(b"W/") {
+        let into = into.get_mut(..listed.len())?;
+        into.copy_from_slice(listed);
+        return Some(into);
+    }
+    // A byte slice is at most isize::MAX bytes, leaving usize room for two quotes.
+    let into = into.get_mut(..listed.len() + 2)?;
+    into[0] = b'"';
+    into[1..listed.len() + 1].copy_from_slice(listed);
+    into[listed.len() + 1] = b'"';
+    Some(into)
+}
+
 /// The metadata pairs of one listed object.
 ///
 /// Each item is a name and a value, as the bytes between the pair's tags.
@@ -1375,7 +1406,7 @@ impl<'b> Iterator for Metadata<'b> {
     type Item = (&'b [u8], &'b [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        crate::xml::next_pair(&mut self.rest)
+        next_pair(&mut self.rest)
     }
 }
 
@@ -1399,7 +1430,7 @@ impl<'b> Properties<'b> {
     /// tag, so it reports what the entry holds and not the entry itself.
     pub fn new(raw: &'b [u8]) -> Self {
         Self {
-            rest: crate::xml::after_opening_tag(raw).unwrap_or_default(),
+            rest: after_opening_tag(raw).unwrap_or_default(),
             within: false,
         }
     }
@@ -1432,13 +1463,15 @@ impl<'b> Iterator for Properties<'b> {
     type Item = (&'b [u8], &'b [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
-        crate::xml::next_property(&mut self.rest, &mut self.within)
+        next_property(&mut self.rest, &mut self.within)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConditionKind, DeleteKind, EntryKind, GetKind, RangeForm, RequestedRange};
+    use super::{
+        ConditionKind, DeleteKind, EntryKind, GetKind, RangeForm, RequestedRange, quoted_etag,
+    };
 
     // The tables are hand-written, so a number that names the wrong value is
     // the bug worth checking for.
@@ -1490,5 +1523,23 @@ mod tests {
         assert_eq!(DeleteKind::from_discriminant(0), None);
         assert_eq!(RangeForm::from_discriminant(0), None);
         assert_eq!(EntryKind::from_discriminant(0), None);
+    }
+
+    #[test]
+    fn quotes_a_listed_etag_once() {
+        let mut into = [0; 32];
+        assert_eq!(
+            quoted_etag(b"0x8DF0046E8E555AF", &mut into),
+            Some(b"\"0x8DF0046E8E555AF\"".as_slice())
+        );
+        assert_eq!(
+            quoted_etag(b"\"already\"", &mut into),
+            Some(b"\"already\"".as_slice())
+        );
+        assert_eq!(
+            quoted_etag(b"W/\"weak\"", &mut into),
+            Some(b"W/\"weak\"".as_slice())
+        );
+        assert_eq!(quoted_etag(b"0x8DF", &mut [0; 6]), None);
     }
 }

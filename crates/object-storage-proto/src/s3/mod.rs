@@ -118,10 +118,11 @@
 //!
 //! # Metadata
 //!
-//! Put the pairs of a write in [`PutOptions::metadata`](crate::PutOptions::metadata). A header value
+//! Put the pairs of a write in
+//! [`PutOptions::metadata`](crate::PutOptions::metadata). A header value
 //! holds only ASCII without control characters. A value with any other text
-//! is sent as an RFC 2047 encoded word, which S3 decodes. S3 returns
-//! such a value encoded as well: pass each response header to
+//! is sent as an RFC 2047 encoded word, which S3 decodes. S3 returns such a
+//! value encoded as well: pass each response header to
 //! [`metadata_name`], and its value to [`metadata_value`].
 //!
 //! A value that a read would not return exactly is refused with
@@ -313,23 +314,36 @@
 
 use core::cmp::Ordering;
 
-use crate::checksum::ChecksumKind;
-use crate::common::{
-    ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, failure,
-    finish_with_body, meta_of, parse_content_range, text_header, validate_condition,
-    validate_properties, validate_tags,
-};
+use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
 use crate::encoding::{self, rfc2047};
-use crate::http::PlainHttp;
+use crate::head::{
+    ContentRange, accept_get_success, parse_content_range, read_decimal_header, read_text_header,
+    strip_metadata_prefix,
+};
+use crate::http::{PlainHttp, valid_http_origin};
+use crate::http_message::is_token_byte;
+use crate::outcome::{FailureOutcome, container_failure_outcome, finish_with_body};
+use crate::properties::Property;
+use crate::properties::sealed::Sealed;
 use crate::request::ByteSink;
 use crate::sigv4::{Credentials, MAX_REGION_LEN};
-use crate::{
-    Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteShape,
-    Error, Failure, GetHeadOutcome, GetKind, GetShape, InvalidRequest, ListEntry, ListHeadOutcome,
-    ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome,
-    PutShape, RequestedRange, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
-    WriteOptions,
+use crate::template::{FixedText, Hole, HoleValues, NO_TEXT, Param, ParamValue, TemplateBody};
+use crate::url::QueryValue;
+use crate::validate::{
+    validate_checksum_item, validate_condition, validate_delimiter, validate_get_item,
+    validate_get_options, validate_properties, validate_revision_item, validate_revision_kind,
+    validate_tags,
 };
+use crate::xml::{read_error_code, root_is};
+use crate::{
+    Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
+    InvalidRequest, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions,
+    Listing, MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem,
+    PutOptions, PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result,
+    RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
+};
+use template::{Describe, Detail, Field, FieldList, FieldValue, S3Values};
 
 mod batch;
 mod copy;
@@ -338,19 +352,6 @@ mod restore;
 mod tags;
 mod template;
 
-use crate::checksum::BASE64_LEN;
-use crate::common::{
-    checksum_text, validate_checksum_item, validate_delimiter, validate_get_item,
-    validate_get_options, validate_revision_item, validate_revision_kind,
-};
-use crate::template::{Body, ParamValue};
-use crate::template::{Hole, Values};
-use crate::template::{NO_TEXT, Param, Text};
-use crate::url::QueryValue;
-use crate::{
-    DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
-    Ranging, RevisionKind,
-};
 pub use batch::{
     DeleteResult, MAX_DELETE_KEYS, accept_delete_many_error_body, accept_delete_many_head,
     encode_delete_many, fill_delete_results, prepare_delete_many,
@@ -379,7 +380,6 @@ pub use tags::{
     accept_update_error_body, encode_get_tagging, encode_put_tagging, fill_tags,
     prepare_get_tagging, prepare_put_tagging,
 };
-use template::{Describe, Detail, Field, FieldList, S3Values, Value};
 pub use template::{
     Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, set_body_checksum, set_body_hash,
     set_signature, signing_key, string_to_sign_prefix,
@@ -408,7 +408,7 @@ pub const METADATA_PREFIX: &str = "x-amz-meta-";
 ///
 /// S3 stores a metadata name in lowercase, and returns it so.
 pub fn metadata_name(header: &str) -> Option<&str> {
-    crate::common::metadata_name(header, METADATA_PREFIX)
+    strip_metadata_prefix(header, METADATA_PREFIX)
 }
 
 /// Returns the text of a metadata value that a response header carries.
@@ -524,7 +524,7 @@ impl Service {
     // Whether AWS answers, so that a client holds requests and responses to
     // the rules that AWS documents, which a compatible service need not
     // follow. Each caller names the rule it applies.
-    pub(crate) const fn is_aws(self) -> bool {
+    const fn is_aws(self) -> bool {
         match self {
             Self::Aws | Self::AwsDirectory => true,
             Self::Compatible => false,
@@ -546,7 +546,7 @@ pub struct Bucket<'a> {
     name: &'a str,
     region: &'a str,
     addressing: Addressing,
-    pub(crate) service: Service,
+    service: Service,
     // The object that templates from this bucket name, if they name one.
     object: Option<&'a str>,
 }
@@ -609,7 +609,7 @@ impl<'a> Bucket<'a> {
         service: Service,
         plain: PlainHttp,
     ) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint, plain) {
+        if !valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
         let (scheme, authority) = match endpoint.split_once("://") {
@@ -853,9 +853,9 @@ impl ObjectProperty {
 // `from_bits` shifts by `COUNT`, which must be below the `u64` shift width.
 const _: () = assert!(ObjectProperty::COUNT < 64);
 
-impl crate::properties::sealed::Sealed for ObjectProperty {}
+impl Sealed for ObjectProperty {}
 
-impl crate::properties::Property for ObjectProperty {
+impl Property for ObjectProperty {
     const COUNT: usize = ObjectProperty::ALL.len();
 
     fn number(self) -> u8 {
@@ -962,7 +962,7 @@ pub enum SessionHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-crate::common::container_failure_outcome!(SessionHeadOutcome<'h>);
+container_failure_outcome!(SessionHeadOutcome<'h>);
 
 impl core::fmt::Display for SessionHeadOutcome<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1004,7 +1004,7 @@ pub fn accept_get_head<'h>(
         200 | 206 if states_length && head.content_length.is_none() => {
             Err(ResponseFault::Head.into())
         }
-        200 | 206 => accept_success(shape, head),
+        200 | 206 => accept_get_success(shape, head),
         304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
         304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
         412 if shape.condition == ConditionKind::None
@@ -1024,12 +1024,12 @@ pub fn accept_get_head<'h>(
         // A HEAD response has no body to name the error, so S3's bare 404
         // for a missing bucket reads as a missing key here.
         404 if shape.kind == GetKind::Head => Ok(GetHeadOutcome::NotFound { kind: None }),
-        status if shape.kind == GetKind::Head => Ok(GetHeadOutcome::ServiceFailure(failure(
+        status if shape.kind == GetKind::Head => Ok(GetHeadOutcome::ServiceFailure(Failure::new(
             status,
             None,
             head.request_id,
         ))),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1054,7 +1054,7 @@ pub fn prepare_get(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_get_options(options, false)?;
-    template::prepare(bucket, credentials, &describe_get(options), buf)
+    template::prepare_template(bucket, credentials, &describe_get(options), buf)
 }
 
 // The request of a read with `options`.
@@ -1104,15 +1104,15 @@ pub fn encode_get(
     };
     let key = template.request_key(bytes, item.key)?;
     validate_get_item(&options, item)?;
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
         condition: item.condition_value,
         revision: item.revision,
-        ..Values::default()
+        ..HoleValues::default()
     });
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -1136,7 +1136,7 @@ pub fn accept_get_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> GetHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Whether every write of a template signs the SHA-256 of its content.
@@ -1175,19 +1175,19 @@ pub fn prepare_put(
 ) -> Result<Template> {
     let service = bucket.service;
     validate_metadata(options.metadata, service)?;
-    validate_stored(&options.options, service)?;
+    validate_stored_properties(&options.options, service)?;
     let aws = matches!(service, Service::Aws | Service::AwsDirectory);
     if aws && options.condition.is_date() {
         return Err(InvalidRequest::Condition.into());
     }
     let mut signed = FieldList::new();
-    push_stored(&mut signed, &options.options);
+    push_stored_fields(&mut signed, &options.options);
     let describe = Describe {
         signed: signed.as_slice(),
         metadata: options.metadata,
         ..describe_put(options.condition, options.checksum, signing)
     };
-    template::prepare(bucket, credentials, &describe, buf)
+    template::prepare_template(bucket, credentials, &describe, buf)
 }
 
 // The request of a whole-object write of a template with `condition`,
@@ -1260,21 +1260,21 @@ pub fn encode_put<'i>(
     validate_write_condition(condition, item.condition_value, template.service)?;
     validate_checksum_item(checksum, item.checksum)?;
     let hex = match (signing, content_sha256) {
-        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex(digest)),
+        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex_digest(digest)),
         (PayloadSigning::Unsigned, None) => None,
         _ => return Err(InvalidRequest::Option.into()),
     };
     let mut text = [0; BASE64_LEN];
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
         content_length: Some(item.content.len()),
-        checksum: checksum_text(item.checksum, &mut text, true),
+        checksum: checksum_base64(item.checksum, &mut text, true),
         payload_hash: hex.as_ref(),
-        ..Values::default()
+        ..HoleValues::default()
     });
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -1299,14 +1299,14 @@ pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<Pu
     match head.status {
         200 => Ok(PutHeadOutcome::Created {
             meta: ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             },
         }),
         412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
         412 => Ok(PutHeadOutcome::PreconditionFailed),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1323,7 +1323,7 @@ pub fn accept_put_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> PutHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of removals with `options` from `bucket`, signed
@@ -1425,7 +1425,7 @@ pub fn accept_delete_head<'h>(
         412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
         412 => Ok(DeleteHeadOutcome::PreconditionFailed),
         200..=203 | 205..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1443,7 +1443,7 @@ pub fn accept_delete_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> DeleteHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of listings with `options` of `bucket`, signed with
@@ -1490,7 +1490,7 @@ pub fn prepare_list(
         delimiter: options.delimiter.is_some(),
         max_keys: options.max_results.is_some(),
     };
-    template::prepare(
+    template::prepare_template(
         bucket,
         credentials,
         &describe_list(detail, Some(options)),
@@ -1615,15 +1615,15 @@ pub fn encode_list(
     if versions && item.start_after.is_some_and(|key| !key.is_empty()) {
         return Err(InvalidRequest::Option.into());
     }
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         prefix: Some(item.prefix),
         marker,
         start_after: item.start_after,
         version_marker,
-        ..Values::default()
+        ..HoleValues::default()
     });
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -1647,10 +1647,10 @@ pub fn encode_list(
 pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
     match head.status {
         200 => Ok(ListHeadOutcome::Page {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1661,7 +1661,7 @@ pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h
 /// [`ListHeadOutcome::ServiceFailure`] with
 /// [`ServiceErrorKind::NoSuchContainer`].
 pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads a page out of the response body of a listing.
@@ -1727,42 +1727,42 @@ pub fn fill_listing_with<'b, E>(
 
 // Reads a head that reports a failure. S3 names its error in the body
 // alone, so every failure needs the body.
-pub(crate) fn failed<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
-    O::need_error_body(failure(head.status, None, head.request_id))
+fn read_failure_head<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
+    O::need_error_body(Failure::new(head.status, None, head.request_id))
 }
 
 /// Returns the error code that an S3 error body names.
 ///
 /// Unknown codes are returned unchanged.
 pub fn error_code(body: &[u8]) -> Option<&str> {
-    crate::xml::error_code(body)
+    read_error_code(body)
 }
 
 /// Classifies the S3 error that `body` names. Set `truncated` if a read
 /// limit stopped the body early.
 pub fn classify_error(body: &[u8], truncated: bool) -> Classification {
-    match body_kind(body) {
+    match kind_in_body(body) {
         Some(kind) => Classification::Classified(kind),
         None if truncated => Classification::Incomplete,
         None => Classification::Unknown,
     }
 }
 
-pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
-    crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+fn kind_in_body(body: &[u8]) -> Option<ServiceErrorKind> {
+    read_error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
 // Returns whether `body` is an error document rather than the result of a
 // request. S3 can send one under status 200.
-pub(crate) fn is_error_document(body: &[u8]) -> bool {
-    crate::xml::root_is(body, b"Error")
+fn is_error_document(body: &[u8]) -> bool {
+    root_is(body, b"Error")
 }
 
 // Returns the error that `body` names if it is an error document, so that a
 // method that reads a result does not report it as a malformed result.
-pub(crate) fn refuse_error_document(body: &[u8]) -> Result<()> {
+fn refuse_error_document(body: &[u8]) -> Result<()> {
     if is_error_document(body) {
-        return Err(Error::Service(body_kind(body)));
+        return Err(Error::Service(kind_in_body(body)));
     }
     Ok(())
 }
@@ -1792,7 +1792,7 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
 // SigV4 signs a header value without the spaces at either end, and with each
 // run of spaces inside it as one space. A value sent as it is holds no other
 // whitespace.
-pub(crate) fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
+fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
     let value = value.trim_ascii();
     let mut start = 0;
     let mut at = 0;
@@ -1884,7 +1884,7 @@ fn looks_like_ipv4(name: &str) -> bool {
         })
 }
 
-pub(crate) fn validate_key(key: &str) -> Result<()> {
+fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(InvalidRequest::EmptyKey.into());
     }
@@ -1910,11 +1910,9 @@ fn has_dot_segment(key: &[u8]) -> bool {
     })
 }
 
-// Checks a checksum of S3's: one that a write signs as text, or one that the
-// encoder computes, an MD5 or a CRC-64/NVME.
 // Checks the content properties, the storage class and the tags that a write
 // stores with the object.
-pub(crate) fn validate_stored(options: &WriteOptions<'_>, service: Service) -> Result<()> {
+fn validate_stored_properties(options: &WriteOptions<'_>, service: Service) -> Result<()> {
     // A general purpose bucket returns header bytes as it got them. A
     // directory bucket refuses a byte outside ASCII with 400 InvalidRequest.
     let utf8: &[&str] = match service {
@@ -1930,7 +1928,7 @@ pub(crate) fn validate_stored(options: &WriteOptions<'_>, service: Service) -> R
 }
 
 // The characters that S3 takes in the key and the value of a tag.
-pub(crate) fn s3_tag_char(character: char) -> bool {
+fn s3_tag_char(character: char) -> bool {
     character.is_alphanumeric() || " +-=._:/@".contains(character)
 }
 
@@ -1938,7 +1936,7 @@ pub(crate) fn s3_tag_char(character: char) -> bool {
 const CRC64_HEADER: &str = "x-amz-checksum-crc64nvme";
 
 // Checks the condition of a write: a whole object, or a commit of parts.
-pub(crate) fn validate_write_condition(
+fn validate_write_condition(
     condition: ConditionKind,
     value: Option<ConditionValue<'_>>,
     service: Service,
@@ -1960,9 +1958,9 @@ pub(crate) fn validate_write_condition(
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
 // token. `write_metadata_value` writes the value, and S3 matches a name
 // without case.
-pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
+fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
-        if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
+        if pair.name.is_empty() || !pair.name.bytes().all(is_token_byte) {
             return Err(InvalidRequest::MetadataName.into());
         }
         // An empty value is a pair with no text, which S3 stores. A value is
@@ -2001,7 +1999,7 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service)
 // A directory bucket stores an encoded word as it is sent, and a read
 // decodes it, so the values that a general purpose bucket would change are
 // encoded for it as well.
-fn encodes(value: &str, service: Service) -> bool {
+fn sends_encoded_word(value: &str, service: Service) -> bool {
     !value.is_ascii()
         || value.bytes().any(|byte| byte.is_ascii_control())
         || (stores_encoded_words(service) && general_purpose_changes(value))
@@ -2031,36 +2029,29 @@ fn general_purpose_changes(value: &str) -> bool {
 // Writes a metadata value as the header carries it, encoded or as it is. An
 // encoded word holds no space, so its canonical form for SigV4 is the same.
 fn write_metadata_value(out: &mut dyn ByteSink, value: &str, service: Service) {
-    if encodes(value, service) {
+    if sends_encoded_word(value, service) {
         rfc2047::write(out, value);
     } else {
         out.push(value.as_bytes());
     }
 }
 
-// The bytes that RFC 9110 allows in a token, which S3 takes in a metadata
-// name.
-fn token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-}
-
-// Writes the template of `request` into `buf`.
 // What every request of a template that names one object sends alike,
 // beside its structure: the fixed fields, signed and not, the metadata, and
 // the text of a fixed body.
 #[derive(Default)]
-pub(in crate::s3) struct ObjectText<'p> {
-    pub(in crate::s3) signed: &'p [Field<'p>],
-    pub(in crate::s3) unsigned: &'p [Field<'p>],
-    pub(in crate::s3) metadata: &'p [MetadataPair<'p>],
-    pub(in crate::s3) body: Option<Text<'p>>,
+struct ObjectText<'p> {
+    signed: &'p [Field<'p>],
+    unsigned: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+    body: Option<FixedText<'p>>,
 }
 
 // Writes the template of `operation`, which names one object, with the
 // condition `condition`, the kind of revision `revision`, and the checksum
 // of its body `checksum`.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::s3) fn prepare_object(
+fn prepare_object(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     operation: Operation,
@@ -2077,7 +2068,7 @@ pub(in crate::s3) fn prepare_object(
         metadata: text.metadata,
         ..describe_object(operation, condition, revision, checksum, text.body)
     };
-    template::prepare(bucket, credentials, &describe, buf)
+    template::prepare_template(bucket, credentials, &describe, buf)
 }
 
 // The request of `operation`, which names one object, for a template with
@@ -2085,12 +2076,12 @@ pub(in crate::s3) fn prepare_object(
 // its body, which a PutObjectTagging and a RestoreObject write from their
 // templates. `body` is the text of that body, the template's, and none for
 // a request.
-pub(in crate::s3) fn describe_object<'p>(
+fn describe_object<'p>(
     operation: Operation,
     condition: ConditionKind,
     revision: RevisionKind,
     checksum: Option<ChecksumKind>,
-    body: Option<Text<'p>>,
+    body: Option<FixedText<'p>>,
 ) -> Describe<'p, 4> {
     let (method, param) = match operation {
         Operation::Delete => (Method::Delete, None),
@@ -2112,31 +2103,31 @@ pub(in crate::s3) fn describe_object<'p>(
     describe.query[3] = version_param(revision);
     describe.condition(condition);
     if matches!(operation, Operation::PutTagging | Operation::Restore) {
-        describe.with_body(Body::Fixed(body.unwrap_or(NO_TEXT)), checksum);
+        describe.with_body(TemplateBody::Fixed(body.unwrap_or(NO_TEXT)), checksum);
     }
     describe
 }
 
 // Adds the fields of what a write stores beside its content and its
 // metadata: the content properties, the storage class and the tags.
-pub(in crate::s3) fn push_stored<'d>(fields: &mut FieldList<'d>, options: &WriteOptions<'d>) {
+fn push_stored_fields<'d>(fields: &mut FieldList<'d>, options: &WriteOptions<'d>) {
     for (name, value) in options.properties.iter() {
-        fields.push(Field::new(name, Value::Bytes(value.as_bytes())));
+        fields.push(Field::new(name, FieldValue::Bytes(value.as_bytes())));
     }
     if let Some(class) = options.storage_class {
         fields.push(Field::new(
             "x-amz-storage-class",
-            Value::Bytes(class.as_bytes()),
+            FieldValue::Bytes(class.as_bytes()),
         ));
     }
     if !options.tags.is_empty() {
-        fields.push(Field::new("x-amz-tagging", Value::Tags(options.tags)));
+        fields.push(Field::new("x-amz-tagging", FieldValue::Tags(options.tags)));
     }
 }
 
 // Writes the request of `operation` that names the one object `item`, from
 // a template of that operation.
-pub(in crate::s3) fn encode_object(
+fn encode_object(
     template: &Template,
     bytes: &[u8],
     operation: Operation,
@@ -2158,15 +2149,15 @@ pub(in crate::s3) fn encode_object(
     let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
         revision: item.revision,
         body_checksum: checksum,
-        ..Values::default()
+        ..HoleValues::default()
     });
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -2195,7 +2186,7 @@ pub fn prepare_create_session(
     if bucket.service != Service::AwsDirectory {
         return Err(InvalidRequest::Option.into());
     }
-    template::prepare(bucket, credentials, &describe_session(), buf)
+    template::prepare_template(bucket, credentials, &describe_session(), buf)
 }
 
 // The request of a CreateSession.
@@ -2232,11 +2223,11 @@ pub fn encode_create_session(
     if template.operation != Operation::CreateSession {
         return Err(InvalidRequest::Template.into());
     }
-    let values = S3Values(Values {
+    let values = S3Values(HoleValues {
         now: Some(now),
-        ..Values::default()
+        ..HoleValues::default()
     });
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -2255,10 +2246,10 @@ pub fn encode_create_session(
 pub fn accept_create_session_head<'h>(head: ResponseHead<'h>) -> Result<SessionHeadOutcome<'h>> {
     match head.status {
         200 => Ok(SessionHeadOutcome::Session {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -2267,7 +2258,7 @@ pub fn accept_create_session_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> SessionHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the credentials of a session out of the response body of a

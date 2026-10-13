@@ -7,15 +7,17 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::template::{Field, Operation, Template, Value};
-use crate::azure::{AzureNamespace, Container, ObjectText, encode_object, prepare_object};
-use crate::azure::{body_kind, failed};
-use crate::common::{finish_with_body, valid_header};
+use crate::azure::template::{Field, FieldValue, Operation, Template};
+use crate::azure::{
+    AzureNamespace, Container, ObjectText, encode_object, kind_in_body, prepare_object,
+    read_failure_head,
+};
+use crate::outcome::finish_with_body;
 use crate::template::WireRequest;
-use crate::{ConditionKind, ObjectItem, RestoreOptions};
+use crate::validate::is_header_value;
 use crate::{
-    Failure, InvalidRequest, ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority,
-    Result, Timestamps,
+    ConditionKind, Failure, InvalidRequest, ObjectItem, ResponseFault, ResponseHead,
+    RestoreHeadOutcome, RestoreOptions, RestorePriority, Result, Timestamps,
 };
 
 /// Writes the template of rehydrations with `options` into `buf`: Set Blob
@@ -49,13 +51,16 @@ pub fn prepare_restore(
     if options.days.is_some() || options.checksum.is_some() {
         return Err(InvalidRequest::Option.into());
     }
-    if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
+    if !is_header_value(tier.as_bytes()) || tier.trim_ascii() != tier {
         return Err(InvalidRequest::ContentProperty.into());
     }
     let fields = [
-        Field::new("x-ms-access-tier", Value::Bytes(tier.as_bytes())),
-        Field::new("x-ms-rehydrate-priority", Value::Bytes(priority.as_bytes())),
-        Field::new("content-length", Value::Bytes(b"0")),
+        Field::new("x-ms-access-tier", FieldValue::Bytes(tier.as_bytes())),
+        Field::new(
+            "x-ms-rehydrate-priority",
+            FieldValue::Bytes(priority.as_bytes()),
+        ),
+        Field::new("content-length", FieldValue::Bytes(b"0")),
     ];
     prepare_object(
         container,
@@ -107,11 +112,11 @@ pub fn accept_restore_head<'h>(head: ResponseHead<'h>) -> Result<RestoreHeadOutc
         202 => Ok(RestoreHeadOutcome::Started),
         200 => Ok(RestoreHeadOutcome::Readable),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_restore_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> RestoreHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }

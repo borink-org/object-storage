@@ -236,7 +236,7 @@ pub struct Layout {
 }
 
 /// The layout that this crate compiled to.
-pub(crate) fn layout() -> Layout {
+pub(crate) fn compiled_layout() -> Layout {
     Layout {
         sizeof_azure_rejection: size_of::<AzureRejection>(),
         alignof_azure_rejection: align_of::<AzureRejection>(),
@@ -476,7 +476,7 @@ pub(crate) fn layout() -> Layout {
 /// `probe` counts every field as different.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_layout_disagrees(probe: *const Layout) -> usize {
-    let ours = layout();
+    let ours = compiled_layout();
     let fields = size_of::<Layout>() / size_of::<usize>();
     if probe.is_null() {
         return fields;

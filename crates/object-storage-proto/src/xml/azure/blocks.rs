@@ -13,9 +13,10 @@
 // the 43-byte minimum element that `azure::max_blocks_in` divides by.
 
 use crate::azure::{Block, BlockState};
-use crate::xml::decode::decode;
+use crate::encoding::parse_decimal;
+use crate::xml::decode::decode_scanned;
 use crate::xml::page::check_body;
-use crate::xml::scan::{Child, Scan, fault, trim};
+use crate::xml::scan::{ChildTag, Scan, body_fault, trim_span};
 use crate::{CapacityError, Error, Listing, Result};
 
 pub(crate) fn fill_blocks<'b, E: From<Block<'b>>>(
@@ -23,7 +24,7 @@ pub(crate) fn fill_blocks<'b, E: From<Block<'b>>>(
     into: &mut [E],
 ) -> Result<Listing<'b>> {
     let mut filled = 0;
-    read(body, into.len(), &mut |block| {
+    read_block_list(body, into.len(), &mut |block| {
         if let Some(slot) = into.get_mut(filled) {
             *slot = block.into();
         }
@@ -33,7 +34,7 @@ pub(crate) fn fill_blocks<'b, E: From<Block<'b>>>(
     })
 }
 
-pub(crate) fn read<'b>(
+pub(crate) fn read_block_list<'b>(
     body: &'b mut [u8],
     room: usize,
     sink: &mut dyn FnMut(Block<'b>) -> bool,
@@ -44,7 +45,7 @@ pub(crate) fn read<'b>(
     loop {
         scan.skip_space();
         if scan.cur() != b'<' {
-            return fault();
+            return body_fault();
         }
         if !scan.skip_misc()? {
             break;
@@ -52,23 +53,23 @@ pub(crate) fn read<'b>(
     }
     let root = scan.open()?;
     if scan.text(root.name) != b"BlockList" || !scan.text(root.attributes).trim_ascii().is_empty() {
-        return fault();
+        return body_fault();
     }
     let mut count = 0;
     let mut seen = [false; 2];
     if !root.empty {
         loop {
             scan.take();
-            let Child::Open(section) = scan.child(b"BlockList")? else {
+            let ChildTag::Open(section) = scan.child(b"BlockList")? else {
                 break;
             };
             let (name, state, index): (&[u8], _, _) = match scan.text(section.name) {
                 b"CommittedBlocks" => (b"CommittedBlocks", BlockState::Committed, 0),
                 b"UncommittedBlocks" => (b"UncommittedBlocks", BlockState::Staged, 1),
-                _ => return fault(),
+                _ => return body_fault(),
             };
             if seen[index] || !scan.text(section.attributes).trim_ascii().is_empty() {
-                return fault();
+                return body_fault();
             }
             seen[index] = true;
             if section.empty {
@@ -76,40 +77,41 @@ pub(crate) fn read<'b>(
             }
             loop {
                 scan.take();
-                let Child::Open(block) = scan.child(name)? else {
+                let ChildTag::Open(block) = scan.child(name)? else {
                     break;
                 };
                 if scan.text(block.name) != b"Block"
                     || block.empty
                     || !scan.text(block.attributes).trim_ascii().is_empty()
                 {
-                    return fault();
+                    return body_fault();
                 }
                 let (mut id, mut size) = (None, None);
-                while let Child::Open(field) = scan.child(b"Block")? {
+                while let ChildTag::Open(field) = scan.child(b"Block")? {
                     if !scan.text(field.attributes).trim_ascii().is_empty() {
-                        return fault();
+                        return body_fault();
                     }
                     match scan.text(field.name) {
                         b"Name" if id.is_none() => id = Some(scan.value(field)?),
                         b"Size" if size.is_none() => size = Some(scan.value(field)?.0),
-                        _ => return fault(),
+                        _ => return body_fault(),
                     }
                 }
                 let (Some((id, flags)), Some(size)) = (id, size) else {
-                    return fault();
+                    return body_fault();
                 };
                 let chunk = scan.take();
-                let (start, end) = trim(chunk, size);
-                let Some(size) = crate::common::decimal(&chunk[start..end]) else {
-                    return fault();
+                let (start, end) = trim_span(chunk, size);
+                let Some(size) = parse_decimal(&chunk[start..end]) else {
+                    return body_fault();
                 };
-                let len = decode(&mut chunk[id.0..id.1], flags, false)?;
+                let len = decode_scanned(&mut chunk[id.0..id.1], flags, false)?;
                 if len == 0 {
-                    return fault();
+                    return body_fault();
                 }
                 // Scan bounds id by chunk; decode cannot grow id.0..id.1.
-                let id = core::str::from_utf8(&chunk[id.0..id.0 + len]).or_else(|_| fault())?;
+                let id =
+                    core::str::from_utf8(&chunk[id.0..id.0 + len]).or_else(|_| body_fault())?;
                 if sink(Block { id, size, state }) {
                     // Every iteration consumes a Block, bounding count by body.len().
                     count += 1;
@@ -123,7 +125,7 @@ pub(crate) fn read<'b>(
             break;
         }
         if scan.cur() != b'<' || !scan.skip_misc()? {
-            return fault();
+            return body_fault();
         }
     }
     if count > room {

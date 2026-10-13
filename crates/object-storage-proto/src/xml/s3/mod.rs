@@ -1,9 +1,10 @@
 // Reads a `ListBucketResult` document, the page of an S3 ListObjectsV2, or
-// a `ListVersionsResult`, the page of a ListObjectVersions, in one pass. `read_session` at the end reads the
-// answer to an S3 Express CreateSession. `parts.rs` reads the answers of
-// an upload in parts, `copy.rs` those of a copy, and `batch.rs` the answer
-// of a DeleteObjects. `read_values` reads the small documents that the
-// last three answer with.
+// a `ListVersionsResult`, the page of a ListObjectVersions, in one pass.
+// `read_session` at the end reads the answer to an S3 Express
+// CreateSession. `parts.rs` reads the answers of an upload in parts,
+// `copy.rs` those of a copy, and `batch.rs` the answer of a DeleteObjects.
+// `read_root_values` reads the small documents that the last three answer
+// with.
 //
 // Each object is a `Contents` child of the root, with its properties beside
 // its key. Each group of keys is a `CommonPrefixes` child that holds one
@@ -18,20 +19,21 @@
 // every key is decoded, and the page is refused at its end if decoding
 // changed a key and the page never named the encoding.
 
+use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
+use crate::url::form_decode_in_place;
+use crate::xml::decode::decode_scanned;
+use crate::xml::page::{
+    ListProperty, captured_values, check_body, check_room, decode_value_in_place, decoded_text,
+    end_decoded_key, field_text, fields_text, open_root_element, read_matched, read_size,
+    read_unmatched, set_once,
+};
+use crate::xml::root_is;
+use crate::xml::scan::{ChildTag, Scan, Span, body_fault, trim_span};
+use crate::{EntryKind, ListEntry, ListMarker, Listing, Result, iso8601_ms};
+
 pub(crate) mod batch;
 pub(crate) mod copy;
 pub(crate) mod parts;
-
-use crate::iso8601_ms;
-use crate::s3::{ObjectProperty, PropertySet, PropertyValues, Session};
-use crate::url::form_decode_in_place;
-use crate::xml::decode::decode;
-use crate::xml::page::{
-    ListProperty, check_body, check_room, decode_value_in_place, end_decoded_key, field,
-    fields_text, open_root_element, read_known, read_other, read_size, set_once, text, values_of,
-};
-use crate::xml::scan::{Child, Scan, Span, fault, trim};
-use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
 
 const ROOT: &[u8] = b"ListBucketResult";
 const OBJECT: &[u8] = b"Contents";
@@ -62,7 +64,7 @@ pub(crate) fn fill_listing<'b, E>(
 ) -> Result<Listing<'b>> {
     check_body(body)?;
     // A ListObjectVersions answers with a root of its own.
-    let versions = crate::xml::root_is(body, VERSIONS_ROOT);
+    let versions = root_is(body, VERSIONS_ROOT);
     let mut scan = Scan::new(body);
     open_root_element(&mut scan, if versions { VERSIONS_ROOT } else { ROOT })?;
     // The read is compiled once for every entry type.
@@ -135,10 +137,10 @@ fn read_root_children_into<'b>(
             Some(read_object(&mut scan, wanted, captured, Entry::Object)?)
         } else {
             match scan.child(root)? {
-                Child::Close => break,
-                Child::Open(tag) => match scan.text(tag.name) {
+                ChildTag::Close => break,
+                ChildTag::Open(tag) => match scan.text(tag.name) {
                     // An entry with nothing in it has no key.
-                    OBJECT | GROUP | VERSION | DELETE_MARKER if tag.empty => return fault(),
+                    OBJECT | GROUP | VERSION | DELETE_MARKER if tag.empty => return body_fault(),
                     OBJECT if !versions => {
                         Some(read_object(&mut scan, wanted, captured, Entry::Object)?)
                     }
@@ -155,13 +157,13 @@ fn read_root_children_into<'b>(
                     b"EncodingType" => {
                         // A second one is refused, as a second key is.
                         if seen_encoding {
-                            return fault();
+                            return body_fault();
                         }
                         seen_encoding = true;
                         let (span, _) = scan.value(tag)?;
                         // The request asked for `url`, and for nothing else.
                         if scan.text(span).trim_ascii() != b"url" {
-                            return fault();
+                            return body_fault();
                         }
                         page.encoded = true;
                         None
@@ -171,62 +173,62 @@ fn read_root_children_into<'b>(
                         let truncated = match scan.text(span).trim_ascii() {
                             b"true" => true,
                             b"false" => false,
-                            _ => return fault(),
+                            _ => return body_fault(),
                         };
                         set_once(&mut page.truncated, truncated)?;
                         None
                     }
                     b"NextKeyMarker" if versions => {
                         if seen_token {
-                            return fault();
+                            return body_fault();
                         }
                         seen_token = true;
                         let (span, flags) = scan.value(tag)?;
                         let chunk = scan.take();
                         // The marker is a key, so it is URL-encoded as the
                         // keys are, and kept with its spaces.
-                        let escaped = decode(&mut chunk[span.0..span.1], flags, false)?;
+                        let escaped = decode_scanned(&mut chunk[span.0..span.1], flags, false)?;
                         let (len, decoded) =
                             form_decode_in_place(&mut chunk[span.0..span.0 + escaped]);
                         page.decoded |= decoded;
                         let chunk: &'b [u8] = chunk;
                         page.token = Some(&chunk[span.0..span.0 + len])
                             .filter(|marker| !marker.is_empty())
-                            .map(text)
+                            .map(decoded_text)
                             .transpose()?;
                         None
                     }
                     b"NextVersionIdMarker" if versions => {
                         if seen_version_token {
-                            return fault();
+                            return body_fault();
                         }
                         seen_version_token = true;
                         let (span, flags) = scan.value(tag)?;
                         let chunk = scan.take();
-                        let (start, stop) = trim(chunk, span);
-                        let len = decode(&mut chunk[start..stop], flags, false)?;
+                        let (start, stop) = trim_span(chunk, span);
+                        let len = decode_scanned(&mut chunk[start..stop], flags, false)?;
                         let chunk: &'b [u8] = chunk;
                         page.version_token = Some(&chunk[start..start + len])
                             .filter(|marker| !marker.is_empty())
-                            .map(text)
+                            .map(decoded_text)
                             .transpose()?;
                         None
                     }
                     b"NextContinuationToken" if !versions => {
                         if seen_token {
-                            return fault();
+                            return body_fault();
                         }
                         seen_token = true;
                         let (span, flags) = scan.value(tag)?;
                         let chunk = scan.take();
-                        let (start, stop) = trim(chunk, span);
+                        let (start, stop) = trim_span(chunk, span);
                         // The token is not URL-encoded, only escaped for XML.
-                        // `decode` returns at most the length it was given.
-                        let len = decode(&mut chunk[start..stop], flags, false)?;
+                        // `decode_scanned` returns at most the length it was given.
+                        let len = decode_scanned(&mut chunk[start..stop], flags, false)?;
                         let chunk: &'b [u8] = chunk;
                         page.token = Some(&chunk[start..start + len])
                             .filter(|token| !token.is_empty())
-                            .map(text)
+                            .map(decoded_text)
                             .transpose()?;
                         None
                     }
@@ -251,19 +253,19 @@ fn read_root_children_into<'b>(
                 // A group of keys captures nothing, so it gives no values.
                 values[..slots].fill(None);
             } else {
-                values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+                captured_values(entry.raw, &spans[..slots], &mut values[..slots]);
             }
             sink(entry, PropertyValues::new(wanted, &values[..slots]));
             page.built += 1;
         }
     }
-    finish(page, room)
+    finish_listing(page, room)
 }
 
-fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
+fn finish_listing<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
     // Without `EncodingType`, a `%` or a `+` in a key may have been text.
     if page.decoded && !page.encoded {
-        return fault();
+        return body_fault();
     }
     check_room(page.held, room)?;
     // `IsTruncated` and the token must agree. Without `IsTruncated`, the
@@ -271,11 +273,11 @@ fn finish<'b>(page: Page<'b>, room: usize) -> Result<Listing<'b>> {
     let next_marker = match (page.truncated, page.token) {
         (Some(true) | None, Some(token)) => Some(token),
         (Some(false) | None, None) => None,
-        (Some(true), None) | (Some(false), Some(_)) => return fault(),
+        (Some(true), None) | (Some(false), Some(_)) => return body_fault(),
     };
     // A version marker names a place among the versions of the next key.
     if page.version_token.is_some() && next_marker.is_none() {
-        return fault();
+        return body_fault();
     }
     let next_marker = next_marker.map(|token| match page.versions {
         true => ListMarker::Version {
@@ -368,35 +370,35 @@ fn read_object(
             b'E' if scan.lit(b"<ETag>") => set_once(&mut fields.e_tag, scan.value_of(b"ETag")?)?,
             b'S' if scan.lit(b"<Size>") => set_once(&mut fields.size, scan.value_of(b"Size")?.0)?,
             b'S' if scan.lit(b"<StorageClass>") => {
-                read_known(scan, ObjectProperty::StorageClass, wanted, captured)?;
+                read_matched(scan, ObjectProperty::StorageClass, wanted, captured)?;
             }
             b'C' if scan.lit(b"<ChecksumAlgorithm>") => {
-                read_known(scan, ObjectProperty::ChecksumAlgorithm, wanted, captured)?;
+                read_matched(scan, ObjectProperty::ChecksumAlgorithm, wanted, captured)?;
             }
             b'C' if scan.lit(b"<ChecksumType>") => {
-                read_known(scan, ObjectProperty::ChecksumType, wanted, captured)?;
+                read_matched(scan, ObjectProperty::ChecksumType, wanted, captured)?;
             }
             b'O' if scan.lit(b"<Owner>") => {
-                read_known(scan, ObjectProperty::Owner, wanted, captured)?
+                read_matched(scan, ObjectProperty::Owner, wanted, captured)?
             }
             b'R' if scan.lit(b"<RestoreStatus>") => {
-                read_known(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
+                read_matched(scan, ObjectProperty::RestoreStatus, wanted, captured)?;
             }
             b'V' if scan.lit(b"<VersionId>") => {
-                read_known(scan, ObjectProperty::VersionId, wanted, captured)?;
+                read_matched(scan, ObjectProperty::VersionId, wanted, captured)?;
             }
             b'I' if scan.lit(b"<IsLatest>") => {
-                read_known(scan, ObjectProperty::IsLatest, wanted, captured)?;
+                read_matched(scan, ObjectProperty::IsLatest, wanted, captured)?;
             }
             b'/' if scan.lit(entry.close()) => break,
             _ => match scan.child(entry.name())? {
-                Child::Close => break,
-                Child::Open(tag) => match scan.text(tag.name) {
+                ChildTag::Close => break,
+                ChildTag::Open(tag) => match scan.text(tag.name) {
                     b"Key" => set_once(&mut fields.key, scan.value(tag)?)?,
                     b"LastModified" => set_once(&mut fields.last_modified, scan.value(tag)?)?,
                     b"ETag" => set_once(&mut fields.e_tag, scan.value(tag)?)?,
                     b"Size" => set_once(&mut fields.size, scan.value(tag)?.0)?,
-                    _ => read_other(scan, tag, wanted, captured)?,
+                    _ => read_unmatched(scan, tag, wanted, captured)?,
                 },
             },
         }
@@ -404,7 +406,7 @@ fn read_object(
     // An object always has a key and a length. A delete marker has a key
     // and no bytes.
     if fields.key.is_none() || fields.size.is_none() != fields.delete_marker {
-        return fault();
+        return body_fault();
     }
     Ok(fields)
 }
@@ -415,15 +417,15 @@ fn read_group(scan: &mut Scan<'_>) -> Result<Fields> {
     let mut fields = Fields::new(true);
     loop {
         match scan.child(GROUP)? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"Prefix" => set_once(&mut fields.key, scan.value(tag)?)?,
                 _ => scan.skip(tag)?,
             },
         }
     }
     if fields.key.is_none() {
-        return fault();
+        return body_fault();
     }
     Ok(fields)
 }
@@ -432,18 +434,18 @@ fn read_group(scan: &mut Scan<'_>) -> Result<Fields> {
 // place. Also returns whether URL-decoding changed the key.
 fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)> {
     let Some((key, key_flags)) = fields.key else {
-        return fault();
+        return body_fault();
     };
     // S3 stores no object under an empty key, and groups no keys under an
     // empty prefix.
     if key.0 == key.1 {
-        return fault();
+        return body_fault();
     }
     let size = fields.size.map(|span| read_size(chunk, span)).transpose()?;
 
     // A key may begin or end with a space, so the key is not trimmed. XML
     // escaping is undone first, because the document applied it last.
-    let escaped = decode(&mut chunk[key.0..key.1], key_flags, false)?;
+    let escaped = decode_scanned(&mut chunk[key.0..key.1], key_flags, false)?;
     let (key_len, decoded) = form_decode_in_place(&mut chunk[key.0..key.0 + escaped]);
     end_decoded_key(chunk, key, key_len, true)?;
     let e_tag = decode_value_in_place(chunk, fields.e_tag)?;
@@ -462,10 +464,12 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<(ListEntry<'_>, bool)
         } else {
             EntryKind::Object
         },
-        key: field(texts, key)?,
+        key: field_text(texts, key)?,
         size,
-        e_tag: e_tag.map(|span| field(texts, span)).transpose()?,
-        last_modified: last_modified.map(|span| field(texts, span)).transpose()?,
+        e_tag: e_tag.map(|span| field_text(texts, span)).transpose()?,
+        last_modified: last_modified
+            .map(|span| field_text(texts, span))
+            .transpose()?,
         content_type: None,
         raw,
     };
@@ -484,16 +488,16 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
     let mut seen_credentials = false;
     loop {
         match scan.child(b"CreateSessionResult")? {
-            Child::Close => break,
-            Child::Open(tag) if scan.text(tag.name) == b"Credentials" && !tag.empty => {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) if scan.text(tag.name) == b"Credentials" && !tag.empty => {
                 if seen_credentials {
-                    return fault();
+                    return body_fault();
                 }
                 seen_credentials = true;
                 loop {
                     match scan.child(b"Credentials")? {
-                        Child::Close => break,
-                        Child::Open(tag) => {
+                        ChildTag::Close => break,
+                        ChildTag::Open(tag) => {
                             let slot = match scan.text(tag.name) {
                                 b"AccessKeyId" => 0,
                                 b"SecretAccessKey" => 1,
@@ -509,7 +513,7 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
                     }
                 }
             }
-            Child::Open(tag) => scan.skip(tag)?,
+            ChildTag::Open(tag) => scan.skip(tag)?,
         }
     }
     let chunk = scan.take();
@@ -518,16 +522,16 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
         *span = decode_value_in_place(chunk, field)?;
     }
     let [Some(key_id), Some(secret), Some(token), expiration] = spans else {
-        return fault();
+        return body_fault();
     };
     Ok(Session {
-        key_id: text(&chunk[key_id.0..key_id.1])?,
-        secret: text(&chunk[secret.0..secret.1])?,
-        token: text(&chunk[token.0..token.1])?,
+        key_id: decoded_text(&chunk[key_id.0..key_id.1])?,
+        secret: decoded_text(&chunk[secret.0..secret.1])?,
+        token: decoded_text(&chunk[token.0..token.1])?,
         expires_at: match expiration {
-            Some((start, end)) => match iso8601_ms(text(&chunk[start..end])?) {
+            Some((start, end)) => match iso8601_ms(decoded_text(&chunk[start..end])?) {
                 Some(millis) => Some(millis / 1000),
-                None => return fault(),
+                None => return body_fault(),
             },
             None => None,
         },
@@ -538,7 +542,7 @@ pub(crate) fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
 // each decoded in place, and skips every other child. A child named twice is
 // a fault. As in `read_session`, nothing is taken off the body until the root
 // is closed, so every span indexes the whole document.
-pub(crate) fn read_values<'b, const N: usize>(
+pub(crate) fn read_root_values<'b, const N: usize>(
     body: &'b mut [u8],
     root: &[u8],
     names: [&[u8]; N],
@@ -549,8 +553,9 @@ pub(crate) fn read_values<'b, const N: usize>(
     let mut fields: [Option<(Span, u8)>; N] = [None; N];
     loop {
         match scan.child(root)? {
-            Child::Close => break,
-            Child::Open(tag) => match names.iter().position(|name| *name == scan.text(tag.name)) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match names.iter().position(|name| *name == scan.text(tag.name))
+            {
                 Some(slot) => set_once(&mut fields[slot], scan.value(tag)?)?,
                 None => scan.skip(tag)?,
             },
@@ -565,7 +570,7 @@ pub(crate) fn read_values<'b, const N: usize>(
     let mut values = [None; N];
     for (value, span) in values.iter_mut().zip(spans) {
         *value = span
-            .map(|(start, end)| text(&chunk[start..end]))
+            .map(|(start, end)| decoded_text(&chunk[start..end]))
             .transpose()?;
     }
     Ok(values)

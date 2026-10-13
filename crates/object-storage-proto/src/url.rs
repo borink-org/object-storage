@@ -155,9 +155,9 @@ const QUERY_VALUE_ESCAPE: &AsciiSet = &NON_ALPHANUMERIC
 
 // `%` and the two upper-case hexadecimal digits of every byte, as
 // `percent-encoding`'s `percent_encode_byte` writes them.
-static ESCAPES: [[u8; 3]; 256] = escapes();
+static ESCAPES: [[u8; 3]; 256] = escape_table();
 
-const fn escapes() -> [[u8; 3]; 256] {
+const fn escape_table() -> [[u8; 3]; 256] {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut table = [*b"%00"; 256];
     let mut byte = 0usize;
@@ -312,7 +312,10 @@ pub(crate) type Parameter<'q> = Option<(&'q str, QueryValue<'q>)>;
 
 // Text from the caller or the service, percent-encoded, or no parameter
 // without a value.
-pub(crate) fn encoded<'q>(name: &'q str, value: impl Into<Option<&'q str>>) -> Parameter<'q> {
+pub(crate) fn encoded_parameter<'q>(
+    name: &'q str,
+    value: impl Into<Option<&'q str>>,
+) -> Parameter<'q> {
     value
         .into()
         .map(|value| (name, QueryValue::Encoded(value.as_bytes())))

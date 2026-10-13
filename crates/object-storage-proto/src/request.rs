@@ -1,7 +1,10 @@
 use core::str;
 
+use crate::encoding::write_xml_text;
+use crate::url::encode_query_value;
+use crate::{ConditionKind, ConditionValue, RequestedRange, Tag, Timestamps};
+
 /// A range of bytes, as an offset from the start of a buffer.
-///
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct Span {
@@ -10,8 +13,6 @@ pub struct Span {
     /// The number of bytes.
     pub len: usize,
 }
-
-impl Span {}
 
 /// The HTTP method of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +161,7 @@ pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
 // The text of bytes that this crate wrote. A request written from bytes that
 // are not its template's can cut a character in two; its text then ends
 // before that character, rather than the program.
-pub(crate) fn text(bytes: &[u8]) -> &str {
+pub(crate) fn written_text(bytes: &[u8]) -> &str {
     match str::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) => str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
@@ -245,6 +246,95 @@ impl U64Decimal {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes[self.start..]
     }
+}
+
+// A range is written as `Range` writes it: `bytes=` and its first and last
+// byte.
+impl HeaderValue for RequestedRange {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_range(out, self);
+    }
+}
+
+// Writes `range` as the value of a `Range` field.
+pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
+    out.push(b"bytes=");
+    match range {
+        RequestedRange::Bounded { start, end } => {
+            out.push(U64Decimal::new(start).as_bytes());
+            out.push(b"-");
+            // Validation requires start < end, so end is nonzero.
+            out.push(U64Decimal::new(end - 1).as_bytes());
+        }
+        RequestedRange::Offset(first) => {
+            out.push(U64Decimal::new(first).as_bytes());
+            out.push(b"-");
+        }
+        RequestedRange::Suffix(last) => {
+            out.push(b"-");
+            out.push(U64Decimal::new(last).as_bytes());
+        }
+        RequestedRange::Whole => unreachable!("the item was validated"),
+    }
+}
+
+// The name of the field that sends a condition of `kind`, if it sends one.
+pub(crate) fn condition_header_name(kind: ConditionKind) -> Option<&'static str> {
+    match kind {
+        ConditionKind::None => None,
+        ConditionKind::IfMatch => Some("if-match"),
+        ConditionKind::IfNoneMatch => Some("if-none-match"),
+        ConditionKind::IfModifiedSince => Some("if-modified-since"),
+        ConditionKind::IfUnmodifiedSince => Some("if-unmodified-since"),
+    }
+}
+
+// An entity tag is written as it is, and an instant as an HTTP date.
+impl HeaderValue for ConditionValue<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        match self {
+            Self::ETag(tag) => out.push(tag),
+            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123_bytes()),
+        }
+    }
+}
+
+// Tags are written as `write_tags_as_query` writes them.
+impl HeaderValue for &[Tag<'_>] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_tags_as_query(out, self);
+    }
+}
+
+// Writes tags as both services take them in a header: `key=value` pairs
+// joined by `&`, each part percent-encoded.
+pub(crate) fn write_tags_as_query(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    for (index, tag) in tags.iter().enumerate() {
+        if index != 0 {
+            out.push(b"&");
+        }
+        for part in encode_query_value(tag.key.as_bytes()) {
+            out.push(part);
+        }
+        out.push(b"=");
+        for part in encode_query_value(tag.value.as_bytes()) {
+            out.push(part);
+        }
+    }
+}
+
+// Writes tags as both services take them in a body: a `TagSet` that holds a
+// `Tag` of a `Key` and a `Value` for each.
+pub(crate) fn write_tag_set(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    out.push(b"<TagSet>");
+    for tag in tags {
+        out.push(b"<Tag><Key>");
+        write_xml_text(out, tag.key.as_bytes());
+        out.push(b"</Key><Value>");
+        write_xml_text(out, tag.value.as_bytes());
+        out.push(b"</Value></Tag>");
+    }
+    out.push(b"</TagSet>");
 }
 
 #[cfg(test)]

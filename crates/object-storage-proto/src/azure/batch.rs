@@ -10,29 +10,27 @@
 // `Content-ID` of the request it answers, and no other field. Every request
 // is answered once. Anything else is a fault.
 
-// Only the links in the doc comments use this, so it is imported for rustdoc
-// alone: a normal build would report it unused.
-#[cfg(doc)]
-use crate::Error;
-use crate::Payload;
 use crate::azure::template::{
-    Describe, Detail, Field, Holes, Operation, Template, Value, encode as encode_template,
-    prepare as prepare_template,
+    Describe, Detail, Field, FieldValue, Holes, Operation, Template, encode_template,
+    prepare_template,
 };
-use crate::azure::{AzureNamespace, Container};
-use crate::azure::{body_kind, failed, revision_parameter, validate_key};
-use crate::common::{decimal, decimal_header, finish_with_body, validate_revision};
+use crate::azure::{
+    AzureNamespace, Container, accept_delete_error_body, accept_delete_head, kind_in_body,
+    read_failure_head, revision_parameter, validate_key,
+};
+use crate::encoding::parse_decimal;
+use crate::head::read_decimal_header;
 use crate::http_message::Response;
-use crate::multipart::MixedContentType;
-use crate::multipart::{self, Part};
-use crate::request::HeaderValue;
-use crate::request::{ByteSink, U64Decimal, Writer};
-use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
-use crate::url;
+use crate::multipart::{self, MixedContentType, Part};
+use crate::outcome::finish_with_body;
+use crate::request::{ByteSink, HeaderValue, U64Decimal, Writer};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
+use crate::validate::validate_revision;
 use crate::{
-    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Failure, InvalidRequest,
-    Method, ResponseFault, ResponseHead, Result, Timestamps,
+    CapacityError, DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Error,
+    Failure, InvalidRequest, Method, Payload, ResponseFault, ResponseHead, Result, Span,
+    Timestamps, url,
 };
 
 /// The most blobs that one Blob Batch removes.
@@ -74,9 +72,10 @@ impl Default for BatchResult<'_> {
 // The body of a batch: a part for each key, numbered by its position,
 // that holds a Delete Blob request. `path` is the path of the container
 // with a `/` after it, and `tail` the fields after `x-ms-date`, which
-// `write_part_tail` writes; each writes its text into `out`. The request has no content, so the CRLF of the
-// delimiter after it stands for the empty line that ends its head, as in
-// the example of Azure's documentation.
+// `write_part_tail` writes; each writes its text into `out`. The request
+// has no content, so the CRLF of the delimiter after it stands for the
+// empty line that ends its head, as in the example of Azure's
+// documentation.
 fn write_batch(
     out: &mut dyn ByteSink,
     objects: &[DeleteTarget<'_>],
@@ -126,7 +125,7 @@ fn request_index(part: &Part<'_>, count: usize) -> Result<usize> {
             if value.len() > 1 && value[0] == b'0' {
                 return Err(ResponseFault::Body.into());
             }
-            let value = decimal(value).ok_or(ResponseFault::Body)?;
+            let value = parse_decimal(value).ok_or(ResponseFault::Body)?;
             index = Some(usize::try_from(value).or(Err(ResponseFault::Body))?);
         } else if name.eq_ignore_ascii_case("content-type")
             && !application_http
@@ -145,7 +144,7 @@ fn request_index(part: &Part<'_>, count: usize) -> Result<usize> {
 
 // Writes the parts of a batch as the body of its request.
 struct BatchFill<'i> {
-    values: Values<'i>,
+    values: HoleValues<'i>,
     objects: &'i [DeleteTarget<'i>],
     path: &'i [u8],
     tail: &'i [u8],
@@ -155,7 +154,7 @@ struct BatchFill<'i> {
 impl Fill for BatchFill<'_> {
     const BODY: bool = true;
 
-    fn values(&self) -> &Values<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         &self.values
     }
 
@@ -184,7 +183,7 @@ pub fn prepare_delete_many(
 ) -> Result<Template> {
     // The template holds the text that each part repeats, outside its
     // sections, for each request to read.
-    let mut stash = [crate::Span::default(); 2];
+    let mut stash = [Span::default(); 2];
     let content_type = MixedContentType(BOUNDARY);
     let mut type_text = [0u8; 80];
     let mut writer = Writer::new(&mut type_text);
@@ -192,7 +191,7 @@ pub fn prepare_delete_many(
     let type_len = writer.position();
     let fields = [Field::new(
         "content-type",
-        Value::Bytes(&type_text[..type_len]),
+        FieldValue::Bytes(&type_text[..type_len]),
     )];
     let mut template = prepare_template(
         container,
@@ -201,8 +200,8 @@ pub fn prepare_delete_many(
         &describe_batch(&fields),
         Operation::DeleteMany,
         Detail::Batch {
-            path: crate::Span::default(),
-            tail: crate::Span::default(),
+            path: Span::default(),
+            tail: Span::default(),
         },
         buf,
         |b| {
@@ -240,7 +239,7 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
         },
         fields,
         metadata: &[],
-        body: Body::Each,
+        body: TemplateBody::Each,
     }
 }
 
@@ -280,9 +279,9 @@ pub fn encode_delete_many<'r>(
         return Err(InvalidRequest::Template.into());
     };
     let fill = BatchFill {
-        values: Values {
+        values: HoleValues {
             now: Some(now),
-            ..Values::default()
+            ..HoleValues::default()
         },
         objects,
         path,
@@ -311,11 +310,11 @@ pub fn accept_delete_many_head<'h>(head: ResponseHead<'h>) -> Result<DeleteManyH
         202 => {
             multipart::boundary(head.content_type.ok_or(ResponseFault::Head)?)?;
             Ok(DeleteManyHeadOutcome::Results {
-                expected_len: decimal_header(head.content_length)?,
+                expected_len: read_decimal_header(head.content_length)?,
             })
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -325,7 +324,7 @@ pub fn accept_delete_many_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> DeleteManyHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the result of each removal of a batch of `count` objects out of
@@ -349,15 +348,13 @@ pub fn fill_delete_results<'b>(
         return Err(InvalidRequest::Keys.into());
     }
     if into.len() < count {
-        return Err(crate::Error::Capacity(crate::CapacityError {
-            required: count,
-        }));
+        return Err(Error::Capacity(CapacityError { required: count }));
     }
     let boundary = multipart::boundary(head.content_type.ok_or(ResponseFault::Head)?)?;
     // One bit for each request that an answer has named.
     let mut answered = [0u64; MAX_BATCH_KEYS.div_ceil(64)];
     let mut held = 0;
-    for part in multipart::parts(body, boundary) {
+    for part in multipart::split_parts(body, boundary) {
         let part = part?;
         let index = request_index(&part, count)?;
         let bit = 1 << (index % 64);
@@ -380,9 +377,9 @@ fn read_removal(message: &[u8]) -> Result<BatchResult<'_>> {
     let response = Response::parse(message)?;
     let head = response.head();
     let shape = DeleteShape::default();
-    let outcome = match super::accept_delete_head(shape, head)? {
+    let outcome = match accept_delete_head(shape, head)? {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            super::accept_delete_error_body(shape, failure, response.content)
+            accept_delete_error_body(shape, failure, response.content)
         }
         outcome => outcome,
     };

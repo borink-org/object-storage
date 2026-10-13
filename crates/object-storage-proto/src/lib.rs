@@ -183,7 +183,8 @@
 //!
 //! The functions that write a template or a request refuse a buffer that is
 //! too small, and state the exact number of bytes that they need. Pass an
-//! empty buffer to learn it.
+//! empty buffer to learn it: [`CapacityError::required_by`] does that for
+//! one call.
 //!
 //! A listing needs a second buffer for the response body, which
 //! [`ListHeadOutcome::Page`] sizes.
@@ -253,17 +254,11 @@
 
 pub mod azure;
 pub mod checksum;
-mod common;
 mod encoding;
 mod error;
 mod head;
 mod http;
 mod http_message;
-#[cfg(test)]
-mod layout_tests;
-mod listed;
-#[cfg(test)]
-mod misuse_tests;
 mod multipart;
 mod outcome;
 pub mod properties;
@@ -271,21 +266,24 @@ mod request;
 pub mod s3;
 pub mod sigv4;
 mod template;
+#[cfg(test)]
+mod tests;
 mod time;
 mod types;
 mod url;
+mod validate;
 mod xml;
 
 pub use checksum::{ChecksumKind, Digest};
 pub use error::{CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, Result};
 pub use head::ResponseHead;
-pub use listed::{decode_property, quoted_etag};
 pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
     ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, RestoreHeadOutcome,
     ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
 };
+pub use properties::decode_property;
 pub use request::{Method, Span};
 pub use template::{Placement, WireRequest};
 pub use time::{Timestamps, http_date_ms, iso8601_ms};
@@ -295,5 +293,5 @@ pub use types::{
     GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem, ListMarker,
     ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PutItem, PutOptions,
     PutShape, RangeForm, Ranging, RequestedRange, RestoreOptions, RestorePriority, Revision,
-    RevisionKind, StageOptions, Tag, WriteOptions,
+    RevisionKind, StageOptions, Tag, WriteOptions, quoted_etag,
 };

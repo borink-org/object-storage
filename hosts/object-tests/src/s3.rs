@@ -12,12 +12,12 @@ use crate::listing::{
 };
 use crate::{
     AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, checksum_value,
-    current_timestamps, decode_base64_field, failed_result, optional_text, owned, read_body_fields,
-    read_meta_fields, requested_checksum_kind, requested_condition, requested_copy,
-    requested_delete, requested_get, requested_keys, requested_metadata, requested_object,
-    requested_properties, requested_restore_options, requested_tags, required, restore_value,
-    send_request, send_request_with, served_range, successful_result, tags_value, text_of,
-    transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
+    current_timestamps, decode_base64_field, failed_result, optional_text, owned_url_and_fields,
+    read_body_fields, read_meta_fields, requested_checksum_kind, requested_condition,
+    requested_copy, requested_delete, requested_get, requested_keys, requested_metadata,
+    requested_object, requested_properties, requested_restore_options, requested_tags,
+    restore_value, send_request, send_request_with, served_range, successful_result, tags_value,
+    text_of, transport_failure, two_checksums_refused, unmapped_call_field, unsupported_by_adapter,
     unsupported_by_crate,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -28,13 +28,13 @@ use borink_object_storage_proto::s3::{
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
-    DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError, GetHeadOutcome, GetItem,
-    GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker,
-    ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload, PutHeadOutcome, PutItem,
-    PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind,
-    StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
-    WireRequest, WriteOptions, iso8601_ms,
+    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
+    DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
+    GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
+    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload,
+    PutHeadOutcome, PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision,
+    RevisionKind, StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps,
+    UpdateHeadOutcome, WireRequest, WriteOptions, iso8601_ms,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -201,11 +201,11 @@ fn signed<'b, 'c: 'b>(
     buf: &'b mut Vec<u8>,
 ) -> Result<(Template, WireRequest<'b>), CrateError> {
     let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
-    let mut bytes = vec![0; required(write)?];
+    let mut bytes = vec![0; CapacityError::required_by(write)?];
     let template = write(&mut bytes)?;
     let key = sigv4::signing_key::<Sha256RustCrypto>(&template, &bytes, credentials, now)?;
     let stamp = sigv4::stamp(&key, &template, &bytes, now)?;
-    *buf = vec![0; required(|out| encode(&template, &bytes, out))?];
+    *buf = vec![0; CapacityError::required_by(|out| encode(&template, &bytes, out))?];
     let unsigned = encode(&template, &bytes, buf)?;
     // The crate writes a body of its own with a placeholder for its
     // checksum, which the caller computes.
@@ -1165,7 +1165,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|template, bytes, buf| s3::encode_get_tagging(template, bytes, &item, &now, buf),
                 &mut get_buf
             ));
-            owned(&request)
+            owned_url_and_fields(&request)
         }
         // A ListObjectsV2, which asks for URL-encoded keys every time.
         "GET" if key.is_empty() && param("list-type").is_some() => {
@@ -1213,7 +1213,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|template, bytes, buf| s3::encode_list(template, bytes, &item, &now, buf),
                 &mut get_buf
             ));
-            owned(&request)
+            owned_url_and_fields(&request)
         }
         _ if !only(&["versionId"]) => {
             return Ok(unsupported_by_adapter("query not mapped"));
@@ -1251,7 +1251,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|template, bytes, buf| s3::encode_get(template, bytes, &item, &now, buf),
                 &mut get_buf
             ));
-            owned(&request)
+            owned_url_and_fields(&request)
         }
         "PUT" if range == RequestedRange::Whole && version.is_none() => {
             let options = PutOptions::default();
@@ -1272,7 +1272,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 },
                 &mut get_buf
             ));
-            owned(&request)
+            owned_url_and_fields(&request)
         }
         "DELETE" if range == RequestedRange::Whole => {
             let options = DeleteOptions {
@@ -1295,7 +1295,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
                 &mut get_buf
             ));
-            owned(&request)
+            owned_url_and_fields(&request)
         }
         _ => return Ok(unsupported_by_adapter("method not mapped")),
     };

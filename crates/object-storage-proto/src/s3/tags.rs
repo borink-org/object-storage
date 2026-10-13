@@ -1,23 +1,25 @@
 // S3 object tags: PutObjectTagging and GetObjectTagging. A write stores tags
 // with the object as well, through `WriteOptions`.
 
-use crate::checksum::ChecksumKind;
-use crate::common::{decimal_header, finish_with_body, meta_of, validate_tags, write_tag_set};
-use crate::request::ByteSink;
-use crate::s3::template::{Operation, Template, Unsigned};
-use crate::s3::{Bucket, ObjectText, encode_object, prepare_object};
-use crate::s3::{body_kind, failed, refuse_error_document, s3_tag_char};
-use crate::sigv4::Credentials;
-use crate::{
-    ConditionKind, Failure, ResponseFault, ResponseHead, Result, Tag, TagsHeadOutcome, Timestamps,
-    UpdateHeadOutcome,
-};
-use crate::{ObjectItem, RevisionKind};
-
-// Only the links in the doc comments use this, so it is imported for rustdoc
-// alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::{Error, InvalidRequest};
+// Only the links in the doc comments use this, so it is imported for rustdoc
+// alone: a normal build would report it unused.
+use crate::checksum::ChecksumKind;
+use crate::head::read_decimal_header;
+use crate::outcome::finish_with_body;
+use crate::request::{ByteSink, write_tag_set};
+use crate::s3::template::{Operation, Template, Unsigned};
+use crate::s3::{
+    Bucket, ObjectText, encode_object, kind_in_body, prepare_object, read_failure_head,
+    refuse_error_document, s3_tag_char,
+};
+use crate::sigv4::Credentials;
+use crate::validate::validate_tags;
+use crate::{
+    ConditionKind, Failure, ObjectItem, ResponseFault, ResponseHead, Result, RevisionKind, Tag,
+    TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+};
 
 const TAGGING_OPEN: &[u8] = b"<Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 const TAGGING_CLOSE: &[u8] = b"</Tagging>";
@@ -100,16 +102,16 @@ pub fn encode_put_tagging(
 pub fn accept_put_tagging_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
         200 => Ok(UpdateHeadOutcome::Updated {
-            meta: meta_of(head),
+            meta: head.object_meta(),
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes an [`UpdateHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_update_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> UpdateHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of GetObjectTaggings into `buf`, signed with
@@ -166,16 +168,16 @@ pub fn encode_get_tagging(
 pub fn accept_get_tagging_head<'h>(head: ResponseHead<'h>) -> Result<TagsHeadOutcome<'h>> {
     match head.status {
         200 => Ok(TagsHeadOutcome::Tags {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 /// Finishes a [`TagsHeadOutcome::NeedErrorBody`] with the response body.
 pub fn accept_get_tagging_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> TagsHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the tags out of the response body of a GetObjectTagging into

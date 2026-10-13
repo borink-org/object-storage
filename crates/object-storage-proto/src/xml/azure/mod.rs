@@ -6,16 +6,17 @@
 // the caller passed must hold the whole page; one that does not is refused
 // with the number of entries the page holds.
 
-pub(crate) mod blocks;
-
 use crate::azure::{BlobProperty, PropertySet, PropertyValues};
-use crate::xml::decode::decode;
+use crate::xml::decode::decode_scanned;
 use crate::xml::page::{
-    ListProperty, capture, check_body, check_room, decode_value_in_place, end_decoded_key, field,
-    fields_text, open_root_element, read_known, read_other, read_size, set_once, text, values_of,
+    ListProperty, captured_values, check_body, check_room, decode_value_in_place, decoded_text,
+    end_decoded_key, field_text, fields_text, keep_value, open_root_element, read_matched,
+    read_size, read_unmatched, set_once,
 };
-use crate::xml::scan::{Child, Scan, Span, Tag, fault, trim};
+use crate::xml::scan::{ChildTag, Scan, Span, StartTag, body_fault, trim_span};
 use crate::{EntryKind, ListEntry, ListMarker, Listing, Result};
+
+pub(crate) mod blocks;
 
 const ROOT: &[u8] = b"EnumerationResults";
 
@@ -65,7 +66,7 @@ type Sink<'s, 'b> = dyn FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) + 's;
 
 // One child of the root element, as the loop in `read_root_children_into`
 // sees it.
-enum Item {
+enum RootChild {
     // The element that holds the entries, and whether it was written as an
     // empty tag. Its children are read by `read_entries_into`.
     Blobs { empty: bool },
@@ -80,18 +81,18 @@ enum Item {
 // Reads one child of the root. The caller has already skipped the whitespace
 // before it and taken everything before that off the scan, so the child
 // begins at offset zero.
-fn read_root_child(scan: &mut Scan<'_>) -> Result<Item> {
+fn read_root_child(scan: &mut Scan<'_>) -> Result<RootChild> {
     let item = match scan.child(ROOT)? {
-        Child::Close => Item::End,
-        Child::Open(tag) => match scan.text(tag.name) {
-            BLOBS => Item::Blobs { empty: tag.empty },
+        ChildTag::Close => RootChild::End,
+        ChildTag::Open(tag) => match scan.text(tag.name) {
+            BLOBS => RootChild::Blobs { empty: tag.empty },
             // The marker names the next page, so it holds only text. The
             // service writes it as `<NextMarker/>`, as `<NextMarker />`, or
             // with text between two tags. All three are the same element.
-            b"NextMarker" => Item::Marker(scan.value(tag)?),
+            b"NextMarker" => RootChild::Marker(scan.value(tag)?),
             _ => {
                 scan.skip(tag)?;
-                Item::Skip
+                RootChild::Skip
             }
         },
     };
@@ -138,14 +139,14 @@ fn read_entries_into<'b>(
         // processing instruction may each hold the tags that entries are
         // read by. All three are refused rather than skipped.
         if scan.cur() != b'<' {
-            return fault();
+            return body_fault();
         }
         match scan.peek(1) {
             b'/' => {
                 scan.close(BLOBS)?;
                 return Ok(entries);
             }
-            b'!' | b'?' => return fault(),
+            b'!' | b'?' => return body_fault(),
             _ => {}
         }
         let captured = &mut spans[..slots];
@@ -158,7 +159,7 @@ fn read_entries_into<'b>(
             let tag = scan.open()?;
             // An entry with nothing in it has no name, so it is not an entry.
             if tag.empty {
-                return fault();
+                return body_fault();
             }
             match scan.text(tag.name) {
                 b"Blob" => read_blob(scan, wanted, captured)?,
@@ -167,7 +168,7 @@ fn read_entries_into<'b>(
                 // Any other element where an entry belongs makes this a page
                 // this crate cannot read. Skipping it would silently drop an
                 // entry that a later service version added.
-                _ => return fault(),
+                _ => return body_fault(),
             }
         };
         let chunk = scan.take();
@@ -179,7 +180,7 @@ fn read_entries_into<'b>(
                 // A group of keys captures nothing, so it gives no values.
                 values[..slots].fill(None);
             } else {
-                values_of(entry.raw, &spans[..slots], &mut values[..slots]);
+                captured_values(entry.raw, &spans[..slots], &mut values[..slots]);
             }
             if wanted.contains(BlobProperty::ContentType) {
                 // This fixed field was decoded, so use its shortened slice.
@@ -263,8 +264,8 @@ fn read_blob(
             continue;
         }
         match scan.child(b"Blob")? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"Name" => read_name(scan, tag, &mut fields)?,
                 // Properties are read only under this element. A property
                 // that a later service version adds beside it is not
@@ -272,13 +273,13 @@ fn read_blob(
                 b"Properties" if !tag.empty => {
                     read_properties(scan, &mut fields, wanted, captured)?;
                 }
-                _ => read_other(scan, tag, wanted, captured)?,
+                _ => read_unmatched(scan, tag, wanted, captured)?,
             },
         }
     }
     // An entry without a name is not an object.
     if fields.key.is_none() {
-        return fault();
+        return body_fault();
     }
     Ok(fields)
 }
@@ -330,8 +331,8 @@ fn read_properties(
             (b'/', _) if scan.lit_in(&head, b"</Properties>") => return Ok(()),
             _ if read_known_element(scan, &head, wanted, captured)? => {}
             _ => match scan.child(b"Properties")? {
-                Child::Close => return Ok(()),
-                Child::Open(tag) => match scan.text(tag.name) {
+                ChildTag::Close => return Ok(()),
+                ChildTag::Open(tag) => match scan.text(tag.name) {
                     b"Last-Modified" => {
                         let value = scan.value(tag)?;
                         set_once(&mut fields.last_modified, value)?;
@@ -352,7 +353,7 @@ fn read_properties(
                         let value = scan.value(tag)?;
                         set_once(&mut fields.resource_type, value.0)?;
                     }
-                    _ => read_other(scan, tag, wanted, captured)?,
+                    _ => read_unmatched(scan, tag, wanted, captured)?,
                 },
             },
         }
@@ -406,22 +407,22 @@ fn known_tag(head: &[u8; 32]) -> Option<(BlobProperty, bool)> {
         // them apart: each then costs the compares of its own two spellings,
         // not those of every content header written before it.
         b'C' if head.starts_with(b"<Content-") => match head[9] {
-            b'T' => spelled(head, b"<Content-Type />", b"<Content-Type>", ContentType),
-            b'E' => spelled(
+            b'T' => match_spelling(head, b"<Content-Type />", b"<Content-Type>", ContentType),
+            b'E' => match_spelling(
                 head,
                 b"<Content-Encoding />",
                 b"<Content-Encoding>",
                 ContentEncoding,
             ),
-            b'L' => spelled(
+            b'L' => match_spelling(
                 head,
                 b"<Content-Language />",
                 b"<Content-Language>",
                 ContentLanguage,
             ),
-            b'C' => spelled(head, b"<Content-CRC64 />", b"<Content-CRC64>", ContentCrc64),
-            b'M' => spelled(head, b"<Content-MD5 />", b"<Content-MD5>", ContentMd5),
-            b'D' => spelled(
+            b'C' => match_spelling(head, b"<Content-CRC64 />", b"<Content-CRC64>", ContentCrc64),
+            b'M' => match_spelling(head, b"<Content-MD5 />", b"<Content-MD5>", ContentMd5),
+            b'D' => match_spelling(
                 head,
                 b"<Content-Disposition />",
                 b"<Content-Disposition>",
@@ -434,7 +435,7 @@ fn known_tag(head: &[u8; 32]) -> Option<(BlobProperty, bool)> {
                 return Some((CreationTime, false));
             }
             if let Some(known) =
-                spelled(head, b"<Cache-Control />", b"<Cache-Control>", CacheControl)
+                match_spelling(head, b"<Cache-Control />", b"<Cache-Control>", CacheControl)
             {
                 return Some(known);
             }
@@ -576,7 +577,7 @@ fn known_tag(head: &[u8; 32]) -> Option<(BlobProperty, bool)> {
 // The element `property` if `head` starts with its start tag, written empty,
 // as `empty`, or not, as `open`.
 #[inline(always)]
-fn spelled(
+fn match_spelling(
     head: &[u8; 32],
     empty: &[u8],
     open: &[u8],
@@ -609,10 +610,10 @@ fn read_known_element(
     if empty {
         scan.advance(property.name().len() + 4);
         // The empty span stands for an element written empty.
-        capture(property, (0, 0), wanted, captured);
+        keep_value(property, (0, 0), wanted, captured);
     } else {
         scan.advance(property.name().len() + 2);
-        read_known(scan, property, wanted, captured)?;
+        read_matched(scan, property, wanted, captured)?;
     }
     Ok(true)
 }
@@ -624,8 +625,8 @@ fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
     let mut fields = Fields::new(true);
     loop {
         match scan.child(b"BlobPrefix")? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"Name" => read_name(scan, tag, &mut fields)?,
                 // A directory of an account with a hierarchical namespace
                 // writes the properties a blob has. A group reports none of
@@ -644,7 +645,7 @@ fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
         }
     }
     if fields.key.is_none() {
-        return fault();
+        return body_fault();
     }
     Ok(fields)
 }
@@ -652,7 +653,7 @@ fn read_blob_prefix(scan: &mut Scan<'_>) -> Result<Fields> {
 // Reads a `<Name>` element into `fields`, with its `Encoded` attribute, the
 // one attribute this crate reads. Azure writes it at most once, with a
 // boolean value.
-fn read_name(scan: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
+fn read_name(scan: &mut Scan<'_>, tag: StartTag, fields: &mut Fields) -> Result<()> {
     let mut encoded = None;
     for attribute in scan.attributes(tag) {
         let (attribute, value) = attribute?;
@@ -660,7 +661,7 @@ fn read_name(scan: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
             let value = match value {
                 b"true" => true,
                 b"false" => false,
-                _ => return fault(),
+                _ => return body_fault(),
             };
             set_once(&mut encoded, value)?;
         }
@@ -675,18 +676,18 @@ fn read_name(scan: &mut Scan<'_>, tag: Tag, fields: &mut Fields) -> Result<()> {
 // the chunk, or the part of one that decoding kept, which is never longer.
 fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let Some((key, key_flags)) = fields.key else {
-        return fault();
+        return body_fault();
     };
     // Azure never writes an empty name. Refused for consistency with the rest
     // of the grammar, not for a case that was seen.
     if key.0 == key.1 {
-        return fault();
+        return body_fault();
     }
     // The resource type is a fixed word the service writes, so it needs no
     // decoding and is read first.
     let directory = match fields.resource_type {
         Some(span) => {
-            let (start, end) = trim(chunk, span);
+            let (start, end) = trim_span(chunk, span);
             &chunk[start..end] == b"directory"
         }
         None => false,
@@ -695,7 +696,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
         Some(span) => Some(read_size(chunk, span)?),
         // An object always has a length. A group of keys and a directory are
         // not objects and have none.
-        None if !fields.prefix && !directory => return fault(),
+        None if !fields.prefix && !directory => return body_fault(),
         None => None,
     };
     let kind = match (fields.prefix, directory) {
@@ -706,7 +707,7 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
 
     // A key may begin or end with a space, so the key is not trimmed. Only
     // the values the service writes for itself are.
-    let key_len = decode(&mut chunk[key.0..key.1], key_flags, fields.percent)?;
+    let key_len = decode_scanned(&mut chunk[key.0..key.1], key_flags, fields.percent)?;
     // XML forbids a zero byte and Azure refuses one in a name, so refusing a
     // decoded one is for consistency, not for a case seen.
     end_decoded_key(chunk, key, key_len, fields.percent)?;
@@ -721,11 +722,15 @@ fn build_entry(chunk: &mut [u8], fields: Fields) -> Result<ListEntry<'_>> {
     let texts = fields_text(raw, &[Some(key), e_tag, content_type, last_modified])?;
     Ok(ListEntry {
         kind,
-        key: field(texts, key)?,
+        key: field_text(texts, key)?,
         size: if directory { None } else { size },
-        e_tag: e_tag.map(|span| field(texts, span)).transpose()?,
-        content_type: content_type.map(|span| field(texts, span)).transpose()?,
-        last_modified: last_modified.map(|span| field(texts, span)).transpose()?,
+        e_tag: e_tag.map(|span| field_text(texts, span)).transpose()?,
+        content_type: content_type
+            .map(|span| field_text(texts, span))
+            .transpose()?,
+        last_modified: last_modified
+            .map(|span| field_text(texts, span))
+            .transpose()?,
         raw,
     })
 }
@@ -751,12 +756,12 @@ fn read_root_children_into<'b>(
         scan.take();
 
         match read_root_child(&mut scan)? {
-            Item::Blobs { empty } => {
+            RootChild::Blobs { empty } => {
                 // A second entries element is refused the way a second name
                 // is. Azure writes one; this is for consistency, not for a
                 // case seen.
                 if entries.is_some() {
-                    return fault();
+                    return body_fault();
                 }
                 entries = Some(if empty {
                     Entries { held: 0, built: 0 }
@@ -764,29 +769,29 @@ fn read_root_children_into<'b>(
                     read_entries_into(&mut scan, room, wanted, sink)?
                 });
             }
-            Item::Marker((span, flags)) => {
+            RootChild::Marker((span, flags)) => {
                 // The same for a second marker.
                 if seen_marker {
-                    return fault();
+                    return body_fault();
                 }
                 seen_marker = true;
                 let chunk = scan.take();
-                let (start, stop) = trim(chunk, span);
-                // `decode` returns at most the length it was given.
-                let len = decode(&mut chunk[start..stop], flags, false)?;
+                let (start, stop) = trim_span(chunk, span);
+                // `decode_scanned` returns at most the length it was given.
+                let len = decode_scanned(&mut chunk[start..stop], flags, false)?;
                 let chunk: &'b [u8] = chunk;
                 // An empty marker means the listing is complete, so it is
                 // reported as no next page rather than an empty one.
                 next_marker = Some(&chunk[start..start + len])
                     .filter(|marker| !marker.is_empty())
-                    .map(text)
+                    .map(decoded_text)
                     .transpose()?;
             }
-            Item::Skip => {}
-            Item::End => {
+            RootChild::Skip => {}
+            RootChild::End => {
                 // A document with no entries element is not a page.
                 let Some(entries) = entries else {
-                    return fault();
+                    return body_fault();
                 };
                 check_room(entries.held, room)?;
                 return Ok(Listing {

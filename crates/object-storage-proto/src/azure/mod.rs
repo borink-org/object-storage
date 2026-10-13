@@ -4,48 +4,39 @@
 
 use core::fmt;
 
-use crate::checksum::ChecksumKind;
-use crate::common::{
-    ContentRange, FailureOutcome, accept_success, decimal_header, failure, finish_with_body,
-    meta_of, missing, parse_content_range, text_header, trim_ascii, validate_condition,
-    validate_properties, validate_tags,
+use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
+use crate::head::{
+    ContentRange, accept_get_success, parse_content_range, read_decimal_header, read_text_header,
+    strip_metadata_prefix,
 };
-use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeaderValue};
-use crate::url::{self, Parameter};
+use crate::http::{PlainHttp, valid_http_origin};
+use crate::outcome::{FailureOutcome, failure_outcome, finish_with_body, not_found_in_head};
+use crate::properties::Property;
+use crate::properties::sealed::Sealed;
+use crate::request::{ByteSink, HeaderValue, condition_header_name};
+use crate::template::{FixedText, Hole, HoleValues, NO_TEXT, Param, ParamValue, TemplateBody};
+use crate::url::{self, Parameter, QueryValue};
+use crate::validate::{
+    validate_checksum_item, validate_condition, validate_delimiter, validate_get_item,
+    validate_get_options, validate_properties, validate_revision_item, validate_tags,
+};
+use crate::xml::read_error_code;
 use crate::{
-    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteShape, Error, Failure,
-    GetHeadOutcome, GetKind, GetShape, InvalidRequest, ListEntry, ListHeadOutcome, ListInclude,
-    ListMarker, Listing, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Timestamps,
-    WriteOptions,
+    Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteOptions, DeleteShape,
+    Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape, InvalidRequest,
+    ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions, Listing,
+    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem, PutOptions,
+    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
+    ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
 };
+use template::{Describe, Detail, Field, FieldList, FieldValue, Holes};
 
 mod batch;
 mod blocks;
 mod copy;
-mod template;
-
-use crate::checksum::BASE64_LEN;
-use crate::common::{
-    checksum_text, condition_header, validate_checksum_item, validate_delimiter, validate_get_item,
-    validate_get_options, validate_revision_item,
-};
-use crate::template::{Body, Param, ParamValue};
-use crate::template::{Hole, Values};
-use crate::template::{NO_TEXT, Text};
-use crate::url::QueryValue;
-use crate::{
-    DeleteOptions, GetItem, GetOptions, ListItem, ListOptions, ObjectItem, PutItem, PutOptions,
-    Ranging, RevisionKind, WireRequest,
-};
-use template::{Describe, Detail, Field, FieldList, Holes, Value};
-pub use template::{Operation, Template};
 mod restore;
 mod tags;
-pub use restore::{
-    accept_restore_error_body, accept_restore_head, encode_restore, prepare_restore,
-};
+mod template;
 
 pub use batch::{
     BatchResult, MAX_BATCH_KEYS, accept_delete_many_error_body, accept_delete_many_head,
@@ -66,6 +57,9 @@ pub use copy::{
     prepare_abort_copy, prepare_copy, prepare_copy_from_url, prepare_put_from_url,
     prepare_stage_block_from_url,
 };
+pub use restore::{
+    accept_restore_error_body, accept_restore_head, encode_restore, prepare_restore,
+};
 pub use tags::{
     SetMetadataOptions, SetPropertiesOptions, accept_get_tags_error_body, accept_get_tags_head,
     accept_set_metadata_head, accept_set_properties_head, accept_set_tags_head,
@@ -73,6 +67,7 @@ pub use tags::{
     encode_set_properties, encode_set_tags, encode_set_tier, fill_tags, prepare_get_tags,
     prepare_set_metadata, prepare_set_properties, prepare_set_tags, prepare_set_tier,
 };
+pub use template::{Operation, Template};
 
 /// The most recent Azure Storage version that every region supports.
 ///
@@ -113,12 +108,12 @@ pub const METADATA_PREFIX: &str = "x-ms-meta-";
 /// Returns the metadata name that a response header carries, or [`None`]
 /// for a header that carries no pair.
 pub fn metadata_name(header: &str) -> Option<&str> {
-    crate::common::metadata_name(header, METADATA_PREFIX)
+    strip_metadata_prefix(header, METADATA_PREFIX)
 }
 
 // A bearer token, as `Authorization` and `x-ms-copy-source-authorization`
 // carry it.
-pub(crate) struct Bearer<'t>(pub(crate) &'t str);
+struct Bearer<'t>(&'t str);
 
 impl HeaderValue for Bearer<'_> {
     fn write_to(self, out: &mut dyn ByteSink) {
@@ -167,7 +162,7 @@ impl<'a> Container<'a> {
     }
 
     fn create(endpoint: &'a str, name: &'a str, plain: PlainHttp) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint, plain) {
+        if !valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
         if name.is_empty()
@@ -313,7 +308,7 @@ impl fmt::Display for SnapshotHeadOutcome<'_> {
     }
 }
 
-crate::common::failure_outcome!(SnapshotHeadOutcome<'h>);
+failure_outcome!(SnapshotHeadOutcome<'h>);
 
 // The word for each include flag. The query writes them in this order,
 // whatever order the set was built in.
@@ -325,10 +320,10 @@ const INCLUDE_WORDS: [(ListInclude, &str); 3] = [
 
 // The query parameter that names a snapshot or a version, or none for the
 // object as it is now.
-pub(crate) fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
+fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
     match revision? {
-        Revision::Snapshot(id) => url::encoded("snapshot", id),
-        Revision::Version(id) => url::encoded("versionid", id),
+        Revision::Snapshot(id) => url::encoded_parameter("snapshot", id),
+        Revision::Version(id) => url::encoded_parameter("versionid", id),
     }
 }
 
@@ -337,24 +332,28 @@ pub(crate) fn revision_parameter(revision: Option<Revision<'_>>) -> Parameter<'_
 // without the header leaves the error to the body. A header that names a
 // code this crate does not know is already decisive. A 404 that names its
 // error is a missing object, or a missing container.
-pub(crate) fn failed<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
+fn read_failure_head<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
     match head.error_code {
-        None => O::need_error_body(failure(head.status, None, head.request_id)),
-        Some(_) if head.status == 404 => missing(head, named(head)),
-        Some(_) => O::service_failure(failure(head.status, named(head), head.request_id)),
+        None => O::need_error_body(Failure::new(head.status, None, head.request_id)),
+        Some(_) if head.status == 404 => not_found_in_head(head, kind_in_head(head)),
+        Some(_) => O::service_failure(Failure::new(
+            head.status,
+            kind_in_head(head),
+            head.request_id,
+        )),
     }
 }
 
-pub(crate) fn named<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
-    kind_for_code(trim_ascii(head.error_code.unwrap_or_default()))
+fn kind_in_head<'h>(head: &ResponseHead<'h>) -> Option<ServiceErrorKind> {
+    kind_for_code(head.error_code.unwrap_or_default().trim_ascii())
 }
 
 /// Borrows the native error code, preferring the header over the XML body.
 /// Unknown codes are retained unchanged.
 pub fn error_code<'a>(head: &ResponseHead<'a>, body: &'a [u8]) -> Option<&'a [u8]> {
     head.error_code
-        .map(trim_ascii)
-        .or_else(|| crate::xml::error_code(body).map(str::as_bytes))
+        .map(<[u8]>::trim_ascii)
+        .or_else(|| read_error_code(body).map(str::as_bytes))
 }
 
 /// Classifies the Azure error that `head` names, or that `body` names if the
@@ -363,8 +362,8 @@ pub fn error_code<'a>(head: &ResponseHead<'a>, body: &'a [u8]) -> Option<&'a [u8
 pub fn classify_error(head: &ResponseHead<'_>, body: &[u8], truncated: bool) -> Classification {
     let code = head
         .error_code
-        .map(trim_ascii)
-        .or_else(|| crate::xml::error_code(body).map(|code| code.as_bytes()));
+        .map(<[u8]>::trim_ascii)
+        .or_else(|| read_error_code(body).map(|code| code.as_bytes()));
     match code.and_then(kind_for_code) {
         Some(kind) => Classification::Classified(kind),
         None if truncated => Classification::Incomplete,
@@ -400,7 +399,7 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
 
 // Whether a write conditional on `If-None-Match` failed because an object
 // exists. Azure answers that with 409 `BlobAlreadyExists`, not 412.
-pub(crate) fn names_existing_object(
+fn names_existing_object(
     status: u16,
     condition: ConditionKind,
     kind: Option<ServiceErrorKind>,
@@ -413,23 +412,19 @@ pub(crate) fn names_existing_object(
 // Whether a 412 is the request's failed condition: the request carried one, and
 // Azure names the failure. Azure also answers 412 for other reasons, such as
 // `LeaseIdMissing` on a leased blob.
-pub(crate) fn names_failed_condition(
-    status: u16,
-    carried: bool,
-    kind: Option<ServiceErrorKind>,
-) -> bool {
+fn names_failed_condition(status: u16, carried: bool, kind: Option<ServiceErrorKind>) -> bool {
     status == 412 && carried && kind == Some(ServiceErrorKind::Precondition)
 }
 
 // The error that a failed response body names, if it names one this crate
 // recognizes.
-pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
-    crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+fn kind_in_body(body: &[u8]) -> Option<ServiceErrorKind> {
+    read_error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
 // The value of `x-ms-delete-snapshots` for a removal of `kind`, or none
 // for the object alone.
-pub(crate) const fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
+const fn delete_snapshots(kind: DeleteKind) -> Option<&'static str> {
     match kind {
         DeleteKind::Object => None,
         DeleteKind::ObjectAndSnapshots => Some("include"),
@@ -464,7 +459,7 @@ pub fn prepare_get(
     buf: &mut [u8],
 ) -> Result<Template> {
     validate_get_options(options, true)?;
-    template::prepare(
+    template::prepare_template(
         container,
         token,
         namespace,
@@ -487,12 +482,12 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
         query: [revision_param(options.revision)],
         holes: Holes {
             range: options.ranging == Ranging::Ranged,
-            condition: condition_header(options.condition),
+            condition: condition_header_name(options.condition),
             ..Holes::default()
         },
         fields: &[],
         metadata: &[],
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -526,15 +521,15 @@ pub fn encode_get<'r>(
         return Err(InvalidRequest::UnsupportedRange.into());
     }
     validate_get_item(&options, item)?;
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
         condition: item.condition_value,
         revision: item.revision,
-        ..Values::default()
+        ..HoleValues::default()
     };
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -586,7 +581,7 @@ pub fn accept_get_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> GetHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     // A read fails `If-None-Match` and `If-Modified-Since` with 304, so only
     // `If-Match` and `If-Unmodified-Since` fail with 412.
     if names_failed_condition(
@@ -628,9 +623,12 @@ pub fn prepare_put(
         return Err(InvalidRequest::Option.into());
     }
     let mut fields = FieldList::new();
-    fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")));
-    stored_fields(&mut fields, &options.options);
-    template::prepare(
+    fields.push(Field::new(
+        "x-ms-blob-type",
+        FieldValue::Bytes(b"BlockBlob"),
+    ));
+    push_stored_fields(&mut fields, &options.options);
+    template::prepare_template(
         container,
         token,
         namespace,
@@ -665,12 +663,12 @@ fn describe_put<'p>(
         holes: Holes {
             content_length: Some(Hole::ContentLength),
             checksum: checksum.map(|kind| kind.header()),
-            condition: condition_header(condition),
+            condition: condition_header_name(condition),
             ..Holes::default()
         },
         fields,
         metadata,
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -712,15 +710,15 @@ pub fn encode_put<'r>(
     validate_condition(condition, item.condition_value)?;
     validate_checksum_item(checksum, item.checksum)?;
     let mut text = [0; BASE64_LEN];
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
         content_length: Some(item.content.len()),
-        checksum: checksum_text(item.checksum, &mut text, false),
-        ..Values::default()
+        checksum: checksum_base64(item.checksum, &mut text, false),
+        ..HoleValues::default()
     };
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -749,20 +747,20 @@ pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<Pu
     match head.status {
         201 => Ok(PutHeadOutcome::Created {
             meta: ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             },
         }),
         412 if shape.condition != ConditionKind::None
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
-        409 if names_existing_object(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, kind_in_head(&head)) => {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -774,7 +772,7 @@ pub fn accept_put_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> PutHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
         || names_existing_object(failure.status, shape.condition, kind)
     {
@@ -810,8 +808,12 @@ pub fn prepare_delete(
     }
     // Azure refuses an object with snapshots when the header is absent,
     // which is the outcome a removal of the object alone asks for.
-    let snapshots = delete_snapshots(options.kind)
-        .map(|snapshots| Field::new("x-ms-delete-snapshots", Value::Bytes(snapshots.as_bytes())));
+    let snapshots = delete_snapshots(options.kind).map(|snapshots| {
+        Field::new(
+            "x-ms-delete-snapshots",
+            FieldValue::Bytes(snapshots.as_bytes()),
+        )
+    });
     let mut template = prepare_object(
         container,
         token,
@@ -859,7 +861,7 @@ pub fn encode_delete<'r>(
 
 // Writes the request of `operation` that names the one object `item`, from
 // a template of that operation.
-pub(in crate::azure) fn encode_object<'r>(
+fn encode_object<'r>(
     template: &Template,
     bytes: &[u8],
     operation: Operation,
@@ -881,14 +883,14 @@ pub(in crate::azure) fn encode_object<'r>(
     let key = template.request_key(bytes, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
         revision: item.revision,
-        ..Values::default()
+        ..HoleValues::default()
     };
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -902,17 +904,17 @@ pub(in crate::azure) fn encode_object<'r>(
 // beside its structure: the fixed fields and the metadata, a fixed
 // parameter after `comp`, and the text of a fixed body.
 #[derive(Default)]
-pub(in crate::azure) struct ObjectText<'p> {
-    pub(in crate::azure) fields: &'p [Field<'p>],
-    pub(in crate::azure) metadata: &'p [MetadataPair<'p>],
-    pub(in crate::azure) param: Param<'p>,
-    pub(in crate::azure) body: Option<Text<'p>>,
+struct ObjectText<'p> {
+    fields: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+    param: Param<'p>,
+    body: Option<FixedText<'p>>,
 }
 
 // Writes the template of `operation`, which names one object, with the
 // condition `condition` and the kind of revision `revision`.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::azure) fn prepare_object(
+fn prepare_object(
     container: &Container<'_>,
     token: &str,
     namespace: AzureNamespace,
@@ -922,7 +924,7 @@ pub(in crate::azure) fn prepare_object(
     text: &ObjectText<'_>,
     buf: &mut [u8],
 ) -> Result<Template> {
-    template::prepare(
+    template::prepare_template(
         container,
         token,
         namespace,
@@ -942,7 +944,7 @@ pub(in crate::azure) fn prepare_object(
 // `condition` and `revision`: its method, the parameter `comp` that names
 // the operation, the fields that each request fills, and its body. `text`
 // is the template's, and none for a request.
-pub(in crate::azure) fn describe_object<'p>(
+fn describe_object<'p>(
     operation: Operation,
     condition: ConditionKind,
     revision: RevisionKind,
@@ -970,14 +972,14 @@ pub(in crate::azure) fn describe_object<'p>(
         ],
         holes: Holes {
             content_length: tags.then_some(Hole::BodyLength),
-            condition: condition_header(condition),
+            condition: condition_header_name(condition),
             ..Holes::default()
         },
         fields: text.map_or(&[], |text| text.fields),
         metadata: text.map_or(&[], |text| text.metadata),
         body: match tags {
-            true => Body::Fixed(text.and_then(|text| text.body).unwrap_or(NO_TEXT)),
-            false => Body::None,
+            true => TemplateBody::Fixed(text.and_then(|text| text.body).unwrap_or(NO_TEXT)),
+            false => TemplateBody::None,
         },
     }
 }
@@ -1005,12 +1007,12 @@ pub fn accept_delete_head<'h>(
     match head.status {
         202 => Ok(DeleteHeadOutcome::Accepted),
         412 if shape.condition != ConditionKind::None
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(DeleteHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1023,7 +1025,7 @@ pub fn accept_delete_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> DeleteHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
         return DeleteHeadOutcome::PreconditionFailed;
     }
@@ -1067,7 +1069,7 @@ pub fn prepare_snapshot(
         options.condition,
         RevisionKind::Current,
         &ObjectText {
-            fields: &[Field::new("content-length", Value::Bytes(b"0"))],
+            fields: &[Field::new("content-length", FieldValue::Bytes(b"0"))],
             metadata: options.metadata,
             ..ObjectText::default()
         },
@@ -1114,19 +1116,19 @@ pub fn accept_snapshot_head<'h>(
 ) -> Result<SnapshotHeadOutcome<'h>> {
     match head.status {
         201 => Ok(SnapshotHeadOutcome::Created {
-            snapshot: text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
+            snapshot: read_text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
             meta: ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             },
         }),
         412 if condition != ConditionKind::None
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(SnapshotHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1137,7 +1139,7 @@ pub fn accept_snapshot_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> SnapshotHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, condition != ConditionKind::None, kind) {
         return SnapshotHeadOutcome::PreconditionFailed;
     }
@@ -1189,7 +1191,7 @@ pub fn prepare_list(
             word_count += 1;
         }
     }
-    template::prepare(
+    template::prepare_template(
         container,
         token,
         namespace,
@@ -1233,7 +1235,7 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
         holes: Holes::default(),
         fields: &[],
         metadata: &[],
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -1285,13 +1287,13 @@ pub fn encode_list<'r>(
     if item.start_after.is_some() {
         return Err(InvalidRequest::Option.into());
     }
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         prefix: Some(item.prefix),
         marker,
-        ..Values::default()
+        ..HoleValues::default()
     };
-    template::encode(
+    template::encode_template(
         template,
         bytes,
         &values,
@@ -1313,10 +1315,10 @@ pub fn encode_list<'r>(
 pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
     match head.status {
         200 => Ok(ListHeadOutcome::Page {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -1325,7 +1327,7 @@ pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h
 /// This is [`accept_get_error_body`] for a listing, and reads the
 /// body the same way.
 pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads a page out of the response body of a listing.
@@ -1399,7 +1401,7 @@ pub fn fill_listing_with<'b, E>(
 
 // The fields that store the content properties, the tags and the access
 // tier of a write with the object.
-fn stored_fields<'p>(fields: &mut FieldList<'p>, options: &WriteOptions<'p>) {
+fn push_stored_fields<'p>(fields: &mut FieldList<'p>, options: &WriteOptions<'p>) {
     for (name, value) in options.properties.iter() {
         let header = match name {
             "cache-control" => "x-ms-blob-cache-control",
@@ -1408,15 +1410,15 @@ fn stored_fields<'p>(fields: &mut FieldList<'p>, options: &WriteOptions<'p>) {
             "content-language" => "x-ms-blob-content-language",
             _ => "x-ms-blob-content-type",
         };
-        fields.push(Field::new(header, Value::Bytes(value.as_bytes())));
+        fields.push(Field::new(header, FieldValue::Bytes(value.as_bytes())));
     }
     if !options.tags.is_empty() {
-        fields.push(Field::new("x-ms-tags", Value::Tags(options.tags)));
+        fields.push(Field::new("x-ms-tags", FieldValue::Tags(options.tags)));
     }
     if let Some(tier) = options.storage_class {
         fields.push(Field::new(
             "x-ms-access-tier",
-            Value::Bytes(tier.as_bytes()),
+            FieldValue::Bytes(tier.as_bytes()),
         ));
     }
 }
@@ -1439,7 +1441,7 @@ fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutc
         // Azure serves no suffix, so this shape did not pass through
         // encode_get.
         206 if matches!(shape.range, RequestedRange::Suffix(_)) => Err(ResponseFault::Range.into()),
-        200 | 206 => accept_success(shape, head),
+        200 | 206 => accept_get_success(shape, head),
         // A conditional status the request did not ask for is a contradiction,
         // not an outcome: nothing in the request explains it.
         304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
@@ -1449,7 +1451,7 @@ fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutc
         // reasons, which reach the caller as the service failure they are.
         412 if shape.condition != ConditionKind::None
             && !shape.condition.fails_as_not_modified()
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(GetHeadOutcome::PreconditionFailed)
         }
@@ -1462,12 +1464,12 @@ fn accept_get<'h>(shape: GetShape, head: ResponseHead<'h>) -> Result<GetHeadOutc
             },
         }),
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
 // Reject unsupported names before encoding, without losing the reason.
-pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
+fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
     if key.is_empty() {
         return Err(InvalidRequest::EmptyKey.into());
     }
@@ -1534,7 +1536,7 @@ pub(crate) fn validate_key(key: &str, namespace: AzureNamespace) -> Result<()> {
 pub const MAX_PUT_LEN: u64 = 5000 * 1024 * 1024;
 
 // The characters that Azure takes in the key and the value of a tag.
-pub(crate) fn azure_tag_char(character: char) -> bool {
+fn azure_tag_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || " +-./:=_".contains(character)
 }
 
@@ -1546,7 +1548,7 @@ pub(crate) fn azure_tag_char(character: char) -> bool {
 // and underscores, and no leading digit. It refuses anything else with 400
 // `InvalidMetadata`. The total size of the pairs is the service's to check;
 // this crate is not told which limit applies to the account.
-pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
+fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
         if pair.name.is_empty()
             || pair.name.starts_with(|first: char| first.is_ascii_digit())
@@ -1583,7 +1585,7 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>]) -> Result<()> {
 }
 
 // The content properties that an account returns in UTF-8 as it got them.
-pub(crate) fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static str] {
+fn utf8_properties(namespace: AzureNamespace) -> &'static [&'static str] {
     match namespace {
         AzureNamespace::Flat => &["content-type"],
         AzureNamespace::Hierarchical | AzureNamespace::Unknown => &[],
@@ -1869,9 +1871,9 @@ impl BlobProperty {
     }
 }
 
-impl crate::properties::sealed::Sealed for BlobProperty {}
+impl Sealed for BlobProperty {}
 
-impl crate::properties::Property for BlobProperty {
+impl Property for BlobProperty {
     const COUNT: usize = BlobProperty::ALL.len();
 
     fn number(self) -> u8 {

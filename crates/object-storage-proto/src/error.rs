@@ -28,6 +28,38 @@ impl fmt::Display for CapacityError {
 
 impl core::error::Error for CapacityError {}
 
+impl CapacityError {
+    /// Returns the number of bytes that `write` needs, by calling it with an
+    /// empty buffer.
+    ///
+    /// `write` is one call that writes a template or a request into the
+    /// buffer it is passed, such as
+    /// `|buf| azure::encode_get(&template, &bytes, &item, &now, buf).map(drop)`.
+    /// Returns 0 if it writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `write`, unless it is [`Error::Capacity`].
+    pub fn required_by<T>(write: impl FnOnce(&mut [u8]) -> Result<T>) -> Result<usize> {
+        match write(&mut []) {
+            Err(Error::Capacity(capacity)) => Ok(capacity.required),
+            Err(error) => Err(error),
+            Ok(_) => Ok(0),
+        }
+    }
+}
+
+// The error for a buffer that needs `capacity.required` bytes: a capacity
+// error, unless no slice can hold that many.
+pub(crate) fn capacity_error(capacity: CapacityError) -> Error {
+    // A slice holds at most isize::MAX bytes.
+    if capacity.required > isize::MAX as usize {
+        InvalidRequest::RequestTooLarge.into()
+    } else {
+        Error::Capacity(capacity)
+    }
+}
+
 /// The reason that a template or a request cannot be written.
 ///
 /// The encoding methods report these before they write any byte, and never
@@ -554,7 +586,7 @@ impl Error {
     /// a [`Failure`](crate::Failure) with the same error carries.
     pub fn class(&self) -> Option<FailureClass> {
         match *self {
-            Self::Service(kind) => Some(crate::common::failure_class(200, kind)),
+            Self::Service(kind) => Some(FailureClass::of(200, kind)),
             _ => None,
         }
     }
@@ -601,9 +633,27 @@ impl Error {
 mod tests {
     extern crate std;
 
-    use super::{CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, ServiceErrorKind};
+    use super::{
+        CapacityError, Error, ErrorCode, InvalidRequest, ResponseFault, ServiceErrorKind,
+        capacity_error,
+    };
     use std::string::ToString;
     use std::vec::Vec;
+
+    #[test]
+    fn a_request_larger_than_a_slice_is_not_a_recoverable_capacity_error() {
+        let fits = CapacityError {
+            required: isize::MAX as usize,
+        };
+        assert_eq!(capacity_error(fits), Error::Capacity(fits));
+        let capacity = CapacityError {
+            required: isize::MAX as usize + 1,
+        };
+        assert_eq!(
+            capacity_error(capacity),
+            InvalidRequest::RequestTooLarge.into()
+        );
+    }
 
     // Every fallible call in this crate pays for this size. The `usize` of a
     // capacity error sets it, so a field added later shows up here.

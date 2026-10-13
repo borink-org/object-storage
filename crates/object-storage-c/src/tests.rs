@@ -391,7 +391,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     ] {
         let sentence = settled_sentence(Some(kind));
         assert!(!sentence.is_empty());
-        assert_eq!(text(&only(kind)), sentence);
+        assert_eq!(text(&only_kind(kind)), sentence);
         said.push(sentence);
     }
     said.sort_unstable();
@@ -399,7 +399,7 @@ fn every_outcome_kind_says_something_of_its_own() {
     assert_eq!(said.len(), 8);
 
     // A kind from a later version of this crate names nothing here.
-    let mut later = only(OutcomeKind::Body);
+    let mut later = only_kind(OutcomeKind::Body);
     later.kind = 4095;
     assert_eq!(text(&later), settled_sentence(None));
 }
@@ -463,7 +463,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
             start: 2,
             end: 6,
         };
-        assert_eq!(range(&read).ok(), expected);
+        assert_eq!(requested_range(&read).ok(), expected);
     }
     for (kind, expected) in [
         (GetKind::Bytes as u16, Some(proto::GetKind::Bytes)),
@@ -547,7 +547,7 @@ fn every_enum_crosses_by_its_number_and_refuses_the_rest() {
             ..read_options()
         });
         counts[3] += usize::from(
-            range(&Range {
+            requested_range(&Range {
                 form: repr,
                 start: 2,
                 end: 6,
@@ -1840,7 +1840,7 @@ fn every_read_outcome_crosses_whole() {
     for object_size in [None, Some(10)] {
         let view = get_outcome(&GetHeadOutcome::RangeNotSatisfiable { object_size });
         assert_eq!(view.kind, OutcomeKind::RangeNotSatisfiable as u16);
-        assert_eq!(number(view.body.object_size), object_size);
+        assert_eq!(optional_u64(view.body.object_size), object_size);
         assert_eq!(
             text(&view),
             GetHeadOutcome::RangeNotSatisfiable { object_size }.to_string()
@@ -2037,7 +2037,7 @@ fn a_short_buffer_still_learns_the_length_of_the_sentence() {
 // learns how many facts disagree rather than reading the wrong offset.
 #[test]
 fn the_layout_check_answers_for_the_layout_it_is_given() {
-    let ours = layout();
+    let ours = compiled_layout();
     // SAFETY: `ours` is live, and null is the case the second call tests.
     unsafe {
         assert_eq!(borink_layout_disagrees(&ours), 0);

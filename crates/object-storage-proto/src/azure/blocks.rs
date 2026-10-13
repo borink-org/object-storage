@@ -9,31 +9,29 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{
-    Describe, Detail, Field, FieldList, Holes, Operation, Template, encode as encode_template,
-    prepare as prepare_template,
+    Describe, Detail, Field, FieldList, Holes, Operation, Template, encode_template,
+    prepare_template,
 };
 use crate::azure::{
-    AzureNamespace, body_kind, failed, named, names_existing_object, names_failed_condition,
-    validate_metadata,
+    AzureNamespace, Container, ObjectText, azure_tag_char, encode_object, kind_in_body,
+    kind_in_head, names_existing_object, names_failed_condition, prepare_object,
+    push_stored_fields, read_failure_head, utf8_properties, validate_metadata,
 };
-use crate::azure::{
-    Container, ObjectText, azure_tag_char, encode_object, prepare_object, stored_fields,
-    utf8_properties,
-};
-use crate::checksum::{BASE64_LEN, ChecksumKind};
-use crate::common::{
-    checksum_text, condition_header, validate_checksum_item, validate_properties, validate_tags,
-};
-use crate::common::{decimal_header, finish_with_body, meta_of, text_header, validate_condition};
-use crate::request::ByteSink;
-use crate::request::Writer;
-use crate::template::{Body, Fill, Hole, ParamValue, Values, WireRequest};
+use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
+use crate::encoding::{base64_into, base64_len};
+use crate::head::{read_decimal_header, read_text_header};
+use crate::outcome::finish_with_body;
+use crate::request::{ByteSink, Writer, condition_header_name};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
-use crate::{ChecksumValue, ConditionValue, MetadataPair, ObjectItem, RevisionKind, StageOptions};
+use crate::validate::{
+    validate_checksum_item, validate_condition, validate_properties, validate_tags,
+};
 use crate::{
-    CommitHeadOutcome, CommitShape, ConditionKind, Failure, InvalidRequest, ListPartsHeadOutcome,
-    Listing, Method, ObjectMeta, Payload, ResponseFault, ResponseHead, Result, ServiceErrorKind,
-    StageHeadOutcome, Timestamps, WriteOptions,
+    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, Failure,
+    InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem, ObjectMeta,
+    Payload, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
+    StageOptions, Timestamps, WriteOptions,
 };
 
 /// Which stored version of a block Put Block List must use.
@@ -167,15 +165,15 @@ const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
 fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
     Ok(ObjectMeta {
-        last_modified: text_header(head.last_modified)?,
-        ..meta_of(head)
+        last_modified: read_text_header(head.last_modified)?,
+        ..head.object_meta()
     })
 }
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
 pub(super) fn validate_block_id(id: &str) -> Result<()> {
-    match crate::encoding::base64_len(id.as_bytes()) {
+    match base64_len(id.as_bytes()) {
         Some(1..=64) => Ok(()),
         _ => Err(InvalidRequest::PartId.into()),
     }
@@ -349,7 +347,7 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
         },
         fields: &[],
         metadata: &[],
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -386,13 +384,13 @@ pub fn encode_stage_block<'r>(
     }
     validate_checksum_item(checksum, item.checksum)?;
     let mut text = [0; BASE64_LEN];
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         block_id: Some(item.id),
         content_length: Some(item.content.len()),
-        checksum: checksum_text(item.checksum, &mut text, false),
-        ..Values::default()
+        checksum: checksum_base64(item.checksum, &mut text, false),
+        ..HoleValues::default()
     };
     encode_template(
         template,
@@ -414,7 +412,7 @@ pub fn accept_stage_block_head<'h>(head: ResponseHead<'h>) -> Result<StageHeadOu
     match head.status {
         201 => Ok(StageHeadOutcome::Staged { e_tag: head.e_tag }),
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -423,7 +421,7 @@ pub fn accept_stage_block_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> StageHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Writes the template of Put Block Lists with `options` into `buf`.
@@ -447,7 +445,7 @@ pub fn prepare_commit_blocks(
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
     let mut fields = FieldList::new();
-    stored_fields(&mut fields, &options.options);
+    push_stored_fields(&mut fields, &options.options);
     prepare_template(
         container,
         token,
@@ -489,18 +487,18 @@ fn describe_commit<'p>(
             // The object's own MD5 is a property of the blob, which Azure
             // stores as it is declared.
             checksum: content_md5.then_some("x-ms-blob-content-md5"),
-            condition: condition_header(condition),
+            condition: condition_header_name(condition),
             ..Holes::default()
         },
         fields,
         metadata,
-        body: Body::Each,
+        body: TemplateBody::Each,
     }
 }
 
 // Writes the block list of a commit as the body of its request.
 struct CommitFill<'i, B> {
-    values: Values<'i>,
+    values: HoleValues<'i>,
     blocks: B,
 }
 
@@ -521,7 +519,7 @@ where
 {
     const BODY: bool = true;
 
-    fn values(&self) -> &Values<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         &self.values
     }
 
@@ -582,12 +580,12 @@ where
         validate_block_id(id)?;
     }
     let fill = CommitFill {
-        values: Values {
+        values: HoleValues {
             now: Some(now),
             key,
             condition: item.condition_value,
             checksum: item.content_md5,
-            ..Values::default()
+            ..HoleValues::default()
         },
         blocks: item.blocks.clone(),
     };
@@ -619,15 +617,15 @@ pub fn accept_commit_blocks_head<'h>(
             meta: multipart_meta(head)?,
         }),
         412 if shape.condition != ConditionKind::None
-            && named(&head) == Some(ServiceErrorKind::Precondition) =>
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
         {
             Ok(CommitHeadOutcome::PreconditionFailed)
         }
-        409 if names_existing_object(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, kind_in_head(&head)) => {
             Ok(CommitHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -637,7 +635,7 @@ pub fn accept_commit_blocks_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> CommitHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
         || names_existing_object(failure.status, shape.condition, kind)
     {
@@ -719,10 +717,10 @@ pub fn accept_list_blocks_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHe
     match head.status {
         200 => Ok(ListPartsHeadOutcome::Parts {
             meta: multipart_meta(head)?,
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -732,7 +730,7 @@ pub fn accept_list_blocks_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> ListPartsHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the blocks out of the response body of a Get Block List into
@@ -782,7 +780,7 @@ pub fn block_id<'a>(bytes: &[u8], into: &'a mut [u8]) -> Option<&'a str> {
         return None;
     }
     let into = into.get_mut(..bytes.len().div_ceil(3) * 4)?;
-    Some(crate::encoding::base64_into(bytes, into))
+    Some(base64_into(bytes, into))
 }
 
 #[cfg(test)]

@@ -15,7 +15,9 @@ const MAX_PAGE: u64 = 8 * 1024 * 1024;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage_proto::{Error, Payload, ResponseHead, Timestamps, WireRequest};
+use borink_object_storage_proto::{
+    CapacityError, Error, Payload, ResponseHead, Timestamps, WireRequest,
+};
 
 // The current time, which the crate never reads itself.
 pub(crate) fn now() -> Result<Timestamps, Box<dyn std::error::Error>> {
@@ -23,24 +25,12 @@ pub(crate) fn now() -> Result<Timestamps, Box<dyn std::error::Error>> {
     Ok(Timestamps::from_unix(unix))
 }
 
-// The bytes that `encode` needs: it refuses an empty buffer with the
-// number.
-pub(crate) fn required<T>(
-    encode: impl FnOnce(&mut [u8]) -> Result<T, Error>,
-) -> Result<usize, Error> {
-    match encode(&mut []) {
-        Err(Error::Capacity(capacity)) => Ok(capacity.required),
-        Err(error) => Err(error),
-        Ok(_) => Ok(0),
-    }
-}
-
 // Writes a template with `prepare` into a buffer of exactly its size, and
 // returns both.
-pub(crate) fn template<T>(
+pub(crate) fn sized_template<T>(
     prepare: impl Fn(&mut [u8]) -> Result<T, Error>,
 ) -> Result<(T, Vec<u8>), Error> {
-    let mut bytes = vec![0; required(&prepare)?];
+    let mut bytes = vec![0; CapacityError::required_by(&prepare)?];
     let template = prepare(&mut bytes)?;
     Ok((template, bytes))
 }
@@ -74,7 +64,7 @@ pub(crate) fn send(
 }
 
 // The head of a response, as the crate reads it.
-pub(crate) fn head(parts: &ureq::http::response::Parts) -> ResponseHead<'_> {
+pub(crate) fn response_head(parts: &ureq::http::response::Parts) -> ResponseHead<'_> {
     ResponseHead::from_headers(
         parts.status.as_u16(),
         parts

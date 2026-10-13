@@ -14,6 +14,7 @@
 
 use core::fmt;
 
+use crate::validate::is_header_value;
 use crate::{Error, Result};
 
 /// The most bytes of secret access key that [`Credentials::new`] takes.
@@ -115,7 +116,7 @@ impl<'a> Credentials<'a> {
     }
 
     fn with_token(mut self, kind: Token<'a>, token: &str) -> Result<Self> {
-        if !crate::common::valid_header(token.as_bytes()) {
+        if !is_header_value(token.as_bytes()) {
             return Err(Error::InvalidCredentials);
         }
         self.token = kind;

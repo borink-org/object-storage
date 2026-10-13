@@ -1,30 +1,30 @@
-// S3 templates: what an S3 request is built from, and the steps that sign
-// a request written from one.
-//
-// An operation describes its request as a `Describe`: the method, whether
-// the path ends in a key, the query, the fields that each request fills,
-// each in its slot in the order of their names, and the fields that every
-// request sends alike. `layout` writes the request from it, once as the
-// template's pass and once as each request's: see `crate::template::Pass`.
-// The template holds the request's fixed text twice where SigV4 needs it
-// twice: once as the head sends it, and once as the canonical request signs
-// it, with the signed fields in the order of their names.
+// S3's templates. `crate::template` says what a template is and how a
+// request is written from one. This module adds what is S3's own: the
+// `Template`, the request that each operation writes, and the signing.
+// SigV4 signs a canonical form of the request, so a template also holds
+// that form's fixed text, with the signed fields sorted by name. A request
+// written from it is `Unsigned` until `set_signature` signs it.
 
 use core::cmp::Ordering;
 
-use super::{
-    Bucket, METADATA_PREFIX, Service, encodes, sorted_metadata, write_canonical_value,
-    write_metadata_value,
+use crate::checksum::{BASE64_LEN, ChecksumKind};
+use crate::encoding::hex_digest;
+use crate::request::{ByteSink, Writer, condition_header_name, write_tags_as_query};
+use crate::s3::{
+    Addressing, Bucket, CRC64_HEADER, METADATA_PREFIX, PayloadSigning, Service, sends_encoded_word,
+    sorted_metadata, validate_key, write_canonical_value, write_metadata_value,
 };
-use crate::common::write_tags;
-use crate::encoding;
-use crate::request::{ByteSink, Writer};
 use crate::sigv4::{ALGORITHM, Credentials, EMPTY_SHA256, MAX_REGION_LEN, MAX_SECRET_LEN};
 use crate::template::{
-    self, Body, Builder, Fill, Hole, Param, ParamValue, Pass, Section, Table, Values, WireRequest,
-    Written,
+    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Section, Table, TemplateBody,
+    WireRequest, Written,
 };
-use crate::{Error, InvalidRequest, MetadataPair, Method, Payload, Result, Span, Tag, Timestamps};
+use crate::url::{encode_object_key, write_query_value};
+use crate::{
+    CommitShape, ConditionKind, ConditionValue, CopyShape, DeleteKind, DeleteShape, Digest, Error,
+    GetItem, GetOptions, GetShape, InvalidRequest, ListInclude, MetadataPair, Method, Payload,
+    PutShape, Ranging, Result, RevisionKind, Span, Tag, Timestamps, encoding,
+};
 
 /// The operation that a template writes requests for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,59 +96,59 @@ pub struct Template {
 // What an operation keeps in its template to check each request against.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Detail {
-    Get(super::GetOptions),
+    Get(GetOptions),
     Put {
-        condition: crate::ConditionKind,
-        checksum: Option<crate::checksum::ChecksumKind>,
-        signing: super::PayloadSigning,
+        condition: ConditionKind,
+        checksum: Option<ChecksumKind>,
+        signing: PayloadSigning,
     },
     // A request that names one object, or none: the condition it carries,
     // the kind of revision it names, and the checksum of its body.
     Object {
-        condition: crate::ConditionKind,
-        revision: crate::RevisionKind,
-        checksum: Option<crate::checksum::ChecksumKind>,
+        condition: ConditionKind,
+        revision: RevisionKind,
+        checksum: Option<ChecksumKind>,
     },
     // A listing: what it includes, and whether its query names a delimiter
     // and a size of page, which come after a parameter that a page may
     // leave out.
     List {
-        include: crate::ListInclude,
+        include: ListInclude,
         delimiter: bool,
         max_keys: bool,
     },
     Stage {
-        checksum: Option<crate::checksum::ChecksumKind>,
-        signing: super::PayloadSigning,
+        checksum: Option<ChecksumKind>,
+        signing: PayloadSigning,
     },
     Commit {
-        condition: crate::ConditionKind,
-        checksum: Option<crate::checksum::ChecksumKind>,
+        condition: ConditionKind,
+        checksum: Option<ChecksumKind>,
         sized: bool,
     },
     // A request that names one upload of one object.
     Upload,
     Copy {
-        condition: crate::ConditionKind,
-        source_revision: crate::RevisionKind,
-        source_condition: crate::ConditionKind,
-        source_ranging: crate::Ranging,
+        condition: ConditionKind,
+        source_revision: RevisionKind,
+        source_condition: ConditionKind,
+        source_ranging: Ranging,
     },
-    DeleteMany(Option<crate::checksum::ChecksumKind>),
+    DeleteMany(Option<ChecksumKind>),
 }
 
 impl Template {
     /// Returns the shape of the read `item` from this template, which
-    /// [`s3::accept_get_head`](super::accept_get_head) reads its response against.
+    /// [`s3::accept_get_head`](crate::s3::accept_get_head) reads its response against.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn get_shape(&self, item: &crate::GetItem<'_>) -> Result<crate::GetShape> {
+    pub const fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
         match self.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -158,10 +158,10 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn put_shape(&self) -> Result<crate::PutShape> {
+    pub const fn put_shape(&self) -> Result<PutShape> {
         match self.detail {
-            Detail::Put { condition, .. } => Ok(crate::PutShape { condition }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            Detail::Put { condition, .. } => Ok(PutShape { condition }),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -171,13 +171,13 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn delete_shape(&self) -> Result<crate::DeleteShape> {
+    pub const fn delete_shape(&self) -> Result<DeleteShape> {
         match (self.operation, self.detail) {
-            (Operation::Delete, Detail::Object { condition, .. }) => Ok(crate::DeleteShape {
-                kind: crate::DeleteKind::Object,
+            (Operation::Delete, Detail::Object { condition, .. }) => Ok(DeleteShape {
+                kind: DeleteKind::Object,
                 condition,
             }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -187,10 +187,10 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn commit_shape(&self) -> Result<crate::CommitShape> {
+    pub const fn commit_shape(&self) -> Result<CommitShape> {
         match self.detail {
-            Detail::Commit { condition, .. } => Ok(crate::CommitShape { condition }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            Detail::Commit { condition, .. } => Ok(CommitShape { condition }),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -200,17 +200,17 @@ impl Template {
     ///
     /// Returns [`InvalidRequest::Template`] for a template of another
     /// operation.
-    pub const fn copy_shape(&self) -> Result<crate::CopyShape> {
+    pub const fn copy_shape(&self) -> Result<CopyShape> {
         match self.detail {
             Detail::Copy {
                 condition,
                 source_condition,
                 ..
-            } => Ok(crate::CopyShape {
+            } => Ok(CopyShape {
                 condition,
                 source_condition,
             }),
-            _ => Err(crate::Error::InvalidRequest(InvalidRequest::Template)),
+            _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
@@ -243,7 +243,7 @@ impl Template {
 
 // The value of one field that every request sends alike.
 #[derive(Clone, Copy)]
-pub(super) enum Value<'p> {
+pub(super) enum FieldValue<'p> {
     // Text from the options or the item, which SigV4 signs with its spaces folded.
     Bytes(&'p [u8]),
     // Text that this crate formats, which holds no space to fold.
@@ -262,7 +262,7 @@ pub(super) struct FieldList<'p> {
 impl<'p> FieldList<'p> {
     pub(super) const fn new() -> Self {
         Self {
-            fields: [Field::new("", Value::Formatted(b"")); MAX_SIGNED],
+            fields: [Field::new("", FieldValue::Formatted(b"")); MAX_SIGNED],
             count: 0,
         }
     }
@@ -280,11 +280,11 @@ impl<'p> FieldList<'p> {
 #[derive(Clone, Copy)]
 pub(super) struct Field<'p> {
     pub(super) name: &'p str,
-    pub(super) value: Value<'p>,
+    pub(super) value: FieldValue<'p>,
 }
 
 impl<'p> Field<'p> {
-    pub(super) const fn new(name: &'p str, value: Value<'p>) -> Self {
+    pub(super) const fn new(name: &'p str, value: FieldValue<'p>) -> Self {
         Self { name, value }
     }
 }
@@ -295,7 +295,7 @@ impl<'p> Field<'p> {
 #[derive(Clone, Copy)]
 pub(super) struct CopyFrom<'p> {
     pub(super) bucket: &'p str,
-    pub(super) revision: crate::RevisionKind,
+    pub(super) revision: RevisionKind,
 }
 
 // The fields that each request fills, each in its slot. The slots of the
@@ -370,7 +370,7 @@ pub(super) struct Describe<'p, const Q: usize> {
     // The fields that every request sends alike and S3 does not sign.
     pub(super) unsigned: &'p [Field<'p>],
     pub(super) metadata: &'p [MetadataPair<'p>],
-    pub(super) body: Body<'p>,
+    pub(super) body: TemplateBody<'p>,
     pub(super) detail: Detail,
 }
 
@@ -399,36 +399,32 @@ impl<'p, const Q: usize> Describe<'p, Q> {
             signed: &[],
             unsigned: &[],
             metadata: &[],
-            body: Body::None,
+            body: TemplateBody::None,
             detail,
         }
     }
 
     // Adds the condition of the kind `condition` on the object, which each
     // request fills.
-    pub(super) fn condition(&mut self, condition: crate::ConditionKind) {
-        self.holes.condition = super::condition_header(condition);
+    pub(super) fn condition(&mut self, condition: ConditionKind) {
+        self.holes.condition = condition_header_name(condition);
     }
 
     // Adds the field of a checksum of `kind` that `hole` fills. S3 reads an
     // MD5 from `Content-MD5`, which it does not sign, and every other kind
     // from its own `x-amz-checksum-` field, which it signs.
-    pub(super) fn checksum(&mut self, kind: crate::checksum::ChecksumKind, hole: Hole) {
+    pub(super) fn checksum(&mut self, kind: ChecksumKind, hole: Hole) {
         use crate::checksum::ChecksumKind;
         match kind {
             ChecksumKind::Md5 => self.holes.content_md5 = Some(hole),
-            ChecksumKind::Crc64 => self.holes.checksum = Some((super::CRC64_HEADER, hole)),
+            ChecksumKind::Crc64 => self.holes.checksum = Some((CRC64_HEADER, hole)),
             kind => self.holes.checksum = Some((kind.header(), hole)),
         }
     }
 
     // Gives the request a body that this crate writes: its length, its
     // SHA-256, which the request signs, and a checksum of `checksum`'s kind.
-    pub(super) fn with_body(
-        &mut self,
-        body: Body<'p>,
-        checksum: Option<crate::checksum::ChecksumKind>,
-    ) {
+    pub(super) fn with_body(&mut self, body: TemplateBody<'p>, checksum: Option<ChecksumKind>) {
         self.body = body;
         self.holes.content_sha256 = Some(Hole::BodyHash);
         self.holes.content_length = Some(Hole::BodyLength);
@@ -550,19 +546,19 @@ struct Fixed<'p> {
 }
 
 // Writes a fixed value as the head sends it.
-fn write_sent(out: &mut Writer<'_>, value: Value<'_>) {
+fn write_sent(out: &mut Writer<'_>, value: FieldValue<'_>) {
     match value {
-        Value::Bytes(bytes) | Value::Formatted(bytes) => out.push(bytes),
-        Value::Tags(tags) => write_tags(out, tags),
+        FieldValue::Bytes(bytes) | FieldValue::Formatted(bytes) => out.push(bytes),
+        FieldValue::Tags(tags) => write_tags_as_query(out, tags),
     }
 }
 
 // Writes a fixed value as SigV4 signs it.
-fn write_signed(out: &mut Writer<'_>, value: Value<'_>) {
+fn write_signed(out: &mut Writer<'_>, value: FieldValue<'_>) {
     match value {
-        Value::Bytes(bytes) => write_canonical_value(out, bytes),
+        FieldValue::Bytes(bytes) => write_canonical_value(out, bytes),
         // Encoded tags hold no space.
-        Value::Formatted(_) | Value::Tags(_) => write_sent(out, value),
+        FieldValue::Formatted(_) | FieldValue::Tags(_) => write_sent(out, value),
     }
 }
 
@@ -576,7 +572,7 @@ fn write_canonical_field(out: &mut Writer<'_>, signed: Signed<'_>, fixed: &Fixed
         Signed::Field(field) => write_signed(out, field.value),
         // An encoded word holds no space, and a value sent as it is is
         // signed folded.
-        Signed::Meta(pair) if encodes(pair.value, service) => {
+        Signed::Meta(pair) if sends_encoded_word(pair.value, service) => {
             write_metadata_value(out, pair.value, service);
         }
         Signed::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
@@ -588,14 +584,14 @@ fn write_canonical_field(out: &mut Writer<'_>, signed: Signed<'_>, fixed: &Fixed
 fn write_path(out: &mut Writer<'_>, fixed: &Fixed<'_>, key: bool) {
     let bucket = fixed.bucket;
     out.push(b"/");
-    if bucket.addressing == super::Addressing::Path {
+    if bucket.addressing == Addressing::Path {
         out.push(bucket.name.as_bytes());
         if key {
             out.push(b"/");
         }
     }
     if let (true, Some(object)) = (key, fixed.object) {
-        for part in crate::url::encode_object_key(object) {
+        for part in encode_object_key(object) {
             out.push(part);
         }
     }
@@ -612,21 +608,21 @@ fn write_fixed_query(out: &mut Writer<'_>, query: &[Param<'_>], mark: bool) {
         out.push(name.as_bytes());
         out.push(b"=");
         if let ParamValue::Fixed(value) = value {
-            crate::url::write_query_value(out, *value);
+            write_query_value(out, *value);
         }
     }
 }
 
 // The source of a copy, which is sent and signed alike.
 #[inline(always)]
-fn copy_source(p: &mut impl Pass, source: CopyFrom<'_>) {
+fn copy_source_field(p: &mut impl Pass, source: CopyFrom<'_>) {
     p.text(|out| {
         out.push(b"/");
         out.push(source.bucket.as_bytes());
         out.push(b"/");
     });
     p.hole(Hole::SourceKey);
-    if source.revision != crate::RevisionKind::Current {
+    if source.revision != RevisionKind::Current {
         p.bytes(b"?versionId=");
         p.hole(Hole::SourceRevision);
     }
@@ -636,7 +632,7 @@ fn copy_source(p: &mut impl Pass, source: CopyFrom<'_>) {
 // for `signed`, as the canonical request signs them. There `before` writes
 // the fixed fields whose names sort before each.
 #[inline(always)]
-fn holes<P: Pass>(
+fn write_filled_fields<P: Pass>(
     p: &mut P,
     holes: &Holes<'_>,
     signed: bool,
@@ -678,7 +674,7 @@ fn holes<P: Pass>(
     }
     if let Some(source) = holes.copy_source {
         start(p, "x-amz-copy-source");
-        copy_source(p, source);
+        copy_source_field(p, source);
         p.bytes(end);
     }
     if let Some(name) = holes.source_condition {
@@ -809,7 +805,7 @@ fn layout<P: Pass, const Q: usize>(
     });
     p.hole(Hole::Signature);
     p.bytes(b"\r\n");
-    holes(p, &d.holes, false, |_, _| {});
+    write_filled_fields(p, &d.holes, false, |_, _| {});
     if let Some(hole) = d.holes.content_length {
         p.bytes(b"content-length: ");
         p.hole(hole);
@@ -856,7 +852,7 @@ fn layout<P: Pass, const Q: usize>(
             }
         });
     };
-    holes(p, &d.holes, true, |p, name| write_before(p, Some(name)));
+    write_filled_fields(p, &d.holes, true, |p, name| write_before(p, Some(name)));
     write_before(p, None);
     p.text(|out| {
         if let Some(fixed) = fixed {
@@ -911,7 +907,7 @@ fn write_signed_names(out: &mut Writer<'_>, fixed: &Fixed<'_>, holes: &Holes<'_>
 /// A bucket that names an object makes a template of that object, whose text
 /// holds the key. An operation that names no object refuses such a bucket
 /// with [`InvalidRequest::Option`].
-pub(super) fn prepare<const Q: usize>(
+pub(super) fn prepare_template<const Q: usize>(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     describe: &Describe<'_, Q>,
@@ -919,24 +915,24 @@ pub(super) fn prepare<const Q: usize>(
 ) -> Result<Template> {
     let object = match bucket.object {
         Some(key) if describe.key => {
-            super::validate_key(key)?;
+            validate_key(key)?;
             Some(key)
         }
         Some(_) => return Err(InvalidRequest::Option.into()),
         None => None,
     };
     let token = credentials.token().header();
-    let mut extra = [Field::new("", Value::Formatted(b"")); 2];
+    let mut extra = [Field::new("", FieldValue::Formatted(b"")); 2];
     let mut count = 0;
     if describe.holes.content_sha256.is_none() {
         extra[count] = Field::new(
             "x-amz-content-sha256",
-            Value::Formatted(describe.content_sha256),
+            FieldValue::Formatted(describe.content_sha256),
         );
         count += 1;
     }
     if let Some((name, value)) = token {
-        extra[count] = Field::new(name, Value::Bytes(value.as_bytes()));
+        extra[count] = Field::new(name, FieldValue::Bytes(value.as_bytes()));
         count += 1;
     }
     let fixed = Fixed {
@@ -976,7 +972,7 @@ pub struct Unsigned<'c> {
     payload: Payload<'c>,
     // The kind of checksum of a body that this crate wrote, if the request
     // sends one.
-    body_checksum: Option<crate::checksum::ChecksumKind>,
+    body_checksum: Option<ChecksumKind>,
 }
 
 impl<'c> Unsigned<'c> {
@@ -1016,7 +1012,7 @@ impl<'c> Unsigned<'c> {
     /// Returns the kind of checksum of a body that this crate wrote, if the
     /// request sends one. Compute it over [`Self::body`] and write it in with
     /// [`set_body_checksum`] before you hash [`Self::canonical`].
-    pub fn body_checksum(&self) -> Option<crate::checksum::ChecksumKind> {
+    pub fn body_checksum(&self) -> Option<ChecksumKind> {
         self.body_checksum
             .filter(|_| self.written.body_checksum[0].is_some())
     }
@@ -1026,16 +1022,16 @@ impl<'c> Unsigned<'c> {
 /// that holds it: the field `x-amz-content-sha256` and the canonical
 /// request. Does nothing for a request that signs no body of its own.
 pub fn set_body_hash(unsigned: &Unsigned<'_>, buf: &mut [u8], sha256: &[u8; 32]) {
-    let hex = crate::encoding::hex(sha256);
+    let hex = hex_digest(sha256);
     for span in unsigned.written.body_hash.iter().flatten() {
-        put(buf, *span, &hex);
+        overwrite_placeholder(buf, *span, &hex);
     }
 }
 
 // Writes `text` over the placeholder at `span` of `buf`, if `buf` holds it
 // whole and it is as long: a buffer that is not the request's is left as it
 // is.
-fn put(buf: &mut [u8], span: Span, text: &[u8]) {
+fn overwrite_placeholder(buf: &mut [u8], span: Span, text: &[u8]) {
     if let Some(slot) = buf.get_mut(span.start..span.start.saturating_add(span.len))
         && slot.len() == text.len()
     {
@@ -1052,22 +1048,18 @@ fn put(buf: &mut [u8], span: Span, text: &[u8]) {
 ///
 /// Returns [`InvalidRequest::Checksum`] for a digest of another kind than the
 /// template's.
-pub fn set_body_checksum(
-    unsigned: &Unsigned<'_>,
-    buf: &mut [u8],
-    digest: &crate::Digest,
-) -> Result<()> {
+pub fn set_body_checksum(unsigned: &Unsigned<'_>, buf: &mut [u8], digest: &Digest) -> Result<()> {
     if unsigned.written.body_checksum[0].is_none() {
         return Ok(());
     }
     if unsigned.body_checksum != Some(digest.kind()) {
         return Err(InvalidRequest::Checksum.into());
     }
-    let mut text = [0; crate::checksum::BASE64_LEN];
+    let mut text = [0; BASE64_LEN];
     // S3 reads a CRC64 in big-endian order.
     let text = digest.base64_for(&mut text, true).as_bytes();
     for span in unsigned.written.body_checksum.iter().flatten() {
-        put(buf, *span, text);
+        overwrite_placeholder(buf, *span, text);
     }
     Ok(())
 }
@@ -1076,7 +1068,7 @@ pub fn set_body_checksum(
 /// writes. `describe` is the template's, without its text. Inlined into
 /// each operation's encoder, which so runs its own layout.
 #[inline(always)]
-pub(super) fn encode<'c, F: Fill, const Q: usize>(
+pub(super) fn encode_template<'c, F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
@@ -1087,8 +1079,9 @@ pub(super) fn encode<'c, F: Fill, const Q: usize>(
     let mut out = Writer::new(buf);
     #[cfg(not(feature = "compact"))]
     let written = {
-        let mut state = template::State::default();
-        let mut pass = template::Encode::new(&template.table, bytes, fill, &mut out, &mut state);
+        let mut state = template::WriteState::default();
+        let mut pass =
+            template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
         layout(&mut pass, describe, None, template.object.is_some());
         pass.finish()?
     };
@@ -1097,7 +1090,7 @@ pub(super) fn encode<'c, F: Fill, const Q: usize>(
         let _ = describe;
         template::walk_request(&template.table, bytes, fill, &mut out)?
     };
-    let written = template::fitted(&template.table, bytes, fill, &out, written)?;
+    let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
     let body_checksum = match template.detail {
         Detail::Object { checksum, .. }
         | Detail::Commit { checksum, .. }
@@ -1119,7 +1112,7 @@ impl Template {
     pub(super) fn request_key<'k>(&self, bytes: &[u8], key: &'k str) -> Result<Option<&'k str>> {
         match self.object {
             None => {
-                super::validate_key(key)?;
+                validate_key(key)?;
                 Ok(Some(key))
             }
             Some(span)
@@ -1183,7 +1176,7 @@ pub fn set_signature<'r>(
     mac: &[u8; 32],
 ) -> WireRequest<'r> {
     if let Some(span) = unsigned.written.signature {
-        put(buf, span, &encoding::hex(mac));
+        overwrite_placeholder(buf, span, &encoding::hex_digest(mac));
     }
     let bytes: &'r [u8] = buf;
     WireRequest::new(bytes, unsigned.method, &unsigned.written, unsigned.payload)
@@ -1231,17 +1224,17 @@ pub fn signing_key(
 }
 
 /// The values of one S3 request, with the canonical form of a condition.
-pub(super) struct S3Values<'i>(pub(super) Values<'i>);
+pub(super) struct S3Values<'i>(pub(super) HoleValues<'i>);
 
 impl Fill for S3Values<'_> {
-    fn values(&self) -> &Values<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         &self.0
     }
 
     fn write(&self, hole: Hole, out: &mut Writer<'_>) -> bool {
         if hole == Hole::SignedSourceCondition {
             return match self.0.source_condition {
-                Some(crate::ConditionValue::ETag(tag)) => {
+                Some(ConditionValue::ETag(tag)) => {
                     write_canonical_value(out, tag);
                     true
                 }
@@ -1254,7 +1247,7 @@ impl Fill for S3Values<'_> {
             };
         }
         match (hole, self.0.condition) {
-            (Hole::SignedCondition, Some(crate::ConditionValue::ETag(tag))) => {
+            (Hole::SignedCondition, Some(ConditionValue::ETag(tag))) => {
                 write_canonical_value(out, tag);
                 true
             }

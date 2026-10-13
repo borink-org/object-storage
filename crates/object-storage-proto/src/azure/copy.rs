@@ -12,30 +12,33 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
+use crate::azure::blocks::validate_block_id;
+use crate::azure::tags::accept_update_head;
 use crate::azure::template::{
-    CopyFrom, Describe, Detail, Field, FieldList, Holes, Operation, Template, Value,
-    encode as encode_template, prepare as prepare_template,
+    CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Holes, Operation, Template,
+    encode_template, prepare_template,
 };
 use crate::azure::{
-    AzureNamespace, Container, azure_tag_char, body_kind, failed, named, names_existing_object,
-    names_failed_condition, validate_key, validate_metadata,
+    AzureNamespace, Container, azure_tag_char, kind_in_body, kind_in_head, names_existing_object,
+    names_failed_condition, push_stored_fields, read_failure_head, utf8_properties, validate_key,
+    validate_metadata,
 };
-use crate::azure::{stored_fields, utf8_properties};
-use crate::common::{
-    condition_header, validate_properties, validate_revision_item, validate_source_range,
-};
-use crate::common::{
-    finish_with_body, meta_of, text_header, trim_ascii, validate_condition, validate_tags,
-};
-use crate::http::PlainHttp;
-use crate::template::{Body, Hole, ParamValue, Values, WireRequest};
+use crate::head::read_text_header;
+use crate::http::{PlainHttp, valid_http_origin};
+use crate::outcome::finish_with_body;
+use crate::request::condition_header_name;
+use crate::template::{Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
-use crate::{
-    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidRequest, Method, ObjectMeta,
-    Payload, PutHeadOutcome, ResponseFault, ResponseHead, Result, ServiceErrorKind, Timestamps,
-    UpdateHeadOutcome,
+use crate::validate::{
+    validate_condition, validate_properties, validate_revision_item, validate_source_container,
+    validate_source_range, validate_tags,
 };
-use crate::{CopyItem, CopyOptions, MetadataPair, Ranging, RevisionKind, WriteOptions};
+use crate::{
+    ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, DeleteKind, Failure,
+    InvalidRequest, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome, Ranging,
+    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps,
+    UpdateHeadOutcome, WriteOptions,
+};
 
 // Whether a copy carried a condition on the target or on the source.
 fn carries_condition(shape: CopyShape) -> bool {
@@ -131,12 +134,10 @@ fn validate_copy_options(
 // Checks where a template's sources are: another account's origin of TLS,
 // and a container that does not change the URL's structure.
 fn validate_source_location(endpoint: Option<&str>, container: Option<&str>) -> Result<()> {
-    if endpoint
-        .is_some_and(|endpoint| !crate::http::valid_http_origin(endpoint, PlainHttp::Refused))
-    {
+    if endpoint.is_some_and(|endpoint| !valid_http_origin(endpoint, PlainHttp::Refused)) {
         return Err(InvalidRequest::CopySource.into());
     }
-    crate::common::validate_source_container(container)
+    validate_source_container(container)
 }
 
 // The field that carries a condition on a copy's source.
@@ -164,25 +165,26 @@ fn prepare_copy_kind(
     match kind {
         CopyKind::Copy | CopyKind::StageBlock => {}
         CopyKind::CopyFromUrl => {
-            fields.push(Field::new("x-ms-requires-sync", Value::Bytes(b"true")))
+            fields.push(Field::new("x-ms-requires-sync", FieldValue::Bytes(b"true")))
         }
-        CopyKind::PutFromUrl => {
-            fields.push(Field::new("x-ms-blob-type", Value::Bytes(b"BlockBlob")))
-        }
+        CopyKind::PutFromUrl => fields.push(Field::new(
+            "x-ms-blob-type",
+            FieldValue::Bytes(b"BlockBlob"),
+        )),
     }
     // A From URL operation reads the source as a client would, with the
     // client's token.
     if kind != CopyKind::Copy {
         fields.push(Field::new(
             "x-ms-copy-source-authorization",
-            Value::Bearer(token),
+            FieldValue::Bearer(token),
         ));
     }
-    stored_fields(&mut fields, &options.options);
+    push_stored_fields(&mut fields, &options.options);
     if let Some(tags) = options.tags.filter(|tags| !tags.is_empty()) {
-        fields.push(Field::new("x-ms-tags", Value::Tags(tags)));
+        fields.push(Field::new("x-ms-tags", FieldValue::Tags(tags)));
     }
-    fields.push(Field::new("content-length", Value::Bytes(b"0")));
+    fields.push(Field::new("content-length", FieldValue::Bytes(b"0")));
     let detail = Detail::Copy {
         condition: options.condition,
         source_revision: options.source_revision,
@@ -248,12 +250,12 @@ fn describe_copy<'p>(
             }),
             source_range: source_ranging == Ranging::Ranged,
             source_condition: source_condition_header(source_condition),
-            condition: condition_header(condition),
+            condition: condition_header_name(condition),
             ..Holes::default()
         },
         fields: text.map_or(&[], |text| text.fields),
         metadata: text.map_or(&[], |text| text.metadata),
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -283,13 +285,13 @@ fn encode_copy_kind<'r>(
     let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key, template.namespace)?;
     if let Some(id) = block_id {
-        super::blocks::validate_block_id(id)?;
+        validate_block_id(id)?;
     }
     validate_revision_item(source_revision, item.source_revision)?;
     validate_condition(condition, item.condition_value)?;
     validate_condition(source_condition, item.source_condition_value)?;
     validate_source_range(source_ranging, item.source_range)?;
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
@@ -298,7 +300,7 @@ fn encode_copy_kind<'r>(
         source_condition: item.source_condition_value,
         source_range: Some(item.source_range),
         block_id,
-        ..Values::default()
+        ..HoleValues::default()
     };
     encode_template(
         template,
@@ -507,23 +509,25 @@ pub fn accept_copy_head<'h>(
     match head.status {
         202 => {
             let meta = ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             };
-            match head.copy_status.map(trim_ascii) {
+            match head.copy_status.map(<[u8]>::trim_ascii) {
                 Some(b"success") => Ok(CopyHeadOutcome::Copied { meta }),
                 Some(b"pending") if head.copy_id.is_some() => Ok(CopyHeadOutcome::Pending { meta }),
                 _ => Err(ResponseFault::Head.into()),
             }
         }
-        412 if carries_condition(shape) && named(&head) == Some(ServiceErrorKind::Precondition) => {
+        412 if carries_condition(shape)
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
             Ok(CopyHeadOutcome::PreconditionFailed)
         }
-        409 if names_existing_object(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, kind_in_head(&head)) => {
             Ok(CopyHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -533,7 +537,7 @@ pub fn accept_copy_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> CopyHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, carries_condition(shape), kind)
         || names_existing_object(failure.status, shape.condition, kind)
     {
@@ -556,18 +560,20 @@ pub fn accept_put_from_url_head<'h>(
     match head.status {
         201 => Ok(PutHeadOutcome::Created {
             meta: ObjectMeta {
-                last_modified: text_header(head.last_modified)?,
-                ..meta_of(head)
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
             },
         }),
-        412 if carries_condition(shape) && named(&head) == Some(ServiceErrorKind::Precondition) => {
+        412 if carries_condition(shape)
+            && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
+        {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
-        409 if names_existing_object(409, shape.condition, named(&head)) => {
+        409 if names_existing_object(409, shape.condition, kind_in_head(&head)) => {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
         200..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -578,17 +584,13 @@ pub fn accept_put_from_url_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> PutHeadOutcome<'h> {
-    let kind = body_kind(body);
+    let kind = kind_in_body(body);
     if names_failed_condition(failure.status, carries_condition(shape), kind)
         || names_existing_object(failure.status, shape.condition, kind)
     {
         return PutHeadOutcome::PreconditionFailed;
     }
-    PutHeadOutcome::ServiceFailure(crate::common::failure(
-        failure.status,
-        kind,
-        failure.request_id,
-    ))
+    PutHeadOutcome::ServiceFailure(Failure::new(failure.status, kind, failure.request_id))
 }
 
 /// Writes the template of Abort Copy Blobs into `buf`.
@@ -604,8 +606,8 @@ pub fn prepare_abort_copy(
     buf: &mut [u8],
 ) -> Result<Template> {
     let fields = [
-        Field::new("x-ms-copy-action", Value::Bytes(b"abort")),
-        Field::new("content-length", Value::Bytes(b"0")),
+        Field::new("x-ms-copy-action", FieldValue::Bytes(b"abort")),
+        Field::new("content-length", FieldValue::Bytes(b"0")),
     ];
     prepare_template(
         container,
@@ -616,7 +618,7 @@ pub fn prepare_abort_copy(
         Detail::Object {
             condition: ConditionKind::None,
             revision: RevisionKind::Current,
-            delete: crate::DeleteKind::Object,
+            delete: DeleteKind::Object,
         },
         buf,
         |_| {},
@@ -635,7 +637,7 @@ fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
         holes: Holes::default(),
         fields,
         metadata: &[],
-        body: Body::None,
+        body: TemplateBody::None,
     }
 }
 
@@ -665,11 +667,11 @@ pub fn encode_abort_copy<'r>(
     if item.copy_id.is_empty() {
         return Err(InvalidRequest::Option.into());
     }
-    let values = Values {
+    let values = HoleValues {
         now: Some(now),
         key,
         copy_id: Some(item.copy_id),
-        ..Values::default()
+        ..HoleValues::default()
     };
     encode_template(
         template,
@@ -688,5 +690,5 @@ pub fn encode_abort_copy<'r>(
 /// Returns [`Error::Response`] if the head cannot be read. A success status
 /// other than 204 is [`ResponseFault::Status`].
 pub fn accept_abort_copy_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
-    super::tags::accept_update(head, &[204], ConditionKind::None)
+    accept_update_head(head, &[204], ConditionKind::None)
 }

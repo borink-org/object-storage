@@ -1,16 +1,21 @@
 // Requests written from a template, for both services.
 //
 // A template is the part of a request that is the same for every object it
-// serves: the origin, the path up to the key, the fields whose values never
-// change, and the fixed text of the canonical request that S3 signs. It is
-// written once into a buffer the caller owns, followed by a table of steps.
-// A step is a run of that fixed text and the hole after it, which each
-// request fills with a value of its own, such as its key or the time. The
-// runs follow each other in the text, so a step holds only their lengths.
+// serves. That is the origin, the path up to the key, the fields whose values
+// never change, and the fixed text of the canonical request that S3 signs.
+// It is checked and written once, into a buffer the caller owns, followed
+// by a table of steps. A step is a run of that fixed text and the hole after
+// it. Each request fills a hole with a value of its own, such as its key or
+// the time. The runs follow each other in the text, so a step holds only
+// their lengths. A request then only copies text and writes its own values.
 //
-// Encoding a request walks the table: it copies each run of fixed text and
-// fills each hole after it. The request is written whole into its own buffer, so it
-// borrows nothing from the template.
+// Each operation describes its request once, in a function generic over a
+// `Pass`. Run with the template's pass, it writes the fixed text and the
+// table. Run with a request's pass, it copies each run of fixed text from
+// the template and fills the hole after it, as straight-line code. With the
+// feature `compact`, a request walks the table instead, in one function for
+// every operation. Either way the request is written whole into its own
+// buffer, so it borrows nothing from the template.
 //
 // The table has six sections, written in this order:
 //
@@ -28,10 +33,16 @@
 // request fills follow. Neither service reads meaning into the order of the
 // fields: S3 signs them sorted by name in the canonical request.
 
-use crate::common::capacity_error;
-use crate::request::{Writer, text};
-use crate::url::QueryValue;
-use crate::{CapacityError, InvalidRequest, Method, Payload, Result, Span};
+use crate::checksum::ChecksumKind;
+use crate::error::capacity_error;
+use crate::request::{ByteSink, U64Decimal, Writer, write_range, written_text};
+use crate::url::{
+    QueryValue, encode_object_key, encode_query_value, key_is_plain, write_query_value,
+};
+use crate::{
+    CapacityError, ConditionValue, InvalidRequest, Method, Payload, RequestedRange, Result, Span,
+    Timestamps,
+};
 
 /// The value that a request writes into one hole of its template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +55,7 @@ pub(crate) enum Hole {
     Path = 2,
     // The query of the URL without its `?`, for the canonical request.
     Query = 3,
-    // The placeholder of an S3 signature, 64 bytes that `finish` replaces.
+    // The placeholder of an S3 signature, 64 bytes that `s3::set_signature` replaces.
     Signature = 4,
     // The object key, percent-encoded as a path.
     Key = 5,
@@ -186,18 +197,18 @@ pub(crate) fn fixed_query(query: &[Param<'_>]) -> bool {
 // The body of a template's requests: none, the same text for every request,
 // or a body that each request writes.
 #[derive(Clone, Copy)]
-pub(crate) enum Body<'b> {
+pub(crate) enum TemplateBody<'b> {
     None,
-    Fixed(Text<'b>),
+    Fixed(FixedText<'b>),
     Each,
 }
 
 // Writes text that every request sends alike, such as a fixed body.
-pub(crate) type Text<'t> = &'t dyn Fn(&mut dyn crate::request::ByteSink);
+pub(crate) type FixedText<'t> = &'t dyn Fn(&mut dyn ByteSink);
 
 // The text of a fixed body, for a request's describe: a request's pass
 // writes no text.
-pub(crate) const NO_TEXT: Text<'static> = &|_| {};
+pub(crate) const NO_TEXT: FixedText<'static> = &|_| {};
 
 /// The sections of a table, in the order that a request is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -261,7 +272,7 @@ pub(crate) struct Table {
 ///
 /// An operation writes its layout once, generic over the pass. The
 /// template's pass ([`Builder`]) writes the fixed text and leaves the holes.
-/// A request's pass ([`Encode`]) copies that text from the template and
+/// A request's pass ([`EncodePass`]) copies that text from the template and
 /// fills the holes. The compiler writes each operation's request pass as
 /// straight-line code, so a request walks no table. What decides the holes,
 /// the sections and the query parameters is the same in both passes: the
@@ -293,12 +304,12 @@ pub(crate) trait Pass {
 
     // The body section.
     #[inline(always)]
-    fn body(&mut self, body: Body<'_>) {
+    fn body(&mut self, body: TemplateBody<'_>) {
         self.section(Section::Body);
         match body {
-            Body::None => {}
-            Body::Fixed(write) => self.text(|out| write(out)),
-            Body::Each => self.hole(Hole::Body),
+            TemplateBody::None => {}
+            TemplateBody::Fixed(write) => self.text(|out| write(out)),
+            TemplateBody::Each => self.hole(Hole::Body),
         }
     }
 }
@@ -461,12 +472,12 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
 
 // Writes the values of a stored template one after another, as
 // `Template::to_bytes` of each service stores them.
-pub(crate) struct Store<'s> {
+pub(crate) struct StoredWriter<'s> {
     bytes: &'s mut [u8],
     at: usize,
 }
 
-impl<'s> Store<'s> {
+impl<'s> StoredWriter<'s> {
     pub(crate) fn new(bytes: &'s mut [u8]) -> Self {
         Self { bytes, at: 0 }
     }
@@ -483,15 +494,15 @@ impl<'s> Store<'s> {
     }
 }
 
-// Reads the values of a stored template back, in the order `Store` wrote
+// Reads the values of a stored template back, in the order `StoredWriter` wrote
 // them. Past the end, it reads zeros. Every read is inlined, so that a
 // template read back reads each value at an offset the compiler knows.
-pub(crate) struct Load<'s> {
+pub(crate) struct StoredReader<'s> {
     bytes: &'s [u8],
     at: usize,
 }
 
-impl<'s> Load<'s> {
+impl<'s> StoredReader<'s> {
     #[inline(always)]
     pub(crate) fn new(bytes: &'s [u8]) -> Self {
         Self { bytes, at: 0 }
@@ -529,7 +540,7 @@ impl Table {
         self.end as usize
     }
 
-    pub(crate) fn store(&self, into: &mut Store<'_>) {
+    pub(crate) fn store(&self, into: &mut StoredWriter<'_>) {
         into.u32(self.start);
         into.put(&self.counts);
         into.put(&[self.total, self.params]);
@@ -545,7 +556,7 @@ impl Table {
     // has: its steps are those of its sections, and fill its bytes from
     // `start` to `end`.
     #[inline(always)]
-    pub(crate) fn load(from: &mut Load<'_>) -> Option<Self> {
+    pub(crate) fn load(from: &mut StoredReader<'_>) -> Option<Self> {
         let start = from.u32();
         let counts: [u8; SECTIONS] = from.take();
         let [total, params] = from.take();
@@ -635,7 +646,7 @@ impl Pass for Builder<'_> {
                 self.text(|out| {
                     out.push(name.as_bytes());
                     out.push(b"=");
-                    crate::url::write_query_value(out, value);
+                    write_query_value(out, value);
                 });
             }
             ParamValue::Hole(hole) => {
@@ -683,12 +694,12 @@ impl Table {
 
     // The parts of `bytes`, or the refusal of bytes that cannot be the
     // template's.
-    fn parts<'t>(&self, bytes: &'t [u8]) -> Result<Parts<'t>> {
+    fn parts<'t>(&self, bytes: &'t [u8]) -> Result<TemplateParts<'t>> {
         let steps = self.steps(bytes)?;
         let text = bytes
             .get(..self.start as usize)
             .ok_or(InvalidRequest::Template)?;
-        Ok(Parts { bytes, steps, text })
+        Ok(TemplateParts { bytes, steps, text })
     }
 
     // Checks that `bytes` are the template's own: its text and its table
@@ -713,7 +724,7 @@ impl Table {
     // length of is counted by writing it into nothing. A fill that writes
     // no body is not handed on, so that it stays where the compiler put it.
     #[inline(always)]
-    fn body_len<F: Fill>(&self, parts: Parts<'_>, fill: &F) -> Result<usize> {
+    fn body_len<F: Fill>(&self, parts: TemplateParts<'_>, fill: &F) -> Result<usize> {
         match (self.body, F::BODY) {
             (false, _) => Ok(0),
             (true, false) => self.fixed_body_len(parts.steps),
@@ -725,7 +736,7 @@ impl Table {
     fn fixed_body_len(&self, steps: &[[u8; 8]]) -> Result<usize> {
         let mut len = 0;
         for at in self.steps_before(Section::Body as usize)..steps.len() {
-            let step = step(steps, at)?;
+            let step = read_step(steps, at)?;
             if step.hole != NO_HOLE {
                 return Err(InvalidRequest::Template.into());
             }
@@ -735,12 +746,12 @@ impl Table {
     }
 
     // The length of a body that `fill` writes into the template's text.
-    fn filled_body_len(&self, parts: Parts<'_>, fill: &impl Fill) -> Result<usize> {
+    fn filled_body_len(&self, parts: TemplateParts<'_>, fill: &impl Fill) -> Result<usize> {
         let body = Section::Body as usize;
         let steps = parts.steps;
         let mut len = 0;
         for at in self.steps_before(body)..steps.len() {
-            let step = step(steps, at)?;
+            let step = read_step(steps, at)?;
             len += step.len as usize + step.name as usize;
             len += match step.hole {
                 NO_HOLE => 0,
@@ -748,7 +759,7 @@ impl Table {
                     Some(len) => len,
                     None => {
                         let mut counted = Writer::new(&mut []);
-                        walk(self, parts.bytes, fill, &mut counted, body..SECTIONS, 0)?;
+                        walk_table(self, parts.bytes, fill, &mut counted, body..SECTIONS, 0)?;
                         return Ok(counted.position());
                     }
                 },
@@ -760,7 +771,7 @@ impl Table {
 }
 
 // The step at `at` of `steps`.
-fn step(steps: &[[u8; 8]], at: usize) -> Result<Step> {
+fn read_step(steps: &[[u8; 8]], at: usize) -> Result<Step> {
     let [l0, l1, l2, l3, hole, name, ends, _] = *steps.get(at).ok_or(InvalidRequest::Template)?;
     Ok(Step {
         len: u32::from_le_bytes([l0, l1, l2, l3]),
@@ -772,14 +783,14 @@ fn step(steps: &[[u8; 8]], at: usize) -> Result<Step> {
 
 /// A template's bytes, and the table and the text in them.
 #[derive(Debug, Clone, Copy)]
-struct Parts<'t> {
+struct TemplateParts<'t> {
     bytes: &'t [u8],
     steps: &'t [[u8; 8]],
     text: &'t [u8],
 }
 
-impl Parts<'_> {
-    const EMPTY: Parts<'static> = Parts {
+impl TemplateParts<'_> {
+    const EMPTY: TemplateParts<'static> = TemplateParts {
         bytes: &[],
         steps: &[],
         text: &[],
@@ -793,9 +804,9 @@ pub(crate) trait Fill {
     const BODY: bool = false;
 
     // The values of the holes that both services share.
-    fn values(&self) -> &Values<'_>;
+    fn values(&self) -> &HoleValues<'_>;
 
-    // Writes the value of a hole that `Values` does not fill: a body that
+    // Writes the value of a hole that `HoleValues` does not fill: a body that
     // this crate writes, or a value in the form that only one service
     // needs. Returns `false` for a hole that this request has no value for,
     // which means the template is for another operation.
@@ -834,7 +845,7 @@ pub(crate) struct Written {
 // where it starts and where each section ends, the placeholders it holds,
 // where its fields start, and how many query parameters it has.
 #[derive(Default)]
-pub(crate) struct State {
+pub(crate) struct WriteState {
     start: usize,
     ends: [usize; SECTIONS],
     marks: Marks,
@@ -843,7 +854,7 @@ pub(crate) struct State {
     body_len: usize,
 }
 
-impl State {
+impl WriteState {
     #[inline(always)]
     fn new(table: &Table, start: usize, body_len: usize) -> Self {
         Self {
@@ -915,7 +926,7 @@ impl State {
 // reduces to the one arm.
 #[inline(always)]
 fn write_hole(
-    state: &mut State,
+    state: &mut WriteState,
     hole: Hole,
     name: &[u8],
     fill: &impl Fill,
@@ -952,11 +963,11 @@ fn write_hole(
             state.marks.signature = Some(out.part(|out| out.push(&[b'0'; 64])));
         }
         Hole::BodyLength => {
-            out.push(crate::request::U64Decimal::new(state.body_len as u64).as_bytes());
+            out.push(U64Decimal::new(state.body_len as u64).as_bytes());
         }
         Hole::BodyHash => {
             let span = out.part(|out| out.push(&[b'0'; 64]));
-            record(&mut state.marks.body_hash, span);
+            record_placeholder(&mut state.marks.body_hash, span);
         }
         Hole::BodyChecksum => {
             let Some(kind) = values.body_checksum else {
@@ -967,7 +978,7 @@ fn write_hole(
                     out.push(b"=");
                 }
             });
-            record(&mut state.marks.body_checksum, span);
+            record_placeholder(&mut state.marks.body_checksum, span);
         }
         Hole::Separator => {
             out.push(if state.params == 0 { b"?" } else { b"&" });
@@ -1001,13 +1012,13 @@ pub(crate) fn walk_request(
     out: &mut Writer<'_>,
 ) -> Result<Written> {
     let body_len = table.body_len(table.parts(template)?, fill)?;
-    walk(table, template, fill, out, 0..SECTIONS, body_len)
+    walk_table(table, template, fill, out, 0..SECTIONS, body_len)
 }
 
 /// Returns where the parts of a request written into `out` are, or the
 /// refusal of one that did not fit, with the room it needs.
 #[inline(always)]
-pub(crate) fn fitted(
+pub(crate) fn check_fit(
     table: &Table,
     template: &[u8],
     fill: &impl Fill,
@@ -1046,7 +1057,7 @@ fn same_as_walked(
     let body_len = table
         .body_len(table.parts(template).expect("the template's own"), fill)
         .expect("the body counts");
-    let again = walk(table, template, fill, &mut copy, 0..SECTIONS, body_len)
+    let again = walk_table(table, template, fill, &mut copy, 0..SECTIONS, body_len)
         .expect("walking the table writes the request");
     assert_eq!(
         &walked[..again.end],
@@ -1076,7 +1087,7 @@ fn same_as_walked(
 /// have, without writing it.
 pub(crate) fn url_len(table: &Table, template: &[u8], fill: &impl Fill) -> Result<usize> {
     let mut counted = Writer::new(&mut []);
-    walk(
+    walk_table(
         table,
         template,
         fill,
@@ -1089,7 +1100,7 @@ pub(crate) fn url_len(table: &Table, template: &[u8], fill: &impl Fill) -> Resul
 
 // Writes the sections `sections` of a request by walking the template's
 // table: it copies each run of text and fills each hole after it.
-fn walk(
+fn walk_table(
     table: &Table,
     template: &[u8],
     fill: &impl Fill,
@@ -1110,13 +1121,13 @@ fn walk(
     let last = table.steps_before(sections.end);
     let mut cursor = 0;
     for at in 0..first {
-        let step = step(steps, at)?;
+        let step = read_step(steps, at)?;
         cursor += step.len as usize + step.name as usize;
     }
-    let mut state = State::new(table, out.position(), body_len);
+    let mut state = WriteState::new(table, out.position(), body_len);
     let (fields_step, fields_offset) = table.fields;
     for at in first..last {
-        let step = step(steps, at)?;
+        let step = read_step(steps, at)?;
         let fixed = run(cursor, step.len as usize)?;
         if at == fields_step as usize {
             state.fields = out.position() + fixed.len().min(fields_offset as usize);
@@ -1152,13 +1163,13 @@ fn walk(
 /// template's write a wrong request, or fail where they run out. They cannot
 /// make the pass read outside them or panic.
 #[cfg_attr(feature = "compact", allow(dead_code))]
-pub(crate) struct Encode<'e, 'o, F: Fill> {
+pub(crate) struct EncodePass<'e, 'o, F: Fill> {
     steps: &'e [[u8; 8]],
     text: &'e [u8],
     table: &'e Table,
     fill: &'e F,
     out: &'e mut Writer<'o>,
-    state: &'e mut State,
+    state: &'e mut WriteState,
     // The next step and where its run starts, and the current section.
     at: usize,
     cursor: usize,
@@ -1169,7 +1180,7 @@ pub(crate) struct Encode<'e, 'o, F: Fill> {
 }
 
 #[cfg_attr(feature = "compact", allow(dead_code))]
-impl<'e, 'o, F: Fill> Encode<'e, 'o, F> {
+impl<'e, 'o, F: Fill> EncodePass<'e, 'o, F> {
     // Starts a request's pass over the template `template`, whose table is
     // `table`, which writes into `out` with the values that `fill` writes,
     // and keeps what the request's parts need in `state`. Bytes whose table
@@ -1182,16 +1193,16 @@ impl<'e, 'o, F: Fill> Encode<'e, 'o, F> {
         template: &'e [u8],
         fill: &'e F,
         out: &'e mut Writer<'o>,
-        state: &'e mut State,
+        state: &'e mut WriteState,
     ) -> Self {
         let (parts, body_len, failed) = match table.parts(template) {
             Ok(parts) => match table.body_len(parts, fill) {
                 Ok(body_len) => (parts, body_len, false),
-                Err(_) => (Parts::EMPTY, 0, true),
+                Err(_) => (TemplateParts::EMPTY, 0, true),
             },
-            Err(_) => (Parts::EMPTY, 0, true),
+            Err(_) => (TemplateParts::EMPTY, 0, true),
         };
-        *state = State::new(table, out.position(), body_len);
+        *state = WriteState::new(table, out.position(), body_len);
         Self {
             steps: parts.steps,
             text: parts.text,
@@ -1255,7 +1266,7 @@ impl<'e, 'o, F: Fill> Encode<'e, 'o, F> {
     }
 }
 
-impl<F: Fill> Pass for Encode<'_, '_, F> {
+impl<F: Fill> Pass for EncodePass<'_, '_, F> {
     #[inline(always)]
     fn section(&mut self, section: Section) {
         self.end_until(section as usize);
@@ -1314,7 +1325,7 @@ struct Marks {
 // Records the span of a placeholder in the first free slot: the head's,
 // then the canonical request's.
 #[inline(always)]
-fn record(slots: &mut [Option<Span>], span: Span) {
+fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
     if let Some(slot) = slots.iter_mut().find(|slot| slot.is_none()) {
         *slot = Some(span);
     }
@@ -1382,7 +1393,7 @@ impl<'r> WireRequest<'r> {
     /// Send it unchanged. S3 signs the `host` that your client writes from
     /// it, and the path and the query as they are written here.
     pub fn url(&self) -> &'r str {
-        text(self.slice(self.url))
+        written_text(self.slice(self.url))
     }
 
     /// Returns each header field as a name and a value, other than `host`.
@@ -1390,7 +1401,7 @@ impl<'r> WireRequest<'r> {
     /// Your HTTP client writes `host` from the URL. Write every field that
     /// this returns, unchanged and none twice.
     pub fn headers(&self) -> impl Iterator<Item = (&'r str, &'r str)> + Clone + use<'r> {
-        Fields(self.slice(self.fields))
+        FieldLines(self.slice(self.fields))
     }
 
     /// Returns the HTTP/1.1 request head: the request line, `host`, every
@@ -1540,9 +1551,9 @@ impl Placement {
 
 // The field lines of a head, each read as its name and its value.
 #[derive(Clone)]
-struct Fields<'r>(&'r [u8]);
+struct FieldLines<'r>(&'r [u8]);
 
-impl<'r> Iterator for Fields<'r> {
+impl<'r> Iterator for FieldLines<'r> {
     type Item = (&'r str, &'r str);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1551,17 +1562,20 @@ impl<'r> Iterator for Fields<'r> {
         self.0 = &rest[2..];
         // A name holds no `:`, so the first `: ` ends it.
         let colon = line.windows(2).position(|pair| pair == b": ")?;
-        Some((text(&line[..colon]), text(&line[colon + 2..])))
+        Some((
+            written_text(&line[..colon]),
+            written_text(&line[colon + 2..]),
+        ))
     }
 }
 
 /// The values of one request that fill the holes both services share.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Values<'i> {
-    pub(crate) now: Option<&'i crate::Timestamps>,
+pub(crate) struct HoleValues<'i> {
+    pub(crate) now: Option<&'i Timestamps>,
     pub(crate) key: Option<&'i str>,
-    pub(crate) range: Option<crate::RequestedRange>,
-    pub(crate) condition: Option<crate::ConditionValue<'i>>,
+    pub(crate) range: Option<RequestedRange>,
+    pub(crate) condition: Option<ConditionValue<'i>>,
     pub(crate) revision: Option<&'i str>,
     pub(crate) content_length: Option<u64>,
     pub(crate) checksum: Option<&'i str>,
@@ -1579,22 +1593,22 @@ pub(crate) struct Values<'i> {
     // The source of a copy, and the ID of an Azure copy.
     pub(crate) source_key: Option<&'i str>,
     pub(crate) source_revision: Option<&'i str>,
-    pub(crate) source_condition: Option<crate::ConditionValue<'i>>,
-    pub(crate) source_range: Option<crate::RequestedRange>,
+    pub(crate) source_condition: Option<ConditionValue<'i>>,
+    pub(crate) source_range: Option<RequestedRange>,
     pub(crate) copy_id: Option<&'i str>,
     // The kind of checksum of a body that this crate writes, whose
     // placeholder the request holds, and the length of an S3 object.
-    pub(crate) body_checksum: Option<crate::checksum::ChecksumKind>,
+    pub(crate) body_checksum: Option<ChecksumKind>,
     pub(crate) object_size: Option<u64>,
 }
 
-impl Fill for Values<'_> {
-    fn values(&self) -> &Values<'_> {
+impl Fill for HoleValues<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         self
     }
 }
 
-impl Values<'_> {
+impl HoleValues<'_> {
     // Writes the value of `hole`. Returns `false` for a hole that is not
     // one of these values, or that this request has no value for.
     #[inline(always)]
@@ -1606,7 +1620,7 @@ impl Values<'_> {
                 None => return false,
             },
             Hole::Range => match self.range {
-                Some(range) => crate::common::write_range(out, range),
+                Some(range) => write_range(out, range),
                 None => return false,
             },
             Hole::Condition => match self.condition {
@@ -1630,7 +1644,7 @@ impl Values<'_> {
                 None => return false,
             },
             Hole::ContentLength => match self.content_length {
-                Some(len) => out.push(crate::request::U64Decimal::new(len).as_bytes()),
+                Some(len) => out.push(U64Decimal::new(len).as_bytes()),
                 None => return false,
             },
             Hole::Checksum => match self.checksum {
@@ -1658,15 +1672,15 @@ impl Values<'_> {
                 None => return false,
             },
             Hole::SourceRange => match self.source_range {
-                Some(range) => crate::common::write_range(out, range),
+                Some(range) => write_range(out, range),
                 None => return false,
             },
             Hole::ObjectSize => match self.object_size {
-                Some(size) => out.push(crate::request::U64Decimal::new(size).as_bytes()),
+                Some(size) => out.push(U64Decimal::new(size).as_bytes()),
                 None => return false,
             },
             Hole::PartNumber => match self.part_number {
-                Some(number) => out.push(crate::request::U64Decimal::new(number.into()).as_bytes()),
+                Some(number) => out.push(U64Decimal::new(number.into()).as_bytes()),
                 None => return false,
             },
             _ => return false,
@@ -1716,7 +1730,7 @@ impl Values<'_> {
 // Writes `value` percent-encoded as a query value.
 #[inline(always)]
 fn write_query(out: &mut Writer<'_>, value: &[u8]) {
-    for part in crate::url::encode_query_value(value) {
+    for part in encode_query_value(value) {
         out.push(part);
     }
 }
@@ -1725,10 +1739,10 @@ fn write_query(out: &mut Writer<'_>, value: &[u8]) {
 // escape.
 #[inline(always)]
 fn write_key(out: &mut Writer<'_>, key: &str) {
-    if crate::url::key_is_plain(key.as_bytes()) {
+    if key_is_plain(key.as_bytes()) {
         out.push(key.as_bytes());
     } else {
-        for part in crate::url::encode_object_key(key) {
+        for part in encode_object_key(key) {
             out.push(part);
         }
     }

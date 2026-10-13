@@ -12,8 +12,7 @@ use std::rc::Rc;
 use std::vec;
 use std::vec::Vec;
 
-use crate::azure::AzureNamespace;
-use crate::azure::{self, BlockRef, BlockSource, Container};
+use crate::azure::{self, AzureNamespace, BlockRef, BlockSource, Container};
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{

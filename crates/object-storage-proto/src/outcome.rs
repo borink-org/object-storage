@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::{ListMarker, ResponseHead};
+
 /// The result of reading the response head of a stage: an Azure Put Block,
 /// or an S3 UploadPart.
 ///
@@ -48,7 +50,7 @@ impl fmt::Display for StageHeadOutcome<'_> {
         match self {
             Self::Staged { .. } => f.write_str("the service holds the part"),
             Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -160,7 +162,7 @@ impl fmt::Display for RestoreHeadOutcome<'_> {
         match self {
             Self::Started => f.write_str("the service started the restore"),
             Self::Readable => f.write_str("the object is readable"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -202,7 +204,7 @@ impl fmt::Display for UpdateHeadOutcome<'_> {
         match self {
             Self::Updated { .. } => f.write_str("the service made the change"),
             Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -242,7 +244,7 @@ impl fmt::Display for TagsHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tags { .. } => f.write_str("the tags follow in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -334,7 +336,7 @@ impl fmt::Display for CommitHeadOutcome<'_> {
             Self::Committed { .. } => f.write_str("the object is committed"),
             Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
             Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -381,7 +383,7 @@ impl fmt::Display for ListPartsHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parts { .. } => f.write_str("the parts follow in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -390,7 +392,7 @@ impl fmt::Display for ListPartsHeadOutcome<'_> {
 
 // What a `NotFound` of an operation on parts writes: what the service named
 // as missing, or all that can be.
-fn not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt::Result {
+fn write_not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt::Result {
     match kind {
         Some(
             kind @ (ServiceErrorKind::NotFound
@@ -778,7 +780,7 @@ pub struct Listing<'b> {
     /// fewer entries than it asked for. An S3 listing of versions names it
     /// as a [`ListMarker::Version`](crate::ListMarker::Version), and every
     /// other listing as a [`ListMarker::Text`](crate::ListMarker::Text).
-    pub next_marker: Option<crate::ListMarker<'b>>,
+    pub next_marker: Option<ListMarker<'b>>,
 }
 
 /// The result of [`classify_error`](crate::azure::classify_error).
@@ -939,6 +941,136 @@ impl fmt::Display for ListHeadOutcome<'_> {
         }
     }
 }
+
+impl<'h> Failure<'h> {
+    // The one record that every failing head becomes, whichever operation
+    // asked.
+    pub(crate) fn new(
+        status: u16,
+        kind: Option<ServiceErrorKind>,
+        request_id: Option<&'h [u8]>,
+    ) -> Self {
+        Self {
+            status,
+            class: FailureClass::of(status, kind),
+            kind,
+            request_id,
+        }
+    }
+}
+
+impl FailureClass {
+    // The category of a failure with `status`, or of the error `kind` that
+    // the service named, which decides when there is one.
+    pub(crate) fn of(status: u16, kind: Option<ServiceErrorKind>) -> Self {
+        match kind {
+            Some(ServiceErrorKind::Unauthorized) => Self::Auth,
+            Some(ServiceErrorKind::Throttled) => Self::Throttled,
+            Some(ServiceErrorKind::Service | ServiceErrorKind::Timeout) => Self::Server,
+            _ => match status {
+                300..=399 => Self::Redirect,
+                401 | 403 => Self::Auth,
+                408 | 429 => Self::Throttled,
+                500..=599 => Self::Server,
+                _ => Self::Other,
+            },
+        }
+    }
+}
+
+// The two outcomes that `finish_with_body` produces, for one operation's
+// outcome type. An outcome whose request names no object, such as a
+// listing, has no `NotFound`: its 404 can only mean a missing container,
+// so `not_found` returns the failure.
+pub(crate) trait FailureOutcome<'h> {
+    fn need_error_body(failure: Failure<'h>) -> Self;
+    fn not_found(failure: Failure<'h>) -> Self;
+    fn service_failure(failure: Failure<'h>) -> Self;
+}
+
+// Finishes a failure with the error `kind` that its head or body named. A
+// 404 is not found, unless it names a missing container. That is a failure
+// of the service, as any other status is: a caller must never read a
+// missing container as a missing object.
+pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
+    head_failure: Failure<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    let failure = Failure::new(head_failure.status, kind, head_failure.request_id);
+    if failure.status == 404 && kind != Some(ServiceErrorKind::NoSuchContainer) {
+        O::not_found(failure)
+    } else {
+        O::service_failure(failure)
+    }
+}
+
+// The outcome of a 404 whose head names its error, as Azure's does.
+pub(crate) fn not_found_in_head<'h, O: FailureOutcome<'h>>(
+    head: &ResponseHead<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    finish_with_body(Failure::new(404, None, head.request_id), kind)
+}
+
+// The outcomes whose request names an object, which report a 404 for the
+// object as `NotFound`.
+macro_rules! failure_outcome {
+    ($($outcome:ty),*) => {$(
+        impl<'h> $crate::outcome::FailureOutcome<'h> for $outcome {
+            fn need_error_body(failure: $crate::Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
+            fn not_found(failure: $crate::Failure<'h>) -> Self {
+                Self::NotFound { kind: failure.kind }
+            }
+
+            fn service_failure(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+pub(crate) use failure_outcome;
+
+// The outcomes whose request names no object, which report every 404 as a
+// failure of the service.
+macro_rules! container_failure_outcome {
+    ($($outcome:ty),*) => {$(
+        impl<'h> $crate::outcome::FailureOutcome<'h> for $outcome {
+            fn need_error_body(failure: $crate::Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
+            fn not_found(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+
+            fn service_failure(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+pub(crate) use container_failure_outcome;
+
+failure_outcome!(
+    CopyHeadOutcome<'h>,
+    RestoreHeadOutcome<'h>,
+    GetHeadOutcome<'h>,
+    DeleteHeadOutcome<'h>,
+    StageHeadOutcome<'h>,
+    CommitHeadOutcome<'h>,
+    ListPartsHeadOutcome<'h>,
+    UpdateHeadOutcome<'h>,
+    TagsHeadOutcome<'h>
+);
+
+container_failure_outcome!(
+    PutHeadOutcome<'h>,
+    ListHeadOutcome<'h>,
+    DeleteManyHeadOutcome<'h>
+);
 
 #[cfg(test)]
 mod tests {

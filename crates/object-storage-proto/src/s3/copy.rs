@@ -10,25 +10,30 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::common::{decimal_header, failure, finish_with_body, validate_condition, validate_tags};
-use crate::common::{validate_revision_item, validate_source_container};
+use crate::head::read_decimal_header;
+use crate::outcome::finish_with_body;
+use crate::s3::parts::{validate_part_number, validate_upload_id};
 use crate::s3::template::{
-    self, CopyFrom, Describe, Detail, Field, FieldList, Operation, Template, Unsigned, Value,
-    encode as encode_template,
+    self, CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Operation, Template, Unsigned,
+    encode_template,
 };
-use crate::s3::{Bucket, S3Values, push_stored, validate_stored};
 use crate::s3::{
-    body_kind, failed, is_error_document, s3_tag_char, validate_key, validate_metadata,
+    Bucket, S3Values, is_error_document, kind_in_body, push_stored_fields, read_failure_head,
+    s3_tag_char, validate_key, validate_metadata, validate_stored_properties,
     validate_write_condition,
 };
-use crate::sigv4::Credentials;
-use crate::sigv4::Token;
-use crate::template::{Hole, ParamValue, Values};
-use crate::{
-    ConditionKind, CopyHeadOutcome, CopyShape, Failure, InvalidRequest, Method, ObjectMeta,
-    Payload, ResponseFault, ResponseHead, Result, ServiceErrorKind, StageHeadOutcome, Timestamps,
+use crate::sigv4::{Credentials, Token};
+use crate::template::{Hole, HoleValues, ParamValue};
+use crate::validate::{
+    validate_condition, validate_revision_item, validate_source_container, validate_source_range,
+    validate_tags,
 };
-use crate::{CopyItem, CopyOptions, Ranging, RevisionKind, WriteOptions};
+use crate::xml::s3::copy::{read_copied, read_part_copied};
+use crate::{
+    ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, Failure, InvalidRequest,
+    Method, ObjectMeta, Payload, Ranging, ResponseFault, ResponseHead, Result, RevisionKind,
+    ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
+};
 
 // Whether a copy carried a condition on the target or on the source.
 fn carries_condition(shape: CopyShape) -> bool {
@@ -104,7 +109,7 @@ fn prepare_copy_kind(
         s3_tag_char,
         service.is_aws().then_some((10, 128, 256)),
     )?;
-    validate_stored(&options.options, service)?;
+    validate_stored_properties(&options.options, service)?;
     if service.is_aws() && options.condition.is_date() {
         return Err(InvalidRequest::Condition.into());
     }
@@ -115,26 +120,26 @@ fn prepare_copy_kind(
         source_ranging: options.source_ranging,
     };
     let mut signed = FieldList::new();
-    push_stored(&mut signed, &options.options);
+    push_stored_fields(&mut signed, &options.options);
     // S3 keeps the source's metadata and content properties unless told to
     // replace them, and its tags likewise. Replacing the tags with none
     // sends an empty `x-amz-tagging`.
     if options.metadata.is_some() || !options.options.properties.is_empty() {
         signed.push(Field::new(
             "x-amz-metadata-directive",
-            Value::Formatted(b"REPLACE"),
+            FieldValue::Formatted(b"REPLACE"),
         ));
     }
     if let Some(tags) = options.tags {
         signed.push(Field::new(
             "x-amz-tagging-directive",
-            Value::Formatted(b"REPLACE"),
+            FieldValue::Formatted(b"REPLACE"),
         ));
-        signed.push(Field::new("x-amz-tagging", Value::Tags(tags)));
+        signed.push(Field::new("x-amz-tagging", FieldValue::Tags(tags)));
     }
     let describe = Describe {
         signed: signed.as_slice(),
-        unsigned: &[Field::new("content-length", Value::Formatted(b"0"))],
+        unsigned: &[Field::new("content-length", FieldValue::Formatted(b"0"))],
         metadata: options.metadata.unwrap_or(&[]),
         ..describe_copy(
             staged,
@@ -142,7 +147,7 @@ fn prepare_copy_kind(
             options.source_container.unwrap_or(bucket.name),
         )
     };
-    template::prepare(bucket, credentials, &describe, buf)
+    template::prepare_template(bucket, credentials, &describe, buf)
 }
 
 // The request of a copy, or of a copy that stages a part, for a template of
@@ -203,14 +208,14 @@ fn encode_copy_kind(
     let key = template.request_key(bytes, item.key)?;
     validate_key(item.source_key)?;
     if let Some((upload_id, number)) = part {
-        super::parts::validate_upload_id(upload_id)?;
-        super::parts::validate_part_number(number, template.service)?;
+        validate_upload_id(upload_id)?;
+        validate_part_number(number, template.service)?;
     }
     validate_revision_item(source_revision, item.source_revision)?;
     validate_write_condition(condition, item.condition_value, template.service)?;
     validate_condition(source_condition, item.source_condition_value)?;
-    crate::common::validate_source_range(source_ranging, item.source_range)?;
-    let values = S3Values(Values {
+    validate_source_range(source_ranging, item.source_range)?;
+    let values = S3Values(HoleValues {
         now: Some(now),
         key,
         condition: item.condition_value,
@@ -220,7 +225,7 @@ fn encode_copy_kind(
         source_range: Some(item.source_range),
         upload_id: part.map(|(upload_id, _)| upload_id),
         part_number: part.map(|(_, number)| number),
-        ..Values::default()
+        ..HoleValues::default()
     });
     encode_template(
         template,
@@ -338,12 +343,12 @@ pub fn accept_copy_head<'h>(
 ) -> Result<CopyHeadOutcome<'h>> {
     match head.status {
         200 => Ok(CopyHeadOutcome::NeedResultBody {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         412 if !carries_condition(shape) => Err(ResponseFault::Status.into()),
         412 => Ok(CopyHeadOutcome::PreconditionFailed),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -363,16 +368,16 @@ pub fn accept_copy_body<'h>(
         return Err(ResponseFault::Status.into());
     }
     if is_error_document(body) {
-        let kind = body_kind(body);
+        let kind = kind_in_body(body);
         return Ok(match kind {
             Some(ServiceErrorKind::Precondition) if carries_condition(shape) => {
                 CopyHeadOutcome::PreconditionFailed
             }
             Some(ServiceErrorKind::NotFound) => CopyHeadOutcome::NotFound { kind },
-            _ => finish_with_body(failure(head.status, None, head.request_id), kind),
+            _ => finish_with_body(Failure::new(head.status, None, head.request_id), kind),
         });
     }
-    let e_tag = crate::xml::s3::copy::read_copied(body)?;
+    let e_tag = read_copied(body)?;
     Ok(CopyHeadOutcome::Copied {
         meta: ObjectMeta {
             e_tag: Some(e_tag.as_bytes()),
@@ -390,7 +395,7 @@ pub fn accept_copy_error_body<'h>(
     body: &[u8],
 ) -> CopyHeadOutcome<'h> {
     let _ = shape;
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the response head of an UploadPartCopy and reports what to do
@@ -404,10 +409,10 @@ pub fn accept_copy_error_body<'h>(
 pub fn accept_stage_part_copy_head<'h>(head: ResponseHead<'h>) -> Result<StageHeadOutcome<'h>> {
     match head.status {
         200 => Ok(StageHeadOutcome::NeedResultBody {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -426,13 +431,13 @@ pub fn accept_stage_part_copy_body<'h>(
         return Err(ResponseFault::Status.into());
     }
     if is_error_document(body) {
-        let kind = body_kind(body);
+        let kind = kind_in_body(body);
         return Ok(match kind {
             Some(ServiceErrorKind::NoSuchUpload) => StageHeadOutcome::NotFound { kind },
-            _ => finish_with_body(failure(head.status, None, head.request_id), kind),
+            _ => finish_with_body(Failure::new(head.status, None, head.request_id), kind),
         });
     }
-    let e_tag = crate::xml::s3::copy::read_part_copied(body)?;
+    let e_tag = read_part_copied(body)?;
     Ok(StageHeadOutcome::Staged {
         e_tag: Some(e_tag.as_bytes()),
     })

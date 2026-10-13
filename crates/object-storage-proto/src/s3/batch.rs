@@ -1,28 +1,26 @@
 // S3 DeleteObjects: the removal of up to 1,000 objects in one request, whose
 // answer holds a result for each.
 
-use crate::Payload;
-use crate::checksum::ChecksumKind;
-use crate::common::{decimal_header, finish_with_body, validate_revision};
-use crate::encoding;
-use crate::request::{ByteSink, Writer};
-use crate::s3::template::{
-    self, Describe, Detail, Operation, Template, Unsigned, encode as encode_template,
-};
-use crate::s3::{Bucket, S3Values};
-use crate::s3::{body_kind, failed, refuse_error_document, validate_key};
-use crate::sigv4::Credentials;
-use crate::template::{Body, Fill, Hole, ParamValue, Values};
-use crate::url::QueryValue;
-use crate::{
-    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidRequest, Method, ResponseFault,
-    ResponseHead, Result, Revision, Timestamps,
-};
-
 // Only the links in the doc comments use this, so it is imported for rustdoc
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
+use crate::checksum::ChecksumKind;
+use crate::head::read_decimal_header;
+use crate::outcome::finish_with_body;
+use crate::request::{ByteSink, Writer};
+use crate::s3::template::{self, Describe, Detail, Operation, Template, Unsigned, encode_template};
+use crate::s3::{
+    Bucket, S3Values, kind_in_body, read_failure_head, refuse_error_document, validate_key,
+};
+use crate::sigv4::Credentials;
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody};
+use crate::url::QueryValue;
+use crate::validate::validate_revision;
+use crate::{
+    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidRequest, Method, Payload, ResponseFault,
+    ResponseHead, Result, Revision, Timestamps, encoding,
+};
 
 /// The most objects that one DeleteObjects removes.
 pub const MAX_DELETE_KEYS: usize = 1000;
@@ -80,7 +78,7 @@ struct DeleteFill<'i> {
 impl Fill for DeleteFill<'_> {
     const BODY: bool = true;
 
-    fn values(&self) -> &Values<'_> {
+    fn values(&self) -> &HoleValues<'_> {
         &self.values.0
     }
 
@@ -120,7 +118,7 @@ pub fn prepare_delete_many(
     if bucket.service.is_aws() && checksum.is_none() {
         return Err(InvalidRequest::Option.into());
     }
-    template::prepare(bucket, credentials, &describe_delete_many(checksum), buf)
+    template::prepare_template(bucket, credentials, &describe_delete_many(checksum), buf)
 }
 
 // The request of a DeleteObjects of a template with `checksum`. Its list of
@@ -133,7 +131,7 @@ fn describe_delete_many(checksum: Option<ChecksumKind>) -> Describe<'static, 4> 
     );
     describe.key = false;
     describe.query[0] = Some(("delete", ParamValue::Fixed(QueryValue::Literal(""))));
-    describe.with_body(Body::Each, checksum);
+    describe.with_body(TemplateBody::Each, checksum);
     describe
 }
 
@@ -176,10 +174,10 @@ pub fn encode_delete_many(
         validate_revision(object.revision, false)?;
     }
     let fill = DeleteFill {
-        values: S3Values(Values {
+        values: S3Values(HoleValues {
             now: Some(now),
             body_checksum: checksum,
-            ..Values::default()
+            ..HoleValues::default()
         }),
         objects,
     };
@@ -202,10 +200,10 @@ pub fn encode_delete_many(
 pub fn accept_delete_many_head<'h>(head: ResponseHead<'h>) -> Result<DeleteManyHeadOutcome<'h>> {
     match head.status {
         200 => Ok(DeleteManyHeadOutcome::Results {
-            expected_len: decimal_header(head.content_length)?,
+            expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
-        _ => Ok(failed(&head)),
+        _ => Ok(read_failure_head(&head)),
     }
 }
 
@@ -215,7 +213,7 @@ pub fn accept_delete_many_error_body<'h>(
     failure: Failure<'h>,
     body: &[u8],
 ) -> DeleteManyHeadOutcome<'h> {
-    finish_with_body(failure, body_kind(body))
+    finish_with_body(failure, kind_in_body(body))
 }
 
 /// Reads the result of each removal out of the response body of a

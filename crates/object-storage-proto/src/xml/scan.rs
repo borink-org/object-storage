@@ -47,7 +47,7 @@
 
 use crate::{Error, ResponseFault, Result};
 
-pub(crate) fn fault<T>() -> Result<T> {
+pub(crate) fn body_fault<T>() -> Result<T> {
     Err(Error::Response(ResponseFault::Body))
 }
 
@@ -65,9 +65,9 @@ pub(crate) const PCT: u8 = 2;
 const NAME: u8 = 1;
 const SPACE: u8 = 2;
 
-static CLASS: [u8; 256] = classes();
+static CLASS: [u8; 256] = byte_classes();
 
-const fn classes() -> [u8; 256] {
+const fn byte_classes() -> [u8; 256] {
     let mut table = [0u8; 256];
     let mut code = 0usize;
     while code < 256 {
@@ -197,7 +197,7 @@ pub(crate) fn find_byte(bytes: &[u8], from: usize, needle: u8) -> usize {
 // Returns the byte at `offset`, or 0 past the end. A document may not hold a NUL
 // byte, so 0 can stand for the end and no loop needs its own bounds test.
 #[inline(always)]
-fn at(bytes: &[u8], offset: usize) -> u8 {
+fn byte_at(bytes: &[u8], offset: usize) -> u8 {
     bytes.get(offset).copied().unwrap_or(0)
 }
 
@@ -205,7 +205,7 @@ fn at(bytes: &[u8], offset: usize) -> u8 {
 #[inline(always)]
 fn space_len(bytes: &[u8], from: usize) -> usize {
     let mut offset = from;
-    while CLASS[at(bytes, offset) as usize] & SPACE != 0 {
+    while CLASS[byte_at(bytes, offset) as usize] & SPACE != 0 {
         offset += 1;
     }
     offset - from
@@ -213,29 +213,29 @@ fn space_len(bytes: &[u8], from: usize) -> usize {
 
 // Reads the name that begins at `from`.
 #[inline(always)]
-fn name(bytes: &[u8], from: usize) -> Result<Span> {
+fn name_at(bytes: &[u8], from: usize) -> Result<Span> {
     let end = from + bytes.get(from..).map_or(0, name_len);
     // A listing has no namespace prefixes. Reading a document that has them
     // would mean resolving the prefixes, which this crate does not do.
-    if end == from || at(bytes, end) == b':' {
-        return fault();
+    if end == from || byte_at(bytes, end) == b':' {
+        return body_fault();
     }
     Ok((from, end))
 }
 
 // Reads the quoted string that begins at `from` and returns the span between
 // the quotes. The closing quote is the byte after it.
-fn quoted(bytes: &[u8], from: usize) -> Result<Span> {
-    let quote = at(bytes, from);
+fn quoted_at(bytes: &[u8], from: usize) -> Result<Span> {
+    let quote = byte_at(bytes, from);
     if quote != b'"' && quote != b'\'' {
-        return fault();
+        return body_fault();
     }
     let start = from + 1;
     let mut offset = start;
     loop {
-        match at(bytes, offset) {
+        match byte_at(bytes, offset) {
             byte if byte == quote => return Ok((start, offset)),
-            0 | b'<' => return fault(),
+            0 | b'<' => return body_fault(),
             _ => offset += 1,
         }
     }
@@ -244,15 +244,15 @@ fn quoted(bytes: &[u8], from: usize) -> Result<Span> {
 // Reads the attribute that begins at `from`: a name, `=` and a quoted value,
 // with whitespace allowed around the `=`. Returns the two spans and the
 // offset after the closing quote.
-fn attribute(bytes: &[u8], from: usize) -> Result<(Span, Span, usize)> {
-    let name = name(bytes, from)?;
+fn attribute_at(bytes: &[u8], from: usize) -> Result<(Span, Span, usize)> {
+    let name = name_at(bytes, from)?;
     let mut offset = name.1 + space_len(bytes, name.1);
-    if at(bytes, offset) != b'=' {
-        return fault();
+    if byte_at(bytes, offset) != b'=' {
+        return body_fault();
     }
     offset += 1;
     offset += space_len(bytes, offset);
-    let value = quoted(bytes, offset)?;
+    let value = quoted_at(bytes, offset)?;
     Ok((name, value, value.1 + 1))
 }
 
@@ -299,14 +299,14 @@ fn eq_short(a: &[u8], b: &[u8]) -> bool {
 
 #[inline(never)]
 fn close_tag_slow(bytes: &[u8], from: usize, expected: &[u8]) -> Result<usize> {
-    let found = name(bytes, from + 2)?;
+    let found = name_at(bytes, from + 2)?;
     // `name` records a span of `bytes`.
     if &bytes[found.0..found.1] != expected {
-        return fault();
+        return body_fault();
     }
     let end = found.1 + space_len(bytes, found.1);
-    if at(bytes, end) != b'>' {
-        return fault();
+    if byte_at(bytes, end) != b'>' {
+        return body_fault();
     }
     Ok(end + 1)
 }
@@ -315,15 +315,19 @@ fn close_tag_slow(bytes: &[u8], from: usize, expected: &[u8]) -> Result<usize> {
 // properties. An element inside a property is already deeper than that.
 const MAX_DEPTH: usize = 16;
 
+// A start tag: the element's name, the text of its attributes, and whether
+// it is written empty, as `<Name/>`.
 #[derive(Clone, Copy)]
-pub(crate) struct Tag {
+pub(crate) struct StartTag {
     pub(crate) name: Span,
     pub(crate) attributes: Span,
     pub(crate) empty: bool,
 }
 
-pub(crate) enum Child {
-    Open(Tag),
+// What follows inside an element: a child's start tag, or the element's
+// own close tag.
+pub(crate) enum ChildTag {
+    Open(StartTag),
     Close,
 }
 
@@ -355,7 +359,7 @@ impl<'b> Scan<'b> {
     // Returns the byte `ahead` bytes past the cursor, or 0 past the end.
     #[inline(always)]
     pub(crate) fn peek(&self, ahead: usize) -> u8 {
-        at(self.bytes, self.cursor + ahead)
+        byte_at(self.bytes, self.cursor + ahead)
     }
 
     #[inline(always)]
@@ -385,12 +389,12 @@ impl<'b> Scan<'b> {
             self.cursor += 1;
             Ok(())
         } else {
-            fault()
+            body_fault()
         }
     }
 
     fn name(&mut self) -> Result<Span> {
-        let span = name(self.bytes, self.cursor)?;
+        let span = name_at(self.bytes, self.cursor)?;
         self.cursor = span.1;
         Ok(span)
     }
@@ -399,7 +403,7 @@ impl<'b> Scan<'b> {
     // attributes are checked here and read again by [`Self::attributes`] if
     // the grammar wants them, which on a listing is only for `<Name>`.
     #[inline(always)]
-    pub(crate) fn open(&mut self) -> Result<Tag> {
+    pub(crate) fn open(&mut self) -> Result<StartTag> {
         self.cursor += 1;
         let name = self.name()?;
         let start = self.cursor;
@@ -409,7 +413,7 @@ impl<'b> Scan<'b> {
                 b'>' => {
                     let attributes = (start, self.cursor);
                     self.cursor += 1;
-                    return Ok(Tag {
+                    return Ok(StartTag {
                         name,
                         attributes,
                         empty: false,
@@ -419,14 +423,14 @@ impl<'b> Scan<'b> {
                     let attributes = (start, self.cursor);
                     self.cursor += 1;
                     self.expect(b'>')?;
-                    return Ok(Tag {
+                    return Ok(StartTag {
                         name,
                         attributes,
                         empty: true,
                     });
                 }
                 _ => {
-                    let (_, _, after) = attribute(self.bytes, self.cursor)?;
+                    let (_, _, after) = attribute_at(self.bytes, self.cursor)?;
                     self.cursor = after;
                 }
             }
@@ -436,7 +440,7 @@ impl<'b> Scan<'b> {
     // Returns every attribute of `tag`, in the order they were written. This
     // reads the span that [`Self::open`] already checked again. That span is
     // empty on nearly every tag either service writes.
-    pub(crate) fn attributes(&self, tag: Tag) -> Attributes<'_> {
+    pub(crate) fn attributes(&self, tag: StartTag) -> Attributes<'_> {
         Attributes {
             // The span ends where the cursor stood at the tag's `>` or `/`.
             bytes: &self.bytes[..tag.attributes.1],
@@ -462,13 +466,13 @@ impl<'b> Scan<'b> {
                     self.cursor += 4;
                     loop {
                         match self.cur() {
-                            0 => return fault(),
+                            0 => return body_fault(),
                             b'-' if self.peek(1) == b'-' => {
                                 if self.peek(2) == b'>' {
                                     self.cursor += 3;
                                     return Ok(true);
                                 }
-                                return fault();
+                                return body_fault();
                             }
                             _ => self.cursor += 1,
                         }
@@ -476,13 +480,13 @@ impl<'b> Scan<'b> {
                 }
                 // A CDATA section and a markup declaration may both hold the
                 // tags that entries are read by.
-                fault()
+                body_fault()
             }
             b'?' => {
                 self.cursor += 2;
                 loop {
                     match self.cur() {
-                        0 => return fault(),
+                        0 => return body_fault(),
                         b'?' if self.peek(1) == b'>' => {
                             self.cursor += 2;
                             return Ok(true);
@@ -499,20 +503,20 @@ impl<'b> Scan<'b> {
     // child's start tag after consuming it, or `Close` after consuming the
     // parent's close tag.
     #[inline(always)]
-    pub(crate) fn child(&mut self, parent: &[u8]) -> Result<Child> {
+    pub(crate) fn child(&mut self, parent: &[u8]) -> Result<ChildTag> {
         loop {
             self.skip_space();
             if self.cur() != b'<' {
-                return fault();
+                return body_fault();
             }
             if self.peek(1) == b'/' {
                 self.close(parent)?;
-                return Ok(Child::Close);
+                return Ok(ChildTag::Close);
             }
             if self.skip_misc()? {
                 continue;
             }
-            return Ok(Child::Open(self.open()?));
+            return Ok(ChildTag::Open(self.open()?));
         }
     }
 
@@ -520,7 +524,7 @@ impl<'b> Scan<'b> {
     // consumes its close tag. Returns the span of the text and its decode
     // flags.
     #[inline]
-    pub(crate) fn value(&mut self, tag: Tag) -> Result<(Span, u8)> {
+    pub(crate) fn value(&mut self, tag: StartTag) -> Result<(Span, u8)> {
         if tag.empty {
             return Ok(((self.cursor, self.cursor), 0));
         }
@@ -530,7 +534,7 @@ impl<'b> Scan<'b> {
     }
 
     // The same, for a start tag matched whole by [`Self::lit`], which has no
-    // `Tag` to name it.
+    // `StartTag` to name it.
     #[inline(always)]
     pub(crate) fn value_of(&mut self, name: &[u8]) -> Result<(Span, u8)> {
         let (value, end) = self.value_end(name)?;
@@ -544,12 +548,12 @@ impl<'b> Scan<'b> {
     fn value_end(&self, name: &[u8]) -> Result<((Span, u8), usize)> {
         let start = self.cursor;
         let Some((end, flags)) = find_lt(self.bytes, start) else {
-            return fault();
+            return body_fault();
         };
         // Anything but the close tag here splits the value in two. Returning
         // one of the pieces would report a value the service did not write.
-        if at(self.bytes, end + 1) != b'/' {
-            return fault();
+        if byte_at(self.bytes, end + 1) != b'/' {
+            return body_fault();
         }
         let after = close_tag(self.bytes, end, name)?;
         Ok((((start, end), flags), after))
@@ -619,7 +623,7 @@ impl<'b> Scan<'b> {
         let mut depth = 0;
         loop {
             let Some((tag_at, _)) = find_lt(self.bytes, self.cursor) else {
-                return fault();
+                return body_fault();
             };
             self.cursor = tag_at;
             match self.peek(1) {
@@ -641,7 +645,7 @@ impl<'b> Scan<'b> {
                         // The fixed array checks the nesting without a heap.
                         // A document deeper than it is not a listing.
                         if depth == MAX_DEPTH {
-                            return fault();
+                            return body_fault();
                         }
                         open[depth] = child.name;
                         depth += 1;
@@ -654,7 +658,7 @@ impl<'b> Scan<'b> {
     // Skips an element whose start tag was consumed. Consumes everything
     // through the matching close tag and checks that the tags in between
     // nest.
-    pub(crate) fn skip(&mut self, tag: Tag) -> Result<()> {
+    pub(crate) fn skip(&mut self, tag: StartTag) -> Result<()> {
         if tag.empty {
             return Ok(());
         }
@@ -663,7 +667,7 @@ impl<'b> Scan<'b> {
         let mut depth = 1;
         loop {
             let Some((tag_at, _)) = find_lt(self.bytes, self.cursor) else {
-                return fault();
+                return body_fault();
             };
             self.cursor = tag_at;
             match self.peek(1) {
@@ -685,7 +689,7 @@ impl<'b> Scan<'b> {
                         // The fixed array checks the nesting without a heap.
                         // A document deeper than it is not a listing.
                         if depth == MAX_DEPTH {
-                            return fault();
+                            return body_fault();
                         }
                         open[depth] = child.name;
                         depth += 1;
@@ -713,7 +717,7 @@ impl<'s> Iterator for Attributes<'s> {
             return None;
         }
         Some(
-            attribute(self.bytes, self.cursor).map(|(name, value, after)| {
+            attribute_at(self.bytes, self.cursor).map(|(name, value, after)| {
                 self.cursor = after;
                 // `attribute` records spans of these bytes.
                 (&self.bytes[name.0..name.1], &self.bytes[value.0..value.1])
@@ -726,7 +730,7 @@ impl<'s> Iterator for Attributes<'s> {
 // A key is never trimmed: a key may begin or end with a space, and that space
 // is part of it. The span was recorded on `bytes`, so `end` is at most their
 // length, and each index below stays between `start` and `end`.
-pub(crate) fn trim(bytes: &[u8], (mut start, mut end): Span) -> Span {
+pub(crate) fn trim_span(bytes: &[u8], (mut start, mut end): Span) -> Span {
     while start < end && bytes[start].is_ascii_whitespace() {
         start += 1;
     }

@@ -18,33 +18,33 @@ pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
         GetHeadOutcome::Body { meta, body } => Outcome {
             meta: meta_view(&meta),
             body: body_view(&body),
-            ..only(OutcomeKind::Body)
+            ..only_kind(OutcomeKind::Body)
         },
         GetHeadOutcome::Complete { meta } => Outcome {
             meta: meta_view(&meta),
-            ..only(OutcomeKind::Complete)
+            ..only_kind(OutcomeKind::Complete)
         },
         GetHeadOutcome::NotModified { e_tag } => Outcome {
             meta: ObjectMeta {
                 e_tag: maybe_bytes(e_tag),
                 ..Default::default()
             },
-            ..only(OutcomeKind::NotModified)
+            ..only_kind(OutcomeKind::NotModified)
         },
-        GetHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        GetHeadOutcome::PreconditionFailed => only_kind(OutcomeKind::PreconditionFailed),
         GetHeadOutcome::NotFound { kind } => not_found(kind),
         GetHeadOutcome::RangeNotSatisfiable { object_size } => Outcome {
             body: BodyWindow {
                 object_size: maybe_number(object_size),
                 ..Default::default()
             },
-            ..only(OutcomeKind::RangeNotSatisfiable)
+            ..only_kind(OutcomeKind::RangeNotSatisfiable)
         },
         GetHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         GetHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
         // The outcome is sealed, so a later version can add a variant. Report
         // one that this crate does not know rather than guessing at it.
-        _ => only(OutcomeKind::Unsupported),
+        _ => only_kind(OutcomeKind::Unsupported),
     }
 }
 
@@ -52,12 +52,12 @@ pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
     match *outcome {
         PutHeadOutcome::Created { meta } => Outcome {
             meta: meta_view(&meta),
-            ..only(OutcomeKind::Created)
+            ..only_kind(OutcomeKind::Created)
         },
-        PutHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        PutHeadOutcome::PreconditionFailed => only_kind(OutcomeKind::PreconditionFailed),
         PutHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         PutHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
-        _ => only(OutcomeKind::Unsupported),
+        _ => only_kind(OutcomeKind::Unsupported),
     }
 }
 
@@ -70,12 +70,12 @@ pub(crate) fn stage_outcome(outcome: &StageHeadOutcome<'_>) -> Outcome {
                 e_tag: maybe_bytes(e_tag),
                 ..Default::default()
             },
-            ..only(OutcomeKind::Staged)
+            ..only_kind(OutcomeKind::Staged)
         },
         StageHeadOutcome::NotFound { kind } => not_found(kind),
         StageHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         StageHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
-        _ => only(OutcomeKind::Unsupported),
+        _ => only_kind(OutcomeKind::Unsupported),
     }
 }
 
@@ -84,13 +84,13 @@ pub(crate) fn commit_outcome(outcome: &CommitHeadOutcome<'_>) -> Outcome {
     match *outcome {
         CommitHeadOutcome::Committed { meta } => Outcome {
             meta: meta_view(&meta),
-            ..only(OutcomeKind::Committed)
+            ..only_kind(OutcomeKind::Committed)
         },
-        CommitHeadOutcome::PreconditionFailed => only(OutcomeKind::PreconditionFailed),
+        CommitHeadOutcome::PreconditionFailed => only_kind(OutcomeKind::PreconditionFailed),
         CommitHeadOutcome::NotFound { kind } => not_found(kind),
         CommitHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         CommitHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
-        _ => only(OutcomeKind::Unsupported),
+        _ => only_kind(OutcomeKind::Unsupported),
     }
 }
 
@@ -103,11 +103,11 @@ pub(crate) fn list_outcome(outcome: &ListHeadOutcome<'_>) -> Outcome {
                 expected_len: maybe_number(expected_len),
                 ..Default::default()
             },
-            ..only(OutcomeKind::Page)
+            ..only_kind(OutcomeKind::Page)
         },
         ListHeadOutcome::NeedErrorBody(failure) => failed(OutcomeKind::NeedErrorBody, &failure),
         ListHeadOutcome::ServiceFailure(failure) => failed(OutcomeKind::ServiceFailure, &failure),
-        _ => only(OutcomeKind::Unsupported),
+        _ => only_kind(OutcomeKind::Unsupported),
     }
 }
 
@@ -121,19 +121,19 @@ impl From<proto::ListEntry<'_>> for ListEntry {
 pub(crate) fn entry_view(entry: &proto::ListEntry<'_>) -> ListEntry {
     ListEntry {
         kind: entry.kind as u16,
-        key: bytes(entry.key.as_bytes()),
+        key: bytes_view(entry.key.as_bytes()),
         size: maybe_number(entry.size),
         e_tag: maybe_bytes(entry.e_tag.map(str::as_bytes)),
         last_modified: maybe_bytes(entry.last_modified.map(str::as_bytes)),
         content_type: maybe_bytes(entry.content_type.map(str::as_bytes)),
-        raw: bytes(entry.raw),
+        raw: bytes_view(entry.raw),
     }
 }
 
 // A walk, as the two values that a C program keeps between calls.
 pub(crate) fn properties_view(walk: proto::Properties<'_>) -> Properties {
     Properties {
-        remaining: bytes(walk.remaining()),
+        remaining: bytes_view(walk.remaining()),
         within: walk.within(),
     }
 }
@@ -142,8 +142,8 @@ pub(crate) fn properties_view(walk: proto::Properties<'_>) -> Properties {
 pub(crate) fn property_view(found: Option<(&[u8], &[u8])>) -> Property {
     found.map_or_else(Default::default, |(name, value)| Property {
         present: true,
-        name: bytes(name),
-        value: bytes(value),
+        name: bytes_view(name),
+        value: bytes_view(value),
     })
 }
 
@@ -167,15 +167,15 @@ pub(crate) fn refused_fill(error: &Error) -> Fill {
     }
 }
 
-pub(crate) fn invalid(error: Error) -> Outcome {
+pub(crate) fn invalid_outcome(error: Error) -> Outcome {
     Outcome {
         error: status_of(&error),
-        ..only(OutcomeKind::Invalid)
+        ..only_kind(OutcomeKind::Invalid)
     }
 }
 
 // An outcome that says this and nothing else: every other field is absent.
-pub(crate) fn only(kind: OutcomeKind) -> Outcome {
+pub(crate) fn only_kind(kind: OutcomeKind) -> Outcome {
     Outcome {
         kind: kind as u16,
         ..Default::default()
@@ -190,7 +190,7 @@ fn failed(kind: OutcomeKind, failure: &proto::Failure<'_>) -> Outcome {
             kind: kind_view(failure.kind),
             request_id: maybe_bytes(failure.request_id),
         },
-        ..only(kind)
+        ..only_kind(kind)
     }
 }
 
@@ -202,7 +202,7 @@ fn not_found(kind: Option<ServiceErrorKind>) -> Outcome {
             kind: kind_view(kind),
             ..Default::default()
         },
-        ..only(OutcomeKind::NotFound)
+        ..only_kind(OutcomeKind::NotFound)
     }
 }
 
@@ -239,11 +239,11 @@ pub(crate) fn kind_view(kind: Option<ServiceErrorKind>) -> u16 {
 pub(crate) fn maybe_bytes(value: Option<&[u8]>) -> MaybeBytes {
     value.map_or_else(Default::default, |value| MaybeBytes {
         present: true,
-        bytes: bytes(value),
+        bytes: bytes_view(value),
     })
 }
 
-pub(crate) fn bytes(value: &[u8]) -> Bytes {
+pub(crate) fn bytes_view(value: &[u8]) -> Bytes {
     Bytes {
         ptr: value.as_ptr(),
         len: value.len(),
