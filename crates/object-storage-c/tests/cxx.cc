@@ -1,9 +1,10 @@
 // What a C++ program sees of this crate, checked against what it should say.
 //
 // This test opens no socket. It checks the helpers in
-// `borink/object_storage.hpp`, which is the whole C++ API: the shapes a
-// request carries, the values a response head lends back, and both ways of
-// reading a sentence the library wrote.
+// `borink/object_storage.hpp`, which is the whole C++ API. They build the
+// options and the items a request is written from, read the values a response
+// head lends back, and read a sentence the library wrote in either of two
+// ways.
 //
 // That the helpers in `borink/object_storage/core.hpp` reach no allocator is
 // not checked here. `checks/freestanding` links them into a board image and
@@ -32,17 +33,21 @@ void check(bool held, const char *source, int line) {
 
 #define CHECK(condition) check((condition), #condition, __LINE__)
 
-borink::Session a_session() {
-    return borink::session("https://account.blob.core.windows.net", "container", "token");
+borink::Container a_container() {
+    return borink::container("https://account.blob.core.windows.net", "container");
 }
 
-// A session names its three values, and an empty endpoint is not one Azure has.
-void reports_what_is_wrong_with_a_session() {
-    const borink::Session good = a_session();
-    CHECK(borink_validate(&good).code == borink::ErrorCodeNone);
+// The instant every request here is written at.
+borink::Timestamps now() { return borink_timestamps_from_unix(1787400000); }
 
-    const borink::Session bad = borink::session("", "container", "token");
-    CHECK(borink_validate(&bad).code == borink::ErrorCodeInvalidEndpoint);
+// A container names its endpoint and its name, and an empty endpoint is not
+// one Azure has.
+void reports_what_is_wrong_with_a_container() {
+    const borink::Container good = a_container();
+    CHECK(borink_container_check(&good).code == borink::ErrorCodeNone);
+
+    const borink::Container bad = borink::container("", "container");
+    CHECK(borink_container_check(&bad).code == borink::ErrorCodeInvalidEndpoint);
 }
 
 // Bytes go in as text or as a span, and a buffer goes in as a span.
@@ -61,8 +66,9 @@ void borrows_what_the_program_owns() {
     CHECK(borink::into(std::span<std::uint8_t>()).ptr == nullptr);
 }
 
-// A read names its range, its precondition and whether it wants the bytes.
-void reads_the_shapes_the_helpers_build() {
+// A read names its range, its precondition and whether it wants the bytes in
+// its options and its item. The shape keeps what the response needs.
+void reads_the_options_and_items_the_helpers_build() {
     CHECK(borink::whole().form == borink::RangeFormWhole);
     CHECK(borink::bounded(2, 6).form == borink::RangeFormBounded);
     CHECK(borink::bounded(2, 6).start == 2);
@@ -70,39 +76,108 @@ void reads_the_shapes_the_helpers_build() {
     CHECK(borink::from(2).form == borink::RangeFormOffset);
     CHECK(borink::from(2).start == 2);
 
-    const borink::Read read;
-    CHECK(read.shape().kind == borink::GetKindBytes);
-    CHECK(read.shape().condition == borink::ConditionNone);
-    CHECK(read.shape().range.form == borink::RangeFormWhole);
+    const borink::GetOptions reads = borink::get_options();
+    CHECK(reads.kind == borink::GetKindBytes);
+    CHECK(reads.ranging == borink::RangingWhole);
+    CHECK(reads.condition == borink::ConditionNone);
+    CHECK(reads.revision == borink::RevisionKindCurrent);
+    CHECK(borink::head_options().kind == borink::GetKindHead);
 
-    const borink::Write write{borink::ConditionIfMatch, "\"tag\""};
-    CHECK(write.shape().condition == borink::ConditionIfMatch);
+    borink::GetOptions ranged = borink::get_options();
+    ranged.ranging = borink::RangingRanged;
+    ranged.condition = borink::ConditionIfMatch;
+    borink::GetItem item = borink::get_item("key");
+    item.range = borink::bounded(2, 6);
+    item.condition_value = borink::condition_tag("\"tag\"");
+    const borink::GetShape shape = borink::shape(item, ranged);
+    CHECK(shape.kind == borink::GetKindBytes);
+    CHECK(shape.range.end == 6);
+    CHECK(shape.condition == borink::ConditionIfMatch);
+    CHECK(item.condition_value.form == borink::ConditionFormETag);
+    CHECK(borink::condition_time(60).form == borink::ConditionFormTime);
+    CHECK(borink::condition_time(60).seconds == 60);
 
-    const borink::Removal removal;
-    CHECK(removal.shape().kind == borink::DeleteKindObject);
-    CHECK(removal.shape().condition == borink::ConditionNone);
+    borink::PutOptions writes = borink::put_options();
+    writes.condition = borink::ConditionIfNoneMatch;
+    const borink::PutItem written = borink::put_item("key", 8);
+    CHECK(written.content_len == 8);
+    CHECK(borink::shape(written, writes).condition == borink::ConditionIfNoneMatch);
+
+    const borink::StageBlockItem staged = borink::stage_block_item("key", "YmxvY2s=", 4);
+    CHECK(borink::text_of(staged.id) == "YmxvY2s=");
+    const std::array<borink::BlockRef, 2> blocks{borink::block("YmxvY2s="),
+                                                 borink::block("YmxvY2t=", borink::BlockSourceCommitted)};
+    const borink::CommitItem commit = borink::commit_item("key", blocks);
+    CHECK(commit.block_count == 2);
+    CHECK(commit.blocks[1].source == borink::BlockSourceCommitted);
+    CHECK(borink::shape(commit, borink::commit_options()).condition == borink::ConditionNone);
+
+    const borink::ListOptions listing = borink::list_options();
+    CHECK(!listing.max_results.present);
+    CHECK(borink::text_of(borink::list_item("dir/", "marker-1").marker) == "marker-1");
+    CHECK(borink::list_item("dir/").marker.len == 0);
 }
 
-// A listing names how it groups the keys and how many it asks for.
-void reads_the_shape_a_listing_carries() {
-    const borink::List all;
-    CHECK(all.shape().delimited == false);
-    CHECK(all.shape().max_results.present == false);
+// A template is prepared into a buffer of the program's once, and each
+// request is written from it into another.
+void writes_a_request_from_a_template() {
+    const borink::Container container = a_container();
+    borink::GetOptions options = borink::get_options();
+    options.ranging = borink::RangingRanged;
+    std::array<std::uint8_t, 512> room{};
+    const borink::Prepared reads =
+        borink_prepare_get(&container, borink::as_bytes("token"), borink::AzureNamespaceUnknown,
+                           &options, borink::into(room));
+    CHECK(reads.status.code == borink::ErrorCodeNone);
+    const borink::Bytes bytes = borink::template_bytes(room, reads);
+    CHECK(bytes.len == reads.required);
+    CHECK(borink_template_check(&reads.template_, bytes).code == borink::ErrorCodeNone);
 
-    const borink::List page{true, borink::at_most(1000), "marker-1"};
-    CHECK(page.shape().delimited == true);
-    CHECK(page.shape().max_results.value == 1000);
+    const borink::Timestamps stamped = now();
+    borink::GetItem item = borink::get_item("dir/a key");
+    item.range = borink::bounded(2, 6);
+    std::array<std::uint8_t, 1024> buffer{};
+    const borink::WireRequest request =
+        borink_encode_get(&reads.template_, bytes, &item, &stamped, borink::into(buffer));
+    CHECK(request.status.code == borink::ErrorCodeNone);
+    CHECK(borink::part(buffer, request.url) ==
+          "https://account.blob.core.windows.net/container/dir/a%20key");
+    CHECK(borink::part(buffer, request.head).starts_with("GET /container/dir/a%20key HTTP/1.1\r\n"));
+
+    std::vector<std::string> names;
+    borink::Bytes fields = borink::fields_of(buffer, request);
+    for (borink::Header field = borink::next_header(fields); field.present;
+         field = borink::next_header(fields)) {
+        names.push_back(std::string(borink::text_of(field.name)));
+        if (borink::text_of(field.name) == "range") {
+            CHECK(borink::text_of(field.value) == "bytes=2-5");
+        }
+    }
+    CHECK(names == std::vector<std::string>({"authorization", "x-ms-version", "x-ms-date", "range"}));
+
+    // A template of one object writes its key from the template.
+    const borink::Container one = borink::object(container, "dir/a key");
+    const borink::Prepared object_reads =
+        borink_prepare_get(&one, borink::as_bytes("token"), borink::AzureNamespaceUnknown,
+                           &options, borink::into(room));
+    CHECK(object_reads.status.code == borink::ErrorCodeNone);
+    borink::GetItem unnamed = borink::get_item("");
+    unnamed.range = borink::bounded(2, 6);
+    const borink::WireRequest same =
+        borink_encode_get(&object_reads.template_, borink::template_bytes(room, object_reads),
+                          &unnamed, &stamped, borink::into(buffer));
+    CHECK(borink::part(buffer, same.url) ==
+          "https://account.blob.core.windows.net/container/dir/a%20key");
 }
 
 // A page is read out of the caller's own buffer, into the caller's own array.
 // The entries point back into that buffer.
 void reads_a_page_out_of_a_body() {
-    const borink::Session session = a_session();
     const borink::HeaderRef headers[] = {
         {borink::as_bytes("Content-Length"), borink::as_bytes("196")},
     };
     const borink::Outcome outcome =
-        borink_accept_list_head(&session, 200, headers, sizeof headers / sizeof headers[0]);
+        borink_accept_list_head(200, headers, sizeof headers / sizeof headers[0]);
     CHECK(outcome.kind == borink::OutcomeKindPage);
     CHECK(outcome.body.expected_len.value == 196);
 
@@ -120,7 +195,7 @@ void reads_a_page_out_of_a_body() {
 
     std::array<borink::ListEntry, 4> entries{};
     const borink::Fill fill =
-        borink_fill_listing(&session, page, entries.data(), entries.size());
+        borink_fill_listing(page, entries.data(), entries.size());
 
     CHECK(fill.status.code == borink::ErrorCodeNone);
     const std::span<const borink::ListEntry> read = borink::entries_of(entries, fill);
@@ -141,7 +216,6 @@ void reads_a_page_out_of_a_body() {
 // An array smaller than the page is refused, and the fill says how many
 // entries the page holds.
 void an_array_smaller_than_the_page_is_refused() {
-    const borink::Session session = a_session();
     std::string body = "<EnumerationResults><Blobs>"
                        "<Blob><Name>a.txt</Name><Properties>"
                        "<Content-Length>4</Content-Length></Properties></Blob>"
@@ -154,7 +228,7 @@ void an_array_smaller_than_the_page_is_refused() {
 
     std::array<borink::ListEntry, 1> entries{};
     const borink::Fill fill =
-        borink_fill_listing(&session, page, entries.data(), entries.size());
+        borink_fill_listing(page, entries.data(), entries.size());
     CHECK(fill.status.code == borink::ErrorCodeCapacity);
     CHECK(fill.required == 2);
     CHECK(fill.filled == 0);
@@ -168,13 +242,12 @@ void reads_the_values_an_entry_lends() {
                        "<Etag>0x8DF0</Etag>"
                        "<Content-Length>4</Content-Length></Properties></Blob>"
                        "</Blobs><NextMarker /></EnumerationResults>";
-    const borink::Session session = a_session();
     const borink::BytesMut page =
         borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(body.data()),
                                              body.size()));
     std::array<borink::ListEntry, 1> entries{};
     const borink::Fill fill =
-        borink_fill_listing(&session, page, entries.data(), entries.size());
+        borink_fill_listing(page, entries.data(), entries.size());
     CHECK(fill.filled == 1);
 
     // The listed tag carries no quotes; a condition takes the quoted form.
@@ -193,7 +266,6 @@ void reads_the_values_an_entry_lends() {
 
 // A value that no field of an entry carries is read out of the entry itself.
 void reads_a_property_out_of_an_entry() {
-    const borink::Session session = a_session();
     std::string body = "<EnumerationResults><Blobs><Blob><Name>a.txt</Name>"
                        "<VersionId>2026-09-01T19:08:11Z</VersionId><Properties>"
                        "<Content-Length>4</Content-Length><AccessTier>Hot</AccessTier>"
@@ -201,7 +273,6 @@ void reads_a_property_out_of_an_entry() {
                        "</Blob></Blobs><NextMarker /></EnumerationResults>";
     std::array<borink::ListEntry, 1> entries{};
     const borink::Fill fill = borink_fill_listing(
-        &session,
         borink::into(std::span<std::uint8_t>(reinterpret_cast<std::uint8_t *>(body.data()),
                                              body.size())),
         entries.data(), entries.size());
@@ -233,10 +304,7 @@ void reads_a_property_out_of_an_entry() {
 
 // A range read reports where the bytes sit, and lends back what the head said.
 void reads_the_values_a_head_lent_back() {
-    const borink::Session session = a_session();
-    const borink::Read read{borink::GetKindBytes, borink::bounded(2, 6), borink::ConditionNone,
-                            {}};
-    const borink::GetShape shape = read.shape();
+    const borink::GetShape shape{borink::GetKindBytes, borink::bounded(2, 6), borink::ConditionNone};
     const borink::HeaderRef headers[] = {
         {borink::as_bytes("ETag"), borink::as_bytes("\"tag\"")},
         {borink::as_bytes("Content-Range"), borink::as_bytes("bytes 2-5/10")},
@@ -245,7 +313,7 @@ void reads_the_values_a_head_lent_back() {
     };
 
     const borink::Outcome outcome =
-        borink_accept_get_head(&session, &shape, 206, headers, sizeof headers / sizeof headers[0]);
+        borink_accept_get_head(shape, 206, headers, sizeof headers / sizeof headers[0]);
 
     CHECK(outcome.kind == borink::OutcomeKindBody);
     CHECK(outcome.body.object_offset == 2);
@@ -261,10 +329,10 @@ void reads_the_values_a_head_lent_back() {
 
 // A room the sentence fits in returns the whole sentence.
 void writes_a_sentence_into_a_room_that_fits() {
-    const borink::Session bad = borink::session("", "container", "token");
+    const borink::Container bad = borink::container("", "container");
     std::array<std::uint8_t, 256> room{};
 
-    const borink::Sentence said = borink::describe_into(room, borink_validate(&bad));
+    const borink::Sentence said = borink::describe_into(room, borink_container_check(&bad));
 
     CHECK(said.complete());
     CHECK(said.needed == said.text.size());
@@ -273,10 +341,10 @@ void writes_a_sentence_into_a_room_that_fits() {
 
 // A room too small for it returns what fitted, and what a whole one takes.
 void reports_the_room_a_whole_sentence_takes() {
-    const borink::Session bad = borink::session("", "container", "token");
+    const borink::Container bad = borink::container("", "container");
     std::array<std::uint8_t, 8> room{};
 
-    const borink::Sentence said = borink::describe_into(room, borink_validate(&bad));
+    const borink::Sentence said = borink::describe_into(room, borink_container_check(&bad));
 
     CHECK(!said.complete());
     CHECK(said.text.size() == room.size());
@@ -285,13 +353,13 @@ void reports_the_room_a_whole_sentence_takes() {
 
 // The growing helper asks again with the room the first answer wanted.
 void grows_a_room_until_the_sentence_is_whole() {
-    const borink::Session bad = borink::session("", "container", "token");
+    const borink::Container bad = borink::container("", "container");
     std::array<std::uint8_t, 256> reference{};
-    const borink::Sentence whole = borink::describe_into(reference, borink_validate(&bad));
+    const borink::Sentence whole = borink::describe_into(reference, borink_container_check(&bad));
 
     // Empty, so the first call cannot fit and the second one has to.
     std::vector<std::uint8_t> room;
-    const std::string_view said = borink::describe_whole(room, borink_validate(&bad));
+    const std::string_view said = borink::describe_whole(room, borink_container_check(&bad));
 
     CHECK(said == whole.text);
     CHECK(room.size() == whole.needed);
@@ -299,13 +367,12 @@ void grows_a_room_until_the_sentence_is_whole() {
 
 // An outcome says the same thing however the room was found.
 void describes_an_outcome_either_way() {
-    const borink::Session session = a_session();
-    const borink::GetShape shape = borink::Read().shape();
+    const borink::GetShape shape{borink::GetKindBytes, borink::whole(), borink::ConditionNone};
     const borink::HeaderRef headers[] = {
         {borink::as_bytes("Content-Length"), borink::as_bytes("4")},
     };
     const borink::Outcome outcome =
-        borink_accept_get_head(&session, &shape, 200, headers, sizeof headers / sizeof headers[0]);
+        borink_accept_get_head(shape, 200, headers, sizeof headers / sizeof headers[0]);
 
     std::array<std::uint8_t, 256> room{};
     const borink::Sentence said = borink::describe_into(room, outcome);
@@ -319,7 +386,6 @@ void describes_an_outcome_either_way() {
 
 // The values of the properties a program asks for are read with the page.
 void reads_the_properties_a_program_asks_for_with_the_page() {
-    const borink::Session session = a_session();
     std::string body =
         "<EnumerationResults><Blobs>"
         "<Blob><Name>a.txt</Name><Properties><Content-Length>4</Content-Length>"
@@ -338,7 +404,7 @@ void reads_the_properties_a_program_asks_for_with_the_page() {
 
     std::array<borink::ListEntry, 2> entries{};
     std::array<borink::MaybeBytes, 2 * 2> values{};
-    const borink::Fill fill = borink_fill_listing_with(&session, page, entries.data(),
+    const borink::Fill fill = borink_fill_listing_with(page, entries.data(),
                                                        entries.size(), wanted, values.data(),
                                                        values.size());
     CHECK(fill.status.code == borink::ErrorCodeNone);
@@ -356,10 +422,10 @@ void reads_the_properties_a_program_asks_for_with_the_page() {
 }
 
 int main() {
-    reports_what_is_wrong_with_a_session();
+    reports_what_is_wrong_with_a_container();
     borrows_what_the_program_owns();
-    reads_the_shapes_the_helpers_build();
-    reads_the_shape_a_listing_carries();
+    reads_the_options_and_items_the_helpers_build();
+    writes_a_request_from_a_template();
     reads_a_page_out_of_a_body();
     an_array_smaller_than_the_page_is_refused();
     reads_the_values_an_entry_lends();

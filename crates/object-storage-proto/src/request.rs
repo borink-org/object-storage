@@ -1,30 +1,10 @@
 use core::str;
 
-use crate::Payload;
-
-/// The storage required to encode a request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RequestSize {
-    /// Bytes for the URL, headers and any generated body.
-    pub bytes: usize,
-    /// Header descriptor slots.
-    pub headers: usize,
-}
-
-/// One header's name and value in the request buffer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct HeaderSpan {
-    /// The header name.
-    pub name: Span,
-    /// The header value.
-    pub value: Span,
-}
+use crate::encoding::write_xml_text;
+use crate::url::encode_query_value;
+use crate::{ConditionKind, ConditionValue, RequestedRange, Tag, Timestamps};
 
 /// A range of bytes, as an offset from the start of a buffer.
-///
-/// [`WireRequest::url_span`] and [`WireRequest::header_spans`] return these,
-/// for a host that addresses the request head by range instead of by slice.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct Span {
@@ -32,13 +12,6 @@ pub struct Span {
     pub start: usize,
     /// The number of bytes.
     pub len: usize,
-}
-
-impl Span {
-    fn of(self, bytes: &str) -> &str {
-        // HeadWriter bounds start + len by the finished buffer's length.
-        &bytes[self.start..self.start + self.len]
-    }
 }
 
 /// The HTTP method of a request.
@@ -77,86 +50,6 @@ impl core::fmt::Display for Method {
     }
 }
 
-/// A request borrowing caller-owned byte storage and header descriptors.
-///
-/// Send this with the HTTP client of your choice. Read the method, the URL,
-/// the headers and the body, and give them to the client.
-///
-/// The encoding methods copy every byte of the head into your buffer,
-/// including each header name. The head therefore borrows nothing that you
-/// passed to them, and each of those arguments can be a temporary. The content
-/// stays where you put it for a stage or PUT. A commit writes its body after
-/// the head in the same buffer.
-///
-/// # Lifetime
-///
-/// The request borrows both storage regions until transport consumption ends.
-/// Drop the request before reusing either region.
-#[derive(Debug, Clone, Copy)]
-pub struct WireRequest<'r> {
-    bytes: &'r str,
-    method: Method,
-    url: Span,
-    headers: &'r [HeaderSpan],
-    payload: Payload<'r>,
-    body: Option<Span>,
-}
-
-impl<'r> WireRequest<'r> {
-    /// Returns the caller-owned descriptor array used by this request.
-    pub fn header_descriptors(&self) -> &'r [HeaderSpan] {
-        self.headers
-    }
-
-    /// Returns the HTTP method.
-    pub fn method(&self) -> Method {
-        self.method
-    }
-
-    /// Returns the complete object URL.
-    pub fn url(&self) -> &'r str {
-        self.url.of(self.bytes)
-    }
-
-    /// Returns an iterator over the request headers.
-    ///
-    /// The order of the headers does not matter to Azure.
-    pub fn headers(&self) -> impl ExactSizeIterator<Item = (&'r str, &'r str)> {
-        let bytes = self.bytes;
-        self.header_spans()
-            .map(move |(name, value)| (name.of(bytes), value.of(bytes)))
-    }
-
-    /// Returns the content of the request.
-    ///
-    /// A read has no content, so this is an empty [`Payload::Slice`] for a
-    /// read. For a write of streamed content this states the length that you
-    /// must send, and carries no bytes.
-    pub fn payload(&self) -> Payload<'r> {
-        self.payload
-    }
-
-    /// Returns the range of the request buffer that holds the body that this
-    /// crate wrote. A commit writes its block list there. Returns [`None`] for
-    /// a payload that you supplied, as a slice or as streamed content.
-    pub fn body_span(&self) -> Option<Span> {
-        self.body
-    }
-
-    /// Returns the URL as a range of the buffer that holds the head.
-    pub fn url_span(&self) -> Span {
-        self.url
-    }
-
-    /// Returns each header name and value as a range of that same buffer.
-    pub fn header_spans(&self) -> impl ExactSizeIterator<Item = (Span, Span)> {
-        self.headers.iter().copied().map(|header| {
-            let HeaderSpan { name, value } = header;
-            (name, value)
-        })
-    }
-}
-
 // The writer keeps counting after capacity is exhausted, so one pass produces
 // either the request or its exact requirement. Partial bytes are never returned.
 // Receives the text of a request as it is written: the request buffer, a
@@ -183,12 +76,13 @@ impl<'a> Writer<'a> {
         Self { bytes, position: 0 }
     }
 
+    #[inline(always)]
     pub(crate) fn push(&mut self, value: &[u8]) {
         // Counting continues past capacity; aliased inputs can exceed usize
         // in aggregate. Saturation preserves monotonicity and cannot fit a slice.
         let end = self.position.saturating_add(value.len());
         if end <= self.bytes.len() {
-            self.bytes[self.position..end].copy_from_slice(value);
+            copy_short(&mut self.bytes[self.position..end], value);
         }
         self.position = end;
     }
@@ -197,136 +91,80 @@ impl<'a> Writer<'a> {
         self.position
     }
 
-    pub(crate) fn finish(self) -> Option<&'a [u8]> {
-        (self.position <= self.bytes.len()).then(|| &self.bytes[..self.position])
-    }
-}
-
-// The head as it is written: every byte of it goes into the caller's buffer,
-// and every part of it is recorded as a range of that buffer.
-pub(crate) struct HeadWriter<'a> {
-    out: Writer<'a>,
-    url: Span,
-    headers: &'a mut [HeaderSpan],
-    count: usize,
-}
-
-impl<'a> HeadWriter<'a> {
-    pub(crate) fn new(bytes: &'a mut [u8], headers: &'a mut [HeaderSpan]) -> Self {
-        Self {
-            out: Writer::new(bytes),
-            url: Span::default(),
-            headers,
-            count: 0,
-        }
-    }
-
-    pub(crate) fn position(&self) -> usize {
-        self.out.position()
-    }
-
-    pub(crate) fn capacity(&self) -> crate::CapacityError {
-        crate::CapacityError {
-            required: self.position(),
-            required_headers: self.count,
-        }
-    }
-
-    pub(crate) fn url(&mut self, write: impl FnOnce(&mut Writer<'a>)) {
-        self.url = self.part(write);
-    }
-
-    pub(crate) fn header(&mut self, name: &str, value: impl HeaderValue) {
-        self.header_parts(|out| out.push(name.as_bytes()), |out| value.write_to(out));
-    }
-
-    // A header whose value `write` writes from state of its own, such as
-    // the signer's.
-    pub(crate) fn header_with(&mut self, name: &str, write: impl FnOnce(&mut Writer<'a>)) {
-        self.header_parts(|out| out.push(name.as_bytes()), write);
-    }
-
-    pub(crate) fn header_parts(
-        &mut self,
-        name: impl FnOnce(&mut Writer<'a>),
-        value: impl FnOnce(&mut Writer<'a>),
-    ) {
-        let name = self.part(name);
-        let value = self.part(value);
-        if let Some(slot) = self.headers.get_mut(self.count) {
-            *slot = HeaderSpan { name, value };
-        }
-        // Option iterators are not bounded by descriptor capacity; keep counting
-        // without wrapping, just as Writer does for bytes.
-        self.count = self.count.saturating_add(1);
-    }
-
-    pub(crate) fn finish(self, method: Method, payload: Payload<'a>) -> Option<WireRequest<'a>> {
-        self.finish_with_body(method, payload, None)
-    }
-
-    pub(crate) fn body(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
-        self.part(write)
-    }
-
-    pub(crate) fn finish_with_body(
-        self,
-        method: Method,
-        payload: Payload<'a>,
-        body: Option<Span>,
-    ) -> Option<WireRequest<'a>> {
-        if self.count > self.headers.len() {
-            return None;
-        }
-        let (url, headers) = (self.url, &self.headers[..self.count]);
-        let bytes = self.out.finish()?;
-        let head_end = body.map_or(bytes.len(), |span| span.start);
-        // body() records writer positions; finish() proved the entire body fits.
-        let payload = body.map_or(payload, |span| {
-            Payload::Slice(&bytes[span.start..span.start + span.len])
-        });
-        Some(WireRequest {
-            bytes: text(&bytes[..head_end]),
-            method,
-            url,
-            headers,
-            payload,
-            body,
-        })
-    }
-
-    fn part(&mut self, write: impl FnOnce(&mut Writer<'a>)) -> Span {
-        let start = self.out.position();
-        write(&mut self.out);
+    // Writes with `write` and returns where its bytes are.
+    #[inline(always)]
+    pub(crate) fn part(&mut self, write: impl FnOnce(&mut Self)) -> Span {
+        let start = self.position;
+        write(self);
         // push only increases or saturates position, so subtraction cannot underflow.
         Span {
             start,
-            len: self.out.position() - start,
+            len: self.position - start,
         }
+    }
+
+    // Writes again the bytes of `span`, which this writer wrote before. If
+    // they did not fit, it only counts them.
+    #[inline(always)]
+    pub(crate) fn repeat(&mut self, span: Span) {
+        let end = self.position.saturating_add(span.len);
+        if end <= self.bytes.len() {
+            self.bytes
+                .copy_within(span.start..span.start + span.len, self.position);
+        }
+        self.position = end;
+    }
+
+    // Whether every byte pushed so far is in the buffer.
+    pub(crate) fn fits(&self) -> bool {
+        self.position <= self.bytes.len()
+    }
+
+    // The bytes written so far that are in the buffer.
+    pub(crate) fn written(&self) -> &[u8] {
+        &self.bytes[..self.position.min(self.bytes.len())]
     }
 }
 
-pub(crate) fn text(bytes: &[u8]) -> &str {
-    str::from_utf8(bytes).expect("request construction writes UTF-8")
-}
-
-// Whether an encoder writes a request, or only measures it. A
-// `*_requirements` function encodes into an empty buffer to learn the room
-// that a request needs, so an empty buffer is a measuring pass, which skips
-// the work that only the bytes need, such as a signature.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pass {
-    Measure,
-    Write,
-}
-
-impl Pass {
-    pub(crate) fn of(buf: &[u8]) -> Self {
-        if buf.is_empty() {
-            Self::Measure
-        } else {
-            Self::Write
+// Copies `from` into `to`, which is as long. A copy of up to 32 bytes is two
+// overlapping copies of a fixed length, which compile to a few moves, where
+// `copy_from_slice` of a length known only at run time calls the C library's
+// `memcpy`, which costs more than the copy for so few bytes. Slicing `to` to
+// that length first lets the compiler drop the bounds checks of each copy.
+#[inline(always)]
+pub(crate) fn copy_short(to: &mut [u8], from: &[u8]) {
+    let len = from.len();
+    let to = &mut to[..len];
+    match len {
+        0 => {}
+        1..=3 => {
+            to[0] = from[0];
+            to[len / 2] = from[len / 2];
+            to[len - 1] = from[len - 1];
         }
+        4..=7 => {
+            to[..4].copy_from_slice(&from[..4]);
+            to[len - 4..].copy_from_slice(&from[len - 4..]);
+        }
+        8..=16 => {
+            to[..8].copy_from_slice(&from[..8]);
+            to[len - 8..].copy_from_slice(&from[len - 8..]);
+        }
+        17..=32 => {
+            to[..16].copy_from_slice(&from[..16]);
+            to[len - 16..].copy_from_slice(&from[len - 16..]);
+        }
+        _ => to.copy_from_slice(from),
+    }
+}
+
+// The text of bytes that this crate wrote. A request written from bytes that
+// are not its template's can cut a character in two; its text then ends
+// before that character, rather than the program.
+pub(crate) fn written_text(bytes: &[u8]) -> &str {
+    match str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
     }
 }
 
@@ -361,6 +199,17 @@ impl HeaderValue for U64Decimal {
     }
 }
 
+// The two decimal digits of each number below 100.
+static DIGIT_PAIRS: [[u8; 2]; 100] = {
+    let mut pairs = [[0; 2]; 100];
+    let mut value = 0;
+    while value < 100 {
+        pairs[value] = [b'0' + (value / 10) as u8, b'0' + (value % 10) as u8];
+        value += 1;
+    }
+    pairs
+};
+
 // Unlike the fixed-width date fields in `time`, range offsets need the shortest
 // decimal representation. This buffer owns that representation without allocating.
 pub(crate) struct U64Decimal {
@@ -369,17 +218,27 @@ pub(crate) struct U64Decimal {
 }
 
 impl U64Decimal {
+    // Kept out of line: the compiler unrolls the digit loop, and inlined at
+    // each of the 21 places that write a number it made one range header
+    // alone 2,400 instructions long.
+    #[inline(never)]
     pub(crate) fn new(mut value: u64) -> Self {
         let mut bytes = [0; 20];
         let mut start = bytes.len();
-        loop {
-            // A u64 has at most 20 decimal digits; each division consumes one.
+        // Two digits a division, from a table of them. A u64 has at most 20
+        // decimal digits, so `start` stays in the array.
+        while value >= 100 {
+            let pair = DIGIT_PAIRS[(value % 100) as usize];
+            value /= 100;
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&pair);
+        }
+        if value >= 10 {
+            start -= 2;
+            bytes[start..start + 2].copy_from_slice(&DIGIT_PAIRS[value as usize]);
+        } else {
             start -= 1;
-            bytes[start] = b'0' + (value % 10) as u8;
-            value /= 10;
-            if value == 0 {
-                break;
-            }
+            bytes[start] = b'0' + value as u8;
         }
         Self { bytes, start }
     }
@@ -389,39 +248,109 @@ impl U64Decimal {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{HeadWriter, HeaderSpan, Method, U64Decimal, Writer};
+// A range is written as `Range` writes it: `bytes=` and its first and last
+// byte.
+impl HeaderValue for RequestedRange {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_range(out, self);
+    }
+}
 
-    #[test]
-    fn header_capacity_is_independent_of_byte_capacity() {
-        for (byte_capacity, header_capacity) in [(0, 1), (9, 0), (9, 1)] {
-            let mut bytes = [0; 9];
-            let mut headers = [HeaderSpan::default(); 1];
-            let mut writer =
-                HeadWriter::new(&mut bytes[..byte_capacity], &mut headers[..header_capacity]);
-            writer.header("name", b"value");
-            let capacity = writer.capacity();
-            assert_eq!(capacity.required, 9);
-            assert_eq!(capacity.required_headers, 1);
-            assert_eq!(
-                writer
-                    .finish(Method::Get, crate::Payload::Slice(b""))
-                    .is_some(),
-                byte_capacity == 9 && header_capacity == 1
-            );
+// Writes `range` as the value of a `Range` field.
+pub(crate) fn write_range(out: &mut dyn ByteSink, range: RequestedRange) {
+    out.push(b"bytes=");
+    match range {
+        RequestedRange::Bounded { start, end } => {
+            out.push(U64Decimal::new(start).as_bytes());
+            out.push(b"-");
+            // Validation requires start < end, so end is nonzero.
+            out.push(U64Decimal::new(end - 1).as_bytes());
+        }
+        RequestedRange::Offset(first) => {
+            out.push(U64Decimal::new(first).as_bytes());
+            out.push(b"-");
+        }
+        RequestedRange::Suffix(last) => {
+            out.push(b"-");
+            out.push(U64Decimal::new(last).as_bytes());
+        }
+        RequestedRange::Whole => unreachable!("the item was validated"),
+    }
+}
+
+// The name of the field that sends a condition of `kind`, if it sends one.
+pub(crate) fn condition_header_name(kind: ConditionKind) -> Option<&'static str> {
+    match kind {
+        ConditionKind::None => None,
+        ConditionKind::IfMatch => Some("if-match"),
+        ConditionKind::IfNoneMatch => Some("if-none-match"),
+        ConditionKind::IfModifiedSince => Some("if-modified-since"),
+        ConditionKind::IfUnmodifiedSince => Some("if-unmodified-since"),
+    }
+}
+
+// An entity tag is written as it is, and an instant as an HTTP date.
+impl HeaderValue for ConditionValue<'_> {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        match self {
+            Self::ETag(tag) => out.push(tag),
+            Self::Time(seconds) => out.push(Timestamps::from_unix(seconds).rfc1123_bytes()),
         }
     }
+}
+
+// Tags are written as `write_tags_as_query` writes them.
+impl HeaderValue for &[Tag<'_>] {
+    fn write_to(self, out: &mut dyn ByteSink) {
+        write_tags_as_query(out, self);
+    }
+}
+
+// Writes tags as both services take them in a header: `key=value` pairs
+// joined by `&`, each part percent-encoded.
+pub(crate) fn write_tags_as_query(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    for (index, tag) in tags.iter().enumerate() {
+        if index != 0 {
+            out.push(b"&");
+        }
+        for part in encode_query_value(tag.key.as_bytes()) {
+            out.push(part);
+        }
+        out.push(b"=");
+        for part in encode_query_value(tag.value.as_bytes()) {
+            out.push(part);
+        }
+    }
+}
+
+// Writes tags as both services take them in a body: a `TagSet` that holds a
+// `Tag` of a `Key` and a `Value` for each.
+pub(crate) fn write_tag_set(out: &mut dyn ByteSink, tags: &[Tag<'_>]) {
+    out.push(b"<TagSet>");
+    for tag in tags {
+        out.push(b"<Tag><Key>");
+        write_xml_text(out, tag.key.as_bytes());
+        out.push(b"</Key><Value>");
+        write_xml_text(out, tag.value.as_bytes());
+        out.push(b"</Value></Tag>");
+    }
+    out.push(b"</TagSet>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{U64Decimal, Writer};
 
     #[test]
-    fn an_exactly_sized_writer_returns_the_written_bytes() {
+    fn an_exactly_sized_writer_holds_the_written_bytes() {
         let mut bytes = [0; 5];
         let mut writer = Writer::new(&mut bytes);
         writer.push(b"one");
         writer.push("\u{e9}".as_bytes());
 
         assert_eq!(writer.position(), 5);
-        assert_eq!(writer.finish().unwrap(), "one\u{e9}".as_bytes());
+        assert!(writer.fits());
+        assert_eq!(bytes, "one\u{e9}".as_bytes());
     }
 
     #[test]
@@ -432,7 +361,7 @@ mod tests {
         writer.push(b" more");
 
         assert_eq!(writer.position(), 9);
-        assert!(writer.finish().is_none());
+        assert!(!writer.fits());
     }
 
     #[test]
@@ -441,7 +370,7 @@ mod tests {
         writer.push(b"measured");
 
         assert_eq!(writer.position(), 8);
-        assert!(writer.finish().is_none());
+        assert!(!writer.fits());
     }
 
     #[test]
@@ -450,16 +379,7 @@ mod tests {
         writer.position = usize::MAX - 1;
         writer.push(b"over");
         assert_eq!(writer.position(), usize::MAX);
-        assert!(writer.finish().is_none());
-
-        let mut head = HeadWriter::new(&mut [], &mut []);
-        head.count = usize::MAX;
-        head.header("name", b"value");
-        assert_eq!(head.capacity().required_headers, usize::MAX);
-        assert!(
-            head.finish(Method::Get, crate::Payload::Slice(b""))
-                .is_none()
-        );
+        assert!(!writer.fits());
     }
 
     #[test]

@@ -1,42 +1,58 @@
 //! The functions a C program calls.
 //!
 //! Each one reads every pointer it was passed in one `unsafe` block, under
-//! the `# Safety` contract written above it, and hands Rust values to
-//! [`crate::step`], [`crate::plan`] and [`crate::outcome`]. Those modules
+//! the `# Safety` contract written above it. It hands the Rust values to
+//! [`crate::step`], [`crate::inputs`] and [`crate::outcome`]. Those modules
 //! forbid `unsafe` code, so what a pointer read needs is checked here and
 //! nowhere else.
+//!
+//! The functions mirror the protocol crate's `azure` module: `borink_prepare_get`
+//! is `azure::prepare_get`, `borink_encode_get` is `azure::encode_get`, and
+//! so on for each operation.
 
+use crate::inputs::{self, UNKNOWN};
 use crate::outcome::{
-    delete_outcome, get_outcome, invalid, list_outcome, maybe_bytes, maybe_number, properties_view,
-    property_view, put_outcome, refused_fill, status_of,
+    bytes_view, commit_outcome, get_outcome, invalid_outcome, list_outcome, maybe_bytes,
+    maybe_number, properties_view, property_view, put_outcome, refused_fill, stage_outcome,
+    status_of,
 };
-use crate::plan::{delete_shape, get_shape, list_shape, put_shape};
 use crate::ptr;
-use crate::sentence::{describe, describe_status};
-use crate::step::{
-    filling, filling_with, finishing, finishing_with, head_of, open, optional, ready, text, written,
-};
+use crate::sentence::{describe_outcome, describe_status};
+use crate::step::{self, fill_entries, filling_with, head_of, prepared_template, written_request};
 use crate::types::*;
 
-use borink_object_storage_proto::{
-    self as proto, InvalidPlan, ListMarker, Payload, PhysicalDelete, PhysicalGet, PhysicalList,
-    PhysicalPut, Timestamps, layered,
-};
+use borink_object_storage_proto::{self as proto, azure};
 
-/// Reports what is wrong with `session`, if anything.
+/// Reports what is wrong with `container`, if anything: what
+/// `Container::new` refuses in the protocol crate.
 ///
-/// A `code` of 0 means that the session can build requests. Every other call
-/// makes the same check, so this exists to fail early.
+/// A `code` of 0 means that a template can be prepared for it. Every
+/// `borink_prepare_*` call makes the same check, so this exists to fail
+/// early. The key of `object`, and the token, are checked when a template is
+/// prepared.
 ///
 /// # Safety
 ///
-/// `session` must be null or point at one readable `borink_session` whose
-/// three values are each readable for their length.
+/// `container` must be null or point at one readable value whose values each
+/// address their stated length.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
+pub unsafe extern "C" fn borink_container_check(container: *const Container) -> Status {
     // SAFETY: the caller states the contract of this function.
-    let session = unsafe { ptr::session(session) };
-    open(session).map_or_else(|error| status_of(&error), |_| Status::default())
+    let container = unsafe { ptr::container(container) };
+    step::container_from_values(container)
+        .map_or_else(|error| status_of(&error), |_| Status::default())
+}
+
+/// Returns the instant `unix_seconds` after the Unix epoch, formatted for the
+/// dates that a request carries: `Timestamps::from_unix` in the protocol crate.
+///
+/// Call it once a second, and pass the result to every request of that
+/// second. A value after `9999-12-31 23:59:59 UTC` becomes that instant.
+#[unsafe(no_mangle)]
+pub extern "C" fn borink_timestamps_from_unix(unix_seconds: u64) -> Timestamps {
+    Timestamps {
+        stored: proto::Timestamps::from_unix(unix_seconds).to_bytes(),
+    }
 }
 
 /// Looks up Azure's corresponding rejection for a local validation failure.
@@ -46,174 +62,591 @@ pub unsafe extern "C" fn borink_validate(session: *const Session) -> Status {
 /// No request was sent; authentication or another fault could take precedence.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_azure_rejection_for(error: Status, namespace: u16) -> AzureRejection {
-    let namespace = match namespace {
-        0 => proto::AzureNamespace::Unknown,
-        1 => proto::AzureNamespace::Flat,
-        2 => proto::AzureNamespace::Hierarchical,
-        _ => return AzureRejection::default(),
+    let Ok(namespace) = step::namespace(namespace) else {
+        return AzureRejection::default();
     };
     let reason = proto::ErrorCode::from_discriminant(error.code)
         .and_then(|code| proto::Error::from_parts(code, error.detail));
-    let Some(proto::Error::InvalidPlan(reason)) = reason else {
+    let Some(proto::Error::InvalidRequest(reason)) = reason else {
         return AzureRejection::default();
     };
     reason
         .azure_rejection(namespace)
         .map_or_else(AzureRejection::default, |rejection| AzureRejection {
             status: rejection.status,
-            code: Bytes {
-                ptr: rejection.code.as_ptr(),
-                len: rejection.code.len(),
-            },
+            code: bytes_view(rejection.code.as_bytes()),
         })
 }
 
-/// Writes the request head of a read into `buf`.
+/// Writes the template of reads with `options` from `container`, sent with
+/// the bearer `token`, into `buf`.
 ///
-/// Pass an empty `condition_value` if `shape` carries no condition. Pass an
-/// empty `buf` to learn the size that this request needs.
+/// `token` is an Entra ID token, without the `Bearer ` prefix. The template
+/// holds it, so a new token means preparing again.
+///
+/// `namespace` is a `borink_azure_namespace`: the kind of account the reads
+/// go to. Pass `Unknown` if you do not know it, and each read refuses only
+/// the keys that both kinds refuse.
+///
+/// Pass an empty `buf` to learn the size that the template needs. A ranged
+/// HEAD is refused with `RangedHead`.
 ///
 /// # Safety
 ///
-/// `session` and `shape` must each be null or point at one readable value.
-/// `key`, `condition_value` and `buf` must each address their stated length,
-/// and `buf` must be reached through nothing else during the call.
-/// Byte storage and header slots must be exclusive and disjoint from all
-/// inputs. Header slots need only be writable; this call initializes them.
+/// `container` and `options` must each be null or point at one readable
+/// value. Each value of `container`, and `token`, must address its stated
+/// length. `buf` must address its stated length and be reached through
+/// nothing else during the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_encode_get(
-    session: *const Session,
-    shape: *const GetShape,
-    key: Bytes,
-    condition_value: Bytes,
-    buf: RequestBuffer,
-    unix_seconds: u64,
-) -> RequestHead {
-    // SAFETY: the header slots are writable, exclusive and disjoint.
-    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
-    let buf = buf.bytes;
-
+pub unsafe extern "C" fn borink_prepare_get(
+    container: *const Container,
+    token: Bytes,
+    namespace: u16,
+    options: *const GetOptions,
+    buf: BytesMut,
+) -> Prepared {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, key, condition_value, buf) = unsafe {
+    let (container, token, options, buf) = unsafe {
         (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::slice(key),
-            ptr::slice(condition_value),
+            ptr::container(container),
+            ptr::slice(token),
+            options.as_ref(),
             ptr::slice_mut(buf),
         )
     };
-    written(ready(session, shape, get_shape).and_then(|(blobs, shape)| {
-        let get = PhysicalGet::from_shape(
-            shape,
-            text(key, InvalidPlan::KeyNotUtf8)?,
-            condition(shape.condition, optional(condition_value))?,
-        );
-        blobs.encode_get(buf, headers, &get, &Timestamps::from_unix(unix_seconds))
+    prepared_template(
+        step::container_from_values(container).and_then(|container| {
+            let options = inputs::get_options(options.ok_or(UNKNOWN)?)?;
+            azure::prepare_get(
+                &container,
+                step::token_text(token)?,
+                step::namespace(namespace)?,
+                &options,
+                buf,
+            )
+        }),
+    )
+}
+
+/// Writes the template of whole-object writes with `options` into `buf`.
+///
+/// Every write sends `x-ms-blob-type: BlockBlob`, and the content properties
+/// and the access tier of `options`. A checksum other than an MD5 or a CRC64
+/// is refused with `Option`.
+///
+/// # Safety
+///
+/// As `borink_prepare_get`, and each value of `options` must address its
+/// stated length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_prepare_put(
+    container: *const Container,
+    token: Bytes,
+    namespace: u16,
+    options: *const PutOptions,
+    buf: BytesMut,
+) -> Prepared {
+    // SAFETY: the caller states the contract of this function.
+    let (container, token, options, buf) = unsafe {
+        (
+            ptr::container(container),
+            ptr::slice(token),
+            options
+                .as_ref()
+                .map(|options| (options, ptr::write_options(&options.options))),
+            ptr::slice_mut(buf),
+        )
+    };
+    prepared_template(
+        step::container_from_values(container).and_then(|container| {
+            let (options, write) = options.ok_or(UNKNOWN)?;
+            let options = inputs::put_options(options, write)?;
+            azure::prepare_put(
+                &container,
+                step::token_text(token)?,
+                step::namespace(namespace)?,
+                &options,
+                buf,
+            )
+        }),
+    )
+}
+
+/// Writes the template of Put Blocks with `options` into `buf`.
+///
+/// A checksum other than an MD5 or a CRC64 is refused with `Option`.
+///
+/// # Safety
+///
+/// As `borink_prepare_get`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_prepare_stage_block(
+    container: *const Container,
+    token: Bytes,
+    namespace: u16,
+    options: *const StageOptions,
+    buf: BytesMut,
+) -> Prepared {
+    // SAFETY: the caller states the contract of this function.
+    let (container, token, options, buf) = unsafe {
+        (
+            ptr::container(container),
+            ptr::slice(token),
+            options.as_ref(),
+            ptr::slice_mut(buf),
+        )
+    };
+    prepared_template(
+        step::container_from_values(container).and_then(|container| {
+            let options = inputs::stage_options(options.ok_or(UNKNOWN)?)?;
+            azure::prepare_stage_block(
+                &container,
+                step::token_text(token)?,
+                step::namespace(namespace)?,
+                &options,
+                buf,
+            )
+        }),
+    )
+}
+
+/// Writes the template of Put Block Lists with `options` into `buf`.
+///
+/// # Safety
+///
+/// As `borink_prepare_put`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_prepare_commit_blocks(
+    container: *const Container,
+    token: Bytes,
+    namespace: u16,
+    options: *const CommitOptions,
+    buf: BytesMut,
+) -> Prepared {
+    // SAFETY: the caller states the contract of this function.
+    let (container, token, options, buf) = unsafe {
+        (
+            ptr::container(container),
+            ptr::slice(token),
+            options
+                .as_ref()
+                .map(|options| (options, ptr::write_options(&options.options))),
+            ptr::slice_mut(buf),
+        )
+    };
+    prepared_template(
+        step::container_from_values(container).and_then(|container| {
+            let (options, write) = options.ok_or(UNKNOWN)?;
+            let options = inputs::commit_options(options, write)?;
+            azure::prepare_commit_blocks(
+                &container,
+                step::token_text(token)?,
+                step::namespace(namespace)?,
+                &options,
+                buf,
+            )
+        }),
+    )
+}
+
+/// Writes the template of the pages of a listing with `options` into `buf`.
+///
+/// A page of no entries is refused with `MaxResults`, and a delimiter other
+/// than `/` on a hierarchical account with `Delimiter`. A container that names
+/// one object is refused with `Option`: a listing names none.
+///
+/// # Safety
+///
+/// As `borink_prepare_get`, and `options->delimiter` must address its stated
+/// length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_prepare_list(
+    container: *const Container,
+    token: Bytes,
+    namespace: u16,
+    options: *const ListOptions,
+    buf: BytesMut,
+) -> Prepared {
+    // SAFETY: the caller states the contract of this function.
+    let (container, token, options, buf) = unsafe {
+        (
+            ptr::container(container),
+            ptr::slice(token),
+            options
+                .as_ref()
+                .map(|options| (options, ptr::slice(options.delimiter))),
+            ptr::slice_mut(buf),
+        )
+    };
+    prepared_template(
+        step::container_from_values(container).and_then(|container| {
+            let (options, delimiter) = options.ok_or(UNKNOWN)?;
+            let options = inputs::list_options(options, delimiter)?;
+            azure::prepare_list(
+                &container,
+                step::token_text(token)?,
+                step::namespace(namespace)?,
+                &options,
+                buf,
+            )
+        }),
+    )
+}
+
+/// Checks that `bytes` are the bytes that `template` was written into.
+///
+/// Encoding trusts that they are, and checks nothing of them per request.
+/// Check bytes once where they could be another template's, such as bytes
+/// read back from storage. A `code` of 0 means that they are the template's
+/// own, and `InvalidRequest` with `Template` that they are not.
+///
+/// # Safety
+///
+/// `template` must be null or point at one readable value. `bytes` must
+/// address its stated length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_template_check(template: *const Template, bytes: Bytes) -> Status {
+    // SAFETY: the caller states the contract of this function.
+    let (template, bytes) = unsafe { (template.as_ref(), ptr::slice(bytes)) };
+    step::stored_template(template)
+        .and_then(|template| template.check(bytes))
+        .map_or_else(|error| status_of(&error), |()| Status::default())
+}
+
+/// Writes the read `item` at `now` from `template` into `buf`.
+///
+/// `bytes` are the template's own, as `borink_prepare_get` wrote them. Pass
+/// an empty `buf` to learn the size that the request needs.
+///
+/// A key that Azure refuses, a range that the template does not take and a
+/// suffix range are refused with `InvalidRequest`. A template of another
+/// operation is refused with `Template`.
+///
+/// # Safety
+///
+/// `template`, `item` and `now` must each be null or point at one readable
+/// value, and each value of `item` must address its stated length. `bytes` must
+/// address its stated length. `buf` must address its stated length and be
+/// reached through nothing else during the call: not through `bytes`, nor
+/// through a value of `item`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_encode_get(
+    template: *const Template,
+    bytes: Bytes,
+    item: *const GetItem,
+    now: *const Timestamps,
+    buf: BytesMut,
+) -> WireRequest {
+    // SAFETY: the caller states the contract of this function.
+    let (template, bytes, item, now, buf) = unsafe {
+        (
+            template.as_ref(),
+            ptr::slice(bytes),
+            item.as_ref().map(|item| {
+                (
+                    item,
+                    ptr::slice(item.key),
+                    ptr::slice(item.condition_value.e_tag),
+                    ptr::slice(item.revision),
+                )
+            }),
+            now.as_ref(),
+            ptr::slice_mut(buf),
+        )
+    };
+    written_request(step::stored_template(template).and_then(|template| {
+        let (item, key, e_tag, revision) = item.ok_or(UNKNOWN)?;
+        let item = inputs::get_item(item, key, e_tag, revision)?;
+        azure::encode_get(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
 
-/// Writes the request head of a write into `buf`.
+/// Writes the whole-object write `item` at `now` from `template`
+/// into `buf`.
 ///
-/// The head states `content_len`. You send those bytes yourself.
+/// The head states `item->content_len`, and you send that content after
+/// it. Content longer than Azure takes in one write is refused with
+/// `PayloadTooLarge`. A checksum that is not the base64 of a digest of the
+/// template's kind is refused with `Checksum`.
 ///
 /// # Safety
 ///
 /// As `borink_encode_get`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_put(
-    session: *const Session,
-    shape: *const PutShape,
-    key: Bytes,
-    condition_value: Bytes,
-    buf: RequestBuffer,
-    content_len: u64,
-    unix_seconds: u64,
-) -> RequestHead {
-    // SAFETY: the header slots are writable, exclusive and disjoint.
-    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
-    let buf = buf.bytes;
-
+    template: *const Template,
+    bytes: Bytes,
+    item: *const PutItem,
+    now: *const Timestamps,
+    buf: BytesMut,
+) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, key, condition_value, buf) = unsafe {
+    let (template, bytes, item, now, buf) = unsafe {
         (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::slice(key),
-            ptr::slice(condition_value),
+            template.as_ref(),
+            ptr::slice(bytes),
+            item.as_ref().map(|item| {
+                (
+                    item,
+                    ptr::slice(item.key),
+                    ptr::slice(item.condition_value.e_tag),
+                    ptr::slice(item.checksum),
+                )
+            }),
+            now.as_ref(),
             ptr::slice_mut(buf),
         )
     };
-    written(ready(session, shape, put_shape).and_then(|(blobs, shape)| {
-        let put = PhysicalPut::from_shape(
-            shape,
-            text(key, InvalidPlan::KeyNotUtf8)?,
-            condition(shape.condition, optional(condition_value))?,
-        );
-        // The content stays in your program. Only its length reaches the
-        // head, so the request borrows no content and you send the bytes
-        // yourself.
-        let content = Payload::Streamed { len: content_len };
-        blobs.encode_put(
-            buf,
-            headers,
-            &put,
-            content,
-            &Timestamps::from_unix(unix_seconds),
-        )
+    written_request(step::stored_template(template).and_then(|template| {
+        let (item, key, e_tag, checksum) = item.ok_or(UNKNOWN)?;
+        let item = inputs::put_item(item, key, e_tag, checksum)?;
+        azure::encode_put(&template, bytes, &item, &step::timestamps(now)?, buf)
     }))
 }
 
-/// Writes the request head of a removal into `buf`.
+/// Writes the Put Block `item` at `now` from `template` into `buf`.
+///
+/// The head states `item->content_len`, and you send that block after it. A
+/// block ID that is not base64 of at most 64 bytes is refused with `PartId`.
 ///
 /// # Safety
 ///
 /// As `borink_encode_get`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_encode_delete(
-    session: *const Session,
-    shape: *const DeleteShape,
-    key: Bytes,
-    condition_value: Bytes,
-    buf: RequestBuffer,
-    unix_seconds: u64,
-) -> RequestHead {
-    // SAFETY: the header slots are writable, exclusive and disjoint.
-    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
-    let buf = buf.bytes;
-
+pub unsafe extern "C" fn borink_encode_stage_block(
+    template: *const Template,
+    bytes: Bytes,
+    item: *const StageBlockItem,
+    now: *const Timestamps,
+    buf: BytesMut,
+) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, key, condition_value, buf) = unsafe {
+    let (template, bytes, item, now, buf) = unsafe {
         (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::slice(key),
-            ptr::slice(condition_value),
+            template.as_ref(),
+            ptr::slice(bytes),
+            item.as_ref().map(|item| {
+                (
+                    item,
+                    ptr::slice(item.key),
+                    ptr::slice(item.id),
+                    ptr::slice(item.checksum),
+                )
+            }),
+            now.as_ref(),
             ptr::slice_mut(buf),
         )
     };
-    written(
-        ready(session, shape, delete_shape).and_then(|(blobs, shape)| {
-            let delete = PhysicalDelete::from_shape(
-                shape,
-                text(key, InvalidPlan::KeyNotUtf8)?,
-                condition(shape.condition, optional(condition_value))?,
-            );
-            blobs.encode_delete(buf, headers, &delete, &Timestamps::from_unix(unix_seconds))
-        }),
-    )
+    written_request(step::stored_template(template).and_then(|template| {
+        let (item, key, id, checksum) = item.ok_or(UNKNOWN)?;
+        let item = inputs::stage_item(item, key, id, checksum)?;
+        azure::encode_stage_block(&template, bytes, &item, &step::timestamps(now)?, buf)
+    }))
+}
+
+/// Writes the Put Block List `item` at `now` from `template` into
+/// `buf`, with its block list as the body after the head.
+///
+/// More than 50,000 blocks are refused with `Parts`, and a block ID that is
+/// not base64 of at most 64 bytes with `PartId`.
+///
+/// # Safety
+///
+/// As `borink_encode_get`, and `item->blocks` must address
+/// `item->block_count` readable values whose IDs each address their stated
+/// length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_encode_commit_blocks(
+    template: *const Template,
+    bytes: Bytes,
+    item: *const CommitItem,
+    now: *const Timestamps,
+    buf: BytesMut,
+) -> WireRequest {
+    // SAFETY: the caller states the contract of this function.
+    let (template, bytes, item, now, buf) = unsafe {
+        (
+            template.as_ref(),
+            ptr::slice(bytes),
+            item.as_ref().map(|item| {
+                (
+                    item,
+                    ptr::slice(item.key),
+                    ptr::slice(item.condition_value.e_tag),
+                    ptr::slice(item.content_md5),
+                    ptr::blocks(item.blocks, item.block_count),
+                )
+            }),
+            now.as_ref(),
+            ptr::slice_mut(buf),
+        )
+    };
+    written_request(step::stored_template(template).and_then(|template| {
+        let (item, key, e_tag, content_md5, blocks) = item.ok_or(UNKNOWN)?;
+        let item = inputs::commit_item(item, key, e_tag, content_md5, blocks)?;
+        azure::encode_commit_blocks(&template, bytes, &item, &step::timestamps(now)?, buf)
+    }))
+}
+
+/// Writes the page `item` of a listing at `now` from `template`
+/// into `buf`.
+///
+/// An empty `prefix` lists the whole container. Pass an empty `marker` for
+/// the first page, and the `next_marker` of the last fill for every page
+/// after it.
+///
+/// # Safety
+///
+/// As `borink_encode_get`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_encode_list(
+    template: *const Template,
+    bytes: Bytes,
+    item: *const ListItem,
+    now: *const Timestamps,
+    buf: BytesMut,
+) -> WireRequest {
+    // SAFETY: the caller states the contract of this function.
+    let (template, bytes, item, now, buf) = unsafe {
+        (
+            template.as_ref(),
+            ptr::slice(bytes),
+            item.as_ref()
+                .map(|item| (ptr::slice(item.prefix), ptr::slice(item.marker))),
+            now.as_ref(),
+            ptr::slice_mut(buf),
+        )
+    };
+    written_request(step::stored_template(template).and_then(|template| {
+        let (prefix, marker) = item.ok_or(UNKNOWN)?;
+        let item = inputs::list_item(prefix, marker)?;
+        azure::encode_list(&template, bytes, &item, &step::timestamps(now)?, buf)
+    }))
+}
+
+/// Reads the next header field of a request, and steps `fields` past it.
+///
+/// Start with the bytes that a request's `fields` addresses in your buffer.
+/// Each call reports one name and its value, as the request wrote them.
+/// Write each one, unchanged and none twice; your HTTP client writes `host`
+/// from the URL. A walk that has ended reports an absent header, and stays
+/// ended.
+///
+/// # Safety
+///
+/// `fields` must be null or point at one writable value that addresses its
+/// stated length.
+///
+/// # Lifetime
+///
+/// The name and the value point into the bytes that `fields` addressed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_next_header(fields: *mut Bytes) -> Header {
+    // SAFETY: the caller states the contract of this function.
+    let Some(fields) = (unsafe { fields.as_mut() }) else {
+        return Header::default();
+    };
+    // SAFETY: as above, for the bytes that the walk has not read.
+    let remaining = unsafe { ptr::slice(*fields) };
+    match step::next_header(remaining) {
+        Some((name, value, rest)) => {
+            *fields = bytes_view(rest);
+            Header {
+                present: true,
+                name: bytes_view(name),
+                value: bytes_view(value),
+            }
+        }
+        None => {
+            *fields = Bytes::default();
+            Header::default()
+        }
+    }
+}
+
+/// Returns the part of a read that holds no pointer, for a template with
+/// `options`: its kind, its range and its condition.
+///
+/// Keep it while the request is in flight, and pass it to
+/// `borink_accept_get_head` when the response arrives. A null `item` or
+/// `options` gives a shape of zeros, which every call refuses.
+///
+/// # Safety
+///
+/// `item` and `options` must each be null or point at one readable value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_get_item_shape(
+    item: *const GetItem,
+    options: *const GetOptions,
+) -> GetShape {
+    // SAFETY: the caller states the contract of this function.
+    match unsafe { (item.as_ref(), options.as_ref()) } {
+        (Some(item), Some(options)) => GetShape {
+            kind: options.kind,
+            range: item.range,
+            condition: options.condition,
+        },
+        _ => GetShape {
+            kind: 0,
+            range: Range {
+                form: 0,
+                start: 0,
+                end: 0,
+            },
+            condition: 0,
+        },
+    }
+}
+
+/// Returns the part of a write that holds no pointer, for a template with
+/// `options`: its condition, which is the template's.
+///
+/// # Safety
+///
+/// As `borink_get_item_shape`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_put_item_shape(
+    item: *const PutItem,
+    options: *const PutOptions,
+) -> PutShape {
+    // SAFETY: the caller states the contract of this function.
+    match unsafe { (item.as_ref(), options.as_ref()) } {
+        (Some(_), Some(options)) => PutShape {
+            condition: options.condition,
+        },
+        _ => PutShape { condition: 0 },
+    }
+}
+
+/// Returns the part of a commit that holds no pointer, for a template with
+/// `options`: its condition, which is the template's.
+///
+/// # Safety
+///
+/// As `borink_get_item_shape`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_commit_item_shape(
+    item: *const CommitItem,
+    options: *const CommitOptions,
+) -> CommitShape {
+    // SAFETY: the caller states the contract of this function.
+    match unsafe { (item.as_ref(), options.as_ref()) } {
+        (Some(_), Some(options)) => CommitShape {
+            condition: options.condition,
+        },
+        _ => CommitShape { condition: 0 },
+    }
 }
 
 /// Reads the response head of a read.
 ///
-/// Pass the same `shape` that you passed to `borink_encode_get`, and one
-/// `borink_header_ref` per response header. The outcome points into the same
-/// bytes as those headers.
+/// Pass the `shape` of the read, and one `borink_header_ref` per response
+/// header. The outcome points into the same bytes as those headers.
 ///
 /// # Safety
 ///
-/// `session` and `shape` must each be null or point at one readable value.
-/// `headers` must address `header_count` readable values.
+/// `headers` must address `header_count` readable values, each of whose
+/// values addresses its stated length.
 ///
 /// # Lifetime
 ///
@@ -221,26 +654,52 @@ pub unsafe extern "C" fn borink_encode_delete(
 /// as long as you use the returned outcome.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_accept_get_head(
-    session: *const Session,
-    shape: *const GetShape,
+    shape: GetShape,
     status: u16,
     headers: *const HeaderRef,
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, headers) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::headers(headers, header_count),
-        )
-    };
-    ready(session, shape, get_shape)
-        .and_then(|(blobs, shape)| blobs.accept_get_head(shape, head_of(status, headers)))
-        .map_or_else(invalid, |outcome| get_outcome(&outcome))
+    let headers = unsafe { ptr::headers(headers, header_count) };
+    inputs::get_shape(&shape)
+        .and_then(|shape| azure::accept_get_head(shape, head_of(status, headers)))
+        .map_or_else(invalid_outcome, |outcome| get_outcome(&outcome))
 }
 
-/// Reads the response head of a write.
+/// Finishes a read whose head asked for the error body.
+///
+/// Pass the `shape` that the head was read against, the `failure` of that
+/// outcome and the body that you read. Pass an empty body if you read none:
+/// the outcome is then final with the error unnamed.
+///
+/// # Safety
+///
+/// `failure.request_id` and `body` must each address their stated length.
+///
+/// # Lifetime
+///
+/// `failure.request_id` must still point at valid bytes, and they must stay
+/// valid for as long as you use the returned outcome. So must `body`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_accept_get_error_body(
+    shape: GetShape,
+    failure: Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller states the contract of this function.
+    let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
+    inputs::get_shape(&shape)
+        .and_then(|shape| {
+            Ok(azure::accept_get_error_body(
+                shape,
+                step::proto_failure(failure)?,
+                body,
+            ))
+        })
+        .map_or_else(invalid_outcome, |outcome| get_outcome(&outcome))
+}
+
+/// Reads the response head of a whole-object write.
 ///
 /// # Safety
 ///
@@ -251,255 +710,181 @@ pub unsafe extern "C" fn borink_accept_get_head(
 /// As `borink_accept_get_head`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_accept_put_head(
-    session: *const Session,
-    shape: *const PutShape,
+    shape: PutShape,
     status: u16,
     headers: *const HeaderRef,
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, headers) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::headers(headers, header_count),
-        )
-    };
-    ready(session, shape, put_shape)
-        .and_then(|(blobs, shape)| blobs.accept_put_head(shape, head_of(status, headers)))
-        .map_or_else(invalid, |outcome| put_outcome(&outcome))
+    let headers = unsafe { ptr::headers(headers, header_count) };
+    inputs::put_shape(&shape)
+        .and_then(|shape| azure::accept_put_head(shape, head_of(status, headers)))
+        .map_or_else(invalid_outcome, |outcome| put_outcome(&outcome))
 }
 
-/// Reads the response head of a removal.
+/// Finishes a whole-object write whose head asked for the error body.
 ///
 /// # Safety
 ///
-/// As `borink_accept_get_head`.
+/// As `borink_accept_get_error_body`.
 ///
 /// # Lifetime
 ///
-/// As `borink_accept_get_head`.
+/// As `borink_accept_get_error_body`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_accept_delete_head(
-    session: *const Session,
-    shape: *const DeleteShape,
-    status: u16,
-    headers: *const HeaderRef,
-    header_count: usize,
-) -> Outcome {
-    // SAFETY: the caller states the contract of this function.
-    let (session, shape, headers) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::headers(headers, header_count),
-        )
-    };
-    ready(session, shape, delete_shape)
-        .and_then(|(blobs, shape)| blobs.accept_delete_head(shape, head_of(status, headers)))
-        .map_or_else(invalid, |outcome| delete_outcome(&outcome))
-}
-
-/// Finishes a read whose head asked for the error body.
-///
-/// Pass the `shape` that the head was read against, the `failure` of that
-/// outcome and the body that you read. Pass an empty body if you read none: the
-/// outcome is then final with the error unnamed.
-///
-/// # Safety
-///
-/// `session`, `shape` and `failure` must each be null or point at one
-/// readable value. `body` must address its stated length.
-///
-/// # Lifetime
-///
-/// `failure->request_id` must still point at valid bytes, and they must stay
-/// valid for as long as you use the returned outcome. So must `body`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_finish_get_error_body(
-    session: *const Session,
-    shape: *const GetShape,
-    failure: *const Failure,
+pub unsafe extern "C" fn borink_accept_put_error_body(
+    shape: PutShape,
+    failure: Failure,
     body: Bytes,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, shape, failure, body) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::failure(failure),
-            ptr::slice(body),
-        )
-    };
-    finishing_with(session, shape, get_shape, failure)
-        .map(|(blobs, shape, failure)| blobs.accept_get_error_body(shape, failure, body))
-        .map_or_else(invalid, |outcome| get_outcome(&outcome))
-}
-
-/// Finishes a write whose head asked for the error body.
-///
-/// # Safety
-///
-/// As `borink_finish_get_error_body`.
-///
-/// # Lifetime
-///
-/// As `borink_finish_get_error_body`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_finish_put_error_body(
-    session: *const Session,
-    shape: *const PutShape,
-    failure: *const Failure,
-    body: Bytes,
-) -> Outcome {
-    // SAFETY: the caller states the contract of this function.
-    let (session, shape, failure, body) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::failure(failure),
-            ptr::slice(body),
-        )
-    };
-    finishing_with(session, shape, put_shape, failure)
-        .map(|(blobs, shape, failure)| blobs.accept_put_error_body(shape, failure, body))
-        .map_or_else(invalid, |outcome| put_outcome(&outcome))
-}
-
-/// Finishes a removal whose head asked for the error body.
-///
-/// # Safety
-///
-/// As `borink_finish_get_error_body`.
-///
-/// # Lifetime
-///
-/// As `borink_finish_get_error_body`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_finish_delete_error_body(
-    session: *const Session,
-    shape: *const DeleteShape,
-    failure: *const Failure,
-    body: Bytes,
-) -> Outcome {
-    // SAFETY: the caller states the contract of this function.
-    let (session, shape, failure, body) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::failure(failure),
-            ptr::slice(body),
-        )
-    };
-    finishing_with(session, shape, delete_shape, failure)
-        .map(|(blobs, shape, failure)| blobs.accept_delete_error_body(shape, failure, body))
-        .map_or_else(invalid, |outcome| delete_outcome(&outcome))
-}
-
-/// Writes the request head of one page of a listing into `buf`.
-///
-/// An empty `prefix` lists the whole container. Pass an empty `marker` for the
-/// first page, and the `next_marker` of the last fill for every page after it.
-///
-/// # Safety
-///
-/// `session` and `shape` must each be null or point at one readable value.
-/// `prefix`, `marker` and `buf` must each address their stated length, and
-/// `buf` must be reached through nothing else during the call.
-/// Byte storage and header slots must be exclusive and disjoint from all
-/// inputs. Header slots need only be writable; this call initializes them.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_encode_list(
-    session: *const Session,
-    shape: *const ListShape,
-    prefix: Bytes,
-    marker: Bytes,
-    buf: RequestBuffer,
-    unix_seconds: u64,
-) -> RequestHead {
-    // SAFETY: the header slots are writable, exclusive and disjoint.
-    let headers = unsafe { ptr::request_headers(buf.headers, buf.header_capacity) };
-    let buf = buf.bytes;
-
-    // SAFETY: the caller states the contract of this function.
-    let (session, shape, prefix, marker, buf) = unsafe {
-        (
-            ptr::session(session),
-            shape.as_ref(),
-            ptr::slice(prefix),
-            ptr::slice(marker),
-            ptr::slice_mut(buf),
-        )
-    };
-    written(
-        ready(session, shape, list_shape).and_then(|(blobs, shape)| {
-            let list = PhysicalList::from_shape(
+    let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
+    inputs::put_shape(&shape)
+        .and_then(|shape| {
+            Ok(azure::accept_put_error_body(
                 shape,
-                text(prefix, InvalidPlan::Prefix)?,
-                optional(marker)
-                    .map(|marker| text(marker, InvalidPlan::Marker).map(ListMarker::Text))
-                    .transpose()?,
-            );
-            blobs.encode_list(buf, headers, &list, &Timestamps::from_unix(unix_seconds))
-        }),
-    )
+                step::proto_failure(failure)?,
+                body,
+            ))
+        })
+        .map_or_else(invalid_outcome, |outcome| put_outcome(&outcome))
+}
+
+/// Reads the response head of a Put Block.
+///
+/// This call takes no shape: a Put Block carries no condition.
+///
+/// # Safety
+///
+/// As `borink_accept_get_head`.
+///
+/// # Lifetime
+///
+/// As `borink_accept_get_head`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_accept_stage_block_head(
+    status: u16,
+    headers: *const HeaderRef,
+    header_count: usize,
+) -> Outcome {
+    // SAFETY: the caller states the contract of this function.
+    let headers = unsafe { ptr::headers(headers, header_count) };
+    azure::accept_stage_block_head(head_of(status, headers))
+        .map_or_else(invalid_outcome, |outcome| stage_outcome(&outcome))
+}
+
+/// Finishes a Put Block whose head asked for the error body.
+///
+/// # Safety
+///
+/// As `borink_accept_get_error_body`.
+///
+/// # Lifetime
+///
+/// As `borink_accept_get_error_body`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_accept_stage_block_error_body(
+    failure: Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller states the contract of this function.
+    let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
+    step::proto_failure(failure)
+        .map(|failure| azure::accept_stage_block_error_body(failure, body))
+        .map_or_else(invalid_outcome, |outcome| stage_outcome(&outcome))
+}
+
+/// Reads the response head of a Put Block List.
+///
+/// # Safety
+///
+/// As `borink_accept_get_head`.
+///
+/// # Lifetime
+///
+/// As `borink_accept_get_head`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_accept_commit_blocks_head(
+    shape: CommitShape,
+    status: u16,
+    headers: *const HeaderRef,
+    header_count: usize,
+) -> Outcome {
+    // SAFETY: the caller states the contract of this function.
+    let headers = unsafe { ptr::headers(headers, header_count) };
+    inputs::commit_shape(&shape)
+        .and_then(|shape| azure::accept_commit_blocks_head(shape, head_of(status, headers)))
+        .map_or_else(invalid_outcome, |outcome| commit_outcome(&outcome))
+}
+
+/// Finishes a Put Block List whose head asked for the error body.
+///
+/// # Safety
+///
+/// As `borink_accept_get_error_body`.
+///
+/// # Lifetime
+///
+/// As `borink_accept_get_error_body`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn borink_accept_commit_blocks_error_body(
+    shape: CommitShape,
+    failure: Failure,
+    body: Bytes,
+) -> Outcome {
+    // SAFETY: the caller states the contract of this function.
+    let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
+    inputs::commit_shape(&shape)
+        .and_then(|shape| {
+            Ok(azure::accept_commit_blocks_error_body(
+                shape,
+                step::proto_failure(failure)?,
+                body,
+            ))
+        })
+        .map_or_else(invalid_outcome, |outcome| commit_outcome(&outcome))
 }
 
 /// Reads the response head of a listing.
 ///
 /// This call takes no shape: it checks nothing in the response against the
-/// plan.
+/// request.
 ///
 /// # Safety
 ///
-/// `session` must be null or point at one readable value. `headers` must
-/// address `header_count` readable values.
+/// As `borink_accept_get_head`.
 ///
 /// # Lifetime
 ///
-/// The bytes that `headers` points at must stay valid, and must not move, for
-/// as long as you use the returned outcome.
+/// As `borink_accept_get_head`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_accept_list_head(
-    session: *const Session,
     status: u16,
     headers: *const HeaderRef,
     header_count: usize,
 ) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, headers) =
-        unsafe { (ptr::session(session), ptr::headers(headers, header_count)) };
-    open(session)
-        .and_then(|blobs| blobs.accept_list_head(head_of(status, headers)))
-        .map_or_else(invalid, |outcome| list_outcome(&outcome))
+    let headers = unsafe { ptr::headers(headers, header_count) };
+    azure::accept_list_head(head_of(status, headers))
+        .map_or_else(invalid_outcome, |outcome| list_outcome(&outcome))
 }
 
 /// Finishes a listing whose head asked for the error body.
 ///
 /// # Safety
 ///
-/// As `borink_finish_get_error_body`.
+/// As `borink_accept_get_error_body`.
 ///
 /// # Lifetime
 ///
-/// As `borink_finish_get_error_body`.
+/// As `borink_accept_get_error_body`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_finish_list_error_body(
-    session: *const Session,
-    failure: *const Failure,
-    body: Bytes,
-) -> Outcome {
+pub unsafe extern "C" fn borink_accept_list_error_body(failure: Failure, body: Bytes) -> Outcome {
     // SAFETY: the caller states the contract of this function.
-    let (session, failure, body) = unsafe {
-        (
-            ptr::session(session),
-            ptr::failure(failure),
-            ptr::slice(body),
-        )
-    };
-    finishing(session, failure)
-        .map(|(blobs, failure)| blobs.accept_list_error_body(failure, body))
-        .map_or_else(invalid, |outcome| list_outcome(&outcome))
+    let (failure, body) = unsafe { (ptr::failure(&failure), ptr::slice(body)) };
+    step::proto_failure(failure)
+        .map(|failure| azure::accept_list_error_body(failure, body))
+        .map_or_else(invalid_outcome, |outcome| list_outcome(&outcome))
 }
 
 /// Reads a page out of the response body of a listing.
@@ -515,9 +900,8 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
 ///
 /// # Safety
 ///
-/// `session` must be null or point at one readable value. `body` must address
-/// its stated length and be reached through nothing else during the call.
-/// `into` must address `capacity` writable entries.
+/// `body` must address its stated length and be reached through nothing else
+/// during the call. `into` must address `capacity` writable entries.
 ///
 /// # Lifetime
 ///
@@ -525,22 +909,13 @@ pub unsafe extern "C" fn borink_finish_list_error_body(
 /// release or reuse that buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_fill_listing(
-    session: *const Session,
     body: BytesMut,
     into: *mut ListEntry,
     capacity: usize,
 ) -> Fill {
     // SAFETY: the caller states the contract of this function.
-    let (session, body, into) = unsafe {
-        (
-            ptr::session(session),
-            ptr::slice_mut(body),
-            ptr::items_mut(into, capacity),
-        )
-    };
-    open(session)
-        .and_then(|blobs| filling(&blobs, body, into))
-        .unwrap_or_else(|error| refused_fill(&error))
+    let (body, into) = unsafe { (ptr::slice_mut(body), ptr::items_mut(into, capacity)) };
+    fill_entries(body, into).unwrap_or_else(|error| refused_fill(&error))
 }
 
 /// Reads a page the way `borink_fill_listing` does, and keeps the values of
@@ -567,7 +942,6 @@ pub unsafe extern "C" fn borink_fill_listing(
 /// Every value points into `body`, like the entries.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_fill_listing_with(
-    session: *const Session,
     body: BytesMut,
     into: *mut ListEntry,
     capacity: usize,
@@ -575,25 +949,22 @@ pub unsafe extern "C" fn borink_fill_listing_with(
     values: *mut MaybeBytes,
     value_capacity: usize,
 ) -> Fill {
-    let wanted = proto::PropertySet::from_bits(wanted.mask);
+    let wanted = proto::azure::PropertySet::from_bits(wanted.mask);
     let width = wanted.len();
     // Rows the values array has room for, when the set names anything.
     let rows = value_capacity
         .checked_div(width)
         .map_or(capacity, |held| capacity.min(held));
     // SAFETY: the caller states the contract of this function.
-    let (session, body, into, values) = unsafe {
+    let (body, into, values) = unsafe {
         (
-            ptr::session(session),
             ptr::slice_mut(body),
             ptr::items_mut(into, rows),
             // width == 0 gives zero; otherwise rows <= value_capacity / width.
             ptr::items_mut(values, rows * width),
         )
     };
-    open(session)
-        .and_then(|blobs| filling_with(&blobs, body, into, wanted, values))
-        .unwrap_or_else(|error| refused_fill(&error))
+    filling_with(body, into, wanted, values).unwrap_or_else(|error| refused_fill(&error))
 }
 
 /// Adds a property to a set.
@@ -604,7 +975,7 @@ pub unsafe extern "C" fn borink_fill_listing_with(
 pub extern "C" fn borink_property_set_with(set: PropertySet, property: u16) -> PropertySet {
     match blob_property(property) {
         Some(property) => PropertySet {
-            mask: set.mask | proto::PropertySet::of(&[property]).bits(),
+            mask: set.mask | proto::azure::PropertySet::of(&[property]).bits(),
         },
         None => set,
     }
@@ -614,17 +985,17 @@ pub extern "C" fn borink_property_set_with(set: PropertySet, property: u16) -> P
 /// row of `borink_fill_listing_with` has.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_set_len(set: PropertySet) -> usize {
-    proto::PropertySet::from_bits(set.mask).len()
+    proto::azure::PropertySet::from_bits(set.mask).len()
 }
 
 /// Returns where a property's value stands in a row: its rank among the
 /// set's members, in the order of their numbers.
 ///
 /// For a property the set does not hold, or a number that names none, this
-/// is the length of the row, which is one past its last value.
+/// is the length of the row: one past its last value.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_slot(set: PropertySet, property: u16) -> usize {
-    let set = proto::PropertySet::from_bits(set.mask);
+    let set = proto::azure::PropertySet::from_bits(set.mask);
     match blob_property(property) {
         Some(property) if set.contains(property) => set.slot(property),
         _ => set.len(),
@@ -635,17 +1006,19 @@ pub extern "C" fn borink_property_slot(set: PropertySet, property: u16) -> usize
 /// for a number that names no property.
 #[unsafe(no_mangle)]
 pub extern "C" fn borink_property_name(property: u16) -> Bytes {
-    let name = blob_property(property).map_or("", proto::BlobProperty::name);
+    let name = blob_property(property).map_or("", proto::azure::BlobProperty::name);
     Bytes {
         ptr: name.as_ptr(),
         len: name.len(),
     }
 }
 
-// The core crate's property with this number, which is its position in the
+// The protocol crate's property with this number, which is its position in the
 // list both crates are built from.
-fn blob_property(number: u16) -> Option<proto::BlobProperty> {
-    proto::BlobProperty::ALL.get(usize::from(number)).copied()
+fn blob_property(number: u16) -> Option<proto::azure::BlobProperty> {
+    proto::azure::BlobProperty::ALL
+        .get(usize::from(number))
+        .copied()
 }
 
 /// Returns the value that one entry gave for a property.
@@ -761,10 +1134,10 @@ pub unsafe extern "C" fn borink_next_property(walk: *mut Properties) -> Property
 /// The bytes returned are `into`, so they are valid until you release or
 /// reuse it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_decode_into(value: Bytes, into: BytesMut) -> MaybeBytes {
+pub unsafe extern "C" fn borink_decode_property(value: Bytes, into: BytesMut) -> MaybeBytes {
     // SAFETY: the caller states the contract of this function.
     let (value, into) = unsafe { (ptr::slice(value), ptr::slice_mut(into)) };
-    maybe_bytes(layered::decode_into(value, into))
+    maybe_bytes(proto::decode_property(value, into))
 }
 
 /// Writes an entity tag from a listing in the quoted form that HTTP defines.
@@ -787,7 +1160,7 @@ pub unsafe extern "C" fn borink_decode_into(value: Bytes, into: BytesMut) -> May
 pub unsafe extern "C" fn borink_quoted_etag(listed: Bytes, into: BytesMut) -> MaybeBytes {
     // SAFETY: the caller states the contract of this function.
     let (listed, into) = unsafe { (ptr::slice(listed), ptr::slice_mut(into)) };
-    maybe_bytes(layered::quoted_etag(listed, into))
+    maybe_bytes(proto::quoted_etag(listed, into))
 }
 
 /// Reads an HTTP date as milliseconds since the Unix epoch.
@@ -805,7 +1178,7 @@ pub unsafe extern "C" fn borink_http_date_ms(value: Bytes) -> MaybeU64 {
     maybe_number(
         core::str::from_utf8(value)
             .ok()
-            .and_then(layered::http_date_ms),
+            .and_then(proto::http_date_ms),
     )
 }
 
@@ -833,7 +1206,7 @@ pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut
             ptr::slice_mut(into),
         )
     };
-    describe(outcome, request_id, into)
+    describe_outcome(outcome, request_id, into)
 }
 
 /// Writes one sentence naming what `status` says.
@@ -848,27 +1221,4 @@ pub unsafe extern "C" fn borink_describe(outcome: *const Outcome, into: BytesMut
 pub unsafe extern "C" fn borink_describe_status(status: Status, into: BytesMut) -> usize {
     // SAFETY: the caller states the contract of this function.
     describe_status(status, unsafe { ptr::slice_mut(into) })
-}
-
-// A condition crosses as its kind and its text, and becomes the value that the
-// kind compares against: an entity tag as it is, and an HTTP date as the
-// instant it names. A date that cannot be read is an invalid condition, as
-// one that cannot be written is.
-fn condition(
-    kind: proto::ConditionKind,
-    value: Option<&[u8]>,
-) -> proto::Result<Option<proto::ConditionValue<'_>>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    match kind {
-        proto::ConditionKind::IfModifiedSince | proto::ConditionKind::IfUnmodifiedSince => {
-            core::str::from_utf8(value)
-                .ok()
-                .and_then(layered::http_date_ms)
-                .map(|millis| Some(proto::ConditionValue::Time(millis / 1000)))
-                .ok_or_else(|| InvalidPlan::Condition.into())
-        }
-        _ => Ok(Some(proto::ConditionValue::ETag(value))),
-    }
 }

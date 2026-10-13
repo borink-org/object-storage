@@ -1,4 +1,5 @@
-//! The Azure half of the adapter: `Blobs` for every operation it has.
+//! The Azure half of the adapter: a template for each call, and a request
+//! written from it.
 //!
 //! The crate authenticates with a bearer token only. Offline cases receive a
 //! placeholder token. Live cases need `endpoint.auth = "bearer"`, and the
@@ -9,28 +10,25 @@ use crate::listing::{
     list_page,
 };
 use crate::{
-    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, current_timestamps,
-    failed_result, optional_text, read_body_fields, read_meta_fields, request_buffers,
-    requested_checksum, requested_condition, requested_keys, requested_metadata,
-    requested_properties, requested_range, requested_restore, requested_revision, requested_source,
-    requested_source_range, requested_tags, restore_value, send_request, send_request_with,
+    AdapterContext, AdapterError, BodyRead, CallBody, HttpExchange, checksum_value,
+    current_timestamps, failed_result, optional_text, read_body_fields, read_meta_fields,
+    requested_checksum_kind, requested_condition, requested_copy, requested_delete, requested_get,
+    requested_keys, requested_metadata, requested_object, requested_properties,
+    requested_restore_options, requested_tags, restore_value, send_request, send_request_with,
     served_range, successful_result, tags_value, text_of, transport_failure, two_checksums_refused,
     unmapped_call_field, unsupported_by_adapter, unsupported_by_crate,
 };
-use borink_object_storage_crypto::{CRC64, MD5_RUSTCRYPTO};
 use borink_object_storage_proto::azure::{
-    self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, PhysicalListBlocks,
-    PhysicalSetMetadata, PhysicalSetProperties, PhysicalSnapshot, PhysicalStageBlock,
-    PhysicalStageBlockFromUrl, SnapshotHeadOutcome,
+    self, BatchResult, Block, BlockListKind, BlockRef, BlockSource, BlockState, SnapshotHeadOutcome,
 };
+use borink_object_storage_proto::azure::{AzureNamespace, Container, PropertySet};
 use borink_object_storage_proto::{
-    AzureNamespace, Blobs, ChecksumKind, Classification, CommitHeadOutcome, Container,
-    CopyHeadOutcome, DeleteHeadOutcome, DeleteKind, DeleteManyHeadOutcome, EntryKind,
-    GetHeadOutcome, GetKind, ListEntry, ListHeadOutcome, ListInclude, ListPartsHeadOutcome,
-    MetadataPair, PhysicalCommit, PhysicalCopy, PhysicalDelete, PhysicalDeleteMany, PhysicalGet,
-    PhysicalList, PhysicalPut, PhysicalSetTags, PropertySet, PutHeadOutcome, RequestedRange,
-    RestoreHeadOutcome, Revision, StageHeadOutcome, Tag, TagsHeadOutcome, TransactionalChecksum,
-    UpdateHeadOutcome, WriteOptions, layered,
+    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
+    DeleteHeadOutcome, DeleteManyHeadOutcome, EntryKind, Error as CrateError, GetHeadOutcome,
+    GetKind, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome,
+    ObjectItem, PutHeadOutcome, PutItem, PutOptions, RequestedRange, RestoreHeadOutcome, Revision,
+    RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome, UpdateHeadOutcome, WireRequest,
+    WriteOptions,
 };
 use serde_json::{Map, Value, json};
 
@@ -61,37 +59,96 @@ fn metadata_from_headers(exchange: &HttpExchange) -> Map<String, Value> {
         .collect()
 }
 
+/// The account and the credentials of one case, which a template is written
+/// from.
+struct Account<'a> {
+    container: Container<'a>,
+    token: &'a str,
+    namespace: AzureNamespace,
+}
+
+impl Account<'_> {
+    /// Writes the template that `prepare` writes, into a buffer of the size
+    /// it needs.
+    fn template(
+        &self,
+        prepare: impl Fn(
+            &Container<'_>,
+            &str,
+            AzureNamespace,
+            &mut [u8],
+        ) -> Result<azure::Template, CrateError>,
+    ) -> Result<(azure::Template, Vec<u8>), CrateError> {
+        let write = |buf: &mut [u8]| prepare(&self.container, self.token, self.namespace, buf);
+        let mut bytes = vec![0; CapacityError::required_by(write)?];
+        let template = write(&mut bytes)?;
+        Ok((template, bytes))
+    }
+
+    /// Writes the template that `prepare` writes and the request that
+    /// `encode` writes from it, and sends that request with `body`. Returns
+    /// the exchange, or the result to report instead.
+    fn send(
+        &self,
+        context: &AdapterContext,
+        prepare: impl Fn(
+            &Container<'_>,
+            &str,
+            AzureNamespace,
+            &mut [u8],
+        ) -> Result<azure::Template, CrateError>,
+        encode: impl for<'r> Fn(
+            &azure::Template,
+            &[u8],
+            &'r mut [u8],
+        ) -> Result<WireRequest<'r>, CrateError>,
+        body: Option<&CallBody>,
+        read: BodyRead<'_>,
+    ) -> Result<Result<HttpExchange, Value>, AdapterError> {
+        let written = self.template(prepare).and_then(|(template, bytes)| {
+            let mut buf =
+                vec![
+                    0;
+                    CapacityError::required_by(|buf| encode(&template, &bytes, buf).map(drop))?
+                ];
+            let request = encode(&template, &bytes, &mut buf)?;
+            Ok(send_request_with(context, &request, body, read))
+        });
+        match written {
+            Ok(Ok(exchange)) => Ok(Ok(exchange)),
+            Ok(Err(error)) => Ok(Err(transport_failure(&error))),
+            Err(error) => Ok(Err(crate::result_for_crate_error(error))),
+        }
+    }
+}
+
+/// Unwraps what `Account::send` returns, or returns the result it reports
+/// instead.
+macro_rules! sent {
+    ($expression:expr) => {
+        match $expression? {
+            Ok(exchange) => exchange,
+            Err(result) => return Ok(result),
+        }
+    };
+}
+
 fn read_object(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
     kind: GetKind,
 ) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate("PhysicalGet carries one precondition"));
+    let Some((options, item)) = requested_get(call, kind)? else {
+        return Ok(unsupported_by_crate("a read carries one precondition"));
     };
-
-    let key = optional_text(call, "key").unwrap_or_default();
-    let range = if kind == GetKind::Head {
-        RequestedRange::Whole
-    } else {
-        requested_range(call)?
-    };
-    let get_plan = PhysicalGet {
-        key,
-        kind,
-        range,
-        condition,
-        condition_value,
-        revision: requested_revision(call),
-    };
-
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::get_requirements(blobs, &get_plan, &now)
-    ));
-    let request =
-        crate_step!(blobs.encode_get(&mut request_bytes, &mut header_spans, &get_plan, &now));
+    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+        azure::prepare_get(container, token, namespace, &options, buf)
+    }));
+    let encode = |buf: &mut [u8]| azure::encode_get(&template, &bytes, &item, &now, buf).map(drop);
+    let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
+    let request = crate_step!(azure::encode_get(&template, &bytes, &item, &now, &mut buf));
     let exchange = transport_step!(send_request_with(
         context,
         &request,
@@ -99,14 +156,15 @@ fn read_object(
         BodyRead::of(call)
     ));
 
-    let head_outcome =
-        crate_step!(blobs.accept_get_head(get_plan.shape(), exchange.response_head()));
+    let shape = item.shape(&options);
+    let head_outcome = crate_step!(azure::accept_get_head(shape, exchange.response_head()));
     let outcome = match head_outcome {
         GetHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_get_error_body(get_plan.shape(), failure, &exchange.body)
+            azure::accept_get_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
+    let range = item.range;
 
     Ok(match outcome {
         GetHeadOutcome::Body { meta, .. } | GetHeadOutcome::Complete { meta } => {
@@ -148,60 +206,55 @@ fn read_object(
 
 fn write_object(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    // A plan holds one transactional checksum, so the crate cannot send a write
-    // that names two. Azure refuses such a write too.
+    // A template sends one transactional checksum, so the crate cannot send a
+    // write that names two. Azure refuses such a write too.
     if call.get("checksums").is_some() {
         return Ok(two_checksums_refused());
     }
     let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate("PhysicalPut carries one precondition"));
+        return Ok(unsupported_by_crate("a write carries one precondition"));
     };
-
-    // Azure takes an MD5 and a CRC64, as text or computed.
-    let checksum = match requested_checksum(call) {
-        None => None,
-        Some(Some(
-            checksum @ (TransactionalChecksum::Md5(_)
-            | TransactionalChecksum::Crc64(_)
-            | TransactionalChecksum::Compute(ChecksumKind::Md5 | ChecksumKind::Crc64)),
-        )) => Some(checksum),
+    let body = CallBody::of(call)?;
+    // Azure takes an MD5 and a CRC64.
+    let (checksum_kind, checksum) = match requested_checksum_kind(call) {
+        None => (None, None),
+        Some(Some((kind @ (ChecksumKind::Md5 | ChecksumKind::Crc64), text))) => {
+            match checksum_value(kind, text, &body) {
+                Ok(value) => (Some(kind), Some(value)),
+                Err(result) => return Ok(result),
+            }
+        }
         Some(_) => return Ok(unsupported_by_crate("checksum algorithm")),
     };
-
     let metadata_pairs = requested_metadata(call);
-
-    let key = optional_text(call, "key").unwrap_or_default();
-    let body = CallBody::of(call)?;
     let tags = requested_tags(call);
-    let put_plan = PhysicalPut {
-        key,
+    let options = PutOptions {
         condition,
-        condition_value,
         metadata: &metadata_pairs,
         options: WriteOptions {
-            checksum,
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "tier"),
-            ..WriteOptions::default()
         },
+        checksum: checksum_kind,
     };
-    let payload = body.payload();
+    let item = PutItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        content: body.payload(),
+        condition_value,
+        checksum,
+    };
 
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::put_requirements(blobs, &put_plan, payload, &now)
-    ));
-    let request = crate_step!(blobs.encode_put(
-        &mut request_bytes,
-        &mut header_spans,
-        &put_plan,
-        payload,
-        &now
-    ));
+    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+        azure::prepare_put(container, token, namespace, &options, buf)
+    }));
+    let encode = |buf: &mut [u8]| azure::encode_put(&template, &bytes, &item, &now, buf).map(drop);
+    let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
+    let request = crate_step!(azure::encode_put(&template, &bytes, &item, &now, &mut buf));
     let exchange = transport_step!(send_request_with(
         context,
         &request,
@@ -209,11 +262,11 @@ fn write_object(
         BodyRead::Hold
     ));
 
-    let head_outcome =
-        crate_step!(blobs.accept_put_head(put_plan.shape(), exchange.response_head()));
+    let shape = item.shape(&options);
+    let head_outcome = crate_step!(azure::accept_put_head(shape, exchange.response_head()));
     let outcome = match head_outcome {
         PutHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_put_error_body(put_plan.shape(), failure, &exchange.body)
+            azure::accept_put_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -236,43 +289,30 @@ fn write_object(
 
 fn delete_object(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate(
-            "PhysicalDelete carries one precondition",
-        ));
-    };
-    let delete_kind = match optional_text(call, "snapshots") {
-        None => DeleteKind::Object,
-        Some("only") => DeleteKind::SnapshotsOnly,
-        Some("include") => DeleteKind::ObjectAndSnapshots,
-        Some(_) => return Err("unknown snapshots mode".into()),
-    };
-
-    let key = optional_text(call, "key").unwrap_or_default();
-    let delete_plan = PhysicalDelete {
-        key,
-        kind: delete_kind,
-        condition,
-        condition_value,
-        revision: requested_revision(call),
+    let Some((options, item)) = requested_delete(call)? else {
+        return Ok(unsupported_by_crate("a removal carries one precondition"));
     };
 
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::delete_requirements(blobs, &delete_plan, &now)
+    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+        azure::prepare_delete(container, token, namespace, &options, buf)
+    }));
+    let encode =
+        |buf: &mut [u8]| azure::encode_delete(&template, &bytes, &item, &now, buf).map(drop);
+    let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
+    let request = crate_step!(azure::encode_delete(
+        &template, &bytes, &item, &now, &mut buf
     ));
-    let request =
-        crate_step!(blobs.encode_delete(&mut request_bytes, &mut header_spans, &delete_plan, &now));
     let exchange = transport_step!(send_request(context, &request));
 
-    let head_outcome =
-        crate_step!(blobs.accept_delete_head(delete_plan.shape(), exchange.response_head()));
+    let shape = options.shape();
+    let head_outcome = crate_step!(azure::accept_delete_head(shape, exchange.response_head()));
     let outcome = match head_outcome {
         DeleteHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_delete_error_body(delete_plan.shape(), failure, &exchange.body)
+            azure::accept_delete_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -333,30 +373,32 @@ fn listed_entry_value(entry: &ListEntry<'_>, metadata_requested: bool) -> Value 
     value
 }
 
-/// The pages of one container's listings, read with a `Blobs` client.
+/// The pages of one container's listings.
 struct BlobPages<'a> {
     context: &'a AdapterContext,
-    blobs: &'a Blobs<'a>,
+    account: &'a Account<'a>,
 }
 
 impl PageSource for BlobPages<'_> {
-    fn read_page(&self, list_plan: &PhysicalList<'_>) -> PageRead {
-        let (context, blobs) = (self.context, self.blobs);
+    fn read_page(&self, options: &ListOptions<'_>, item: &ListItem<'_>) -> PageRead {
         let now = current_timestamps();
-        let (mut request_bytes, mut header_spans) = request_buffers(page_step!(
-            layered::list_requirements(blobs, list_plan, &now)
-        ));
-        let request =
-            page_step!(blobs.encode_list(&mut request_bytes, &mut header_spans, list_plan, &now));
-        let mut exchange = match send_request(context, &request) {
+        let (template, bytes) =
+            page_step!(self.account.template(|container, token, namespace, buf| {
+                azure::prepare_list(container, token, namespace, options, buf)
+            }));
+        let encode =
+            |buf: &mut [u8]| azure::encode_list(&template, &bytes, item, &now, buf).map(drop);
+        let mut buf = vec![0; page_step!(CapacityError::required_by(encode))];
+        let request = page_step!(azure::encode_list(&template, &bytes, item, &now, &mut buf));
+        let mut exchange = match send_request(self.context, &request) {
             Ok(exchange) => exchange,
             Err(error) => return Ok(Err(transport_failure(&error))),
         };
 
-        let head_outcome = page_step!(blobs.accept_list_head(exchange.response_head()));
+        let head_outcome = page_step!(azure::accept_list_head(exchange.response_head()));
         let outcome = match head_outcome {
             ListHeadOutcome::NeedErrorBody(failure) => {
-                blobs.accept_list_error_body(failure, &exchange.body)
+                azure::accept_list_error_body(failure, &exchange.body)
             }
             outcome => outcome,
         };
@@ -371,9 +413,9 @@ impl PageSource for BlobPages<'_> {
             return Ok(Err(error_result(&exchange, status)));
         }
 
-        let mut slots: Vec<ListedBlob<'_>> = entry_slots(list_plan, MAX_PAGE_ENTRIES);
-        let metadata_requested = list_plan.include.contains(ListInclude::METADATA);
-        let listing = page_step!(blobs.fill_listing_with(
+        let mut slots: Vec<ListedBlob<'_>> = entry_slots(options, MAX_PAGE_ENTRIES);
+        let metadata_requested = options.include.contains(ListInclude::METADATA);
+        let listing = page_step!(azure::fill_listing_with(
             &mut exchange.body,
             &mut slots,
             PropertySet::default(),
@@ -386,7 +428,7 @@ impl PageSource for BlobPages<'_> {
     }
 }
 
-/// A listed blob, and whether the plan asked for its metadata, which the
+/// A listed blob, and whether the listing asked for its metadata, which the
 /// result reports as an empty set when the blob has none.
 #[derive(Clone, Copy, Default)]
 struct ListedBlob<'b> {
@@ -406,29 +448,30 @@ impl Listed for ListedBlob<'_> {
 
 fn stage_block(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let block_id = optional_text(call, "block_id_base64").unwrap_or_default();
     let body = CallBody::of(call)?;
-    let stage_plan = PhysicalStageBlock {
-        key,
-        id: block_id,
-        options: WriteOptions::default(),
-    };
-    let payload = body.payload();
-
+    let item = azure::StageBlockItem::new(
+        optional_text(call, "key").unwrap_or_default(),
+        optional_text(call, "block_id_base64").unwrap_or_default(),
+        body.payload(),
+    );
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::stage_block_requirements(blobs, &stage_plan, payload, &now)
-    ));
-    let request = crate_step!(blobs.encode_stage_block(
-        &mut request_bytes,
-        &mut header_spans,
-        &stage_plan,
-        payload,
-        &now
+    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+        azure::prepare_stage_block(
+            container,
+            token,
+            namespace,
+            &borink_object_storage_proto::StageOptions::default(),
+            buf,
+        )
+    }));
+    let encode =
+        |buf: &mut [u8]| azure::encode_stage_block(&template, &bytes, &item, &now, buf).map(drop);
+    let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
+    let request = crate_step!(azure::encode_stage_block(
+        &template, &bytes, &item, &now, &mut buf
     ));
     let exchange = transport_step!(send_request_with(
         context,
@@ -437,10 +480,10 @@ fn stage_block(
         BodyRead::Hold
     ));
 
-    let head_outcome = crate_step!(blobs.accept_stage_block_head(exchange.response_head()));
+    let head_outcome = crate_step!(azure::accept_stage_block_head(exchange.response_head()));
     let outcome = match head_outcome {
         StageHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_stage_block_error_body(failure, &exchange.body)
+            azure::accept_stage_block_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -457,13 +500,11 @@ fn stage_block(
 
 fn commit_blocks(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
     let Some((condition, condition_value)) = requested_condition(call) else {
-        return Ok(unsupported_by_crate(
-            "PhysicalCommit carries one precondition",
-        ));
+        return Ok(unsupported_by_crate("a commit carries one precondition"));
     };
 
     let mut block_references = Vec::new();
@@ -488,39 +529,46 @@ fn commit_blocks(
         });
     }
 
-    let key = optional_text(call, "key").unwrap_or_default();
     let tags = requested_tags(call);
-    let commit_plan = PhysicalCommit {
+    let content_md5 = optional_text(call, "content_md5_base64");
+    let options = azure::CommitOptions {
         condition,
-        condition_value,
         options: WriteOptions {
-            declared_md5: optional_text(call, "content_md5_base64"),
             properties: requested_properties(call),
             tags: &tags,
             storage_class: optional_text(call, "tier"),
-            ..WriteOptions::default()
         },
-        ..PhysicalCommit::new(key)
+        content_md5: content_md5.is_some(),
+        ..azure::CommitOptions::default()
+    };
+    let item = azure::CommitItem {
+        condition_value,
+        content_md5,
+        ..azure::CommitItem::new(
+            optional_text(call, "key").unwrap_or_default(),
+            &block_references,
+        )
     };
 
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::commit_blocks_requirements(blobs, &commit_plan, &block_references, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_commit_blocks(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_commit_blocks(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_commit_blocks(
-        &mut request_bytes,
-        &mut header_spans,
-        &commit_plan,
-        &block_references,
-        &now
-    ));
-    let exchange = transport_step!(send_request(context, &request));
 
-    let head_outcome =
-        crate_step!(blobs.accept_commit_blocks_head(commit_plan.shape(), exchange.response_head()));
+    let shape = item.shape(&options);
+    let head_outcome = crate_step!(azure::accept_commit_blocks_head(
+        shape,
+        exchange.response_head()
+    ));
     let outcome = match head_outcome {
         CommitHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_commit_blocks_error_body(commit_plan.shape(), failure, &exchange.body)
+            azure::accept_commit_blocks_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -544,7 +592,7 @@ fn commit_blocks(
 
 fn list_blocks(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
     let block_list_kind = match optional_text(call, "kind").unwrap_or("all") {
@@ -554,25 +602,29 @@ fn list_blocks(
         _ => return Err("unknown block list kind".into()),
     };
 
-    let key = optional_text(call, "key").unwrap_or_default();
-    let list_blocks_plan = PhysicalListBlocks::new(key, block_list_kind);
-
+    let item = ObjectItem::new(optional_text(call, "key").unwrap_or_default());
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::list_blocks_requirements(blobs, &list_blocks_plan, &now)
+    let mut exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_list_blocks(
+                container,
+                token,
+                namespace,
+                block_list_kind,
+                RevisionKind::Current,
+                buf,
+            )
+        },
+        |template, bytes, buf| azure::encode_list_blocks(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_list_blocks(
-        &mut request_bytes,
-        &mut header_spans,
-        &list_blocks_plan,
-        &now
-    ));
-    let mut exchange = transport_step!(send_request(context, &request));
 
-    let head_outcome = crate_step!(blobs.accept_list_blocks_head(exchange.response_head()));
+    let head_outcome = crate_step!(azure::accept_list_blocks_head(exchange.response_head()));
     let outcome = match head_outcome {
         ListPartsHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_list_blocks_error_body(failure, &exchange.body)
+            azure::accept_list_blocks_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -588,8 +640,8 @@ fn list_blocks(
     }
 
     // The crate bounds the count from the body's own length.
-    let mut blocks = vec![Block::default(); layered::max_blocks_in(exchange.body.len())];
-    let listing = crate_step!(blobs.fill_blocks(&mut exchange.body, &mut blocks));
+    let mut blocks = vec![Block::default(); azure::max_blocks_in(exchange.body.len())];
+    let listing = crate_step!(azure::fill_blocks(&mut exchange.body, &mut blocks));
 
     let mut committed = Vec::new();
     let mut uncommitted = Vec::new();
@@ -803,7 +855,7 @@ fn mapped_call_fields(operation: &str) -> &'static [&'static str] {
 /// Returns the reason the crate cannot express a call field, for the fields it lacks.
 fn crate_limitation(field: &str) -> Option<&'static str> {
     match field {
-        "lease_id" => Some("the crate's plans carry no lease ID"),
+        "lease_id" => Some("the crate's requests carry no lease ID"),
         _ => None,
     }
 }
@@ -850,52 +902,49 @@ pub(crate) fn execute_operation(message: &Value, call: &Value) -> Result<Value, 
     let namespace = account_namespace(endpoint);
     ACCOUNT_NAMESPACE.set(namespace).ok();
     let container = crate_step!(Container::new_allowing_http(endpoint_url, container_name));
-    let blobs = crate_step!(Blobs::new(container, &token))
-        .with_namespace(namespace)
-        .with_checksum(CRC64)
-        .with_checksum(MD5_RUSTCRYPTO);
+    let account = Account {
+        container,
+        token: &token,
+        namespace,
+    };
 
     let context = AdapterContext::for_endpoint(endpoint)?;
     let pages = BlobPages {
         context: &context,
-        blobs: &blobs,
+        account: &account,
     };
 
     match operation {
-        "get" => read_object(&context, &blobs, call, GetKind::Bytes),
-        "head" => read_object(&context, &blobs, call, GetKind::Head),
-        "put" => write_object(&context, &blobs, call),
-        "delete" => delete_object(&context, &blobs, call),
+        "get" => read_object(&context, &account, call, GetKind::Bytes),
+        "head" => read_object(&context, &account, call, GetKind::Head),
+        "put" => write_object(&context, &account, call),
+        "delete" => delete_object(&context, &account, call),
         "list" => list_all_keys(call, &pages),
         "list_page" => list_page(call, &pages),
-        "azure.stage_block" => stage_block(&context, &blobs, call),
-        "azure.commit_blocks" => commit_blocks(&context, &blobs, call),
-        "azure.list_blocks" => list_blocks(&context, &blobs, call),
-        "azure.set_tier" => set_tier(&context, &blobs, call),
-        "azure.snapshot" => snapshot(&context, &blobs, call),
-        "azure.set_metadata" => set_metadata(&context, &blobs, call),
-        "azure.set_properties" => set_properties(&context, &blobs, call),
-        "restore" => restore(&context, &blobs, call),
-        "copy" => copy(&context, &blobs, call),
-        "azure.put_from_url" => put_from_url(&context, &blobs, call),
-        "azure.stage_block_from_url" => stage_block_from_url(&context, &blobs, call),
-        "azure.abort_copy" => abort_copy(&context, &blobs, call),
-        "azure.set_tags" => set_tags(&context, &blobs, call),
-        "azure.get_tags" => get_tags(&context, &blobs, call),
-        "delete_many" => delete_many(&context, &blobs, call),
+        "azure.stage_block" => stage_block(&context, &account, call),
+        "azure.commit_blocks" => commit_blocks(&context, &account, call),
+        "azure.list_blocks" => list_blocks(&context, &account, call),
+        "azure.set_tier" => set_tier(&context, &account, call),
+        "azure.snapshot" => snapshot(&context, &account, call),
+        "azure.set_metadata" => set_metadata(&context, &account, call),
+        "azure.set_properties" => set_properties(&context, &account, call),
+        "restore" => restore(&context, &account, call),
+        "copy" => copy(&context, &account, call),
+        "azure.put_from_url" => put_from_url(&context, &account, call),
+        "azure.stage_block_from_url" => stage_block_from_url(&context, &account, call),
+        "azure.abort_copy" => abort_copy(&context, &account, call),
+        "azure.set_tags" => set_tags(&context, &account, call),
+        "azure.get_tags" => get_tags(&context, &account, call),
+        "delete_many" => delete_many(&context, &account, call),
         _ => Ok(unsupported_by_adapter("operation not mapped")),
     }
 }
 
 /// The result of a request that changes the object and returns nothing.
-fn update_result(
-    blobs: &Blobs<'_>,
-    exchange: &HttpExchange,
-    outcome: UpdateHeadOutcome<'_>,
-) -> Value {
+fn update_result(exchange: &HttpExchange, outcome: UpdateHeadOutcome<'_>) -> Value {
     let outcome = match outcome {
         UpdateHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_update_error_body(failure, &exchange.body)
+            azure::accept_update_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -915,42 +964,52 @@ fn update_result(
 
 fn set_tier(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
+    let item = ObjectItem::new(optional_text(call, "key").unwrap_or_default());
     let tier = optional_text(call, "tier").unwrap_or_default();
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::set_tier_requirements(blobs, key, tier, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_set_tier(container, token, namespace, tier, buf)
+        },
+        |template, bytes, buf| azure::encode_set_tier(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_set_tier(&mut request_bytes, &mut header_spans, key, tier, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = crate_step!(blobs.accept_set_tier_head(exchange.response_head()));
-    Ok(update_result(blobs, &exchange, outcome))
+    let outcome = crate_step!(azure::accept_set_tier_head(exchange.response_head()));
+    Ok(update_result(&exchange, outcome))
 }
 
 fn snapshot(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let plan = PhysicalSnapshot::new(optional_text(call, "key").unwrap_or_default());
+    let item = ObjectItem::new(optional_text(call, "key").unwrap_or_default());
+    let options = azure::SnapshotOptions::default();
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::snapshot_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_snapshot(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_snapshot(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_snapshot(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome =
-        match crate_step!(blobs.accept_snapshot_head(plan.condition, exchange.response_head())) {
-            SnapshotHeadOutcome::NeedErrorBody(failure) => {
-                blobs.accept_snapshot_error_body(plan.condition, failure, &exchange.body)
-            }
-            outcome => outcome,
-        };
+    let condition = options.condition;
+    let outcome = match crate_step!(azure::accept_snapshot_head(
+        condition,
+        exchange.response_head()
+    )) {
+        SnapshotHeadOutcome::NeedErrorBody(failure) => {
+            azure::accept_snapshot_error_body(condition, failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
     Ok(match outcome {
         SnapshotHeadOutcome::Created { snapshot, meta } => {
             let mut value = json!({
@@ -970,61 +1029,40 @@ fn snapshot(
     })
 }
 
-/// Reads the target and the source of a copy call into a plan, or returns
-/// the result that says why the crate cannot send it.
-fn copy_plan<'c>(
-    call: &'c Value,
-    metadata: &'c [MetadataPair<'c>],
-    tags: &'c [Tag<'c>],
-) -> Result<PhysicalCopy<'c>, Value> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
-        return Err(unsupported_by_crate(
-            "PhysicalCopy carries one condition on the target",
-        ));
-    };
-    let Some(source) = requested_source(call, "source_container") else {
-        return Err(unsupported_by_crate("CopySource carries one condition"));
-    };
-    // A call that names no metadata or no tags keeps what the service
-    // gives a copy.
-    Ok(PhysicalCopy {
-        condition,
-        condition_value,
-        metadata: call.get("metadata").map(|_| metadata),
-        tags: call.get("tags").map(|_| tags),
-        options: WriteOptions {
-            properties: requested_properties(call),
-            storage_class: optional_text(call, "tier"),
-            ..WriteOptions::default()
-        },
-        ..PhysicalCopy::new(optional_text(call, "key").unwrap_or_default(), source)
-    })
-}
-
-fn copy(context: &AdapterContext, blobs: &Blobs<'_>, call: &Value) -> Result<Value, AdapterError> {
+fn copy(
+    context: &AdapterContext,
+    account: &Account<'_>,
+    call: &Value,
+) -> Result<Value, AdapterError> {
     let (metadata, tags) = (requested_metadata(call), requested_tags(call));
-    let plan = match copy_plan(call, &metadata, &tags) {
-        Ok(plan) => plan,
-        Err(result) => return Ok(result),
+    let Some((options, item)) = requested_copy(call, "source_container", "tier", &metadata, &tags)?
+    else {
+        return Ok(unsupported_by_crate(
+            "a copy carries one condition on the target and one on the source",
+        ));
     };
     // Copy Blob From URL answers once the copy is written.
     let sync = call.get("sync").and_then(Value::as_bool) == Some(true);
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(if sync {
-        layered::copy_from_url_requirements(blobs, &plan, &now)
-    } else {
-        layered::copy_requirements(blobs, &plan, &now)
-    }));
-    let request = crate_step!(if sync {
-        blobs.encode_copy_from_url(&mut request_bytes, &mut header_spans, &plan, &now)
-    } else {
-        blobs.encode_copy(&mut request_bytes, &mut header_spans, &plan, &now)
-    });
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = match crate_step!(blobs.accept_copy_head(plan.shape(), exchange.response_head()))
-    {
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| if sync {
+            azure::prepare_copy_from_url(container, token, namespace, &options, buf)
+        } else {
+            azure::prepare_copy(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| if sync {
+            azure::encode_copy_from_url(template, bytes, &item, &now, buf)
+        } else {
+            azure::encode_copy(template, bytes, &item, &now, buf)
+        },
+        None,
+        BodyRead::Hold,
+    ));
+    let shape = options.shape();
+    let outcome = match crate_step!(azure::accept_copy_head(shape, exchange.response_head())) {
         CopyHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_copy_error_body(plan.shape(), failure, &exchange.body)
+            azure::accept_copy_error_body(shape, failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1042,7 +1080,7 @@ fn copy(context: &AdapterContext, blobs: &Blobs<'_>, call: &Value) -> Result<Val
             }
             successful_result(value)
         }
-        CopyHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        CopyHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
         CopyHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         CopyHeadOutcome::NeedErrorBody(failure) | CopyHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
@@ -1053,28 +1091,36 @@ fn copy(context: &AdapterContext, blobs: &Blobs<'_>, call: &Value) -> Result<Val
 
 fn put_from_url(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
     let (metadata, tags) = (requested_metadata(call), requested_tags(call));
-    let plan = match copy_plan(call, &metadata, &tags) {
-        Ok(plan) => plan,
-        Err(result) => return Ok(result),
+    let Some((options, item)) = requested_copy(call, "source_container", "tier", &metadata, &tags)?
+    else {
+        return Ok(unsupported_by_crate(
+            "a copy carries one condition on the target and one on the source",
+        ));
     };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::put_from_url_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_put_from_url(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_put_from_url(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_put_from_url(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome =
-        match crate_step!(blobs.accept_put_from_url_head(plan.shape(), exchange.response_head())) {
-            PutHeadOutcome::NeedErrorBody(failure) => {
-                blobs.accept_put_from_url_error_body(plan.shape(), failure, &exchange.body)
-            }
-            outcome => outcome,
-        };
+    let shape = options.shape();
+    let outcome = match crate_step!(azure::accept_put_from_url_head(
+        shape,
+        exchange.response_head()
+    )) {
+        PutHeadOutcome::NeedErrorBody(failure) => {
+            azure::accept_put_from_url_error_body(shape, failure, &exchange.body)
+        }
+        outcome => outcome,
+    };
     Ok(match outcome {
         PutHeadOutcome::Created { meta } => {
             let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
@@ -1083,7 +1129,7 @@ fn put_from_url(
             }
             successful_result(value)
         }
-        PutHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        PutHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
         PutHeadOutcome::NeedErrorBody(failure) | PutHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }
@@ -1093,34 +1139,33 @@ fn put_from_url(
 
 fn stage_block_from_url(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let Some(source) = requested_source(call, "source_container") else {
-        return Ok(unsupported_by_crate("CopySource carries one condition"));
+    let Some((options, copy)) = requested_copy(call, "source_container", "tier", &[], &[])? else {
+        return Ok(unsupported_by_crate(
+            "a copy carries one condition on the source",
+        ));
     };
-    let plan = PhysicalStageBlockFromUrl {
-        range: requested_source_range(call)?,
-        ..PhysicalStageBlockFromUrl::new(
-            optional_text(call, "key").unwrap_or_default(),
-            optional_text(call, "block_id_base64").unwrap_or_default(),
-            source,
-        )
+    let item = azure::StageBlockFromUrlItem {
+        copy,
+        id: optional_text(call, "block_id_base64").unwrap_or_default(),
     };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::stage_block_from_url_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_stage_block_from_url(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| {
+            azure::encode_stage_block_from_url(template, bytes, &item, &now, buf)
+        },
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_stage_block_from_url(
-        &mut request_bytes,
-        &mut header_spans,
-        &plan,
-        &now
-    ));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = match crate_step!(blobs.accept_stage_block_head(exchange.response_head())) {
+    let outcome = match crate_step!(azure::accept_stage_block_head(exchange.response_head())) {
         StageHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_stage_block_error_body(failure, &exchange.body)
+            azure::accept_stage_block_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1136,45 +1181,48 @@ fn stage_block_from_url(
 
 fn abort_copy(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let copy_id = optional_text(call, "copy_id").unwrap_or_default();
+    let item = azure::AbortCopyItem {
+        key: optional_text(call, "key").unwrap_or_default(),
+        copy_id: optional_text(call, "copy_id").unwrap_or_default(),
+    };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::abort_copy_requirements(blobs, key, copy_id, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_abort_copy(container, token, namespace, buf)
+        },
+        |template, bytes, buf| azure::encode_abort_copy(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_abort_copy(
-        &mut request_bytes,
-        &mut header_spans,
-        key,
-        copy_id,
-        &now
-    ));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = crate_step!(blobs.accept_abort_copy_head(exchange.response_head()));
-    Ok(update_result(blobs, &exchange, outcome))
+    let outcome = crate_step!(azure::accept_abort_copy_head(exchange.response_head()));
+    Ok(update_result(&exchange, outcome))
 }
 
 fn restore(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let Some(plan) = requested_restore(call) else {
+    let Some((options, item)) = requested_restore_options(call, None) else {
         return Ok(unsupported_by_adapter("priority not mapped"));
     };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::restore_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_restore(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_restore(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_restore(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = match crate_step!(blobs.accept_restore_head(exchange.response_head())) {
+    let outcome = match crate_step!(azure::accept_restore_head(exchange.response_head())) {
         RestoreHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_restore_error_body(failure, &exchange.body)
+            azure::accept_restore_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1192,109 +1240,111 @@ fn restore(
 
 fn set_metadata(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
+    let Some((condition, _, item)) = requested_object(call) else {
         return Ok(unsupported_by_crate(
-            "PhysicalSetMetadata carries one precondition",
+            "a Set Blob Metadata carries one precondition",
         ));
     };
     let metadata = requested_metadata(call);
-    let plan = PhysicalSetMetadata {
+    let options = azure::SetMetadataOptions {
+        metadata: &metadata,
         condition,
-        condition_value,
-        ..PhysicalSetMetadata::new(optional_text(call, "key").unwrap_or_default(), &metadata)
     };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::set_metadata_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_set_metadata(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_set_metadata(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_set_metadata(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome =
-        crate_step!(blobs.accept_set_metadata_head(plan.condition, exchange.response_head()));
-    Ok(update_result(blobs, &exchange, outcome))
+    let outcome = crate_step!(azure::accept_set_metadata_head(
+        condition,
+        exchange.response_head()
+    ));
+    Ok(update_result(&exchange, outcome))
 }
 
 fn set_properties(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let Some((condition, condition_value)) = requested_condition(call) else {
+    let Some((condition, _, item)) = requested_object(call) else {
         return Ok(unsupported_by_crate(
-            "PhysicalSetProperties carries one precondition",
+            "a Set Blob Properties carries one precondition",
         ));
     };
-    let plan = PhysicalSetProperties {
+    let options = azure::SetPropertiesOptions {
+        properties: requested_properties(call),
         condition,
-        condition_value,
-        ..PhysicalSetProperties::new(
-            optional_text(call, "key").unwrap_or_default(),
-            requested_properties(call),
-        )
     };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::set_properties_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_set_properties(container, token, namespace, &options, buf)
+        },
+        |template, bytes, buf| azure::encode_set_properties(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_set_properties(
-        &mut request_bytes,
-        &mut header_spans,
-        &plan,
-        &now
+    let outcome = crate_step!(azure::accept_set_properties_head(
+        condition,
+        exchange.response_head()
     ));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome =
-        crate_step!(blobs.accept_set_properties_head(plan.condition, exchange.response_head()));
-    Ok(update_result(blobs, &exchange, outcome))
+    Ok(update_result(&exchange, outcome))
 }
 
 fn set_tags(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
-    let tags = requested_tags(call);
-    let plan = PhysicalSetTags {
-        revision: requested_revision(call),
-        ..PhysicalSetTags::new(key, &tags)
+    let Some((_, revision, item)) = requested_object(call) else {
+        return Ok(unsupported_by_crate("a Set Blob Tags carries no condition"));
     };
+    let tags = requested_tags(call);
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::set_tags_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_set_tags(container, token, namespace, &tags, revision, buf)
+        },
+        |template, bytes, buf| azure::encode_set_tags(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_set_tags(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = crate_step!(blobs.accept_set_tags_head(exchange.response_head()));
-    Ok(update_result(blobs, &exchange, outcome))
+    let outcome = crate_step!(azure::accept_set_tags_head(exchange.response_head()));
+    Ok(update_result(&exchange, outcome))
 }
 
 fn get_tags(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
-    let key = optional_text(call, "key").unwrap_or_default();
+    let Some((_, revision, item)) = requested_object(call) else {
+        return Ok(unsupported_by_crate("a Get Blob Tags carries no condition"));
+    };
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::get_tags_requirements(blobs, key, requested_revision(call), &now)
+    let mut exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_get_tags(container, token, namespace, revision, buf)
+        },
+        |template, bytes, buf| azure::encode_get_tags(template, bytes, &item, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request = crate_step!(blobs.encode_get_tags(
-        &mut request_bytes,
-        &mut header_spans,
-        key,
-        requested_revision(call),
-        &now
-    ));
-    let mut exchange = transport_step!(send_request(context, &request));
-    let outcome = match crate_step!(blobs.accept_get_tags_head(exchange.response_head())) {
+    let outcome = match crate_step!(azure::accept_get_tags_head(exchange.response_head())) {
         TagsHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_get_tags_error_body(failure, &exchange.body)
+            azure::accept_get_tags_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1311,7 +1361,7 @@ fn get_tags(
     }
     // An object holds at most ten tags.
     let mut tags = [Tag::default(); 10];
-    let count = crate_step!(blobs.fill_tags(&mut exchange.body, &mut tags));
+    let count = crate_step!(azure::fill_tags(&mut exchange.body, &mut tags));
     Ok(successful_result(
         json!({"tags": tags_value(&tags[..count])}),
     ))
@@ -1319,21 +1369,23 @@ fn get_tags(
 
 fn delete_many(
     context: &AdapterContext,
-    blobs: &Blobs<'_>,
+    account: &Account<'_>,
     call: &Value,
 ) -> Result<Value, AdapterError> {
     let keys = requested_keys(call);
-    let plan = PhysicalDeleteMany::new(&keys);
     let now = current_timestamps();
-    let (mut request_bytes, mut header_spans) = request_buffers(crate_step!(
-        layered::delete_many_requirements(blobs, &plan, &now)
+    let exchange = sent!(account.send(
+        context,
+        |container, token, namespace, buf| {
+            azure::prepare_delete_many(container, token, namespace, buf)
+        },
+        |template, bytes, buf| azure::encode_delete_many(template, bytes, &keys, &now, buf),
+        None,
+        BodyRead::Hold,
     ));
-    let request =
-        crate_step!(blobs.encode_delete_many(&mut request_bytes, &mut header_spans, &plan, &now));
-    let exchange = transport_step!(send_request(context, &request));
-    let outcome = match crate_step!(blobs.accept_delete_many_head(exchange.response_head())) {
+    let outcome = match crate_step!(azure::accept_delete_many_head(exchange.response_head())) {
         DeleteManyHeadOutcome::NeedErrorBody(failure) => {
-            blobs.accept_delete_many_error_body(failure, &exchange.body)
+            azure::accept_delete_many_error_body(failure, &exchange.body)
         }
         outcome => outcome,
     };
@@ -1347,8 +1399,8 @@ fn delete_many(
         return Ok(error_result(&exchange, status));
     }
     let mut results = vec![BatchResult::default(); keys.len()];
-    let count = crate_step!(blobs.fill_delete_results(
-        &plan,
+    let count = crate_step!(azure::fill_delete_results(
+        keys.len(),
         exchange.response_head(),
         &exchange.body,
         &mut results

@@ -19,7 +19,7 @@
 // - Each part is a field section, the empty line, and the content. Every line
 //   of the field section ends in CRLF.
 
-use crate::http_message::{field_line, field_lines, next_line, token_byte, trim_whitespace};
+use crate::http_message::{field_line, field_lines, is_token_byte, next_line, trim_whitespace};
 use crate::request::{ByteSink, HeaderValue};
 use crate::{ResponseFault, Result};
 
@@ -42,12 +42,12 @@ pub(crate) fn boundary(content_type: &[u8]) -> Result<&[u8]> {
             return head_fault();
         };
         let (name, value) = (&parameter[..equals], &parameter[equals + 1..]);
-        if name.is_empty() || !name.iter().all(|byte| token_byte(*byte)) {
+        if name.is_empty() || !name.iter().all(|byte| is_token_byte(*byte)) {
             return head_fault();
         }
         let value = match value {
             [b'"', inner @ .., b'"'] if !inner.contains(&b'\\') && !inner.contains(&b'"') => inner,
-            value if !value.is_empty() && value.iter().all(|byte| token_byte(*byte)) => value,
+            value if !value.is_empty() && value.iter().all(|byte| is_token_byte(*byte)) => value,
             _ => return head_fault(),
         };
         if name.eq_ignore_ascii_case(b"boundary") {
@@ -80,22 +80,22 @@ pub(crate) struct Part<'b> {
 }
 
 impl<'b> Part<'b> {
-    // The fields of the part, in order. `parts` checked each line.
+    // The fields of the part, in order. `split_parts` checked each line.
     pub(crate) fn fields(&self) -> impl Iterator<Item = (&'b str, &'b [u8])> + use<'b> {
         field_lines(self.fields)
     }
 }
 
 // The parts of `body`, in order. The first fault ends them.
-pub(crate) fn parts<'b, 'n>(body: &'b [u8], boundary: &'n [u8]) -> Parts<'b, 'n> {
-    Parts {
+pub(crate) fn split_parts<'b, 'n>(body: &'b [u8], boundary: &'n [u8]) -> MultipartParts<'b, 'n> {
+    MultipartParts {
         rest: body,
         boundary,
         state: State::Start,
     }
 }
 
-pub(crate) struct Parts<'b, 'n> {
+pub(crate) struct MultipartParts<'b, 'n> {
     rest: &'b [u8],
     boundary: &'n [u8],
     state: State,
@@ -111,7 +111,7 @@ enum State {
     Done,
 }
 
-impl<'b> Iterator for Parts<'b, '_> {
+impl<'b> Iterator for MultipartParts<'b, '_> {
     type Item = Result<Part<'b>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -127,7 +127,7 @@ impl<'b> Iterator for Parts<'b, '_> {
     }
 }
 
-impl<'b> Parts<'b, '_> {
+impl<'b> MultipartParts<'b, '_> {
     // Reads the first delimiter, which no CRLF precedes.
     fn open(&mut self) -> Result<()> {
         let rest = self

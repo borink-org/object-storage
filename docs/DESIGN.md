@@ -2,7 +2,7 @@ Note that this document is human-written and therefore incomplete. It records on
 
 First, the most important constraints this library is designed around:
 
-- The library has to be sans-I/O in the core crate and its language bindings. This is so it can be used in multiple execution contexts and in various runtimes. The application should decide the I/O. Furthermore, this allows us to be easily `no_std` (so we do not depend on the Rust `std` library).
+- The library has to be sans-I/O in `borink-object-storage-proto` and its language bindings. This is so it can be used in multiple execution contexts and in various runtimes. The application should decide the I/O. Furthermore, this allows us to be easily `no_std` (so we do not depend on the Rust `std` library).
 - The core library performs no dynamic allocation, not even at startup. All allocations and buffers are owned by the host. This takes sans-I/O to its logical conclusion and allows very fine control over memory usage by consumers. This is useful for multiple purposes, but we care about three of these:
   - Large multi-tenant or multi-user applications (like servers) that want to constrain memory (and general resource) usage per tenant or user or operation
   - Embedded applications simply have very few resources and in some cases cannot even do any dynamic allocation at all.

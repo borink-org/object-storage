@@ -15,36 +15,60 @@ use crate::encoding::hex_digit;
 use crate::request::{ByteSink, U64Decimal};
 
 // A set of ASCII bytes, as `percent-encoding`'s `AsciiSet`. `percent_encode`
-// escapes the bytes in the set and every byte outside ASCII.
+// escapes the bytes in the set and every byte outside ASCII. It is kept as
+// one flag for each of the 256 bytes, the bytes outside ASCII set, so that
+// asking about a byte is one load.
 pub(crate) struct AsciiSet {
-    mask: [u32; 4],
+    escape: [bool; 256],
 }
 
 impl AsciiSet {
-    const fn contains(&self, byte: u8) -> bool {
-        self.mask[byte as usize / 32] & (1 << (byte % 32)) != 0
+    fn should_percent_encode(&self, byte: u8) -> bool {
+        self.escape[byte as usize]
     }
 
-    fn should_percent_encode(&self, byte: u8) -> bool {
-        !byte.is_ascii() || self.contains(byte)
+    // The length of the run of bytes at the start of `bytes` that need no
+    // escape. Sixteen bytes are tested at once while none of them does.
+    fn unescaped(&self, bytes: &[u8]) -> usize {
+        let (chunks, _) = bytes.as_chunks::<16>();
+        let clean = chunks
+            .iter()
+            .take_while(|chunk| {
+                !chunk
+                    .iter()
+                    .fold(false, |any, &byte| any | self.should_percent_encode(byte))
+            })
+            .count();
+        let at = clean * 16;
+        at + bytes[at..]
+            .iter()
+            .position(|&byte| self.should_percent_encode(byte))
+            .unwrap_or(bytes.len() - at)
     }
 
     const fn add(&self, byte: u8) -> Self {
-        let mut mask = self.mask;
-        mask[byte as usize / 32] |= 1 << (byte % 32);
-        Self { mask }
+        let mut escape = self.escape;
+        escape[byte as usize] = true;
+        Self { escape }
     }
 
     const fn remove(&self, byte: u8) -> Self {
-        let mut mask = self.mask;
-        mask[byte as usize / 32] &= !(1 << (byte % 32));
-        Self { mask }
+        let mut escape = self.escape;
+        escape[byte as usize] = false;
+        Self { escape }
     }
 }
 
-// The C0 controls, 0x00 to 0x1F, and DEL, 0x7F.
-const CONTROLS: &AsciiSet = &AsciiSet {
-    mask: [!0, 0, 0, 1 << (0x7F % 32)],
+// The C0 controls, 0x00 to 0x1F, and DEL, 0x7F, with every byte outside
+// ASCII.
+const CONTROLS: &AsciiSet = &{
+    let mut escape = [false; 256];
+    let mut byte = 0;
+    while byte < escape.len() {
+        escape[byte] = byte < 0x20 || byte >= 0x7F;
+        byte += 1;
+    }
+    AsciiSet { escape }
 };
 
 // Every ASCII byte that is not a letter or a digit.
@@ -131,9 +155,9 @@ const QUERY_VALUE_ESCAPE: &AsciiSet = &NON_ALPHANUMERIC
 
 // `%` and the two upper-case hexadecimal digits of every byte, as
 // `percent-encoding`'s `percent_encode_byte` writes them.
-static ESCAPES: [[u8; 3]; 256] = escapes();
+static ESCAPES: [[u8; 3]; 256] = escape_table();
 
-const fn escapes() -> [[u8; 3]; 256] {
+const fn escape_table() -> [[u8; 3]; 256] {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut table = [*b"%00"; 256];
     let mut byte = 0usize;
@@ -143,6 +167,22 @@ const fn escapes() -> [[u8; 3]; 256] {
         byte += 1;
     }
     table
+}
+
+// Whether no byte of `key` is one that `encode_object_key` escapes: each is
+// a letter, a digit, or one of `-./_~`. One pass over every byte, with no
+// early exit and no table, which costs less than the encoder's search for
+// runs when a key, as most do, has nothing to escape.
+pub(crate) fn key_is_plain(key: &[u8]) -> bool {
+    key.iter().fold(true, |plain, &byte| {
+        plain
+            & (byte.is_ascii_alphanumeric()
+                | (byte == b'-')
+                | (byte == b'.')
+                | (byte == b'/')
+                | (byte == b'_')
+                | (byte == b'~'))
+    })
 }
 
 pub(crate) fn encode_object_key(value: &str) -> PercentEncode<'_> {
@@ -177,10 +217,7 @@ impl<'v> Iterator for PercentEncode<'v> {
             self.bytes = remaining;
             return Some(&ESCAPES[first as usize]);
         }
-        let end = remaining
-            .iter()
-            .position(|&byte| self.ascii_set.should_percent_encode(byte))
-            .map_or(self.bytes.len(), |at| at + 1);
+        let end = 1 + self.ascii_set.unescaped(remaining);
         let (unchanged, remaining) = self.bytes.split_at(end);
         self.bytes = remaining;
         Some(unchanged)
@@ -205,6 +242,15 @@ pub(crate) fn form_decode_in_place(bytes: &mut [u8]) -> (usize, bool) {
 // `form_urlencoded` replaces every `+` before it percent-decodes. One pass
 // does the same, because a `+` is never a hexadecimal digit of an escape.
 fn decode_in_place(b: &mut [u8], plus_is_space: bool) -> (usize, bool) {
+    // Most text holds nothing to decode. One pass that finds no `%` and no
+    // `+` compiles to a few vector compares, where the loop below stops at
+    // each byte to ask.
+    let escapes = b.iter().fold(false, |found, &byte| {
+        found | (byte == b'%') | (plus_is_space & (byte == b'+'))
+    });
+    if !escapes {
+        return (b.len(), false);
+    }
     // `r` reads and `w` writes. The two are equal up to the first change, so
     // nothing moves until something has shrunk. `w` never passes `r`.
     let (mut r, mut w) = (0, 0);
@@ -266,25 +312,13 @@ pub(crate) type Parameter<'q> = Option<(&'q str, QueryValue<'q>)>;
 
 // Text from the caller or the service, percent-encoded, or no parameter
 // without a value.
-pub(crate) fn encoded<'q>(name: &'q str, value: impl Into<Option<&'q str>>) -> Parameter<'q> {
+pub(crate) fn encoded_parameter<'q>(
+    name: &'q str,
+    value: impl Into<Option<&'q str>>,
+) -> Parameter<'q> {
     value
         .into()
         .map(|value| (name, QueryValue::Encoded(value.as_bytes())))
-}
-
-// A constant of this crate, written as it is.
-pub(crate) fn literal<'q>(name: &'q str, value: &'q str) -> Parameter<'q> {
-    Some((name, QueryValue::Literal(value)))
-}
-
-// A number, or no parameter without one.
-pub(crate) fn number<'q>(name: &'q str, value: impl Into<Option<u32>>) -> Parameter<'q> {
-    value.into().map(|value| (name, QueryValue::Number(value)))
-}
-
-// Constants of this crate joined by commas, or no parameter without any.
-pub(crate) fn words<'q>(name: &'q str, words: &'q [&'q str]) -> Parameter<'q> {
-    (!words.is_empty()).then_some((name, QueryValue::Words(words)))
 }
 
 // Writes the parameters that `query` holds, without the `?` that begins a
@@ -296,21 +330,26 @@ pub(crate) fn write_query(out: &mut dyn ByteSink, query: &[Parameter<'_>]) {
         }
         out.push(name.as_bytes());
         out.push(b"=");
-        match *value {
-            QueryValue::Literal(value) => out.push(value.as_bytes()),
-            QueryValue::Encoded(value) => {
-                for part in encode_query_value(value) {
-                    out.push(part);
-                }
+        write_query_value(out, *value);
+    }
+}
+
+// Writes one parameter's value.
+pub(crate) fn write_query_value(out: &mut dyn ByteSink, value: QueryValue<'_>) {
+    match value {
+        QueryValue::Literal(value) => out.push(value.as_bytes()),
+        QueryValue::Encoded(value) => {
+            for part in encode_query_value(value) {
+                out.push(part);
             }
-            QueryValue::Number(value) => out.push(U64Decimal::new(value.into()).as_bytes()),
-            QueryValue::Words(words) => {
-                for (index, word) in words.iter().enumerate() {
-                    if index != 0 {
-                        out.push(b",");
-                    }
-                    out.push(word.as_bytes());
+        }
+        QueryValue::Number(value) => out.push(U64Decimal::new(value.into()).as_bytes()),
+        QueryValue::Words(words) => {
+            for (index, word) in words.iter().enumerate() {
+                if index != 0 {
+                    out.push(b",");
                 }
+                out.push(word.as_bytes());
             }
         }
     }
@@ -336,6 +375,18 @@ mod tests {
         OBJECT_KEY_ESCAPE, QUERY_VALUE_ESCAPE, encode_object_key, encode_query_value,
         form_decode_in_place, percent_decode_in_place,
     };
+
+    // `key_is_plain` finds exactly the bytes that the key's set escapes.
+    #[test]
+    fn a_plain_key_is_one_with_no_byte_to_escape() {
+        for byte in 0..=255u8 {
+            assert_eq!(
+                super::key_is_plain(&[byte]),
+                !OBJECT_KEY_ESCAPE.should_percent_encode(byte),
+                "byte {byte:#04x}"
+            );
+        }
+    }
 
     fn key(value: &str) -> String {
         written(encode_object_key(value).collect())

@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_proto::{Blobs, Container};
+use borink_object_storage_proto::azure::Container;
 use borink_object_storage_ureq::azure;
 
 #[test]
@@ -32,11 +32,7 @@ fn executes_the_generated_request() {
             .unwrap();
     });
 
-    let blobs = Blobs::new(
-        Container::new_allowing_http(&endpoint, "container").unwrap(),
-        "token",
-    )
-    .unwrap();
-    assert_eq!(azure::get(&blobs, "a key").unwrap(), b"body");
+    let container = Container::new_allowing_http(&endpoint, "container").unwrap();
+    assert_eq!(azure::get(&container, "token", "a key").unwrap(), b"body");
     server.join().unwrap();
 }

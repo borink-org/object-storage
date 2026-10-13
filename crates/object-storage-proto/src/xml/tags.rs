@@ -3,10 +3,11 @@
 // Each `Tag` is taken off the body whole once it is read, and its two fields
 // are decoded in place, as `s3/parts.rs` reads the parts of an upload.
 
-use super::page::{
-    check_body, check_room, decode_value_in_place, open_root_element, set_once, text,
+use crate::xml::page::{
+    ElementValue, check_body, check_room, decode_value_in_place, decoded_text, open_root_element,
+    set_once,
 };
-use super::scan::{Child, Scan, Span, fault};
+use crate::xml::scan::{ChildTag, Scan, body_fault};
 use crate::{Result, Tag};
 
 const SET: &[u8] = b"TagSet";
@@ -24,15 +25,15 @@ pub(crate) fn fill_tags<'b>(
     loop {
         scan.take();
         let tag = match scan.child(root)? {
-            Child::Close => break,
-            Child::Open(tag) => tag,
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => tag,
         };
         if scan.text(tag.name) != SET {
             scan.skip(tag)?;
             continue;
         }
         if seen_set {
-            return fault();
+            return body_fault();
         }
         seen_set = true;
         if tag.empty {
@@ -43,8 +44,8 @@ pub(crate) fn fill_tags<'b>(
             // while reading it index the bytes that the next `take` returns.
             scan.take();
             match scan.child(SET)? {
-                Child::Close => break,
-                Child::Open(tag) if scan.text(tag.name) == b"Tag" && !tag.empty => {
+                ChildTag::Close => break,
+                ChildTag::Open(tag) if scan.text(tag.name) == b"Tag" && !tag.empty => {
                     let (key, value) = read_tag(&mut scan)?;
                     let chunk = scan.take();
                     let tag = build_tag(chunk, key, value)?;
@@ -53,7 +54,7 @@ pub(crate) fn fill_tags<'b>(
                     }
                     held += 1;
                 }
-                Child::Open(_) => return fault(),
+                ChildTag::Open(_) => return body_fault(),
             }
         }
     }
@@ -61,15 +62,13 @@ pub(crate) fn fill_tags<'b>(
     Ok(held)
 }
 
-type Field = Option<(Span, u8)>;
-
 // Reads a tag. `<Tag>` has been consumed.
-fn read_tag(scan: &mut Scan<'_>) -> Result<(Field, Field)> {
+fn read_tag(scan: &mut Scan<'_>) -> Result<(ElementValue, ElementValue)> {
     let (mut key, mut value) = (None, None);
     loop {
         match scan.child(b"Tag")? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"Key" => set_once(&mut key, scan.value(tag)?)?,
                 b"Value" => set_once(&mut value, scan.value(tag)?)?,
                 _ => scan.skip(tag)?,
@@ -81,18 +80,18 @@ fn read_tag(scan: &mut Scan<'_>) -> Result<(Field, Field)> {
 
 // Builds one tag from its bytes. A tag always has a key and a value, which
 // may be empty.
-fn build_tag(chunk: &mut [u8], key: Field, value: Field) -> Result<Tag<'_>> {
+fn build_tag(chunk: &mut [u8], key: ElementValue, value: ElementValue) -> Result<Tag<'_>> {
     if key.is_none() || value.is_none() {
-        return fault();
+        return body_fault();
     }
     let key = decode_value_in_place(chunk, key)?;
     let value = decode_value_in_place(chunk, value)?;
     let chunk: &[u8] = chunk;
     let (Some(key), Some(value)) = (key, value) else {
-        return fault();
+        return body_fault();
     };
     Ok(Tag {
-        key: text(&chunk[key.0..key.1])?,
-        value: text(&chunk[value.0..value.1])?,
+        key: decoded_text(&chunk[key.0..key.1])?,
+        value: decoded_text(&chunk[value.0..value.1])?,
     })
 }

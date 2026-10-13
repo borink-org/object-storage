@@ -6,9 +6,10 @@
 use crate::Result;
 use crate::s3::DeleteResult;
 use crate::xml::page::{
-    check_body, check_room, decode_value_in_place, open_root_element, set_once, text,
+    ElementValue, check_body, check_room, decode_value_in_place, decoded_text, open_root_element,
+    set_once,
 };
-use crate::xml::scan::{Child, Scan, Span, fault};
+use crate::xml::scan::{ChildTag, Scan, body_fault};
 
 const ROOT: &[u8] = b"DeleteResult";
 
@@ -25,8 +26,8 @@ pub(crate) fn fill_delete_results<'b>(
         // while reading it index the bytes that the next `take` returns.
         scan.take();
         let tag = match scan.child(ROOT)? {
-            Child::Close => break,
-            Child::Open(tag) => tag,
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => tag,
         };
         let deleted = match scan.text(tag.name) {
             b"Deleted" => true,
@@ -37,7 +38,7 @@ pub(crate) fn fill_delete_results<'b>(
             }
         };
         if tag.empty {
-            return fault();
+            return body_fault();
         }
         let parent: &[u8] = if deleted { b"Deleted" } else { b"Error" };
         let fields = read_result(&mut scan, parent)?;
@@ -52,16 +53,14 @@ pub(crate) fn fill_delete_results<'b>(
     Ok(held)
 }
 
-type Field = Option<(Span, u8)>;
-
 // The fields of one result, as ranges into its own bytes.
 #[derive(Default)]
 struct Fields {
-    key: Field,
-    code: Field,
-    version: Field,
-    delete_marker: Field,
-    delete_marker_version: Field,
+    key: ElementValue,
+    code: ElementValue,
+    version: ElementValue,
+    delete_marker: ElementValue,
+    delete_marker_version: ElementValue,
 }
 
 // Reads a result. Its opening tag has been consumed.
@@ -69,8 +68,8 @@ fn read_result(scan: &mut Scan<'_>, parent: &[u8]) -> Result<Fields> {
     let mut fields = Fields::default();
     loop {
         match scan.child(parent)? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"Key" => set_once(&mut fields.key, scan.value(tag)?)?,
                 b"Code" => set_once(&mut fields.code, scan.value(tag)?)?,
                 b"VersionId" => set_once(&mut fields.version, scan.value(tag)?)?,
@@ -88,7 +87,7 @@ fn read_result(scan: &mut Scan<'_>, parent: &[u8]) -> Result<Fields> {
 // Builds one result. Each names its key, and an error names its code.
 fn build_result(chunk: &mut [u8], fields: Fields, deleted: bool) -> Result<DeleteResult<'_>> {
     if fields.key.is_none() || deleted == fields.code.is_some() {
-        return fault();
+        return body_fault();
     }
     let key = decode_value_in_place(chunk, fields.key)?;
     let code = decode_value_in_place(chunk, fields.code)?;
@@ -97,19 +96,19 @@ fn build_result(chunk: &mut [u8], fields: Fields, deleted: bool) -> Result<Delet
     let delete_marker_version = decode_value_in_place(chunk, fields.delete_marker_version)?;
     let chunk: &[u8] = chunk;
     let Some(key) = key else {
-        return fault();
+        return body_fault();
     };
     let value = |span: Option<(usize, usize)>| {
-        span.map(|(start, end)| text(&chunk[start..end]))
+        span.map(|(start, end)| decoded_text(&chunk[start..end]))
             .transpose()
     };
     let delete_marker = match value(delete_marker)?.map(str::trim_ascii) {
         None | Some("false") => false,
         Some("true") => true,
-        Some(_) => return fault(),
+        Some(_) => return body_fault(),
     };
     Ok(DeleteResult {
-        key: text(&chunk[key.0..key.1])?,
+        key: decoded_text(&chunk[key.0..key.1])?,
         code: value(code)?,
         version: value(version)?,
         delete_marker,

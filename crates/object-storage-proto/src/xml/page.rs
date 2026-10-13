@@ -2,13 +2,15 @@
 // keeping the values of wanted properties, and building an entry taken off
 // the body.
 
-use super::decode::decode;
-use super::scan::{Scan, Span, Tag, fault, trim};
+use crate::encoding::parse_decimal;
+use crate::properties::{Property, PropertySet};
+use crate::xml::decode::decode_scanned;
+use crate::xml::scan::{Scan, Span, StartTag, body_fault, trim_span};
 use crate::{CapacityError, Error, Result};
 
-// A property whose value a page reader can keep: `BlobProperty` or
+// A property whose value a page reader can keep: `azure::BlobProperty` or
 // `s3::ObjectProperty`.
-pub(super) trait ListProperty: Copy {
+pub(super) trait ListProperty: Property {
     fn name(self) -> &'static str;
 
     // Whether the element holds other elements rather than one text.
@@ -18,27 +20,13 @@ pub(super) trait ListProperty: Copy {
     fn identify(name: &[u8]) -> Option<Self>;
 }
 
-// The properties that one read of a page keeps the values of: `PropertySet`
-// or `s3::PropertySet`. It is a projection, like Parquet's `ProjectionMask`:
-// the reader walks every element and keeps only these.
-pub(super) trait ListPropertySet: Copy {
-    type Property: ListProperty;
-
-    fn contains(self, property: Self::Property) -> bool;
-
-    fn is_empty(self) -> bool;
-
-    // The property's rank among the set's members, which is its slot.
-    fn slot(self, property: Self::Property) -> usize;
-}
-
 // Keeps the span of a property's value if `wanted` holds the property. A
 // property written twice keeps the first.
 #[inline(always)]
-pub(super) fn capture<S: ListPropertySet>(
-    property: S::Property,
+pub(super) fn keep_value<P: ListProperty>(
+    property: P,
     span: Span,
-    wanted: S,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) {
     // The slot is in range: `captured` has one slot per member of `wanted`.
@@ -55,10 +43,10 @@ pub(super) fn capture<S: ListPropertySet>(
 // value if it is wanted. An element that holds other elements is read to its
 // close tag, and its value is everything between its tags.
 #[inline(always)]
-pub(super) fn read_known<S: ListPropertySet>(
+pub(super) fn read_matched<P: ListProperty>(
     scan: &mut Scan<'_>,
-    property: S::Property,
-    wanted: S,
+    property: P,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) -> Result<()> {
     let name = property.name().as_bytes();
@@ -67,30 +55,30 @@ pub(super) fn read_known<S: ListPropertySet>(
     } else {
         scan.value_of(name)?.0
     };
-    capture(property, span, wanted, captured);
+    keep_value(property, span, wanted, captured);
     Ok(())
 }
 
 // Reads past an element that no whole-tag match took: one this crate does
 // not know, or a known one in another spelling, such as `<AccessTier >`.
 // Keeps the value of a wanted one.
-pub(super) fn read_other<S: ListPropertySet>(
+pub(super) fn read_unmatched<P: ListProperty>(
     scan: &mut Scan<'_>,
-    tag: Tag,
-    wanted: S,
+    tag: StartTag,
+    wanted: PropertySet<P>,
     captured: &mut [Option<Span>],
 ) -> Result<()> {
     if wanted.is_empty() {
         return scan.skip(tag);
     }
-    match S::Property::identify(scan.text(tag.name)) {
+    match P::identify(scan.text(tag.name)) {
         Some(property) if wanted.contains(property) => {
             let span = if property.holds_elements() && !tag.empty {
                 scan.nested(property.name().as_bytes())?
             } else {
                 scan.value(tag)?.0
             };
-            capture(property, span, wanted, captured);
+            keep_value(property, span, wanted, captured);
             Ok(())
         }
         _ => scan.skip(tag),
@@ -99,7 +87,7 @@ pub(super) fn read_other<S: ListPropertySet>(
 
 // Writes into `values` the part of an entry's bytes that each captured span
 // names. The spans were recorded on those bytes.
-pub(super) fn values_of<'b>(
+pub(super) fn captured_values<'b>(
     raw: &'b [u8],
     spans: &[Option<Span>],
     values: &mut [Option<&'b [u8]>],
@@ -113,10 +101,7 @@ pub(super) fn values_of<'b>(
 // the number it holds.
 pub(super) fn check_room(held: usize, room: usize) -> Result<()> {
     if held > room {
-        return Err(Error::Capacity(CapacityError {
-            required: held,
-            ..CapacityError::default()
-        }));
+        return Err(Error::Capacity(CapacityError { required: held }));
     }
     Ok(())
 }
@@ -124,10 +109,10 @@ pub(super) fn check_room(held: usize, room: usize) -> Result<()> {
 // Reads the size of an object.
 #[inline]
 pub(super) fn read_size(chunk: &[u8], span: Span) -> Result<u64> {
-    let (start, end) = trim(chunk, span);
-    match crate::common::decimal(&chunk[start..end]) {
+    let (start, end) = trim_span(chunk, span);
+    match parse_decimal(&chunk[start..end]) {
         Some(size) => Ok(size),
-        None => fault(),
+        None => body_fault(),
     }
 }
 
@@ -148,7 +133,7 @@ pub(super) fn end_decoded_key(
     if len < key.1 - key.0 {
         chunk[key.0 + len..key.1].fill(0);
         if escaped && chunk[key.0..key.0 + len].contains(&0) {
-            return fault();
+            return body_fault();
         }
     }
     Ok(())
@@ -176,17 +161,25 @@ pub(super) fn check_body(body: &[u8]) -> Result<()> {
     // UTF-8. The key is checked again after it is decoded and refused then,
     // but a `str` could not hold the bytes in between. The decoded values are
     // handed out as `str` once each is known to be text.
-    if core::str::from_utf8(body).is_err() {
-        return fault();
-    }
+    //
     // XML forbids a zero byte in a document, and the reader writes zero over
     // the bytes a decoded value no longer needs, so that the walk over an
     // entry can find where the decoded text ends. A document that held a zero
-    // byte of its own would defeat that. Written as a minimum so that it
-    // compiles to one vector instruction per sixteen bytes; a search that
-    // stops at the first hit does not, and costs ten times as much.
-    if body.iter().fold(u8::MAX, |lowest, &byte| lowest.min(byte)) == 0 {
-        return fault();
+    // byte of its own would defeat that.
+    //
+    // One pass finds the lowest byte and every bit that any byte sets. It is
+    // written as a fold so that it compiles to two vector instructions per
+    // sixteen bytes. A search that stops at the first hit does not, and costs
+    // ten times as much. A body without a byte above 0x7F is ASCII, which is
+    // UTF-8, so only a body with one is validated as UTF-8 as well.
+    // Azure begins a body with the byte order mark, which is UTF-8 and the
+    // only byte above 0x7F of an ASCII page; it is left out of the fold.
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    let (lowest, bits) = body.iter().fold((u8::MAX, 0), |(lowest, bits), &byte| {
+        (lowest.min(byte), bits | byte)
+    });
+    if lowest == 0 || (bits >= 0x80 && core::str::from_utf8(body).is_err()) {
+        return body_fault();
     }
     Ok(())
 }
@@ -201,7 +194,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
     loop {
         scan.skip_space();
         if scan.cur() != b'<' {
-            return fault();
+            return body_fault();
         }
         if !scan.skip_misc()? {
             break;
@@ -211,7 +204,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
     // A service can answer a listing with an error document under a success
     // status. That is not a page.
     if scan.text(tag.name) != root || tag.empty {
-        return fault();
+        return body_fault();
     }
     Ok(())
 }
@@ -220,7 +213,7 @@ pub(super) fn open_root_element(scan: &mut Scan<'_>, root: &[u8]) -> Result<()> 
 // crate made up.
 pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
     if slot.is_some() {
-        return fault();
+        return body_fault();
     }
     *slot = Some(value);
     Ok(())
@@ -228,24 +221,86 @@ pub(super) fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<()> {
 
 // Returns a decoded value as text. The body was UTF-8 and a reference decodes
 // to a character, so only a percent-decoded key can fail this.
-pub(super) fn text(bytes: &[u8]) -> Result<&str> {
-    core::str::from_utf8(bytes).or_else(|_| fault())
+pub(super) fn decoded_text(bytes: &[u8]) -> Result<&str> {
+    core::str::from_utf8(bytes).or_else(|_| body_fault())
+}
+
+// The fields of an entry as text, after their values were decoded: the
+// bytes of `raw` from the first field to the end of the last, checked as
+// UTF-8 once, and where they begin. Take each field with `field_text`.
+// Checked one by one, a field of a few dozen bytes is too short for
+// `from_utf8` to read a word at a time, and costs a byte at a time and a
+// misread branch or two. Checked whole, the entry would include every
+// property as well.
+pub(super) fn fields_text<'r>(raw: &'r [u8], spans: &[Option<Span>]) -> Result<(&'r str, usize)> {
+    let (start, end) = spans
+        .iter()
+        .flatten()
+        .fold((usize::MAX, 0), |(start, end), span| {
+            (start.min(span.0), end.max(span.1))
+        });
+    if start > end {
+        return Ok(("", 0));
+    }
+    // `from_utf8` reads two words a step only from an address that is a
+    // multiple of eight, and only while sixteen bytes are left. A key of
+    // sixteen bytes that begins anywhere else is read a byte at a time, at
+    // nine instructions each. So the bytes around the fields are checked
+    // too, out to such an address before them and to a whole number of steps
+    // after. They are the tags around the fields, which are ASCII. Should the
+    // wider range fail, the fields alone decide.
+    let (wide_start, wide_end) = utf8_check_range(raw, start, end);
+    if let Some(text) = raw
+        .get(wide_start..wide_end)
+        .and_then(|wide| core::str::from_utf8(wide).ok())
+    {
+        return Ok((text, wide_start));
+    }
+    let text = raw.get(start..end).map_or_else(body_fault, decoded_text)?;
+    Ok((text, start))
+}
+
+// The range `fields_text` checks for `start..end` of `raw`. It begins at the
+// last multiple of eight at or before `start`, and ends a whole number of
+// sixteen-byte steps after that, both within `raw`.
+#[inline(always)]
+fn utf8_check_range(raw: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let misaligned = (raw.as_ptr() as usize).wrapping_add(start) % 8;
+    let wide_start = start.saturating_sub(misaligned);
+    let wide_end = (wide_start + (end - wide_start).next_multiple_of(16)).min(raw.len());
+    (wide_start, wide_end)
+}
+
+// The text of the field `span` of an entry, from what `fields_text` gave.
+pub(super) fn field_text((text, start): (&str, usize), (from, to): Span) -> Result<&str> {
+    text.get(from - start..to - start)
+        .map_or_else(body_fault, Ok)
 }
 
 // Trims one value, decodes it in place and returns the range of the decoded
-// text.
+// text. An absent value is told apart here, inline, rather than by a call: a
+// group of keys has none of the values an object has.
+#[inline(always)]
 pub(super) fn decode_value_in_place(
     chunk: &mut [u8],
     field: Option<(Span, u8)>,
 ) -> Result<Option<Span>> {
-    let Some((span, flags)) = field else {
-        return Ok(None);
-    };
-    let (start, end) = trim(chunk, span);
-    let len = decode(&mut chunk[start..end], flags, false)?;
+    match field {
+        Some((span, flags)) => decode_span_in_place(chunk, span, flags).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn decode_span_in_place(chunk: &mut [u8], span: Span, flags: u8) -> Result<Span> {
+    let (start, end) = trim_span(chunk, span);
+    let len = decode_scanned(&mut chunk[start..end], flags, false)?;
     // trim preserves start <= end <= chunk.len(); decode returns len <= end - start.
     if len < end - start {
         chunk[start + len..end].fill(0);
     }
-    Ok(Some((start, start + len)))
+    Ok((start, start + len))
 }
+
+// The value of a child element, if the entry wrote one: its span and the
+// scanner's flags for what it holds to decode.
+pub(super) type ElementValue = Option<(Span, u8)>;

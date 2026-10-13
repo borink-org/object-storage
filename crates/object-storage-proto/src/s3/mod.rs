@@ -2,36 +2,37 @@
 //!
 //! # How a request works
 //!
-//! 1. Create a [`Bucket`] and [`Credentials`], and from them an [`Objects`]
-//!    client with a [`Sha256Provider`]. The `borink-object-storage-crypto`
-//!    crate has providers, and the function that [`Credentials::new`] takes
-//!    to wipe its copy of the secret.
-//! 2. Describe the operation with a [`PhysicalGet`], a [`PhysicalPut`], a
-//!    [`PhysicalDelete`] or a [`PhysicalList`].
-//! 3. Call [`Objects::encode_get`], [`Objects::encode_put`],
-//!    [`Objects::encode_delete`] or [`Objects::encode_list`] to write the
-//!    signed request head into your buffer, and send the [`WireRequest`]
-//!    with your HTTP client.
-//! 4. Put the response headers into a [`ResponseHead`] and call the
-//!    `accept_*_head` method of the same operation.
+//! 1. Create a [`Bucket`] and [`Credentials`]. The
+//!    `borink-object-storage-crypto` crate has the function that
+//!    [`Credentials::new`] takes to wipe its copy of the secret.
+//! 2. Describe what every request shares, as [`GetOptions`] or
+//!    [`PutOptions`], and call [`prepare_get`] or [`prepare_put`] to write
+//!    a [`Template`] into a buffer that you own.
+//! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
+//!    [`encode_get`] or [`encode_put`] to write it into a second buffer. The request is
+//!    [`Unsigned`]: sign it, as [Signing](#signing) describes, and send the
+//!    [`WireRequest`](crate::WireRequest) that [`set_signature`] returns with your
+//!    HTTP client.
+//! 4. Put the response headers into a [`ResponseHead`] and call
+//!    [`accept_get_head`] or [`accept_put_head`].
 //!
 //! S3 names an error in the response body, not in a header. A failure of a
 //! GET, a PUT, a DELETE or a listing is therefore a `NeedErrorBody` outcome.
-//! Read the body and pass it to the `accept_*_error_body` method of the same
-//! operation. A HEAD response has no body, and its outcome is final.
+//! Read the body and pass it to the `accept_*_error_body` function of the
+//! same operation. A HEAD response has no body, and its outcome is final.
 //!
 //! # Example
 //!
 //! ```
-//! use borink_object_storage_proto::s3::{Bucket, Service, Objects, PayloadHash};
+//! use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 //! use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 //! use borink_object_storage_proto::{
-//!     GetHeadOutcome, HeaderSpan, Payload, PhysicalGet, PhysicalPut, PutHeadOutcome,
-//!     ResponseHead, Timestamps, layered,
+//!     GetHeadOutcome, GetItem, GetOptions, Payload, PutHeadOutcome, PutItem, PutOptions,
+//!     ResponseHead, Timestamps,
 //! };
-//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
-//! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
+//! # fn hmac_of_string_to_sign(_canonical: &[u8]) -> [u8; 32] {
+//! #     [0; 32]
+//! # }
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let bucket = Bucket::new(
@@ -40,17 +41,18 @@
 //! // Pass `borink_object_storage_crypto::wipe` in place of `wipe_best_effort`.
 //! let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! let now = Timestamps::from_unix(1_787_400_000);
-//! // SHA256 is a provider, such as `borink_object_storage_crypto::SHA256_RUSTCRYPTO`.
-//! let objects = Objects::new(bucket, credentials, SHA256).with_signing_key(&now);
 //!
-//! let put = PhysicalPut::new("directory/object.txt");
-//! let content = Payload::Slice(b"contents");
-//! let size = layered::s3::put_requirements(&objects, &put, content, PayloadHash::Compute, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_put(
-//!     &mut buffer, &mut headers, &put, content, PayloadHash::Compute, &now,
-//! )?;
+//! let options = PutOptions::default();
+//! let mut template = vec![0; 1024];
+//! let writes =
+//!     s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Unsigned, &mut template)?;
+//!
+//! let put = PutItem::new("directory/object.txt", Payload::Slice(b"contents"));
+//! let mut buffer = vec![0; 2048];
+//! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
+//! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
+//! let mac = hmac_of_string_to_sign(unsigned.canonical(&buffer));
+//! let request = s3::set_signature(&unsigned, &mut buffer, &mac);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/directory/object.txt"
@@ -58,23 +60,26 @@
 //!
 //! let head = ResponseHead::from_headers(200, [("ETag", b"\"tag\"".as_slice())]);
 //! assert!(matches!(
-//!     objects.accept_put_head(put.shape(), head)?,
+//!     s3::accept_put_head(put.shape(&options), head)?,
 //!     PutHeadOutcome::Created { .. }
 //! ));
 //!
-//! let get = PhysicalGet::new("directory/object.txt");
-//! let size = layered::s3::get_requirements(&objects, &get, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_get(&mut buffer, &mut headers, &get, &now)?;
-//! # let _ = request;
+//! let options = GetOptions::new();
+//! let mut template = vec![0; 1024];
+//! let reads = s3::prepare_get(&bucket, &credentials, &options, &mut template)?;
+//! let get = GetItem::new("directory/object.txt");
+//! let mut buffer = vec![0; 2048];
+//! let unsigned = s3::encode_get(&reads, &template, &get, &now, &mut buffer)?;
+//! # let _ = unsigned;
 //! let head = ResponseHead::from_headers(404, [("x-amz-request-id", b"4442587FB7D0A2F9".as_slice())]);
-//! let GetHeadOutcome::NeedErrorBody(failure) = objects.accept_get_head(get.shape(), head)? else {
+//! let GetHeadOutcome::NeedErrorBody(failure) =
+//!     s3::accept_get_head(reads.service(), get.shape(&options), head)?
+//! else {
 //!     panic!("S3 names the error in the body");
 //! };
 //! let body = b"<Error><Code>NoSuchKey</Code></Error>";
 //! assert!(matches!(
-//!     objects.accept_get_error_body(get.shape(), failure, body),
+//!     s3::accept_get_error_body(get.shape(&options), failure, body),
 //!     GetHeadOutcome::NotFound { .. }
 //! ));
 //! # Ok(())
@@ -91,10 +96,20 @@
 //!
 //! # Signing
 //!
-//! Every request is signed for the bucket's region. Signing takes five
-//! HMACs, and four of them depend only on the day. Call
-//! [`Objects::with_signing_key`] to compute those four once. A client whose
-//! key is for another day computes them again for each request.
+//! Every request is signed for the bucket's region, in four steps:
+//!
+//! 1. Once a day, compute the key that signs every request of that day with
+//!    [`signing_key`].
+//! 2. Once for each instant you sign at, write the start of the string to
+//!    sign with [`string_to_sign_prefix`].
+//! 3. For each request, hash [`Unsigned::canonical`] with SHA-256, and
+//!    compute the HMAC-SHA256 of the prefix and the lowercase hexadecimal of
+//!    that hash, under the day's key.
+//! 4. Write the HMAC into the request with [`set_signature`].
+//!
+//! This crate computes no hash. The `sigv4` module of the
+//! `borink-object-storage-crypto` crate does steps 1 to 4 with any SHA-256,
+//! for one request or for many at once.
 //!
 //! The signature covers the `host` header, which your HTTP client writes from
 //! the URL. Send the URL as the request holds it. An endpoint that names the
@@ -103,32 +118,28 @@
 //!
 //! # Metadata
 //!
-//! Put the pairs of a write in [`PhysicalPut::metadata`]. A header value
+//! Put the pairs of a write in
+//! [`PutOptions::metadata`](crate::PutOptions::metadata). A header value
 //! holds only ASCII without control characters. A value with any other text
-//! is sent as an RFC 2047 encoded word, which S3 decodes. S3 returns
-//! such a value encoded as well: pass each response header to
+//! is sent as an RFC 2047 encoded word, which S3 decodes. S3 returns such a
+//! value encoded as well: pass each response header to
 //! [`metadata_name`], and its value to [`metadata_value`].
 //!
 //! A value that a read would not return exactly is refused with
-//! [`InvalidPlan::MetadataValue`].
+//! [`InvalidRequest::MetadataValue`].
 //! [`MetadataPair::value`](crate::MetadataPair::value) lists those values.
 //!
 //! # Listing
 //!
-//! A listing reads one page per request. Encode a [`PhysicalList`] with
-//! [`Objects::encode_list`], read the whole body of a
-//! [`ListHeadOutcome::Page`], and pass it to [`Objects::fill_listing`]. Pass
-//! the page's [`Listing::next_marker`] as the marker of the next plan.
+//! A listing reads one page per request. Write the template of its pages
+//! with [`prepare_list`], and each page with [`encode_list`]. Read the whole
+//! body of a [`ListHeadOutcome::Page`], and pass it to [`fill_listing`].
+//! Pass the page's [`Listing::next_marker`] as the marker of the next page.
 //!
 //! ```
-//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects};
+//! # use borink_object_storage_proto::s3::{self, Bucket, Service};
 //! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
-//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
-//! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
-//! use borink_object_storage_proto::{
-//!     EntryKind, HeaderSpan, ListEntry, PhysicalList, Timestamps, layered,
-//! };
+//! use borink_object_storage_proto::{EntryKind, ListEntry, ListItem, ListOptions, Timestamps};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let bucket = Bucket::new(
@@ -136,15 +147,15 @@
 //! # )?;
 //! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! # let now = Timestamps::from_unix(1_787_400_000);
-//! # let objects = Objects::new(bucket, credentials, SHA256);
-//! let list = PhysicalList {
+//! let options = ListOptions {
 //!     delimiter: Some("/"),
-//!     ..PhysicalList::new("photos/")
+//!     ..ListOptions::default()
 //! };
-//! let size = layered::s3::list_requirements(&objects, &list, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_list(&mut buffer, &mut headers, &list, &now)?;
+//! let mut template = vec![0; 1024];
+//! let pages = s3::prepare_list(&bucket, &credentials, &options, &mut template)?;
+//! let mut buffer = vec![0; 2048];
+//! let unsigned = s3::encode_list(&pages, &template, &ListItem::new("photos/"), &now, &mut buffer)?;
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects\
@@ -160,7 +171,7 @@
 //!         .as_slice(),
 //! );
 //! let mut entries = vec![ListEntry::default(); 1000];
-//! let page = objects.fill_listing(&mut body, &mut entries)?;
+//! let page = s3::fill_listing(&mut body, &mut entries)?;
 //! assert_eq!(page.filled, 2);
 //! assert_eq!(entries[0].key, "photos/a b.jpg");
 //! assert_eq!(entries[1].kind, EntryKind::Prefix);
@@ -174,36 +185,28 @@
 //! An object longer than [`MAX_PUT_LEN`], or one that you send as it
 //! arrives, is written in parts:
 //!
-//! 1. Create an upload with [`Objects::encode_create_upload`], and read its
-//!    ID out of the answer with [`Objects::read_upload_id`]. The metadata of
-//!    the object goes into this request.
-//! 2. Stage each part with [`Objects::encode_stage_part`], under a number
-//!    from 1, in any order and at once if you like. Keep the entity tag that
-//!    [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged) carries
-//!    for each. On AWS, every part but the last holds at least
+//! 1. Create an upload with [`prepare_create_upload`] and
+//!    [`encode_create_upload`], and read its ID out of the answer with
+//!    [`read_upload_id`]. The metadata of the object goes into this request.
+//! 2. Stage each part with [`prepare_stage_part`] and [`encode_stage_part`],
+//!    under a number from 1, in any order and at once if you like. Keep the
+//!    entity tag that [`StageHeadOutcome::Staged`](crate::StageHeadOutcome::Staged)
+//!    carries for each. On AWS, every part but the last holds at least
 //!    [`MIN_PART_LEN`] bytes.
-//! 3. Commit the parts with [`Objects::encode_commit_parts`], which takes a
-//!    [`PhysicalCommit`](crate::PhysicalCommit).
-//!    S3 answers with status 200 before it has finished, and writes the
-//!    result into the body, which may still be an error. Read it with
-//!    [`Objects::accept_commit_parts_body`].
+//! 3. Commit the parts with [`prepare_commit_parts`] and
+//!    [`encode_commit_parts`]. The request's body is the list of parts, whose
+//!    SHA-256 it signs. S3 answers with status 200 before it has finished,
+//!    and writes the result into the body, which may still be an error. Read
+//!    it with [`accept_commit_parts_body`].
 //!
-//! [`Objects::encode_list_parts`] reads the parts that an upload holds, to
-//! resume it. [`Objects::encode_abort_upload`] ends an upload without an
-//! object. An upload that is neither committed nor aborted keeps its parts,
-//! and AWS bills them.
+//! [`encode_list_parts`] reads the parts that an upload holds, to resume it.
+//! [`encode_abort_upload`] ends an upload without an object. An upload that
+//! is neither committed nor aborted keeps its parts, and AWS bills them.
 //!
 //! ```
-//! # use borink_object_storage_proto::s3::{Bucket, Service, Objects, PayloadHash};
-//! # use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
-//! # use borink_object_storage_proto::sigv4::{Sha256Provider, Sha256State};
-//! # const SHA256: Sha256Provider =
-//! #     Sha256Provider::new(Sha256State::uninit, |_, _| {}, |_| [0; 32], |_, _| [0; 32]);
-//! use borink_object_storage_proto::s3::{PartRef, PhysicalCreateUpload, PhysicalStagePart};
-//! use borink_object_storage_proto::{
-//!     CommitHeadOutcome, HeaderSpan, Payload, PhysicalCommit, ResponseHead, StageHeadOutcome,
-//!     Timestamps, layered,
-//! };
+//! use borink_object_storage_proto::s3::{self, Bucket, CommitItem, CommitOptions, PartRef, Service};
+//! use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
+//! use borink_object_storage_proto::{CommitHeadOutcome, ResponseHead, Timestamps};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let bucket = Bucket::new(
@@ -211,49 +214,16 @@
 //! # )?;
 //! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! # let now = Timestamps::from_unix(1_787_400_000);
-//! # let objects = Objects::new(bucket, credentials, SHA256);
-//! let create = PhysicalCreateUpload::new("large.bin");
-//! let size = layered::s3::create_upload_requirements(&objects, &create, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_create_upload(&mut buffer, &mut headers, &create, &now)?;
-//! assert_eq!(
-//!     request.url(),
-//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploads="
-//! );
-//! let mut body = Vec::from(
-//!     b"<InitiateMultipartUploadResult><Bucket>objects</Bucket><Key>large.bin</Key>\
-//!       <UploadId>VXBsb2FkSUQ</UploadId></InitiateMultipartUploadResult>"
-//!         .as_slice(),
-//! );
-//! let upload_id = String::from(objects.read_upload_id(&mut body)?);
+//! let options = CommitOptions::default();
+//! let mut template = vec![0; 1024];
+//! let commits = s3::prepare_commit_parts(&bucket, &credentials, &options, &mut template)?;
 //!
-//! let stage = PhysicalStagePart::new("large.bin", &upload_id, 1);
-//! let part = Payload::Slice(b"the only part");
-//! let hash = PayloadHash::Compute;
-//! let size = layered::s3::stage_part_requirements(&objects, &stage, part, hash, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request = objects.encode_stage_part(&mut buffer, &mut headers, &stage, part, hash, &now)?;
+//! let parts = [PartRef { number: 1, e_tag: b"\"e1\"" }];
+//! let commit = CommitItem::new("large.bin", "VXBsb2FkSUQ", &parts);
+//! let mut buffer = vec![0; 2048];
+//! let unsigned = s3::encode_commit_parts(&commits, &template, &commit, &now, &mut buffer)?;
 //! assert_eq!(
-//!     request.url(),
-//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?partNumber=1&uploadId=VXBsb2FkSUQ"
-//! );
-//! let head = ResponseHead::from_headers(200, [("ETag", b"\"e1\"".as_slice())]);
-//! let StageHeadOutcome::Staged { e_tag: Some(e_tag) } = objects.accept_stage_part_head(head)?
-//! else {
-//!     panic!("S3 staged no part");
-//! };
-//!
-//! let commit = PhysicalCommit::new("large.bin");
-//! let parts = [PartRef { number: 1, e_tag }];
-//! let size = layered::s3::commit_parts_requirements(&objects, &commit, &upload_id, &parts, &now)?;
-//! let mut buffer = vec![0; size.bytes];
-//! let mut headers = vec![HeaderSpan::default(); size.headers];
-//! let request =
-//!     objects.encode_commit_parts(&mut buffer, &mut headers, &commit, &upload_id, &parts, &now)?;
-//! assert_eq!(
-//!     request.payload().bytes(),
+//!     unsigned.body(&buffer),
 //!     Some(
 //!         b"<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 //!           <Part><PartNumber>1</PartNumber><ETag>\"e1\"</ETag></Part>\
@@ -261,16 +231,25 @@
 //!             .as_slice()
 //!     )
 //! );
+//! // `borink_object_storage_crypto::sigv4::sign` writes in the body's SHA-256
+//! // with `s3::set_body_hash`, and then signs.
+//! # s3::set_body_hash(&unsigned, &mut buffer, &[0; 32]);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
+//! assert_eq!(
+//!     request.url(),
+//!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploadId=VXBsb2FkSUQ"
+//! );
+//!
 //! let head = ResponseHead::new(200);
-//! let outcome = objects.accept_commit_parts_head(commit.shape(), head)?;
+//! let shape = commit.shape(&options);
+//! let outcome = s3::accept_commit_parts_head(shape, head)?;
 //! assert!(matches!(outcome, CommitHeadOutcome::NeedResultBody { .. }));
 //! let mut body = Vec::from(
 //!     b"<CompleteMultipartUploadResult><Key>large.bin</Key>\
 //!       <ETag>&quot;c0-1&quot;</ETag></CompleteMultipartUploadResult>"
 //!         .as_slice(),
 //! );
-//! let CommitHeadOutcome::Committed { meta } =
-//!     objects.accept_commit_parts_body(commit.shape(), head, &mut body)?
+//! let CommitHeadOutcome::Committed { meta } = s3::accept_commit_parts_body(shape, head, &mut body)?
 //! else {
 //!     panic!("S3 committed no object");
 //! };
@@ -289,13 +268,14 @@
 //! It serves its objects to requests signed with the credentials of a
 //! session, which it hands out itself:
 //!
-//! 1. Encode a CreateSession with [`Objects::encode_create_session`], signed
-//!    with your own credentials, and send it.
-//! 2. Read the head with [`Objects::accept_create_session_head`], and the
-//!    body with [`Objects::read_session`].
-//! 3. Encode the requests to the objects with the client that
-//!    [`Objects::with_session`] returns. Each carries the token in
-//!    `x-amz-s3session-token`.
+//! 1. Write a CreateSession with [`prepare_create_session`] and
+//!    [`encode_create_session`], signed with your own credentials, and send
+//!    it.
+//! 2. Read the head with [`accept_create_session_head`], and the body with
+//!    [`read_session`].
+//! 3. Write the templates of the requests to the objects with the
+//!    credentials that [`Session::credentials`] returns. Each request
+//!    carries the token in `x-amz-s3session-token`.
 //!
 //! AWS ends a session five minutes after it creates it, so create the next
 //! one before [`Session::expires_at`].
@@ -306,96 +286,118 @@
 //! - Requests are signed for the service `s3express`, and go to
 //!   virtual-hosted URLs.
 //! - A listing prefix ends in `/`. Any other is refused with
-//!   [`InvalidPlan::Prefix`].
+//!   [`InvalidRequest::Prefix`].
 //! - A directory bucket stores an RFC 2047 encoded word as it is sent. So a
 //!   metadata value that a general purpose bucket would store other than as
 //!   given, such as one with a line break, is sent as an encoded word rather
 //!   than refused.
 //! - A commit of parts reports most errors under status 200, such as
 //!   `NoSuchUpload` and `PreconditionFailed`.
-//!   [`Objects::accept_commit_parts_body`] reads them as the outcomes that
+//!   [`accept_commit_parts_body`] reads them as the outcomes that
 //!   a general purpose bucket answers with. A directory bucket refuses a
 //!   commit whose part numbers are not consecutive, such as 1 and 3, with
 //!   `InvalidPartOrder`. The client sends such a commit as given.
-//! - A copy, [`Objects::encode_copy`] or [`Objects::encode_stage_part_copy`],
-//!   is authorized by your own credentials, not by a session's: AWS refuses
-//!   the credentials of a session for it. Encode it with the client that
-//!   you asked for the session, which signs it for `s3express` too. A
-//!   client that holds a session refuses it with [`InvalidPlan::Option`].
+//! - A copy, [`prepare_copy`] or [`prepare_stage_part_copy`], is authorized
+//!   by your own credentials, not by a session's: AWS refuses the
+//!   credentials of a session for it. Write its template with your own
+//!   credentials, which sign it for `s3express` too. A template written
+//!   with a session's credentials is refused with [`InvalidRequest::Option`].
 //!
 //! # Content that is not signed
 //!
-//! [`PayloadHash::Unsigned`] sends a write without the SHA-256 of its
-//! content, so this crate never reads the content. The signature then does
-//! not cover the content. TLS still protects the bytes in transit, but
-//! nothing checks the bytes that you handed to your HTTP client. Send an MD5
-//! of the content in [`WriteOptions::checksum`] to have S3 check them.
+//! [`PayloadSigning::Unsigned`] sends a write or a part without the SHA-256
+//! of its content. The signature then does not cover the content. TLS still
+//! protects the bytes in transit, but nothing checks the bytes that you
+//! handed to your HTTP client. Send a checksum of the content, in
+//! [`PutItem::checksum`](crate::PutItem::checksum) or
+//! [`StagePartItem::checksum`], to have S3 check them.
 
 use core::cmp::Ordering;
 
-use crate::checksum::{ChecksumKind, ChecksumProvider, KINDS, Sum, check_base64_len};
-use crate::common::{
-    ContentRange, FailureOutcome, accept_success, condition_header, decimal_header, encoded,
-    failure, finish_with_body, meta_of, parse_content_range, push_checksum, text_header,
-    validate_checksum, validate_condition, validate_properties, validate_revision, validate_tags,
-    write_range, write_tags,
-};
+use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
 use crate::encoding::{self, rfc2047};
-use crate::http::PlainHttp;
-use crate::request::{ByteSink, HeadWriter, HeaderValue, Pass, U64Decimal};
-use crate::sigv4::{self, Credentials, EMPTY_SHA256, MAX_REGION_LEN, Sha256Provider, SigningKey};
-use crate::url::{self, Parameter};
-use crate::{
-    Classification, ConditionKind, ConditionValue, CopySource, DeleteHeadOutcome, DeleteKind,
-    DeleteShape, Error, Failure, GetHeadOutcome, GetKind, GetShape, HeaderSpan, InvalidPlan,
-    ListEntry, ListHeadOutcome, ListInclude, ListMarker, Listing, MetadataPair, Method, ObjectMeta,
-    Payload, PhysicalDelete, PhysicalGet, PhysicalList, PhysicalPut, PutHeadOutcome, PutShape,
-    RequestedRange, ResponseFault, ResponseHead, Result, Revision, ServiceErrorKind, Tag,
-    Timestamps, TransactionalChecksum, WireRequest, WriteOptions,
+use crate::head::{
+    ContentRange, accept_get_success, parse_content_range, read_decimal_header, read_text_header,
+    strip_metadata_prefix,
 };
+use crate::http::{PlainHttp, valid_http_origin};
+use crate::http_message::is_token_byte;
+use crate::outcome::{FailureOutcome, container_failure_outcome, finish_with_body};
+use crate::properties::Property;
+use crate::properties::sealed::Sealed;
+use crate::request::ByteSink;
+use crate::sigv4::{Credentials, MAX_REGION_LEN};
+use crate::template::{FixedText, Hole, HoleValues, NO_TEXT, Param, ParamValue, TemplateBody};
+use crate::url::QueryValue;
+use crate::validate::{
+    validate_checksum_item, validate_condition, validate_delimiter, validate_get_item,
+    validate_get_options, validate_properties, validate_revision_item, validate_revision_kind,
+    validate_tags,
+};
+use crate::xml::{read_error_code, root_is};
+use crate::{
+    Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions,
+    DeleteShape, Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
+    InvalidRequest, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions,
+    Listing, MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem,
+    PutOptions, PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result,
+    RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
+};
+use template::{Describe, Detail, Field, FieldList, FieldValue, S3Values};
 
 mod batch;
 mod copy;
 mod parts;
 mod restore;
 mod tags;
+mod template;
 
-pub use batch::{DeleteResult, MAX_DELETE_KEYS};
-pub use copy::PhysicalStagePartCopy;
+pub use batch::{
+    DeleteResult, MAX_DELETE_KEYS, accept_delete_many_error_body, accept_delete_many_head,
+    encode_delete_many, fill_delete_results, prepare_delete_many,
+};
+pub use copy::{
+    StagePartCopyItem, accept_copy_body, accept_copy_error_body, accept_copy_head,
+    accept_stage_part_copy_body, accept_stage_part_copy_head, encode_copy, encode_stage_part_copy,
+    prepare_copy, prepare_stage_part_copy,
+};
 pub use parts::{
-    CreateUploadHeadOutcome, MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef,
-    PhysicalAbortUpload, PhysicalCreateUpload, PhysicalListParts, PhysicalStagePart,
+    CommitItem, CommitOptions, CreateUploadHeadOutcome, CreateUploadOptions, ListPartsItem,
+    MAX_PART_LEN, MAX_PARTS, MIN_PART_LEN, Part, PartRef, StagePartItem, UploadItem,
+    accept_abort_upload_error_body, accept_abort_upload_head, accept_commit_parts_body,
+    accept_commit_parts_error_body, accept_commit_parts_head, accept_create_upload_error_body,
+    accept_create_upload_head, accept_list_parts_error_body, accept_list_parts_head,
+    accept_stage_part_error_body, accept_stage_part_head, encode_abort_upload, encode_commit_parts,
+    encode_create_upload, encode_list_parts, encode_stage_part, fill_parts, prepare_abort_upload,
+    prepare_commit_parts, prepare_create_upload, prepare_list_parts, prepare_stage_part,
+    read_upload_id,
+};
+pub use restore::{
+    accept_restore_error_body, accept_restore_head, encode_restore, prepare_restore,
+};
+pub use tags::{
+    accept_get_tagging_error_body, accept_get_tagging_head, accept_put_tagging_head,
+    accept_update_error_body, encode_get_tagging, encode_put_tagging, fill_tags,
+    prepare_get_tagging, prepare_put_tagging,
+};
+pub use template::{
+    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, set_body_checksum, set_body_hash,
+    set_signature, signing_key, string_to_sign_prefix,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
-// The value of `x-amz-content-sha256`: the SHA-256 of the content in
-// lowercase hexadecimal, or `UNSIGNED-PAYLOAD`.
-pub(crate) enum ContentSha256 {
-    Hex([u8; 64]),
-    Unsigned,
-}
-
-impl ContentSha256 {
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Hex(hex) => hex,
-            Self::Unsigned => UNSIGNED_PAYLOAD.as_bytes(),
-        }
-    }
-}
-
 /// The most bytes that an S3 object key holds.
 ///
 /// Every encoding method refuses a longer key with
-/// [`InvalidPlan::KeyTooLong`]. S3 counts the bytes of the key's UTF-8.
+/// [`InvalidRequest::KeyTooLong`]. S3 counts the bytes of the key's UTF-8.
 pub const MAX_KEY_LEN: usize = 1024;
 
 /// The most bytes that S3 writes in one `PutObject` request.
 ///
-/// [`Objects::encode_put`] refuses a longer payload with
-/// [`InvalidPlan::PayloadTooLarge`].
+/// [`encode_put`] refuses a longer payload with
+/// [`InvalidRequest::PayloadTooLarge`].
 pub const MAX_PUT_LEN: u64 = 5 * 1024 * 1024 * 1024;
 
 /// The prefix of the header that carries one metadata pair.
@@ -406,8 +408,7 @@ pub const METADATA_PREFIX: &str = "x-amz-meta-";
 ///
 /// S3 stores a metadata name in lowercase, and returns it so.
 pub fn metadata_name(header: &str) -> Option<&str> {
-    let (prefix, name) = header.split_at_checked(METADATA_PREFIX.len())?;
-    (prefix.eq_ignore_ascii_case(METADATA_PREFIX) && !name.is_empty()).then_some(name)
+    strip_metadata_prefix(header, METADATA_PREFIX)
 }
 
 /// Returns the text of a metadata value that a response header carries.
@@ -475,7 +476,7 @@ impl Addressing {
 pub enum Service {
     /// Amazon S3, with a general purpose bucket.
     ///
-    /// The client refuses a plan that AWS refuses, and a response that AWS
+    /// This crate refuses a request that AWS refuses, and a response that AWS
     /// does not send:
     ///
     /// - A bucket name has 3 to 63 lowercase letters, digits, `.` and `-`.
@@ -496,7 +497,7 @@ pub enum Service {
     ///
     /// - A bucket name holds ASCII letters, digits, `-`, `.`, `_` and `~`.
     /// - A region name holds ASCII letters, digits, `-`, `.` and `_`.
-    /// - A condition is sent as the plan gives it, and the metadata of a write
+    /// - A condition is sent as the item gives it, and the metadata of a write
     ///   may be of any size.
     /// - A successful GET or HEAD may leave out `Content-Length`.
     /// - A removal succeeds with status 200 or 204.
@@ -519,6 +520,16 @@ impl Service {
             _ => return None,
         })
     }
+
+    // Whether AWS answers, so that a client holds requests and responses to
+    // the rules that AWS documents, which a compatible service need not
+    // follow. Each caller names the rule it applies.
+    const fn is_aws(self) -> bool {
+        match self {
+            Self::Aws | Self::AwsDirectory => true,
+            Self::Compatible => false,
+        }
+    }
 }
 
 /// The most bytes of metadata that a write takes for [`Service::Aws`].
@@ -535,7 +546,9 @@ pub struct Bucket<'a> {
     name: &'a str,
     region: &'a str,
     addressing: Addressing,
-    pub(crate) service: Service,
+    service: Service,
+    // The object that templates from this bucket name, if they name one.
+    object: Option<&'a str>,
 }
 
 impl<'a> Bucket<'a> {
@@ -596,7 +609,7 @@ impl<'a> Bucket<'a> {
         service: Service,
         plain: PlainHttp,
     ) -> Result<Self> {
-        if !crate::http::valid_http_origin(endpoint, plain) {
+        if !valid_http_origin(endpoint, plain) {
             return Err(Error::InvalidEndpoint);
         }
         let (scheme, authority) = match endpoint.split_once("://") {
@@ -648,7 +661,27 @@ impl<'a> Bucket<'a> {
             region,
             addressing,
             service,
+            object: None,
         })
+    }
+
+    /// Names the object `key` of this bucket, for templates of that one
+    /// object.
+    ///
+    /// A template prepared from it writes the key as fixed text, checked
+    /// once, and so does each request's line and canonical request: a
+    /// request of it checks and encodes no key. Pass each encoding function
+    /// an empty key, or this one; any other is [`InvalidRequest::Template`].
+    /// Keep one template for each object you read or write often, such as
+    /// the files of a database. An operation that names no object, such as
+    /// a listing, refuses a bucket that names one with
+    /// [`InvalidRequest::Option`].
+    #[must_use]
+    pub const fn object(self, key: &'a str) -> Self {
+        Self {
+            object: Some(key),
+            ..self
+        }
     }
 
     /// Returns this bucket with `addressing` in place of the addressing that
@@ -684,24 +717,6 @@ impl<'a> Bucket<'a> {
         }
         out.push(self.authority.as_bytes());
     }
-
-    // The path of the URL, which the signature covers as it is written. A
-    // request to the bucket itself has the path `/` with virtual-hosted
-    // addressing and `/bucket` with path-style addressing.
-    fn write_path(&self, out: &mut dyn ByteSink, key: Option<&str>) {
-        out.push(b"/");
-        if self.addressing == Addressing::Path {
-            out.push(self.name.as_bytes());
-            if key.is_some() {
-                out.push(b"/");
-            }
-        }
-        if let Some(key) = key {
-            for part in url::encode_object_key(key) {
-                out.push(part);
-            }
-        }
-    }
 }
 
 // The scheme of an endpoint, which decides its default port.
@@ -729,33 +744,11 @@ impl Scheme {
     }
 }
 
-/// The SHA-256 of the content of a write, which the request signs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PayloadHash {
-    /// The encoder computes the SHA-256 of the content.
-    ///
-    /// This needs the bytes, so the encoder refuses it for a
-    /// [`Payload::Streamed`] with [`InvalidPlan::Option`].
-    #[default]
-    Compute,
-    /// The SHA-256 of the content, which you computed.
-    ///
-    /// S3 refuses the write with 400 `XAmzContentSHA256Mismatch` if the
-    /// content does not match.
-    Sha256([u8; 32]),
-    /// The request does not sign its content, and the encoder never reads
-    /// it.
-    ///
-    /// See the module documentation for what this leaves unchecked.
-    Unsigned,
-}
-
 /// An element that an S3 listing writes for an object, other than the four
 /// that every [`ListEntry`] carries.
 ///
 /// Name the ones you want in a [`PropertySet`] and read a page with
-/// [`Objects::fill_listing_with`], which hands you their values as it goes.
+/// [`fill_listing_with`], which hands you their values as it goes.
 /// Read anything that is not listed here with [`ListEntry::property`].
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -842,120 +835,61 @@ impl ObjectProperty {
 
     // The property that an element name stands for, if it is one of these.
     pub(crate) fn identify(name: &[u8]) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|property| property.name().as_bytes() == name)
-    }
-
-    const fn bit(self) -> u64 {
-        1 << (self as u8)
+        // The names of `Self::name`, matched whole: a switch on the length
+        // and one compare.
+        Some(match name {
+            b"StorageClass" => Self::StorageClass,
+            b"ChecksumAlgorithm" => Self::ChecksumAlgorithm,
+            b"ChecksumType" => Self::ChecksumType,
+            b"Owner" => Self::Owner,
+            b"RestoreStatus" => Self::RestoreStatus,
+            b"VersionId" => Self::VersionId,
+            b"IsLatest" => Self::IsLatest,
+            _ => return None,
+        })
     }
 }
 
 // `from_bits` shifts by `COUNT`, which must be below the `u64` shift width.
 const _: () = assert!(ObjectProperty::COUNT < 64);
 
+impl Sealed for ObjectProperty {}
+
+impl Property for ObjectProperty {
+    const COUNT: usize = ObjectProperty::ALL.len();
+
+    fn number(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The properties that one read of an S3 page is asked for.
 ///
-/// Build one with [`Self::of`] and pass it to [`Objects::fill_listing_with`].
-/// The values come back in the order that [`ObjectProperty`] lists them,
-/// whatever order the set was built in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct PropertySet(u64);
+/// Build one with [`PropertySet::of`] and pass it to [`fill_listing_with`].
+pub type PropertySet = crate::properties::PropertySet<ObjectProperty>;
+
+/// The values that one entry of an S3 listing gave for the properties of a
+/// [`PropertySet`].
+pub type PropertyValues<'x, 'b> = crate::properties::PropertyValues<'x, 'b, ObjectProperty>;
 
 impl PropertySet {
     /// A set of these properties. Naming one twice is the same as once.
     pub const fn of(properties: &[ObjectProperty]) -> Self {
-        let mut mask = 0;
+        let mut bits = 0;
         let mut i = 0;
         while i < properties.len() {
-            mask |= properties[i].bit();
+            bits |= 1 << (properties[i] as u8);
             i += 1;
         }
-        Self(mask)
-    }
-
-    /// A set from its bits, one per property in the order [`ObjectProperty`]
-    /// numbers them. A bit that names no property is dropped.
-    pub const fn from_bits(bits: u64) -> Self {
-        Self(bits & ((1 << ObjectProperty::COUNT) - 1))
-    }
-
-    /// The set's bits, as [`Self::from_bits`] reads them.
-    pub const fn bits(self) -> u64 {
-        self.0
-    }
-
-    /// Whether the set holds this property.
-    pub const fn contains(self, property: ObjectProperty) -> bool {
-        self.0 & property.bit() != 0
-    }
-
-    /// How many properties the set holds, which is how many values a read
-    /// reports for each entry.
-    pub const fn len(self) -> usize {
-        self.0.count_ones() as usize
-    }
-
-    /// Whether the set holds nothing.
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Where a property's value stands among the values of an entry: its
-    /// rank among the set's members, in the order [`ObjectProperty`] lists
-    /// them. Meaningful only for a property the set holds.
-    pub const fn slot(self, property: ObjectProperty) -> usize {
-        (self.0 & (property.bit() - 1)).count_ones() as usize
-    }
-}
-
-/// The values that one entry gave for the properties of a set.
-///
-/// [`Objects::fill_listing_with`] hands one to the closure that builds each
-/// entry. Each value is the bytes between the element's tags, as S3 wrote
-/// them, under the rules that [`ListEntry::property`] states. A group of
-/// keys gives no values.
-#[derive(Clone, Copy, Debug)]
-pub struct PropertyValues<'x, 'b> {
-    set: PropertySet,
-    values: &'x [Option<&'b [u8]>],
-}
-
-impl<'x, 'b> PropertyValues<'x, 'b> {
-    pub(crate) fn new(set: PropertySet, values: &'x [Option<&'b [u8]>]) -> Self {
-        Self { set, values }
-    }
-
-    /// The set that the page was read with.
-    pub const fn set(&self) -> PropertySet {
-        self.set
-    }
-
-    /// The value the entry gave for one property.
-    ///
-    /// [`None`] if the property is not in the set or the entry wrote no such
-    /// element; an empty slice if it wrote the element empty.
-    pub fn get(&self, property: ObjectProperty) -> Option<&'b [u8]> {
-        if !self.set.contains(property) {
-            return None;
-        }
-        self.values[self.set.slot(property)]
-    }
-
-    /// Every value, one per member of the set, in the order
-    /// [`ObjectProperty`] lists them.
-    pub const fn all(&self) -> &'x [Option<&'b [u8]>] {
-        self.values
+        Self::new(bits)
     }
 }
 
 /// The credentials of a session with one
 /// [directory bucket](self#directory-buckets).
 ///
-/// Only [`Objects::with_session`] takes them. Its
-/// [`Debug`](core::fmt::Debug) output shows the key ID and hides the secret
+/// [`Self::credentials`] turns them into the credentials that sign requests
+/// to that bucket. Its [`Debug`](core::fmt::Debug) output shows the key ID and hides the secret
 /// and the token.
 #[derive(Clone, Copy)]
 pub struct Session<'a> {
@@ -968,6 +902,23 @@ pub struct Session<'a> {
     /// When the credentials expire, in seconds since the Unix epoch, if the
     /// answer says.
     pub expires_at: Option<u64>,
+}
+
+impl<'a> Session<'a> {
+    /// Returns the credentials of this session, which sign every request to
+    /// the directory bucket but a copy, and send the token in
+    /// `x-amz-s3session-token`.
+    ///
+    /// `wipe` clears the copy of the secret that signing makes; see
+    /// [`Credentials::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCredentials`] if the key ID, the secret or the
+    /// token cannot sign a request.
+    pub fn credentials(&self, wipe: fn(&mut [u8])) -> Result<Credentials<'a>> {
+        Credentials::new(self.key_id, self.secret, wipe)?.with_s3_session_token(self.token)
+    }
 }
 
 impl core::fmt::Debug for Session<'_> {
@@ -984,7 +935,7 @@ impl core::fmt::Debug for Session<'_> {
 /// The result of reading the response head of a CreateSession.
 ///
 /// A head that reports a failure is one of these too.
-/// [`Objects::accept_create_session_head`] returns an [`Err`] only for a
+/// [`accept_create_session_head`] returns an [`Err`] only for a
 /// head it cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -992,7 +943,7 @@ pub enum SessionHeadOutcome<'h> {
     /// The credentials follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Objects::read_session`].
+    /// [`read_session`].
     Session {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -1000,7 +951,7 @@ pub enum SessionHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Objects::accept_create_session_error_body`], which returns the final
+    /// [`accept_create_session_error_body`], which returns the final
     /// outcome. If you cannot read the body, pass an empty one and the error
     /// stays unnamed.
     NeedErrorBody(Failure<'h>),
@@ -1011,7 +962,7 @@ pub enum SessionHeadOutcome<'h> {
     ServiceFailure(Failure<'h>),
 }
 
-crate::common::container_failure_outcome!(SessionHeadOutcome<'h>);
+container_failure_outcome!(SessionHeadOutcome<'h>);
 
 impl core::fmt::Display for SessionHeadOutcome<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1024,1078 +975,794 @@ impl core::fmt::Display for SessionHeadOutcome<'_> {
     }
 }
 
-/// The S3 operations that one set of credentials authorizes on one bucket.
+/// Reads the response head of a GET or a HEAD and reports what to do next.
 ///
-/// This is a small value, and it is [`Copy`]. This crate never reads the
-/// clock, so every method that encodes a request takes the current time in
-/// `now`. It signs the request for that time.
-#[derive(Clone, Copy)]
-pub struct Objects<'a> {
-    pub(crate) bucket: Bucket<'a>,
-    credentials: Credentials<'a>,
-    pub(crate) sha256: Sha256Provider,
-    signing_key: Option<SigningKey>,
-    pub(crate) checksums: [Option<ChecksumProvider>; KINDS],
-}
-
-impl core::fmt::Debug for Objects<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Objects")
-            .field("bucket", &self.bucket)
-            .field("credentials", &self.credentials)
-            .field("signing_key", &self.signing_key.map(|_| "<redacted>"))
-            .field("checksums", &self.checksums)
-            .finish_non_exhaustive()
-    }
-}
-
-// What the signature of one request covers, beside the client's own values.
-pub(crate) struct Signed<'p> {
-    pub(crate) method: Method,
-    // The object, or `None` for the bucket itself.
-    pub(crate) key: Option<&'p str>,
-    // The query, in the order of its names. See `url.rs`.
-    pub(crate) query: &'p [Parameter<'p>],
-    pub(crate) range: RequestedRange,
-    pub(crate) condition: ConditionKind,
-    pub(crate) condition_value: Option<ConditionValue<'p>>,
-    // Further signed headers, with lowercase names.
-    pub(crate) headers: &'p [(&'p str, &'p [u8])],
-    pub(crate) metadata: &'p [MetadataPair<'p>],
-    pub(crate) content_sha256: &'p [u8],
-    // The tags of a write, signed as `x-amz-tagging`.
-    pub(crate) tags: &'p [Tag<'p>],
-    // The source of a copy, signed with its condition.
-    pub(crate) copy: Option<SignedCopy<'p>>,
-}
-
-// The source of a copy, signed as `x-amz-copy-source`, and the bytes of it
-// that an UploadPartCopy copies, as `x-amz-copy-source-range`.
-#[derive(Clone, Copy)]
-pub(crate) struct SignedCopy<'p> {
-    pub(crate) source: CopySource<'p>,
-    pub(crate) range: RequestedRange,
-}
-
-// Where the value of a signed header comes from.
-#[derive(Clone, Copy)]
-enum SignedValue<'a> {
-    Bytes(&'a [u8]),
-    Host,
-    Range,
-    Date,
-    Tags,
-    CopySource,
-    CopyRange,
-    Condition(ConditionValue<'a>),
-}
-
-#[derive(Clone, Copy)]
-enum Header<'a> {
-    Fixed(&'a str, SignedValue<'a>),
-    Meta(&'a MetadataPair<'a>),
-}
-
-impl<'a> Objects<'a> {
-    /// Creates a client that signs requests to `bucket` with `credentials`,
-    /// computing SHA-256 and HMAC-SHA256 with `sha256`.
-    pub const fn new(
-        bucket: Bucket<'a>,
-        credentials: Credentials<'a>,
-        sha256: Sha256Provider,
-    ) -> Self {
-        Self {
-            bucket,
-            credentials,
-            sha256,
-            signing_key: None,
-            checksums: [None; KINDS],
+/// Pass the service that answered, as [`Template::service`] returns it, and
+/// the [`GetShape`] of the read. A failure of a GET is
+/// [`GetHeadOutcome::NeedErrorBody`]: read the body and pass it to
+/// [`accept_get_error_body`]. A failure of a HEAD is final, and names no
+/// error.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against `shape`.
+/// A `Content-Range` that is missing, or whose end is before its start, is
+/// [`ResponseFault::Head`], and so is a success without `Content-Length`
+/// from [`Service::Aws`]. A range other than the one the read asked for,
+/// and a ranged read answered with status 200, are [`ResponseFault::Range`].
+pub fn accept_get_head<'h>(
+    service: Service,
+    shape: GetShape,
+    head: ResponseHead<'h>,
+) -> Result<GetHeadOutcome<'h>> {
+    let ranged = shape.range != RequestedRange::Whole;
+    // AWS states the length of every response that it serves.
+    let states_length = service.is_aws();
+    match head.status {
+        206 if !ranged => Err(ResponseFault::Range.into()),
+        200 if ranged => Err(ResponseFault::Range.into()),
+        200 | 206 if states_length && head.content_length.is_none() => {
+            Err(ResponseFault::Head.into())
         }
+        200 | 206 => accept_get_success(shape, head),
+        304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
+        304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
+        412 if shape.condition == ConditionKind::None
+            || shape.condition.fails_as_not_modified() =>
+        {
+            Err(ResponseFault::Status.into())
+        }
+        412 => Ok(GetHeadOutcome::PreconditionFailed),
+        416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
+            object_size: match head.content_range.map(parse_content_range) {
+                Some(Some(ContentRange::Unsatisfied { total })) => total,
+                None => None,
+                Some(_) => return Err(ResponseFault::Head.into()),
+            },
+        }),
+        200..=299 => Err(ResponseFault::Status.into()),
+        // A HEAD response has no body to name the error, so S3's bare 404
+        // for a missing bucket reads as a missing key here.
+        404 if shape.kind == GetKind::Head => Ok(GetHeadOutcome::NotFound { kind: None }),
+        status if shape.kind == GetKind::Head => Ok(GetHeadOutcome::ServiceFailure(Failure::new(
+            status,
+            None,
+            head.request_id,
+        ))),
+        _ => Ok(read_failure_head(&head)),
     }
+}
 
-    /// Returns this client with the signing key for the day of `now`.
-    ///
-    /// A request signed on that day uses the key. A request signed on
-    /// another day computes a key of its own, which takes four more HMACs.
-    /// Call this again when the day changes.
-    pub fn with_signing_key(mut self, now: &Timestamps) -> Self {
-        self.signing_key = Some(self.derive(now));
-        self
+/// Writes the template of reads with `options` from `bucket`, signed with
+/// `credentials`, into `buf`.
+///
+/// Only the key ID and the token of `credentials` are written into the
+/// template. A read can name a version, and never a snapshot.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if the reads cannot be S3 requests: a
+/// ranged HEAD is [`InvalidRequest::RangedHead`], and a snapshot is
+/// [`InvalidRequest::Revision`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_get(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &GetOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_get_options(options, false)?;
+    template::prepare_template(bucket, credentials, &describe_get(options), buf)
+}
+
+// The request of a read with `options`.
+fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
+    let method = match options.kind {
+        GetKind::Bytes => Method::Get,
+        GetKind::Head => Method::Head,
+    };
+    let mut describe = Describe::new(Operation::Get, method, Detail::Get(*options));
+    describe.query = [version_param(options.revision)];
+    describe.condition(options.condition);
+    describe.holes.range = options.ranging == Ranging::Ranged;
+    describe
+}
+
+// The query parameter that names a template's version. S3 keeps no
+// snapshots.
+const fn version_param(revision: RevisionKind) -> Param<'static> {
+    match revision {
+        RevisionKind::Version => Some(("versionId", ParamValue::Hole(Hole::Revision))),
+        RevisionKind::Current | RevisionKind::Snapshot => None,
     }
+}
 
-    /// Returns this client with `provider` registered for the kind that it
-    /// computes.
-    ///
-    /// A write that asks for [`TransactionalChecksum::Compute`] of that kind
-    /// then has the encoder compute the checksum: an MD5, sent as
-    /// `Content-MD5`, or a CRC-64/NVME, sent as `x-amz-checksum-crc64nvme`.
-    pub const fn with_checksum(mut self, provider: ChecksumProvider) -> Self {
-        self.checksums[provider.kind().slot()] = Some(provider);
-        self
+/// Writes the read `item` at `now` from `template` into `buf`, ready to
+/// sign.
+///
+/// `bytes` are the template's own, as [`prepare_get`] wrote them.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `item` is not a read that the template
+/// writes, or not a key that S3 takes: see [Object keys](crate#object-keys).
+/// A template for another operation is [`InvalidRequest::Template`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_get(
+    template: &Template,
+    bytes: &[u8],
+    item: &GetItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let Detail::Get(options) = template.detail else {
+        return Err(InvalidRequest::Template.into());
+    };
+    let key = template.request_key(bytes, item.key)?;
+    validate_get_item(&options, item)?;
+    let values = S3Values(HoleValues {
+        now: Some(now),
+        key,
+        range: Some(item.range).filter(|range| *range != RequestedRange::Whole),
+        condition: item.condition_value,
+        revision: item.revision,
+        ..HoleValues::default()
+    });
+    template::encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_get(&options),
+    )
+}
+
+/// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// Pass the [`Failure`] of that outcome and the body that you read. Pass
+/// an empty body if you could not read one: the outcome is then final with
+/// the error unnamed.
+///
+/// It takes the [`GetShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_get_error_body<'h>(
+    _shape: GetShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> GetHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
+}
+
+/// Whether every write of a template signs the SHA-256 of its content.
+///
+/// The SHA-256 is the only part of a signature that grows with the
+/// content. Leaving the content unsigned is sound over HTTPS: send a
+/// checksum with it, which S3 checks and stores. See the
+/// [module documentation](self).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PayloadSigning {
+    /// Every write sends `UNSIGNED-PAYLOAD`, and nothing reads the content.
+    #[default]
+    Unsigned,
+    /// Every write signs the SHA-256 of its content, which you compute and
+    /// pass to the encoder.
+    Signed,
+}
+
+/// Writes the template of whole-object writes with `options` into `bucket`,
+/// signed with `credentials`, into `buf`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] for a metadata pair, a content property,
+/// a storage class or a tag that S3 would not store as given. For
+/// [`Service::Aws`], a date condition is [`InvalidRequest::Condition`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_put(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &PutOptions<'_>,
+    signing: PayloadSigning,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let service = bucket.service;
+    validate_metadata(options.metadata, service)?;
+    validate_stored_properties(&options.options, service)?;
+    let aws = matches!(service, Service::Aws | Service::AwsDirectory);
+    if aws && options.condition.is_date() {
+        return Err(InvalidRequest::Condition.into());
     }
+    let mut signed = FieldList::new();
+    push_stored_fields(&mut signed, &options.options);
+    let describe = Describe {
+        signed: signed.as_slice(),
+        metadata: options.metadata,
+        ..describe_put(options.condition, options.checksum, signing)
+    };
+    template::prepare_template(bucket, credentials, &describe, buf)
+}
 
-    fn derive(&self, now: &Timestamps) -> SigningKey {
-        SigningKey::derive(
-            &self.credentials,
-            self.bucket.region,
-            self.bucket.signing_service(),
-            now,
-            &self.sha256,
+// The request of a whole-object write of a template with `condition`,
+// `checksum` and `signing`.
+fn describe_put(
+    condition: ConditionKind,
+    checksum: Option<ChecksumKind>,
+    signing: PayloadSigning,
+) -> Describe<'static, 0> {
+    let mut describe = Describe::new(
+        Operation::Put,
+        Method::Put,
+        Detail::Put {
+            condition,
+            checksum,
+            signing,
+        },
+    );
+    describe.condition(condition);
+    describe.holes.content_length = Some(Hole::ContentLength);
+    if let Some(kind) = checksum {
+        describe.checksum(kind, Hole::Checksum);
+    }
+    match signing {
+        PayloadSigning::Unsigned => describe.content_sha256 = UNSIGNED_PAYLOAD.as_bytes(),
+        PayloadSigning::Signed => describe.holes.content_sha256 = Some(Hole::PayloadHash),
+    }
+    describe
+}
+
+/// Writes the whole-object write `item` at `now` from `template` into
+/// `buf`, ready to sign.
+///
+/// `bytes` are the template's own, as [`prepare_put`] wrote them. Pass the
+/// SHA-256 of the content as `content_sha256` for a template that signs it,
+/// and [`None`] for one that does not.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `item` is not a write that the template
+/// writes, or not a key that S3 takes. Content longer than [`MAX_PUT_LEN`]
+/// is [`InvalidRequest::PayloadTooLarge`]. A checksum that is not the base64 of
+/// a digest of the template's kind is [`InvalidRequest::Checksum`]. A SHA-256
+/// that the template does not take, or one missing that it does, is
+/// [`InvalidRequest::Option`]. For [`Service::Aws`], `If-None-Match` with any
+/// value but `*` is [`InvalidRequest::Condition`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_put<'i>(
+    template: &Template,
+    bytes: &[u8],
+    item: &PutItem<'i>,
+    content_sha256: Option<&[u8; 32]>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'i>> {
+    let Detail::Put {
+        condition,
+        checksum,
+        signing,
+    } = template.detail
+    else {
+        return Err(InvalidRequest::Template.into());
+    };
+    let key = template.request_key(bytes, item.key)?;
+    if item.content.len() > MAX_PUT_LEN {
+        return Err(InvalidRequest::PayloadTooLarge.into());
+    }
+    validate_write_condition(condition, item.condition_value, template.service)?;
+    validate_checksum_item(checksum, item.checksum)?;
+    let hex = match (signing, content_sha256) {
+        (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex_digest(digest)),
+        (PayloadSigning::Unsigned, None) => None,
+        _ => return Err(InvalidRequest::Option.into()),
+    };
+    let mut text = [0; BASE64_LEN];
+    let values = S3Values(HoleValues {
+        now: Some(now),
+        key,
+        condition: item.condition_value,
+        content_length: Some(item.content.len()),
+        checksum: checksum_base64(item.checksum, &mut text, true),
+        payload_hash: hex.as_ref(),
+        ..HoleValues::default()
+    });
+    template::encode_template(
+        template,
+        bytes,
+        &values,
+        item.content,
+        buf,
+        &describe_put(condition, checksum, signing),
+    )
+}
+
+/// Reads the response head of a write and reports what S3 did.
+///
+/// Pass the [`PutShape`] of the write. A failure is
+/// [`PutHeadOutcome::NeedErrorBody`]: read the body and pass it to
+/// [`accept_put_error_body`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against `shape`.
+/// A success status other than 200 is [`ResponseFault::Status`], and so is a
+/// 412 to a write that carried no condition.
+pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<PutHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(PutHeadOutcome::Created {
+            meta: ObjectMeta {
+                last_modified: read_text_header(head.last_modified)?,
+                ..head.object_meta()
+            },
+        }),
+        412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
+        412 => Ok(PutHeadOutcome::PreconditionFailed),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(read_failure_head(&head)),
+    }
+}
+
+/// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// Pass the [`Failure`] of that outcome and the body that you read, or an
+/// empty body if you could not read one.
+///
+/// It takes the [`PutShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_put_error_body<'h>(
+    _shape: PutShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> PutHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
+}
+
+/// Writes the template of removals with `options` from `bucket`, signed
+/// with `credentials`, into `buf`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `options` cannot become an S3
+/// request:
+///
+/// - [`InvalidRequest::Option`] for a [`DeleteKind`] other than
+///   [`DeleteKind::Object`]. S3 keeps no snapshots.
+/// - [`InvalidRequest::Revision`] for a snapshot.
+/// - [`InvalidRequest::Condition`] for any condition but
+///   [`ConditionKind::IfMatch`], for [`Service::Aws`] and
+///   [`Service::AwsDirectory`]. AWS removes on `If-Match` only.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_delete(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &DeleteOptions,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if options.kind != DeleteKind::Object {
+        return Err(InvalidRequest::Option.into());
+    }
+    // AWS removes on `If-Match` alone.
+    if bucket.service.is_aws()
+        && !matches!(
+            options.condition,
+            ConditionKind::None | ConditionKind::IfMatch
         )
-    }
-
-    /// Writes the signed request head for `get` into `buf`.
-    ///
-    /// A [`GetKind::Head`] plan becomes a HEAD request. S3 serves every
-    /// [`RequestedRange`], including a [`RequestedRange::Suffix`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `get` cannot become an S3 request.
-    /// A suffix of zero bytes is [`InvalidPlan::Range`]. This method
-    /// validates the plan before it writes any byte.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::get_requirements`](crate::layered::s3::get_requirements)
-    /// first.
-    pub fn encode_get<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        get: &PhysicalGet<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_get(get)?;
-        let method = match get.kind {
-            GetKind::Bytes => Method::Get,
-            GetKind::Head => Method::Head,
-        };
-        let query = [version_parameter(get.revision)];
-        let signed = Signed {
-            method,
-            key: Some(get.key),
-            query: &query,
-            headers: &[],
-            range: get.range,
-            condition: get.condition,
-            condition_value: get.condition_value,
-            metadata: &[],
-            content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: &[],
-            copy: None,
-        };
-        let pass = Pass::of(buf);
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        encoded(head, method, Payload::Slice(&[]))
-    }
-
-    /// Writes the signed request head for `put` into `buf`.
-    ///
-    /// The head states the length of `content`, which stays where you put
-    /// it. `hash` says how the request signs the content.
-    ///
-    /// S3 takes any one checksum in [`WriteOptions::checksum`], and the
-    /// content properties, the tags and the storage class there. For
-    /// [`Service::Aws`], a condition is either `If-Match` with an entity tag
-    /// or `If-None-Match` with `*`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `put` cannot become an S3 request:
-    ///
-    /// - [`InvalidPlan::PayloadTooLarge`] if `content` is longer than
-    ///   [`MAX_PUT_LEN`].
-    /// - [`InvalidPlan::Option`] if the plan declares an MD5, or computes a
-    ///   checksum whose provider the client has not registered.
-    /// - [`InvalidPlan::Checksum`] for a checksum that is not the base64 of
-    ///   a digest of its kind.
-    /// - [`InvalidPlan::ContentProperty`] or [`InvalidPlan::Tag`] for a
-    ///   content property, a storage class or a tag that S3 would not store
-    ///   as given.
-    /// - [`InvalidPlan::Option`] if `hash` or the checksum is to be computed
-    ///   over a [`Payload::Streamed`].
-    /// - [`InvalidPlan::Condition`] if `If-None-Match` carries a value other
-    ///   than `*`, or for a date condition, for [`Service::Aws`].
-    /// - [`InvalidPlan::MetadataName`], [`InvalidPlan::MetadataValue`] or
-    ///   [`InvalidPlan::MetadataDuplicate`] for a pair that S3 would not
-    ///   store as given. [`MetadataPair`] states the rules.
-    /// - [`InvalidPlan::MetadataTooLarge`] if the metadata holds more than
-    ///   [`MAX_METADATA_LEN`] bytes, for [`Service::Aws`].
-    ///
-    /// This method validates the plan before it writes any byte.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::put_requirements`](crate::layered::s3::put_requirements)
-    /// first.
-    pub fn encode_put<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        put: &PhysicalPut<'_>,
-        content: Payload<'r>,
-        hash: PayloadHash,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_put(put, content, hash, &self.checksums, self.bucket.service)?;
-        let pass = Pass::of(buf);
-        let content_sha256 = self.content_sha256(hash, content, pass);
-        let mut checksum = [0; CHECKSUM_TEXT_LEN];
-        let checksum = self.signed_checksum(
-            put.options.checksum,
-            |sum| sum.update(content.bytes().unwrap_or_default()),
-            pass,
-            &mut checksum,
-        );
-        let (stored, count) = stored_headers(&put.options, checksum);
-        let signed = Signed {
-            method: Method::Put,
-            key: Some(put.key),
-            query: &[],
-            headers: &stored[..count],
-            range: RequestedRange::Whole,
-            condition: put.condition,
-            condition_value: put.condition_value,
-            metadata: put.metadata,
-            content_sha256: content_sha256.as_bytes(),
-            tags: put.options.tags,
-            copy: None,
-        };
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        self.push_content(&mut head, content, put.options.checksum);
-        encoded(head, Method::Put, content)
-    }
-
-    /// Writes the signed request head for `delete` into `buf`.
-    ///
-    /// S3 answers the removal of a key that holds no object as it answers any
-    /// other removal. The outcome therefore does not say whether an object
-    /// was there.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `delete` cannot become an S3
-    /// request:
-    ///
-    /// - [`InvalidPlan::Option`] for a [`DeleteKind`] other than
-    ///   [`DeleteKind::Object`]. S3 keeps no snapshots.
-    /// - [`InvalidPlan::Condition`] for any condition but
-    ///   [`ConditionKind::IfMatch`], for [`Service::Aws`]. AWS removes on
-    ///   `If-Match` only.
-    ///
-    /// This method validates the plan before it writes any byte.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::delete_requirements`](crate::layered::s3::delete_requirements)
-    /// first.
-    pub fn encode_delete<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        delete: &PhysicalDelete<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_delete(delete, self.bucket.service)?;
-        let query = [version_parameter(delete.revision)];
-        let signed = Signed {
-            method: Method::Delete,
-            key: Some(delete.key),
-            query: &query,
-            headers: &[],
-            range: RequestedRange::Whole,
-            condition: delete.condition,
-            condition_value: delete.condition_value,
-            metadata: &[],
-            content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: &[],
-            copy: None,
-        };
-        let pass = Pass::of(buf);
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        encoded(head, Method::Delete, Payload::Slice(&[]))
-    }
-
-    /// Writes the signed request head of a CreateSession into `buf`, which
-    /// asks a [directory bucket](self#directory-buckets) for the credentials
-    /// of a session.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] with [`InvalidPlan::Option`] unless the
-    /// bucket is of [`Service::AwsDirectory`].
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::create_session_requirements`](crate::layered::s3::create_session_requirements)
-    /// first.
-    pub fn encode_create_session<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        match self.bucket.service {
-            Service::AwsDirectory => {}
-            Service::Aws | Service::Compatible => return Err(InvalidPlan::Option.into()),
-        }
-        let signed = Signed {
-            method: Method::Get,
-            key: None,
-            query: &[url::literal("session", "")],
-            headers: &[],
-            range: RequestedRange::Whole,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: &[],
-            copy: None,
-        };
-        let pass = Pass::of(buf);
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        encoded(head, Method::Get, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a CreateSession and reports what to do
-    /// next.
-    ///
-    /// A failure is [`SessionHeadOutcome::NeedErrorBody`]: read the body and
-    /// pass it to [`Self::accept_create_session_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 200 is [`ResponseFault::Status`], and a
-    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
-    pub fn accept_create_session_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<SessionHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(SessionHeadOutcome::Session {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(SessionHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a CreateSession, and reads
-    /// the body the same way. A missing bucket is a
-    /// [`SessionHeadOutcome::ServiceFailure`] with
-    /// [`ServiceErrorKind::NoSuchContainer`].
-    pub fn accept_create_session_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> SessionHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
-    }
-
-    /// Reads the credentials out of the response body of a CreateSession.
-    ///
-    /// The body is decoded in place, and the credentials borrow it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a `CreateSessionResult` that holds an access key ID, a secret
-    /// access key and a session token, or if its expiration is not an
-    /// ISO 8601 time in UTC.
-    ///
-    /// Returns [`Error::Service`] if `body` is an error document, which S3
-    /// can send under status 200.
-    pub fn read_session<'b>(&self, body: &'b mut [u8]) -> Result<Session<'b>> {
-        refuse_error_document(body)?;
-        crate::xml::s3::read_session(body)
-    }
-
-    /// Returns a client that signs its requests with the credentials of a
-    /// session, which [`Self::read_session`] read.
-    ///
-    /// The client wipes its copy of the secret with the function of this
-    /// client's credentials. It has no signing key yet: call
-    /// [`Self::with_signing_key`] on it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidCredentials`] if [`Credentials::new`] would
-    /// refuse the key ID or the secret of `session`, or if the token is not
-    /// usable as one HTTP header value.
-    pub fn with_session<'s>(self, session: Session<'s>) -> Result<Objects<'s>>
-    where
-        'a: 's,
     {
-        let credentials =
-            Credentials::new(session.key_id, session.secret, self.credentials.wipe())?
-                .with_s3_session_token(session.token)?;
-        Ok(Objects {
-            credentials,
-            signing_key: None,
-            ..self
-        })
+        return Err(InvalidRequest::Condition.into());
     }
-
-    // Writes the URL and every signed header. A measuring pass writes a signature
-    // of zeros, which is as long as a real one.
-    pub(crate) fn write_head(
-        &self,
-        head: &mut HeadWriter<'_>,
-        signed: &Signed<'_>,
-        pass: Pass,
-        now: &Timestamps,
-    ) {
-        let signature = if pass == Pass::Measure {
-            [b'0'; 64]
-        } else {
-            self.signature(signed, now)
-        };
-        head.url(|out| {
-            out.push(self.bucket.scheme.as_str().as_bytes());
-            out.push(b"://");
-            self.bucket.write_host(out);
-            self.bucket.write_path(out, signed.key);
-            url::write_query_in_url(out, signed.query);
-        });
-        let token = self.token();
-        head.header_with("authorization", |out| {
-            out.push(sigv4::ALGORITHM.as_bytes());
-            out.push(b" Credential=");
-            out.push(self.credentials.key_id().as_bytes());
-            out.push(b"/");
-            self.write_scope(out, now);
-            out.push(b", SignedHeaders=");
-            write_signed_names(out, signed, token);
-            out.push(b", Signature=");
-            out.push(&signature);
-        });
-        for header in ordered_headers(signed, token) {
-            match header {
-                Header::Fixed(_, SignedValue::Host) => {}
-                Header::Fixed(name, value) => head.header_with(name, |out| match value {
-                    SignedValue::Bytes(bytes) => out.push(bytes),
-                    SignedValue::Condition(value) => value.write_to(out),
-                    SignedValue::Range => write_range(out, signed.range),
-                    SignedValue::Date => out.push(now.iso8601().as_bytes()),
-                    SignedValue::Tags => write_tags(out, signed.tags),
-                    SignedValue::CopySource => self.write_copy_source(out, signed),
-                    SignedValue::CopyRange => write_copy_range(out, signed),
-                    SignedValue::Host => {}
-                }),
-                Header::Meta(pair) => head.header_parts(
-                    |out| {
-                        out.push(METADATA_PREFIX.as_bytes());
-                        for byte in pair.name.bytes() {
-                            out.push(&[byte.to_ascii_lowercase()]);
-                        }
-                    },
-                    |out| write_metadata_value(out, pair.value, self.bucket.service),
-                ),
-            }
-        }
+    prepare_object(
+        bucket,
+        credentials,
+        Operation::Delete,
+        options.condition,
+        options.revision,
+        None,
+        &ObjectText::default(),
+        buf,
+    )
+}
+/// Writes the removal `item` at `now` from `template` into `buf`, ready
+/// to sign.
+///
+/// `bytes` are the template's own, as [`prepare_delete`] wrote them. The
+/// request has no content.
+///
+/// S3 answers the removal of a key that holds no object as it answers any
+/// other removal. The outcome therefore does not say whether an object was
+/// there.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `item` is not a removal that the
+/// template writes, or not a key that S3 takes: see
+/// [Object keys](crate#object-keys). A template for another operation is
+/// [`InvalidRequest::Template`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_delete(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    encode_object(template, bytes, Operation::Delete, item, now, buf)
+}
+/// Reads the response head of a removal and reports what S3 did.
+///
+/// Pass the service of the template and the [`DeleteShape`] of the
+/// removal. A failure is [`DeleteHeadOutcome::NeedErrorBody`]: read the
+/// body and pass it to [`accept_delete_error_body`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read against
+/// `shape`. A success status other than 204, and a failed condition on a
+/// removal that carried none, are both [`ResponseFault::Status`]. A
+/// [`Service::Compatible`] client also takes 200 as success.
+pub fn accept_delete_head<'h>(
+    service: Service,
+    shape: DeleteShape,
+    head: ResponseHead<'h>,
+) -> Result<DeleteHeadOutcome<'h>> {
+    // Some services that implement the S3 API answer 200.
+    let accepts_200 = !service.is_aws();
+    match head.status {
+        204 => Ok(DeleteHeadOutcome::Accepted),
+        200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
+        412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
+        412 => Ok(DeleteHeadOutcome::PreconditionFailed),
+        200..=203 | 205..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(read_failure_head(&head)),
     }
+}
 
-    // The value of `x-amz-copy-source`: the source's bucket, or the client's
-    // own, the key encoded as a path, and the version.
-    fn write_copy_source(&self, out: &mut dyn ByteSink, signed: &Signed<'_>) {
-        let Some(copy) = signed.copy else { return };
-        out.push(b"/");
-        out.push(copy.source.container.unwrap_or(self.bucket.name).as_bytes());
-        out.push(b"/");
-        for part in url::encode_object_key(copy.source.key) {
-            out.push(part);
-        }
-        url::write_query_in_url(out, &[version_parameter(copy.source.revision)]);
+/// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// This is [`accept_get_error_body`] for a removal, and reads the body the
+/// same way. A 404 names a missing bucket, or a missing object under an
+/// `If-Match` condition.
+///
+/// It takes the [`DeleteShape`] of the request as Azure's does, so that a host
+/// reads both services alike. S3 reports a failed condition in the head, so
+/// the body never decides it.
+pub fn accept_delete_error_body<'h>(
+    _shape: DeleteShape,
+    failure: Failure<'h>,
+    body: &[u8],
+) -> DeleteHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
+}
+
+/// Writes the template of listings with `options` of `bucket`, signed with
+/// `credentials`, into `buf`.
+///
+/// A listing is a ListObjectsV2, or a ListObjectVersions for
+/// [`ListInclude::VERSIONS`]. Each page is written with its parameters in
+/// the order that SigV4 signs them.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `options` cannot become an S3 request:
+///
+/// - [`InvalidRequest::Delimiter`] for an empty delimiter, and for any but `/`
+///   on a [directory bucket](self#directory-buckets).
+/// - [`InvalidRequest::Option`] for [`ListInclude::METADATA`] and
+///   [`ListInclude::SNAPSHOTS`], which S3 does not list, and for
+///   [`ListInclude::VERSIONS`] on a directory bucket, which keeps no
+///   versions.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_list(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    options: &ListOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    // A general purpose bucket groups keys at any text. A directory bucket
+    // groups them at `/` alone, and answers anything else with 400
+    // `InvalidRequest`.
+    let directory = bucket.service == Service::AwsDirectory;
+    validate_delimiter(options.delimiter, directory)?;
+    let versions = options.include.contains(ListInclude::VERSIONS);
+    if options
+        .include
+        .intersects(ListInclude::METADATA | ListInclude::SNAPSHOTS)
+        || (versions && directory)
+    {
+        return Err(InvalidRequest::Option.into());
     }
+    let detail = Detail::List {
+        include: options.include,
+        delimiter: options.delimiter.is_some(),
+        max_keys: options.max_results.is_some(),
+    };
+    template::prepare_template(
+        bucket,
+        credentials,
+        &describe_list(detail, Some(options)),
+        buf,
+    )
+}
 
-    // The session token and the header that carries it.
-    fn token(&self) -> Option<(&'static str, &'a str)> {
-        self.credentials.token().header()
-    }
-
-    // The text of `x-amz-content-sha256` for `content`. A measuring pass returns no
-    // request, so it does not read the content: the digest is the same
-    // length whatever it is.
-    pub(crate) fn content_sha256(
-        &self,
-        hash: PayloadHash,
-        content: Payload<'_>,
-        pass: Pass,
-    ) -> ContentSha256 {
-        match hash {
-            PayloadHash::Unsigned => ContentSha256::Unsigned,
-            PayloadHash::Sha256(digest) => ContentSha256::Hex(encoding::hex(&digest)),
-            PayloadHash::Compute if pass == Pass::Measure => ContentSha256::Hex([b'0'; 64]),
-            PayloadHash::Compute => ContentSha256::Hex(encoding::hex(
-                &self.sha256.hash(content.bytes().unwrap_or_default()),
-            )),
-        }
-    }
-
-    // The headers that describe the content of a write, after the signed
-    // ones: its length, and its MD5 if the plan carries one. Any other
-    // checksum is an `x-amz-` header, which the request signs.
-    pub(crate) fn push_content(
-        &self,
-        head: &mut HeadWriter<'_>,
-        content: Payload<'_>,
-        checksum: Option<TransactionalChecksum<'_>>,
-    ) {
-        head.header("content-length", U64Decimal::new(content.len()).as_bytes());
-        let md5 = checksum.filter(|checksum| {
-            matches!(
-                checksum,
-                TransactionalChecksum::Md5(_) | TransactionalChecksum::Compute(ChecksumKind::Md5)
-            )
-        });
-        push_checksum(head, md5, &self.checksums, |sum| {
-            sum.update(content.bytes().unwrap_or_default());
-        });
-    }
-
-    // The `x-amz-checksum-` header of a write and its value, written into
-    // `into`, for a checksum other than an MD5. `content` feeds the content
-    // to a computed checksum. A measuring pass computes nothing: the text is as
-    // long whatever it is.
-    pub(crate) fn signed_checksum<'x>(
-        &self,
-        checksum: Option<TransactionalChecksum<'x>>,
-        content: impl FnOnce(&mut Sum),
-        pass: Pass,
-        into: &'x mut [u8; CHECKSUM_TEXT_LEN],
-    ) -> Option<(&'static str, &'x [u8])> {
-        Some(match checksum? {
-            TransactionalChecksum::Crc64(text) => (CRC64_HEADER, text.as_bytes()),
-            TransactionalChecksum::Crc32(text) => ("x-amz-checksum-crc32", text.as_bytes()),
-            TransactionalChecksum::Crc32c(text) => ("x-amz-checksum-crc32c", text.as_bytes()),
-            TransactionalChecksum::Sha1(text) => ("x-amz-checksum-sha1", text.as_bytes()),
-            TransactionalChecksum::Sha256(text) => ("x-amz-checksum-sha256", text.as_bytes()),
-            TransactionalChecksum::Compute(ChecksumKind::Md5) => return None,
-            TransactionalChecksum::Compute(kind) => {
-                let len = kind.digest_len();
-                let mut bytes = [0; 32];
-                if pass == Pass::Write
-                    && let Some(provider) = &self.checksums[kind.slot()]
-                {
-                    let mut sum = provider.start();
-                    content(&mut sum);
-                    bytes[..len].copy_from_slice(sum.finish().as_bytes());
-                }
-                // A digest holds a CRC-64 in the little-endian order that
-                // Azure reads, and S3 reads it big-endian.
-                if kind == ChecksumKind::Crc64 {
-                    bytes[..len].reverse();
-                }
-                let text_len = len.div_ceil(3) * 4;
-                let text = encoding::base64_into(&bytes[..len], &mut into[..text_len]);
-                let name = match kind {
-                    ChecksumKind::Crc64 => CRC64_HEADER,
-                    kind => kind.header(),
-                };
-                (name, text.as_bytes())
-            }
-            _ => return None,
-        })
-    }
-
-    fn write_scope(&self, out: &mut dyn ByteSink, now: &Timestamps) {
-        out.push(now.date().as_bytes());
-        out.push(b"/");
-        out.push(self.bucket.region.as_bytes());
-        out.push(b"/");
-        out.push(self.bucket.signing_service().as_bytes());
-        out.push(b"/aws4_request");
-    }
-
-    // Returns the signature of the request, as lowercase hexadecimal. The
-    // canonical request is hashed as it is written, so it is never held.
-    fn signature(&self, signed: &Signed<'_>, now: &Timestamps) -> [u8; 64] {
-        let mut sum = self.sha256.start();
-        self.write_canonical_request(&mut sum, signed, now);
-        let canonical = sum.finish();
-        let key = match self.signing_key {
-            Some(key) if key.covers(now) => key,
-            _ => self.derive(now),
-        };
-        key.sign(
-            &canonical,
-            self.bucket.region,
-            self.bucket.signing_service(),
-            now,
-            &self.sha256,
+// The request of a page of a listing of `detail`. `options` are the
+// template's, which hold the values of its fixed parameters, and none for a
+// request: whether each is there is the detail's.
+fn describe_list<'p>(detail: Detail, options: Option<&ListOptions<'p>>) -> Describe<'p, 8> {
+    let Detail::List {
+        include,
+        delimiter,
+        max_keys,
+    } = detail
+    else {
+        unreachable!("a listing's template has the detail of a listing");
+    };
+    let fixed = ParamValue::Fixed;
+    let delimiter = delimiter.then(|| {
+        let text = options.and_then(|options| options.delimiter);
+        (
+            "delimiter",
+            fixed(text.map_or(QueryValue::Literal(""), |text| {
+                QueryValue::Encoded(text.as_bytes())
+            })),
         )
-    }
+    });
+    let max_keys = max_keys.then(|| {
+        let count = options.and_then(|options| options.max_results);
+        (
+            "max-keys",
+            fixed(count.map_or(QueryValue::Literal(""), QueryValue::Number)),
+        )
+    });
+    // SigV4 signs the parameters in the order of their names. With
+    // `encoding-type=url`, a key that XML cannot carry still arrives.
+    let encoding = Some(("encoding-type", fixed(QueryValue::Literal("url"))));
+    let mut describe = Describe::new(Operation::List, Method::Get, detail);
+    describe.key = false;
+    describe.query = match include.contains(ListInclude::VERSIONS) {
+        true => [
+            delimiter,
+            encoding,
+            Some(("key-marker", ParamValue::Optional(Hole::Marker))),
+            max_keys,
+            Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+            Some((
+                "version-id-marker",
+                ParamValue::Optional(Hole::VersionMarker),
+            )),
+            Some(("versions", fixed(QueryValue::Literal("")))),
+            None,
+        ],
+        false => [
+            Some(("continuation-token", ParamValue::Optional(Hole::Marker))),
+            delimiter,
+            encoding,
+            include
+                .contains(ListInclude::OWNER)
+                .then_some(("fetch-owner", fixed(QueryValue::Literal("true")))),
+            Some(("list-type", fixed(QueryValue::Literal("2")))),
+            max_keys,
+            Some(("prefix", ParamValue::Optional(Hole::Prefix))),
+            Some(("start-after", ParamValue::Optional(Hole::StartAfter))),
+        ],
+    };
+    describe
+}
 
-    // The canonical request of SigV4.
-    fn write_canonical_request(
-        &self,
-        out: &mut dyn ByteSink,
-        signed: &Signed<'_>,
-        now: &Timestamps,
-    ) {
-        out.push(signed.method.as_str().as_bytes());
-        out.push(b"\n");
-        self.bucket.write_path(out, signed.key);
-        out.push(b"\n");
-        // The URL carries the query in canonical form, so this is the same
-        // text.
-        url::write_query(out, signed.query);
-        out.push(b"\n");
-        let token = self.token();
-        for header in ordered_headers(signed, token) {
-            write_header_name(out, header);
-            out.push(b":");
-            match header {
-                Header::Fixed(_, SignedValue::Bytes(bytes)) => write_canonical_value(out, bytes),
-                Header::Fixed(_, SignedValue::Condition(ConditionValue::ETag(tag))) => {
-                    write_canonical_value(out, tag);
-                }
-                // An HTTP date has no space at either end, nor a run of them.
-                Header::Fixed(_, SignedValue::Condition(value)) => value.write_to(out),
-                Header::Fixed(_, SignedValue::Host) => self.bucket.write_host(out),
-                Header::Fixed(_, SignedValue::Range) => write_range(out, signed.range),
-                Header::Fixed(_, SignedValue::Date) => out.push(now.iso8601().as_bytes()),
-                // The encoded form holds no space, so it is its canonical form.
-                Header::Fixed(_, SignedValue::Tags) => write_tags(out, signed.tags),
-                Header::Fixed(_, SignedValue::CopySource) => self.write_copy_source(out, signed),
-                Header::Fixed(_, SignedValue::CopyRange) => write_copy_range(out, signed),
-                Header::Meta(pair) if encodes(pair.value, self.bucket.service) => {
-                    write_metadata_value(out, pair.value, self.bucket.service)
-                }
-                Header::Meta(pair) => write_canonical_value(out, pair.value.as_bytes()),
-            }
-            out.push(b"\n");
+/// Writes the page `item` at `now` from `template` into `buf`, ready to
+/// sign.
+///
+/// `bytes` are the template's own, as [`prepare_list`] wrote them. Read
+/// the whole response body and pass it to [`fill_listing`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] if `item` cannot become an S3 request:
+///
+/// - [`InvalidRequest::Marker`] for a marker of the other kind than the
+///   listing hands out, or an empty one.
+/// - [`InvalidRequest::Prefix`] for a prefix that does not end in `/`, on a
+///   [directory bucket](self#directory-buckets).
+/// - [`InvalidRequest::Option`] for [`ListItem::start_after`] in a listing of
+///   versions, which starts at its markers alone.
+/// - [`InvalidRequest::Template`] for a template for another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_list(
+    template: &Template,
+    bytes: &[u8],
+    item: &ListItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let detail @ Detail::List { include, .. } = template.detail else {
+        return Err(InvalidRequest::Template.into());
+    };
+    // A listing continues from the kind of marker that its pages hand out,
+    // and S3 hands out no empty one: a version marker names a key.
+    let versions = include.contains(ListInclude::VERSIONS);
+    let (marker, version_marker) = match item.marker {
+        None => (None, None),
+        Some(ListMarker::Text(token)) if !versions && !token.is_empty() => (Some(token), None),
+        Some(ListMarker::Version { key, version })
+            if versions && !key.is_empty() && version.is_none_or(|version| !version.is_empty()) =>
+        {
+            (Some(key), version)
         }
-        out.push(b"\n");
-        write_signed_names(out, signed, token);
-        out.push(b"\n");
-        out.push(signed.content_sha256);
+        Some(_) => return Err(InvalidRequest::Marker.into()),
+    };
+    // A directory bucket lists only at a prefix that ends in `/`.
+    if template.service == Service::AwsDirectory
+        && !item.prefix.is_empty()
+        && !item.prefix.ends_with('/')
+    {
+        return Err(InvalidRequest::Prefix.into());
     }
+    if versions && item.start_after.is_some_and(|key| !key.is_empty()) {
+        return Err(InvalidRequest::Option.into());
+    }
+    let values = S3Values(HoleValues {
+        now: Some(now),
+        prefix: Some(item.prefix),
+        marker,
+        start_after: item.start_after,
+        version_marker,
+        ..HoleValues::default()
+    });
+    template::encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_list(detail, None),
+    )
+}
 
-    /// Reads the response head of a GET or a HEAD and reports what to do
-    /// next.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_get`]. A
-    /// failure of a GET is [`GetHeadOutcome::NeedErrorBody`]: read the body
-    /// and pass it to [`Self::accept_get_error_body`]. A failure of a HEAD is
-    /// final, and names no error.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against
-    /// `shape`. A `Content-Range` that is missing, or whose end is before its
-    /// start, is [`ResponseFault::Head`], and so is a success without
-    /// `Content-Length` to a [`Service::Aws`] client. A range other than the
-    /// one the plan requested, and a ranged plan answered with status 200,
-    /// are [`ResponseFault::Range`].
-    pub fn accept_get_head<'h>(
-        &self,
-        shape: GetShape,
-        head: ResponseHead<'h>,
-    ) -> Result<GetHeadOutcome<'h>> {
-        let ranged = shape.range != RequestedRange::Whole;
-        // AWS states the length of every response that it serves.
-        let states_length = match self.bucket.service {
-            Service::Aws | Service::AwsDirectory => true,
-            Service::Compatible => false,
-        };
-        match head.status {
-            206 if !ranged => Err(ResponseFault::Range.into()),
-            200 if ranged => Err(ResponseFault::Range.into()),
-            200 | 206 if states_length && head.content_length.is_none() => {
-                Err(ResponseFault::Head.into())
-            }
-            200 | 206 => accept_success(shape, head),
-            304 if !shape.condition.fails_as_not_modified() => Err(ResponseFault::Status.into()),
-            304 => Ok(GetHeadOutcome::NotModified { e_tag: head.e_tag }),
-            412 if shape.condition == ConditionKind::None
-                || shape.condition.fails_as_not_modified() =>
-            {
-                Err(ResponseFault::Status.into())
-            }
-            412 => Ok(GetHeadOutcome::PreconditionFailed),
-            416 => Ok(GetHeadOutcome::RangeNotSatisfiable {
-                object_size: match head.content_range.map(parse_content_range) {
-                    Some(Some(ContentRange::Unsatisfied { total })) => total,
-                    None => None,
-                    Some(_) => return Err(ResponseFault::Head.into()),
-                },
-            }),
-            200..=299 => Err(ResponseFault::Status.into()),
-            // A HEAD response has no body to name the error, so S3's bare 404
-            // for a missing bucket reads as a missing key here.
-            404 if shape.kind == GetKind::Head => Ok(GetHeadOutcome::NotFound { kind: None }),
-            status if shape.kind == GetKind::Head => Ok(GetHeadOutcome::ServiceFailure(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(GetHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-        }
+/// Reads the response head of a listing and reports what S3 did.
+///
+/// S3 often sends a page without `Content-Length`, so cap what you read.
+/// A failure is [`ListHeadOutcome::NeedErrorBody`]: read the body and
+/// pass it to [`accept_list_error_body`].
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success
+/// status other than 200 is [`ResponseFault::Status`], and a
+/// `Content-Length` that is not a number is [`ResponseFault::Head`].
+pub fn accept_list_head<'h>(head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(ListHeadOutcome::Page {
+            expected_len: read_decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(read_failure_head(&head)),
     }
+}
 
-    /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// Pass the `shape` that you passed to [`Self::accept_get_head`], the
-    /// [`Failure`] of that outcome, and the body that you
-    /// read. Pass an empty body if you could not read one: the outcome is
-    /// then final with the error unnamed.
-    ///
-    /// S3 reports a failed condition in the head, so this method reads no
-    /// part of `shape`.
-    pub fn accept_get_error_body<'h>(
-        &self,
-        shape: GetShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> GetHeadOutcome<'h> {
-        let _ = shape;
-        finish_with_body(failure, body_kind(body))
-    }
+/// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
+///
+/// This is [`accept_get_error_body`] for a listing, and reads the
+/// body the same way. A missing bucket is a
+/// [`ListHeadOutcome::ServiceFailure`] with
+/// [`ServiceErrorKind::NoSuchContainer`].
+pub fn accept_list_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> ListHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
+}
 
-    /// Reads the response head of a write and reports what S3 did.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_put`]. A
-    /// failure is [`PutHeadOutcome::NeedErrorBody`]: read the body and pass
-    /// it to [`Self::accept_put_error_body`].
-    ///
-    /// A conditional write that another conditional write overtook is
-    /// refused with 409 `ConditionalRequestConflict`, which reaches you as a
-    /// service failure. Retry it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against
-    /// `shape`. A success status that a write never returns, and a failed
-    /// condition on a write that carried none, are both
-    /// [`ResponseFault::Status`].
-    pub fn accept_put_head<'h>(
-        &self,
-        shape: PutShape,
-        head: ResponseHead<'h>,
-    ) -> Result<PutHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(PutHeadOutcome::Created {
-                meta: ObjectMeta {
-                    last_modified: text_header(head.last_modified)?,
-                    ..meta_of(head)
-                },
-            }),
-            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
-            412 => Ok(PutHeadOutcome::PreconditionFailed),
-            201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(PutHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-        }
-    }
+/// Reads a page out of the response body of a listing.
+///
+/// Reading is destructive, and your array must hold the whole page. An
+/// array of 1,000 entries holds any page from AWS.
+///
+/// AWS writes all objects of a page before its groups of keys. An
+/// object's entity tag keeps its quotes. Read its date with
+/// [`iso8601_ms`](crate::iso8601_ms).
+///
+/// # Errors
+///
+/// Returns [`Error::Capacity`] if the page holds more entries than the
+/// array, with `required` set to the number it holds. Ask the service for
+/// the page again, with a larger array.
+///
+/// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
+/// not a ListObjectsV2 page, or if the page contradicts itself. A page
+/// that does not say it URL-encoded its keys is refused if decoding
+/// changes a key.
+///
+/// Returns [`Error::Service`] if `body` is an error document, which S3
+/// can send under status 200.
+pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
+    body: &'b mut [u8],
+    into: &mut [E],
+) -> Result<Listing<'b>> {
+    refuse_error_document(body)?;
+    crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
+}
 
-    /// Finishes a [`PutHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a write, and reads the
-    /// body the same way. A missing bucket is a
-    /// [`PutHeadOutcome::ServiceFailure`] with
-    /// [`ServiceErrorKind::NoSuchContainer`].
-    pub fn accept_put_error_body<'h>(
-        &self,
-        shape: PutShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> PutHeadOutcome<'h> {
-        let _ = shape;
-        finish_with_body(failure, body_kind(body))
-    }
+/// Reads a page the way [`fill_listing`] does, and hands you the
+/// values of the properties in `wanted` as it goes.
+///
+/// What `build` returns for each entry is written into your array.
+///
+/// ```
+/// # use borink_object_storage_proto::s3::{self, ObjectProperty, PropertySet};
+/// # use borink_object_storage_proto::{ListEntry, Result};
+/// # fn read(body: &mut [u8]) -> Result<()> {
+/// let wanted = PropertySet::of(&[ObjectProperty::StorageClass]);
+/// let mut entries = [(ListEntry::default(), None); 1000];
+/// s3::fill_listing_with(body, &mut entries, wanted, |entry, values| {
+///     (entry, values.get(ObjectProperty::StorageClass))
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// As [`fill_listing`].
+pub fn fill_listing_with<'b, E>(
+    body: &'b mut [u8],
+    into: &mut [E],
+    wanted: PropertySet,
+    build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
+) -> Result<Listing<'b>> {
+    refuse_error_document(body)?;
+    crate::xml::s3::fill_listing(body, into, wanted, build)
+}
 
-    /// Reads the response head of a removal and reports what S3 did.
-    ///
-    /// Pass the same `shape` that you passed to [`Self::encode_delete`]. A
-    /// failure is [`DeleteHeadOutcome::NeedErrorBody`]: read the body and
-    /// pass it to [`Self::accept_delete_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read against
-    /// `shape`. A success status other than 204, and a failed condition on a
-    /// removal that carried none, are both [`ResponseFault::Status`]. A
-    /// [`Service::Compatible`] client also takes 200 as success.
-    pub fn accept_delete_head<'h>(
-        &self,
-        shape: DeleteShape,
-        head: ResponseHead<'h>,
-    ) -> Result<DeleteHeadOutcome<'h>> {
-        // Some services that implement the S3 API answer 200.
-        let accepts_200 = match self.bucket.service {
-            Service::Compatible => true,
-            Service::Aws | Service::AwsDirectory => false,
-        };
-        match head.status {
-            204 => Ok(DeleteHeadOutcome::Accepted),
-            200 if accepts_200 => Ok(DeleteHeadOutcome::Accepted),
-            412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
-            412 => Ok(DeleteHeadOutcome::PreconditionFailed),
-            200..=203 | 205..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(DeleteHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`DeleteHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a removal, and reads the
-    /// body the same way. A 404 names a missing bucket, or a missing object
-    /// under an `If-Match` condition.
-    pub fn accept_delete_error_body<'h>(
-        &self,
-        shape: DeleteShape,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> DeleteHeadOutcome<'h> {
-        let _ = shape;
-        finish_with_body(failure, body_kind(body))
-    }
-
-    /// Writes the signed request head for one page of `list` into `buf`.
-    ///
-    /// The request is a ListObjectsV2. Read the whole response body and pass
-    /// it to [`Self::fill_listing`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] if `list` cannot become an S3 request:
-    ///
-    /// - [`InvalidPlan::Marker`] for an empty marker.
-    /// - [`InvalidPlan::Option`] for [`ListInclude::METADATA`], which S3 does
-    ///   not list.
-    ///
-    /// This method validates the plan before it writes any byte.
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots. Grow both buffers and retry, or
-    /// call [`layered::s3::list_requirements`](crate::layered::s3::list_requirements)
-    /// first.
-    pub fn encode_list<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        list: &PhysicalList<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_list(list, self.bucket.service)?;
-        // An empty prefix is no parameter at all.
-        let prefix = Some(list.prefix).filter(|prefix| !prefix.is_empty());
-        // Validation matched the kind of marker to the listing.
-        let (key_marker, version_marker) = match list.marker {
-            Some(ListMarker::Version { key, version }) => (Some(key), version),
-            _ => (None, None),
-        };
-        let token = list.marker.and_then(ListMarker::text);
-        // SigV4 signs the parameters in the order of their names. With
-        // `encoding-type=url`, a key that XML cannot carry still arrives.
-        let versions = [
-            url::encoded("delimiter", list.delimiter),
-            url::literal("encoding-type", "url"),
-            url::encoded("key-marker", key_marker),
-            url::number("max-keys", list.max_results),
-            url::encoded("prefix", prefix),
-            url::encoded("version-id-marker", version_marker),
-            url::literal("versions", ""),
-        ];
-        let objects = [
-            url::encoded("continuation-token", token),
-            url::encoded("delimiter", list.delimiter),
-            url::literal("encoding-type", "url"),
-            url::literal("fetch-owner", "true")
-                .filter(|_| list.include.contains(ListInclude::OWNER)),
-            url::literal("list-type", "2"),
-            url::number("max-keys", list.max_results),
-            url::encoded("prefix", prefix),
-            url::encoded(
-                "start-after",
-                list.start_after.filter(|key| !key.is_empty()),
-            ),
-        ];
-        let query: &[Parameter<'_>] = if list.include.contains(ListInclude::VERSIONS) {
-            &versions
-        } else {
-            &objects
-        };
-        let signed = Signed {
-            method: Method::Get,
-            key: None,
-            query,
-            headers: &[],
-            range: RequestedRange::Whole,
-            condition: ConditionKind::None,
-            condition_value: None,
-            metadata: &[],
-            content_sha256: EMPTY_SHA256.as_bytes(),
-            tags: &[],
-            copy: None,
-        };
-        let pass = Pass::of(buf);
-        let mut head = HeadWriter::new(buf, headers);
-        self.write_head(&mut head, &signed, pass, now);
-        encoded(head, Method::Get, Payload::Slice(&[]))
-    }
-
-    /// Reads the response head of a listing and reports what S3 did.
-    ///
-    /// S3 often sends a page without `Content-Length`, so cap what you read.
-    /// A failure is [`ListHeadOutcome::NeedErrorBody`]: read the body and
-    /// pass it to [`Self::accept_list_error_body`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. A success
-    /// status other than 200 is [`ResponseFault::Status`], and a
-    /// `Content-Length` that is not a number is [`ResponseFault::Head`].
-    pub fn accept_list_head<'h>(&self, head: ResponseHead<'h>) -> Result<ListHeadOutcome<'h>> {
-        match head.status {
-            200 => Ok(ListHeadOutcome::Page {
-                expected_len: decimal_header(head.content_length)?,
-            }),
-            201..=299 => Err(ResponseFault::Status.into()),
-            status => Ok(ListHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-        }
-    }
-
-    /// Finishes a [`ListHeadOutcome::NeedErrorBody`] with the response body.
-    ///
-    /// This is [`Self::accept_get_error_body`] for a listing, and reads the
-    /// body the same way. A missing bucket is a
-    /// [`ListHeadOutcome::ServiceFailure`] with
-    /// [`ServiceErrorKind::NoSuchContainer`].
-    pub fn accept_list_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> ListHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
-    }
-
-    /// Reads a page out of the response body of a listing.
-    ///
-    /// Reading is destructive, and your array must hold the whole page. An
-    /// array of 1,000 entries holds any page from AWS.
-    ///
-    /// AWS writes all objects of a page before its groups of keys. An
-    /// object's entity tag keeps its quotes. Read its date with
-    /// [`layered::iso8601_ms`](crate::layered::iso8601_ms).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Capacity`] if the page holds more entries than the
-    /// array, with `required` set to the number it holds. Ask the service for
-    /// the page again, with a larger array.
-    ///
-    /// Returns [`Error::Response`] with [`ResponseFault::Body`] if `body` is
-    /// not a ListObjectsV2 page, or if the page contradicts itself. A page
-    /// that does not say it URL-encoded its keys is refused if decoding
-    /// changes a key.
-    ///
-    /// Returns [`Error::Service`] if `body` is an error document, which S3
-    /// can send under status 200.
-    pub fn fill_listing<'b, E: From<ListEntry<'b>>>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [E],
-    ) -> Result<Listing<'b>> {
-        refuse_error_document(body)?;
-        crate::xml::s3::fill_listing(body, into, PropertySet::default(), |entry, _| entry.into())
-    }
-
-    /// Reads a page the way [`Self::fill_listing`] does, and hands you the
-    /// values of the properties in `wanted` as it goes.
-    ///
-    /// What `build` returns for each entry is written into your array.
-    ///
-    /// ```
-    /// # use borink_object_storage_proto::s3::{Objects, ObjectProperty, PropertySet};
-    /// # use borink_object_storage_proto::{ListEntry, Result};
-    /// # fn read(objects: &Objects<'_>, body: &mut [u8]) -> Result<()> {
-    /// let wanted = PropertySet::of(&[ObjectProperty::StorageClass]);
-    /// let mut entries = [(ListEntry::default(), None); 1000];
-    /// objects.fill_listing_with(body, &mut entries, wanted, |entry, values| {
-    ///     (entry, values.get(ObjectProperty::StorageClass))
-    /// })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::fill_listing`].
-    pub fn fill_listing_with<'b, E>(
-        &self,
-        body: &'b mut [u8],
-        into: &mut [E],
-        wanted: PropertySet,
-        build: impl FnMut(ListEntry<'b>, PropertyValues<'_, 'b>) -> E,
-    ) -> Result<Listing<'b>> {
-        refuse_error_document(body)?;
-        crate::xml::s3::fill_listing(body, into, wanted, build)
-    }
+// Reads a head that reports a failure. S3 names its error in the body
+// alone, so every failure needs the body.
+fn read_failure_head<'h, O: FailureOutcome<'h>>(head: &ResponseHead<'h>) -> O {
+    O::need_error_body(Failure::new(head.status, None, head.request_id))
 }
 
 /// Returns the error code that an S3 error body names.
 ///
 /// Unknown codes are returned unchanged.
 pub fn error_code(body: &[u8]) -> Option<&str> {
-    crate::xml::error_code(body)
+    read_error_code(body)
 }
 
 /// Classifies the S3 error that `body` names. Set `truncated` if a read
 /// limit stopped the body early.
 pub fn classify_error(body: &[u8], truncated: bool) -> Classification {
-    match body_kind(body) {
+    match kind_in_body(body) {
         Some(kind) => Classification::Classified(kind),
         None if truncated => Classification::Incomplete,
         None => Classification::Unknown,
     }
 }
 
-pub(crate) fn body_kind(body: &[u8]) -> Option<ServiceErrorKind> {
-    crate::xml::error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
+fn kind_in_body(body: &[u8]) -> Option<ServiceErrorKind> {
+    read_error_code(body).and_then(|code| kind_for_code(code.as_bytes()))
 }
 
 // Returns whether `body` is an error document rather than the result of a
 // request. S3 can send one under status 200.
-pub(crate) fn is_error_document(body: &[u8]) -> bool {
-    crate::xml::root_is(body, b"Error")
+fn is_error_document(body: &[u8]) -> bool {
+    root_is(body, b"Error")
 }
 
 // Returns the error that `body` names if it is an error document, so that a
 // method that reads a result does not report it as a malformed result.
-pub(crate) fn refuse_error_document(body: &[u8]) -> Result<()> {
+fn refuse_error_document(body: &[u8]) -> Result<()> {
     if is_error_document(body) {
-        return Err(Error::Service(body_kind(body)));
+        return Err(Error::Service(kind_in_body(body)));
     }
     Ok(())
 }
@@ -2122,114 +1789,6 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     })
 }
 
-// Every signed header in the order of its name: the fixed set sorted, merged
-// with the metadata sorted by lowercase name.
-fn ordered_headers<'s>(
-    signed: &'s Signed<'s>,
-    token: Option<(&'static str, &'s str)>,
-) -> impl Iterator<Item = Header<'s>> {
-    let mut fixed = [Header::Fixed("", SignedValue::Host); 24];
-    let mut count = 0;
-    let entries = [
-        Some(("host", SignedValue::Host)),
-        Some((
-            "x-amz-content-sha256",
-            SignedValue::Bytes(signed.content_sha256),
-        )),
-        Some(("x-amz-date", SignedValue::Date)),
-        token.map(|(name, token)| (name, SignedValue::Bytes(token.as_bytes()))),
-        (signed.range != RequestedRange::Whole).then_some(("range", SignedValue::Range)),
-        condition_header(signed.condition)
-            .zip(signed.condition_value)
-            .map(|(name, value)| (name, SignedValue::Condition(value))),
-        (!signed.tags.is_empty()).then_some(("x-amz-tagging", SignedValue::Tags)),
-        signed
-            .copy
-            .map(|_| ("x-amz-copy-source", SignedValue::CopySource)),
-        signed
-            .copy
-            .filter(|copy| copy.range != RequestedRange::Whole)
-            .map(|_| ("x-amz-copy-source-range", SignedValue::CopyRange)),
-        signed.copy.and_then(|copy| {
-            let name = match copy.source.condition {
-                ConditionKind::None => return None,
-                ConditionKind::IfMatch => "x-amz-copy-source-if-match",
-                ConditionKind::IfNoneMatch => "x-amz-copy-source-if-none-match",
-                ConditionKind::IfModifiedSince => "x-amz-copy-source-if-modified-since",
-                ConditionKind::IfUnmodifiedSince => "x-amz-copy-source-if-unmodified-since",
-            };
-            Some((name, SignedValue::Condition(copy.source.condition_value?)))
-        }),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(
-        signed
-            .headers
-            .iter()
-            .map(|(name, value)| (*name, SignedValue::Bytes(value))),
-    );
-    for (name, value) in entries {
-        let mut at = count;
-        while at > 0 && matches!(fixed[at - 1], Header::Fixed(previous, _) if previous > name) {
-            fixed[at] = fixed[at - 1];
-            at -= 1;
-        }
-        fixed[at] = Header::Fixed(name, value);
-        count += 1;
-    }
-    let mut index = 0;
-    let mut metadata = sorted_metadata(signed.metadata).peekable();
-    core::iter::from_fn(move || {
-        let next = (index < count).then(|| fixed[index]);
-        match (next, metadata.peek()) {
-            (None, None) => None,
-            (Some(header), None) => {
-                index += 1;
-                Some(header)
-            }
-            (Some(Header::Fixed(name, value)), Some(pair))
-                if name.bytes().cmp(metadata_header_name(pair)) == Ordering::Less =>
-            {
-                index += 1;
-                Some(Header::Fixed(name, value))
-            }
-            _ => metadata.next().map(Header::Meta),
-        }
-    })
-}
-
-fn metadata_header_name<'p>(pair: &'p MetadataPair<'p>) -> impl Iterator<Item = u8> + 'p {
-    METADATA_PREFIX
-        .bytes()
-        .chain(pair.name.bytes().map(|byte| byte.to_ascii_lowercase()))
-}
-
-fn write_header_name(out: &mut dyn ByteSink, header: Header<'_>) {
-    match header {
-        Header::Fixed(name, _) => out.push(name.as_bytes()),
-        Header::Meta(pair) => {
-            for byte in metadata_header_name(pair) {
-                out.push(&[byte]);
-            }
-        }
-    }
-}
-
-// The names of the signed headers, in order, separated by `;`.
-fn write_signed_names(
-    out: &mut dyn ByteSink,
-    signed: &Signed<'_>,
-    token: Option<(&'static str, &str)>,
-) {
-    for (index, header) in ordered_headers(signed, token).enumerate() {
-        if index != 0 {
-            out.push(b";");
-        }
-        write_header_name(out, header);
-    }
-}
-
 // SigV4 signs a header value without the spaces at either end, and with each
 // run of spaces inside it as one space. A value sent as it is holds no other
 // whitespace.
@@ -2251,7 +1810,7 @@ fn write_canonical_value(out: &mut dyn ByteSink, value: &[u8]) {
     out.push(&value[start..]);
 }
 
-// The pairs in the order of their lowercase names. A plan carries a handful
+// The pairs in the order of their lowercase names. A request carries a handful
 // of pairs, and validation refused two with the same name, so each step
 // finds the least name after the previous one.
 fn sorted_metadata<'m>(
@@ -2325,187 +1884,59 @@ fn looks_like_ipv4(name: &str) -> bool {
         })
 }
 
-pub(crate) fn validate_key(key: &str) -> Result<()> {
+fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
-        return Err(InvalidPlan::EmptyKey.into());
+        return Err(InvalidRequest::EmptyKey.into());
     }
     if key.len() > MAX_KEY_LEN {
-        return Err(InvalidPlan::KeyTooLong.into());
+        return Err(InvalidRequest::KeyTooLong.into());
     }
     // A host resolves `.` and `..` segments out of the URL before it sends
     // it, which would address another object.
-    if key.split('/').any(|segment| matches!(segment, "." | "..")) {
-        return Err(InvalidPlan::KeyWouldBeNormalized.into());
+    if has_dot_segment(key.as_bytes()) {
+        return Err(InvalidRequest::KeyWouldBeNormalized.into());
     }
     Ok(())
 }
 
-fn validate_get(get: &PhysicalGet<'_>) -> Result<()> {
-    validate_key(get.key)?;
-    match get.range {
-        RequestedRange::Bounded { start, end } if start >= end => {
-            return Err(InvalidPlan::Range.into());
-        }
-        RequestedRange::Suffix(0) => return Err(InvalidPlan::Range.into()),
-        RequestedRange::Whole => {}
-        _ if get.kind == GetKind::Head => return Err(InvalidPlan::RangedHead.into()),
-        _ => {}
-    }
-    validate_revision(get.revision, false)?;
-    validate_condition(get.condition, get.condition_value)
+// Whether `key` has a segment, between slashes or at either end, that is
+// `.` or `..`. One pass, looking only at a dot that starts a segment.
+fn has_dot_segment(key: &[u8]) -> bool {
+    let ends = |at: usize| key.get(at).is_none_or(|&byte| byte == b'/');
+    key.iter().enumerate().any(|(at, &byte)| {
+        byte == b'.'
+            && (at == 0 || key[at - 1] == b'/')
+            && (ends(at + 1) || (key[at + 1] == b'.' && ends(at + 2)))
+    })
 }
 
-// The value of `x-amz-copy-source-range`, which names its last byte as
-// `Range` does.
-fn write_copy_range(out: &mut dyn ByteSink, signed: &Signed<'_>) {
-    if let Some(copy) = signed.copy {
-        write_range(out, copy.range);
-    }
-}
-
-// The query parameter that names a version, or none for the object as it is
-// now. Validation refused a snapshot.
-pub(crate) fn version_parameter(revision: Option<Revision<'_>>) -> Parameter<'_> {
-    match revision? {
-        Revision::Version(id) => url::encoded("versionId", id),
-        Revision::Snapshot(_) => None,
-    }
-}
-
-fn validate_put(
-    put: &PhysicalPut<'_>,
-    content: Payload<'_>,
-    hash: PayloadHash,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-    service: Service,
-) -> Result<()> {
-    validate_key(put.key)?;
-    if content.len() > MAX_PUT_LEN {
-        return Err(InvalidPlan::PayloadTooLarge.into());
-    }
-    validate_metadata(put.metadata, service)?;
-    validate_content(
-        &put.options,
-        content,
-        hash,
-        checksums,
-        Stores::Object(service),
-    )?;
-    validate_write_condition(put.condition, put.condition_value, service)
-}
-
-// The writes that take options. A write of a whole object stores the
-// content properties, the tags and the storage class of the object, under
-// the rules of a service, and takes any checksum. A part, staged or
-// committed, takes none of those, and an MD5 alone.
-#[derive(Clone, Copy)]
-pub(crate) enum Stores {
-    Object(Service),
-    Part,
-}
-
-// Checks what a write sends beside its content. S3 stores no declared MD5.
-// A checksum or a SHA-256 that the encoder computes needs the bytes.
-pub(crate) fn validate_content(
-    options: &WriteOptions<'_>,
-    content: Payload<'_>,
-    hash: PayloadHash,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-    stores: Stores,
-) -> Result<()> {
-    let has_bytes = content.bytes().is_some();
-    if options.declared_md5.is_some() || (hash == PayloadHash::Compute && !has_bytes) {
-        return Err(InvalidPlan::Option.into());
-    }
-    let md5_or_none = matches!(
-        options.checksum,
-        None | Some(
-            TransactionalChecksum::Md5(_) | TransactionalChecksum::Compute(ChecksumKind::Md5)
-        )
-    );
-    if matches!(stores, Stores::Part) && !md5_or_none {
-        return Err(InvalidPlan::Option.into());
-    }
-    validate_s3_checksum(options.checksum, has_bytes, checksums)?;
-    match stores {
-        Stores::Object(service) => {
-            // A general purpose bucket returns header bytes as it got
-            // them. A directory bucket refuses a byte outside ASCII with
-            // 400 InvalidRequest.
-            let utf8: &[&str] = match service {
-                Service::Aws | Service::Compatible => &["content-disposition", "content-type"],
-                Service::AwsDirectory => &[],
-            };
-            validate_properties(options, utf8)?;
-            let limits = match service {
-                Service::Aws | Service::AwsDirectory => Some((10, 128, 256)),
-                Service::Compatible => None,
-            };
-            validate_tags(options.tags, s3_tag_char, limits)
-        }
-        Stores::Part
-            if !options.properties.is_empty()
-                || !options.tags.is_empty()
-                || options.storage_class.is_some() =>
-        {
-            Err(InvalidPlan::Option.into())
-        }
-        Stores::Part => Ok(()),
-    }
-}
-
-// Checks a checksum of S3's: one that a write signs as text, or one that the
-// encoder computes, an MD5 or a CRC-64/NVME.
-pub(crate) fn validate_s3_checksum(
-    checksum: Option<TransactionalChecksum<'_>>,
-    has_bytes: bool,
-    checksums: &[Option<ChecksumProvider>; KINDS],
-) -> Result<()> {
-    let len = match checksum {
-        Some(TransactionalChecksum::Crc32(text) | TransactionalChecksum::Crc32c(text)) => (text, 4),
-        Some(TransactionalChecksum::Sha1(text)) => (text, 20),
-        Some(TransactionalChecksum::Sha256(text)) => (text, 32),
-        _ => return validate_checksum(checksum, has_bytes, checksums),
+// Checks the content properties, the storage class and the tags that a write
+// stores with the object.
+fn validate_stored_properties(options: &WriteOptions<'_>, service: Service) -> Result<()> {
+    // A general purpose bucket returns header bytes as it got them. A
+    // directory bucket refuses a byte outside ASCII with 400 InvalidRequest.
+    let utf8: &[&str] = match service {
+        Service::Aws | Service::Compatible => &["content-disposition", "content-type"],
+        Service::AwsDirectory => &[],
     };
-    check_base64_len(len.0, len.1)
+    validate_properties(options, utf8)?;
+    let limits = match service {
+        Service::Aws | Service::AwsDirectory => Some((10, 128, 256)),
+        Service::Compatible => None,
+    };
+    validate_tags(options.tags, s3_tag_char, limits)
 }
 
 // The characters that S3 takes in the key and the value of a tag.
-pub(crate) fn s3_tag_char(character: char) -> bool {
+fn s3_tag_char(character: char) -> bool {
     character.is_alphanumeric() || " +-=._:/@".contains(character)
 }
 
 // The header that carries a CRC-64/NVME on S3.
 const CRC64_HEADER: &str = "x-amz-checksum-crc64nvme";
 
-// The longest text of a checksum that a write signs: the base64 of a
-// SHA-256.
-pub(crate) const CHECKSUM_TEXT_LEN: usize = 44;
-
-// The headers that a write signs beside the client's own: the content
-// properties, the storage class and a checksum other than an MD5.
-pub(crate) fn stored_headers<'a>(
-    options: &WriteOptions<'a>,
-    checksum: Option<(&'static str, &'a [u8])>,
-) -> ([(&'static str, &'a [u8]); 7], usize) {
-    let mut headers = [("", &[][..]); 7];
-    let mut count = 0;
-    let properties = options
-        .properties
-        .iter()
-        .map(|(name, value)| (name, value.as_bytes()));
-    let class = options
-        .storage_class
-        .map(|class| ("x-amz-storage-class", class.as_bytes()));
-    for header in properties.chain(class).chain(checksum) {
-        headers[count] = header;
-        count += 1;
-    }
-    (headers, count)
-}
-
 // Checks the condition of a write: a whole object, or a commit of parts.
-pub(crate) fn validate_write_condition(
+fn validate_write_condition(
     condition: ConditionKind,
     value: Option<ConditionValue<'_>>,
     service: Service,
@@ -2513,84 +1944,13 @@ pub(crate) fn validate_write_condition(
     validate_condition(condition, value)?;
     // AWS writes on `If-None-Match` only if no object holds the key, and takes
     // no value but `*`. It takes no date condition on a write.
-    let aws = match service {
-        Service::Aws | Service::AwsDirectory => true,
-        Service::Compatible => false,
-    };
+    let aws = service.is_aws();
     if aws
         && (condition.is_date()
             || (condition == ConditionKind::IfNoneMatch
                 && value != Some(ConditionValue::ETag(b"*"))))
     {
-        return Err(InvalidPlan::Condition.into());
-    }
-    Ok(())
-}
-
-fn validate_delete(delete: &PhysicalDelete<'_>, service: Service) -> Result<()> {
-    validate_key(delete.key)?;
-    if delete.kind != DeleteKind::Object {
-        return Err(InvalidPlan::Option.into());
-    }
-    validate_revision(delete.revision, false)?;
-    // AWS removes on `If-Match` alone.
-    let if_match_only = match service {
-        Service::Aws | Service::AwsDirectory => true,
-        Service::Compatible => false,
-    };
-    if if_match_only
-        && !matches!(
-            delete.condition,
-            ConditionKind::None | ConditionKind::IfMatch
-        )
-    {
-        return Err(InvalidPlan::Condition.into());
-    }
-    validate_condition(delete.condition, delete.condition_value)
-}
-
-// A prefix is not a key, so `validate_key` does not apply. S3 takes any
-// number of entries, zero included.
-fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
-    // A listing continues from the kind of marker that its pages hand out,
-    // and S3 hands out no empty one: a version marker names a key.
-    let versions = list.include.contains(ListInclude::VERSIONS);
-    match list.marker {
-        None => {}
-        Some(ListMarker::Text(token)) if !versions && !token.is_empty() => {}
-        Some(ListMarker::Version { key, version })
-            if versions && !key.is_empty() && version.is_none_or(|version| !version.is_empty()) => {
-        }
-        Some(_) => return Err(InvalidPlan::Marker.into()),
-    }
-    // A general purpose bucket groups keys at any text. A directory bucket
-    // groups them at `/` alone, lists only at a prefix that ends in it, and
-    // answers anything else with 400 `InvalidRequest`.
-    let slash_only = match service {
-        Service::AwsDirectory => true,
-        Service::Aws | Service::Compatible => false,
-    };
-    if let Some(delimiter) = list.delimiter
-        && (delimiter.is_empty() || (slash_only && delimiter != "/"))
-    {
-        return Err(InvalidPlan::Delimiter.into());
-    }
-    if slash_only && !list.prefix.is_empty() && !list.prefix.ends_with('/') {
-        return Err(InvalidPlan::Prefix.into());
-    }
-    // S3 keeps no snapshots, and lists no metadata.
-    if list
-        .include
-        .intersects(ListInclude::METADATA | ListInclude::SNAPSHOTS)
-    {
-        return Err(InvalidPlan::Option.into());
-    }
-    if list.include.contains(ListInclude::VERSIONS) {
-        // A directory bucket keeps no versions, and a ListObjectVersions
-        // starts at its markers alone.
-        if slash_only || list.start_after.is_some_and(|key| !key.is_empty()) {
-            return Err(InvalidPlan::Option.into());
-        }
+        return Err(InvalidRequest::Condition.into());
     }
     Ok(())
 }
@@ -2598,10 +1958,10 @@ fn validate_list(list: &PhysicalList<'_>, service: Service) -> Result<()> {
 // S3 sends a metadata pair as an `x-amz-meta-` header, so the name must be a
 // token. `write_metadata_value` writes the value, and S3 matches a name
 // without case.
-pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
+fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service) -> Result<()> {
     for (index, pair) in metadata.iter().enumerate() {
-        if pair.name.is_empty() || !pair.name.bytes().all(token_byte) {
-            return Err(InvalidPlan::MetadataName.into());
+        if pair.name.is_empty() || !pair.name.bytes().all(is_token_byte) {
+            return Err(InvalidRequest::MetadataName.into());
         }
         // An empty value is a pair with no text, which S3 stores. A value is
         // refused if a read would not return it exactly. A general purpose
@@ -2611,25 +1971,22 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service)
         // directory bucket stores an encoded word as it is sent, so
         // `encodes` sends each of these values as one.
         if !stores_encoded_words(service) && general_purpose_changes(pair.value) {
-            return Err(InvalidPlan::MetadataValue.into());
+            return Err(InvalidRequest::MetadataValue.into());
         }
         if metadata[..index]
             .iter()
             .any(|earlier| earlier.name.eq_ignore_ascii_case(pair.name))
         {
-            return Err(InvalidPlan::MetadataDuplicate.into());
+            return Err(InvalidRequest::MetadataDuplicate.into());
         }
     }
     let len = metadata.iter().fold(0usize, |len, pair| {
         len.saturating_add(pair.name.len())
             .saturating_add(pair.value.len())
     });
-    let limited = match service {
-        Service::Aws | Service::AwsDirectory => true,
-        Service::Compatible => false,
-    };
+    let limited = service.is_aws();
     if limited && len > MAX_METADATA_LEN {
-        return Err(InvalidPlan::MetadataTooLarge.into());
+        return Err(InvalidRequest::MetadataTooLarge.into());
     }
     Ok(())
 }
@@ -2642,7 +1999,7 @@ pub(crate) fn validate_metadata(metadata: &[MetadataPair<'_>], service: Service)
 // A directory bucket stores an encoded word as it is sent, and a read
 // decodes it, so the values that a general purpose bucket would change are
 // encoded for it as well.
-fn encodes(value: &str, service: Service) -> bool {
+fn sends_encoded_word(value: &str, service: Service) -> bool {
     !value.is_ascii()
         || value.bytes().any(|byte| byte.is_ascii_control())
         || (stores_encoded_words(service) && general_purpose_changes(value))
@@ -2672,17 +2029,249 @@ fn general_purpose_changes(value: &str) -> bool {
 // Writes a metadata value as the header carries it, encoded or as it is. An
 // encoded word holds no space, so its canonical form for SigV4 is the same.
 fn write_metadata_value(out: &mut dyn ByteSink, value: &str, service: Service) {
-    if encodes(value, service) {
+    if sends_encoded_word(value, service) {
         rfc2047::write(out, value);
     } else {
         out.push(value.as_bytes());
     }
 }
 
-// The bytes that RFC 9110 allows in a token, which S3 takes in a metadata
-// name.
-fn token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+// What every request of a template that names one object sends alike,
+// beside its structure: the fixed fields, signed and not, the metadata, and
+// the text of a fixed body.
+#[derive(Default)]
+struct ObjectText<'p> {
+    signed: &'p [Field<'p>],
+    unsigned: &'p [Field<'p>],
+    metadata: &'p [MetadataPair<'p>],
+    body: Option<FixedText<'p>>,
+}
+
+// Writes the template of `operation`, which names one object, with the
+// condition `condition`, the kind of revision `revision`, and the checksum
+// of its body `checksum`.
+#[allow(clippy::too_many_arguments)]
+fn prepare_object(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    checksum: Option<ChecksumKind>,
+    text: &ObjectText<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    validate_revision_kind(revision, false)?;
+    let describe = Describe {
+        signed: text.signed,
+        unsigned: text.unsigned,
+        metadata: text.metadata,
+        ..describe_object(operation, condition, revision, checksum, text.body)
+    };
+    template::prepare_template(bucket, credentials, &describe, buf)
+}
+
+// The request of `operation`, which names one object, for a template with
+// `condition`, `revision` and `checksum`: its method, its parameter, and
+// its body, which a PutObjectTagging and a RestoreObject write from their
+// templates. `body` is the text of that body, the template's, and none for
+// a request.
+fn describe_object<'p>(
+    operation: Operation,
+    condition: ConditionKind,
+    revision: RevisionKind,
+    checksum: Option<ChecksumKind>,
+    body: Option<FixedText<'p>>,
+) -> Describe<'p, 4> {
+    let (method, param) = match operation {
+        Operation::Delete => (Method::Delete, None),
+        Operation::GetTagging => (Method::Get, Some("tagging")),
+        Operation::PutTagging => (Method::Put, Some("tagging")),
+        Operation::Restore => (Method::Post, Some("restore")),
+        _ => (Method::Post, Some("uploads")),
+    };
+    let mut describe = Describe::new(
+        operation,
+        method,
+        Detail::Object {
+            condition,
+            revision,
+            checksum,
+        },
+    );
+    describe.query[0] = param.map(|name| (name, ParamValue::Fixed(QueryValue::Literal(""))));
+    describe.query[3] = version_param(revision);
+    describe.condition(condition);
+    if matches!(operation, Operation::PutTagging | Operation::Restore) {
+        describe.with_body(TemplateBody::Fixed(body.unwrap_or(NO_TEXT)), checksum);
+    }
+    describe
+}
+
+// Adds the fields of what a write stores beside its content and its
+// metadata: the content properties, the storage class and the tags.
+fn push_stored_fields<'d>(fields: &mut FieldList<'d>, options: &WriteOptions<'d>) {
+    for (name, value) in options.properties.iter() {
+        fields.push(Field::new(name, FieldValue::Bytes(value.as_bytes())));
+    }
+    if let Some(class) = options.storage_class {
+        fields.push(Field::new(
+            "x-amz-storage-class",
+            FieldValue::Bytes(class.as_bytes()),
+        ));
+    }
+    if !options.tags.is_empty() {
+        fields.push(Field::new("x-amz-tagging", FieldValue::Tags(options.tags)));
+    }
+}
+
+// Writes the request of `operation` that names the one object `item`, from
+// a template of that operation.
+fn encode_object(
+    template: &Template,
+    bytes: &[u8],
+    operation: Operation,
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    let Detail::Object {
+        condition,
+        revision,
+        checksum,
+    } = template.detail
+    else {
+        return Err(InvalidRequest::Template.into());
+    };
+    if template.operation != operation {
+        return Err(InvalidRequest::Template.into());
+    }
+    let key = template.request_key(bytes, item.key)?;
+    validate_revision_item(revision, item.revision)?;
+    validate_condition(condition, item.condition_value)?;
+    let values = S3Values(HoleValues {
+        now: Some(now),
+        key,
+        condition: item.condition_value,
+        revision: item.revision,
+        body_checksum: checksum,
+        ..HoleValues::default()
+    });
+    template::encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_object(operation, condition, revision, checksum, None),
+    )
+}
+
+/// Writes the template of CreateSessions into `buf`, signed with
+/// `credentials`, which ask the [directory bucket](self#directory-buckets)
+/// `bucket` for the credentials of a session.
+///
+/// # Errors
+///
+/// Returns [`InvalidRequest::Option`] unless the bucket is of
+/// [`Service::AwsDirectory`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_create_session(
+    bucket: &Bucket<'_>,
+    credentials: &Credentials<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    if bucket.service != Service::AwsDirectory {
+        return Err(InvalidRequest::Option.into());
+    }
+    template::prepare_template(bucket, credentials, &describe_session(), buf)
+}
+
+// The request of a CreateSession.
+fn describe_session() -> Describe<'static, 4> {
+    let mut describe = Describe::new(
+        Operation::CreateSession,
+        Method::Get,
+        Detail::Object {
+            condition: ConditionKind::None,
+            revision: RevisionKind::Current,
+            checksum: None,
+        },
+    );
+    describe.key = false;
+    describe.query[0] = Some(("session", ParamValue::Fixed(QueryValue::Literal(""))));
+    describe
+}
+
+/// Writes a CreateSession at `now` from `template` into `buf`, ready to
+/// sign.
+///
+/// # Errors
+///
+/// Returns [`InvalidRequest::Template`] for a template of another operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_create_session(
+    template: &Template,
+    bytes: &[u8],
+    now: &Timestamps,
+    buf: &mut [u8],
+) -> Result<Unsigned<'static>> {
+    if template.operation != Operation::CreateSession {
+        return Err(InvalidRequest::Template.into());
+    }
+    let values = S3Values(HoleValues {
+        now: Some(now),
+        ..HoleValues::default()
+    });
+    template::encode_template(
+        template,
+        bytes,
+        &values,
+        Payload::Slice(&[]),
+        buf,
+        &describe_session(),
+    )
+}
+
+/// Reads the response head of a CreateSession and reports what to do next.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 is [`ResponseFault::Status`].
+pub fn accept_create_session_head<'h>(head: ResponseHead<'h>) -> Result<SessionHeadOutcome<'h>> {
+    match head.status {
+        200 => Ok(SessionHeadOutcome::Session {
+            expected_len: read_decimal_header(head.content_length)?,
+        }),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(read_failure_head(&head)),
+    }
+}
+
+/// Finishes a [`SessionHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_create_session_error_body<'h>(
+    failure: Failure<'h>,
+    body: &[u8],
+) -> SessionHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
+}
+
+/// Reads the credentials of a session out of the response body of a
+/// CreateSession. Sign the requests to the directory bucket with
+/// [`Session::credentials`].
+///
+/// # Errors
+///
+/// Returns [`Error::Service`] if `body` is an error document, and
+/// [`Error::Response`] if it holds no session.
+pub fn read_session(body: &mut [u8]) -> Result<Session<'_>> {
+    refuse_error_document(body)?;
+    crate::xml::s3::read_session(body)
 }
 
 #[cfg(test)]

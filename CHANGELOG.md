@@ -2,6 +2,80 @@
 
 This file lists the changes in each release of `borink-object-storage-proto` and `borink-object-storage-crypto`. Until 1.0, any release can break the API. Note: these changelogs are not human-written and only lightly reviewed before 1.0.
 
+## Unreleased
+
+### Added
+
+- Templates:
+  - New functions `azure::prepare_*` and `s3::prepare_*`. Each writes the template of one operation from its options into a buffer you own. A template is the part of each request that is the same for each object. A template holds no borrow.
+  - New functions `azure::encode_*` and `s3::encode_*`. Each writes one request from a template and an item into a second buffer: the URL, the HTTP/1.1 head and, for S3, the canonical request.
+  - New functions `azure::accept_*_head`, `azure::accept_*_error_body`, `s3::accept_*_head` and `s3::accept_*_error_body`. They read the response of each operation.
+  - New structs of options, such as `GetOptions`, `PutOptions`, `DeleteOptions`, `ListOptions`, `CopyOptions`, `RestoreOptions` and `StageOptions`, and of items, such as `GetItem`, `PutItem`, `ObjectItem`, `ListItem` and `CopyItem`. Each service adds its own.
+  - New struct `WireRequest`. It names its URL, its HTTP/1.1 head, its field lines and a body it holds by offset. A host that writes HTTP/1.1 itself sends `WireRequest::head` unchanged.
+  - New methods `azure::Template::check` and `s3::Template::check`. Each checks once that bytes are the template's own, against a hash of its text and its table. Call one where bytes could be another template's, such as bytes read back from storage.
+  - New methods `azure::Template::bytes_len` and `s3::Template::bytes_len`. Each returns how many bytes of its buffer the template takes.
+  - New constant `azure::Template::STORED_LEN`, and new methods `azure::Template::to_bytes` and `azure::Template::from_bytes`. `to_bytes` stores a template in 80 bytes that hold no pointer and end in a hash of the rest. `from_bytes` reads them back, and refuses bytes that were changed.
+  - New constant `Timestamps::STORED_LEN`, and new methods `Timestamps::to_bytes` and `Timestamps::from_bytes`. `from_bytes` returns `None` for dates that are not ASCII.
+  - New methods `get_shape`, `put_shape`, `delete_shape`, `commit_shape` and `copy_shape` on `azure::Template` and `s3::Template`. Each returns the shape that the operation's `accept_*_head` reads a response against, from the options the template was written with. A template of another operation returns `InvalidRequest::Template`.
+  - New struct `Placement`, and new method `WireRequest::placement`. A placement is where a request's parts are in its buffer, without a borrow of the buffer, and `Placement::request` gives the request back. A host can grow its buffer and write a request again in one function.
+  - New feature `compact`. It writes every request by walking its template's table, one function for every operation, in place of the code that each operation's layout compiles to. Turn it on for a target where size matters more than speed.
+- Templates of one object: new methods `azure::Container::object` and `s3::Bucket::object`. Each names the object that every request of a template writes. The template holds the key as text, checked and percent-encoded once, and a request passes that key or an empty one. An operation that names no object refuses such a container or bucket with `InvalidRequest::Option`.
+- Bodies that this crate writes:
+  - A request from a template holds the body that this crate writes after its head. Such a body is a list of blocks or parts, a set of tags, a restore or a removal of many objects. On S3 the body's SHA-256 and checksum are placeholders.
+  - New functions `s3::set_body_hash` and `s3::set_body_checksum`, which write them in.
+- Signing S3 requests from templates:
+  - New struct `s3::Unsigned`, an S3 request from a template before it is signed.
+  - New functions `s3::signing_key`, which you call once a day, `s3::string_to_sign_prefix`, which you call once a second, and `s3::set_signature`, which writes the signature of each request's canonical request.
+  - New module `sigv4` in `borink-object-storage-crypto`, whose functions `sign` and `sign_batch` sign one request or many with any SHA-256. `sign` writes the body's SHA-256 too.
+- New enum `ChecksumValue`. It passes a checksum that you computed, as base64 text or as a `Digest`, which a request writes in its service's byte order.
+- New constructors `Ranging::from_discriminant` and `RevisionKind::from_discriminant`.
+- New associated function `CapacityError::required_by`. It calls a function that writes a template or a request with an empty buffer, and returns the bytes that the function needs.
+
+### Removed
+
+- The clients `Blobs` and `s3::Objects`, and every method of theirs. Write each request from a template with the `prepare_*`, `encode_*` and `accept_*` functions of `azure` and `s3`.
+- Module `layered`. Its `*_requirements` functions sized the buffers of the clients. Its other functions moved:
+  - `layered::block_id` and `layered::max_blocks_in` are `azure::block_id` and `azure::max_blocks_in`.
+  - `layered::quoted_etag`, `layered::http_date_ms` and `layered::iso8601_ms` are at the crate root.
+  - `layered::decode_into` is `decode_property`, at the crate root. The C function `borink_decode_into` is `borink_decode_property`.
+- Structs `LegacyRequest`, `HeaderSpan` and `RequestSize`, and field `CapacityError::required_headers`. A request from a template is a `WireRequest`, and its buffer needs bytes only.
+- Structs `PhysicalGet`, `PhysicalPut`, `PhysicalDelete`, `PhysicalList`, `PhysicalCommit`, `PhysicalCopy`, `PhysicalDeleteMany`, `PhysicalRestore`, `PhysicalSetTags`, `azure::PhysicalStageBlock`, `azure::PhysicalStageBlockFromUrl`, `azure::PhysicalListBlocks`, `azure::PhysicalSnapshot`, `azure::PhysicalSetMetadata`, `azure::PhysicalSetProperties`, `s3::PhysicalCreateUpload`, `s3::PhysicalStagePart`, `s3::PhysicalStagePartCopy`, `s3::PhysicalAbortUpload`, `s3::PhysicalListParts` and `ListShape`. The options and the item of each operation replace them.
+- Enums `Condition` and `TransactionalChecksum`, struct `CopySource`, and fields `WriteOptions::checksum` and `WriteOptions::declared_md5`. A template names the kind of its condition and of its checksum, and the item of each request holds their values.
+- Struct `azure::BlockResponseHead`. Enum `s3::PayloadHash`, which `s3::PayloadSigning` replaces.
+- Structs `checksum::ChecksumProvider`, `checksum::ChecksumState`, `sigv4::Sha256Provider` and `sigv4::Sha256State`, through which the clients computed hashes. In `borink-object-storage-crypto`, the constants `CRC64`, `MD5_RUSTCRYPTO`, `CRC32`, `CRC32C`, `SHA1_RUSTCRYPTO`, `SHA256_CHECKSUM_RUSTCRYPTO`, `SHA256_CHECKSUM_MINIMAL`, `SHA256_RUSTCRYPTO` and `SHA256_MINIMAL`, and the functions `provider` and `sha256_provider`. Use the types that implement `Checksum` and `Sha256` directly.
+
+### Changed
+
+- Listings read faster. `azure::fill_listing` reads a page of blobs in about two thirds of the time. `azure::fill_listing_with` takes two thirds to three quarters, more as it keeps more properties. `s3::fill_listing` and `s3::fill_listing_with` read a page of versions in about seven tenths of the time, and a page of objects in about three quarters. A page of groups of keys reads in about half the time, on either service. A listing body that holds only ASCII skips the UTF-8 check.
+- Moved the Azure items at the crate root into `azure`: `Container`, `AzureNamespace`, `AzureRejection`, `VERSION` and `classify_error` are `azure::Container` and so on, as their S3 counterparts are in `s3`.
+- Properties of a listing:
+  - Moved enum `BlobProperty` to `azure::BlobProperty`.
+  - Structs `PropertySet` and `PropertyValues` moved to the new module `properties`, and take the property type as a parameter. New trait `properties::Property` names the two property types. `azure::PropertySet` and `s3::PropertySet`, and the two `PropertyValues`, are aliases of them. `PropertySet::contains` and `PropertySet::slot` are no longer `const fn`; `of` still is.
+- Moved functions `http_date_ms` and `iso8601_ms` beside `Timestamps`. Their paths at the crate root are unchanged.
+- Renamed enum `InvalidPlan` to `InvalidRequest`, and the variants `Error::InvalidPlan` and `ErrorCode::InvalidPlan` to `InvalidRequest`. In the C ABI, `BORINK_ERROR_CODE_INVALID_PLAN` is `BORINK_ERROR_CODE_INVALID_REQUEST`.
+- Functions `s3::accept_get_error_body`, `s3::accept_put_error_body` and `s3::accept_delete_error_body` take the shape of the request first, as Azure's do, so that a host reads both services alike.
+- Function `azure::accept_get_head` finishes the failure of a HEAD itself, since its answer has no body. It never returns `GetHeadOutcome::NeedErrorBody` for a HEAD.
+- On Azure, a put, a commit or a copy conditional on `If-None-Match` onto an object that exists is now `PreconditionFailed`, as on S3. Azure answers it with 409 `BlobAlreadyExists`, which was a `ServiceFailure` before.
+- The C ABI of `borink-object-storage-c` writes every request from a template, for reads, whole-object writes, writes in blocks and listings:
+  - New functions `borink_prepare_get`, `borink_prepare_put`, `borink_prepare_stage_block`, `borink_prepare_commit_blocks` and `borink_prepare_list`. Each takes a `borink_container` and the token, as `azure::prepare_*` does.
+  - New functions `borink_encode_*` for the same five operations. Each takes a `borink_timestamps`, as `azure::encode_*` takes `&Timestamps`.
+  - New function `borink_timestamps_from_unix`. Call it once a second, and pass what it returns to each request of that second.
+  - New functions `borink_accept_stage_block_head`, `borink_accept_commit_blocks_head` and their `borink_accept_*_error_body`. Every `borink_accept_*` function takes its shape by value and no session.
+  - Renamed `borink_finish_*_error_body` to `borink_accept_*_error_body`.
+  - New functions `borink_template_check`, `borink_next_header`, `borink_get_item_shape`, `borink_put_item_shape` and `borink_commit_item_shape`.
+  - New struct `borink_container`, which replaces `borink_session`. Its field `object` names the object of a template of one object, as `azure::Container::object` does.
+  - Renamed `borink_validate` to `borink_container_check`. It checks the container alone; a template's preparation checks the token.
+  - Removed `borink_encode_delete`, `borink_accept_delete_head`, `borink_delete_shape`, `borink_list_shape`, `borink_request_buffer` and `borink_request_head`. `borink_fill_listing` and `borink_fill_listing_with` take no session.
+  - Renamed the outcome kind `Done` to `Created`, and replaced `Accepted` with `Staged` and `Committed`.
+- Struct `azure::CommitItem` has a type parameter `B`, the type of its field `blocks`. It is a slice of `BlockRef`, as before, or any iterator of them that can be cloned. `azure::encode_commit_blocks` takes either.
+
+- Encoding trusts that the bytes passed with a template are its own, and checks nothing of them per request. Bytes that are not write a wrong request or are refused, and never make an encoder panic.
+- `WireRequest`'s accessors, `s3::Unsigned::canonical`, `s3::set_body_hash`, `s3::set_body_checksum` and `s3::set_signature` no longer panic for a buffer that is not the request's. Neither do `sigv4::sign` and `sigv4::hash_body`. They read and write only what fits in the buffer.
+- An Azure listing sends `delimiter`, `maxresults` and `include` before `prefix` and `marker` in its query.
+- A request copies a key that has no byte to escape whole, rather than percent-encoding it byte by byte.
+- `ResponseHead::insert` compares a header's name only with the known names of the same length. A header that a head does not keep costs one comparison of lengths rather than up to 25 of names.
+- In `borink-object-storage-crypto`, the trait `Sha256` requires `Copy` and no longer has `hmac`. `Sha256RustCrypto` keeps its own state over `sha2`'s compression function, and the crate no longer depends on `hmac`. The `zeroize` feature now changes only `wipe`. Nothing wipes the hash states of a `sigv4::SigningKey` or a `sigv4::Stamp`.
+
 ## 0.0.4 - 2026-10-03
 
 ### Added

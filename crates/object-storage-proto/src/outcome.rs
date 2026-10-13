@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::{ListMarker, ResponseHead};
+
 /// The result of reading the response head of a stage: an Azure Put Block,
 /// or an S3 UploadPart.
 ///
@@ -14,9 +16,7 @@ pub enum StageHeadOutcome<'h> {
         ///
         /// S3 names a part at the commit by its number and this tag, so keep
         /// it: see [`s3::PartRef`](crate::s3::PartRef). Azure names a block by
-        /// the ID you chose, and sends no tag. The checksum and encryption
-        /// headers that Azure does send are on
-        /// [`BlockResponseHead`](crate::azure::BlockResponseHead).
+        /// the ID you chose, and sends no tag.
         e_tag: Option<&'h [u8]>,
     },
     /// S3 took an UploadPartCopy, and says in the body whether it
@@ -24,7 +24,7 @@ pub enum StageHeadOutcome<'h> {
     ///
     /// This outcome is not final. Read the whole body and pass it with the
     /// head to
-    /// [`s3::Objects::accept_stage_part_copy_body`](crate::s3::Objects::accept_stage_part_copy_body),
+    /// [`s3::accept_stage_part_copy_body`](crate::s3::accept_stage_part_copy_body),
     /// which returns the final outcome. No other stage returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
@@ -50,7 +50,7 @@ impl fmt::Display for StageHeadOutcome<'_> {
         match self {
             Self::Staged { .. } => f.write_str("the service holds the part"),
             Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -75,7 +75,7 @@ pub enum CopyHeadOutcome<'h> {
     ///
     /// `meta.copy_id` names the copy. Read its progress with a HEAD of the
     /// target, in [`ObjectMeta::copy_status`], or stop it with
-    /// [`Blobs::encode_abort_copy`](crate::Blobs::encode_abort_copy).
+    /// [`azure::encode_abort_copy`](crate::azure::encode_abort_copy).
     Pending {
         /// The metadata of the target, with the copy's ID and its status,
         /// `pending`.
@@ -85,7 +85,7 @@ pub enum CopyHeadOutcome<'h> {
     ///
     /// This outcome is not final. Read the whole body and pass it with the
     /// head to
-    /// [`s3::Objects::accept_copy_body`](crate::s3::Objects::accept_copy_body),
+    /// [`s3::accept_copy_body`](crate::s3::accept_copy_body),
     /// which returns the final outcome. Azure never returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
@@ -93,6 +93,9 @@ pub enum CopyHeadOutcome<'h> {
     },
     /// The condition on the target or on the source did not hold, so the
     /// service copied nothing.
+    ///
+    /// On Azure, this includes a copy conditional on `If-None-Match` onto an
+    /// object that exists, which Azure answers with 409 rather than 412.
     PreconditionFailed,
     /// The source does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
@@ -103,9 +106,6 @@ pub enum CopyHeadOutcome<'h> {
     /// Read the error body to finish this response.
     NeedErrorBody(Failure<'h>),
     /// The service refused the copy, or failed to carry it out.
-    ///
-    /// A copy conditional on `If-None-Match: *` onto an object that exists
-    /// is refused here on Azure, with [`ServiceErrorKind::AlreadyExists`].
     ServiceFailure(Failure<'h>),
 }
 
@@ -162,7 +162,7 @@ impl fmt::Display for RestoreHeadOutcome<'_> {
         match self {
             Self::Started => f.write_str("the service started the restore"),
             Self::Readable => f.write_str("the object is readable"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -204,7 +204,7 @@ impl fmt::Display for UpdateHeadOutcome<'_> {
         match self {
             Self::Updated { .. } => f.write_str("the service made the change"),
             Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -222,8 +222,8 @@ pub enum TagsHeadOutcome<'h> {
     /// The tags follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_tags`](crate::Blobs::fill_tags) or
-    /// [`s3::Objects::fill_tags`](crate::s3::Objects::fill_tags).
+    /// [`azure::fill_tags`](crate::azure::fill_tags) or
+    /// [`s3::fill_tags`](crate::s3::fill_tags).
     Tags {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -244,7 +244,7 @@ impl fmt::Display for TagsHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tags { .. } => f.write_str("the tags follow in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -262,8 +262,8 @@ pub enum DeleteManyHeadOutcome<'h> {
     /// The result of each removal follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_delete_results`](crate::Blobs::fill_delete_results) or
-    /// [`s3::Objects::fill_delete_results`](crate::s3::Objects::fill_delete_results).
+    /// [`azure::fill_delete_results`](crate::azure::fill_delete_results) or
+    /// [`s3::fill_delete_results`](crate::s3::fill_delete_results).
     Results {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
@@ -304,13 +304,16 @@ pub enum CommitHeadOutcome<'h> {
     /// S3 answers a commit with status 200 before it has finished, and then
     /// writes either the result or an error into the body. This outcome is
     /// not final. Read the whole body and pass it with the head to
-    /// [`s3::Objects::accept_commit_parts_body`](crate::s3::Objects::accept_commit_parts_body),
+    /// [`s3::accept_commit_parts_body`](crate::s3::accept_commit_parts_body),
     /// which returns the final outcome. Azure never returns this.
     NeedResultBody {
         /// The exact length of the response body, if the head states it.
         expected_len: Option<u64>,
     },
     /// The commit's condition failed.
+    ///
+    /// On Azure, this includes a commit conditional on `If-None-Match` onto
+    /// an object that exists, which Azure answers with 409 rather than 412.
     PreconditionFailed,
     /// On S3, the upload does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
@@ -333,7 +336,7 @@ impl fmt::Display for CommitHeadOutcome<'_> {
             Self::Committed { .. } => f.write_str("the object is committed"),
             Self::NeedResultBody { .. } => f.write_str("the result follows in the response body"),
             Self::PreconditionFailed => f.write_str("a precondition on the request did not hold"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -354,8 +357,8 @@ pub enum ListPartsHeadOutcome<'h> {
     /// The parts follow in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_blocks`](crate::Blobs::fill_blocks) or
-    /// [`s3::Objects::fill_parts`](crate::s3::Objects::fill_parts).
+    /// [`azure::fill_blocks`](crate::azure::fill_blocks) or
+    /// [`s3::fill_parts`](crate::s3::fill_parts).
     #[non_exhaustive]
     Parts {
         /// Metadata of the committed object, if any. Only Azure sends it.
@@ -380,7 +383,7 @@ impl fmt::Display for ListPartsHeadOutcome<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parts { .. } => f.write_str("the parts follow in the response body"),
-            Self::NotFound { kind } => not_found(f, *kind),
+            Self::NotFound { kind } => write_not_found(f, *kind),
             Self::NeedErrorBody(_) => f.write_str("read the response body to name the error"),
             Self::ServiceFailure(failure) => failure.fmt(f),
         }
@@ -389,7 +392,7 @@ impl fmt::Display for ListPartsHeadOutcome<'_> {
 
 // What a `NotFound` of an operation on parts writes: what the service named
 // as missing, or all that can be.
-fn not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt::Result {
+fn write_not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt::Result {
     match kind {
         Some(
             kind @ (ServiceErrorKind::NotFound
@@ -404,7 +407,7 @@ fn not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -> fmt:
 ///
 /// Each field holds the bytes that the service sent. `last_modified` holds
 /// them as text. To read it as an instant, use
-/// [`layered::http_date_ms`](crate::layered::http_date_ms).
+/// [`http_date_ms`](crate::http_date_ms).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObjectMeta<'h> {
     /// The size of the whole object, if the head states it.
@@ -529,7 +532,7 @@ impl FailureClass {
 /// The three head-reading methods return this in the two outcomes that carry a
 /// failure. Pass it back to the `accept_*_error_body` method of the same
 /// operation, such as
-/// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body).
+/// [`azure::accept_get_error_body`](crate::azure::accept_get_error_body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure<'h> {
     /// The HTTP status code.
@@ -565,7 +568,7 @@ impl fmt::Display for Failure<'_> {
 /// Every head that the service sends becomes one of these values, including
 /// the heads that report a failure. Branch on this value to drive the request.
 ///
-/// [`Blobs::accept_get_head`](crate::Blobs::accept_get_head) returns an
+/// [`azure::accept_get_head`](crate::azure::accept_get_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -585,7 +588,7 @@ pub enum GetHeadOutcome<'h> {
     },
     /// No body follows and the request is complete.
     ///
-    /// A [`GetKind::Head`](crate::GetKind::Head) plan ends here.
+    /// A [`GetKind::Head`](crate::GetKind::Head) request ends here.
     Complete {
         /// The metadata from the head.
         meta: ObjectMeta<'h>,
@@ -621,7 +624,7 @@ pub enum GetHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_get_error_body`](crate::Blobs::accept_get_error_body). That
+    /// [`azure::accept_get_error_body`](crate::azure::accept_get_error_body). That
     /// call returns the final outcome. If you cannot read the body, pass an
     /// empty one and the error stays unnamed.
     ///
@@ -639,7 +642,7 @@ pub enum GetHeadOutcome<'h> {
 /// Every head that Azure sends becomes one of these values, including the
 /// heads that report a failure.
 ///
-/// [`Blobs::accept_put_head`](crate::Blobs::accept_put_head) returns an
+/// [`azure::accept_put_head`](crate::azure::accept_put_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -654,16 +657,14 @@ pub enum PutHeadOutcome<'h> {
     },
     /// The entity tag in the condition did not match, so Azure stored nothing.
     ///
-    /// A write conditional on `If-None-Match: *` does not report a lost race
-    /// here. Azure answers that with status 409, which reaches you as
-    /// [`Self::ServiceFailure`] whose kind is
-    /// [`ServiceErrorKind::AlreadyExists`]. The Azure documentation states 412
-    /// for that case; this crate follows the service.
+    /// A write conditional on `If-None-Match: *` that loses a race is
+    /// reported here too. Azure answers that with 409 `BlobAlreadyExists`,
+    /// though its documentation states 412.
     PreconditionFailed,
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_put_error_body`](crate::Blobs::accept_put_error_body).
+    /// [`azure::accept_put_error_body`](crate::azure::accept_put_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -681,14 +682,14 @@ pub enum PutHeadOutcome<'h> {
 /// Every head that Azure sends becomes one of these values, including the
 /// heads that report a failure.
 ///
-/// [`Blobs::accept_delete_head`](crate::Blobs::accept_delete_head) returns an
+/// [`azure::accept_delete_head`](crate::azure::accept_delete_head) returns an
 /// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeleteHeadOutcome<'h> {
     /// Azure accepted the removal.
     ///
-    /// The object is gone unless the plan asked only for its snapshots: see
+    /// The object is gone unless the request asked only for its snapshots: see
     /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).
     Accepted,
     /// The condition did not hold, so the service removed nothing.
@@ -706,7 +707,7 @@ pub enum DeleteHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_delete_error_body`](crate::Blobs::accept_delete_error_body).
+    /// [`azure::accept_delete_error_body`](crate::azure::accept_delete_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -714,7 +715,7 @@ pub enum DeleteHeadOutcome<'h> {
     NeedErrorBody(Failure<'h>),
     /// The service refused the removal, or it failed to carry it out.
     ///
-    /// An object that has snapshots is refused here, unless the plan asked to
+    /// An object that has snapshots is refused here, unless the request asked to
     /// remove them too: see [`DeleteKind`](crate::DeleteKind).
     ServiceFailure(Failure<'h>),
 }
@@ -722,8 +723,8 @@ pub enum DeleteHeadOutcome<'h> {
 /// The result of reading the response head of a listing.
 ///
 /// A head that reports a failure is one of these too;
-/// [`Blobs::accept_list_head`](crate::Blobs::accept_list_head) and
-/// [`s3::Objects::accept_list_head`](crate::s3::Objects::accept_list_head)
+/// [`azure::accept_list_head`](crate::azure::accept_list_head) and
+/// [`s3::accept_list_head`](crate::s3::accept_list_head)
 /// return an [`Err`] only for a head they cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -731,8 +732,8 @@ pub enum ListHeadOutcome<'h> {
     /// The page follows in the response body.
     ///
     /// Read the whole body into one buffer and pass it to
-    /// [`Blobs::fill_listing`](crate::Blobs::fill_listing) or
-    /// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing),
+    /// [`azure::fill_listing`](crate::azure::fill_listing) or
+    /// [`s3::fill_listing`](crate::s3::fill_listing),
     /// which reads the entries out of it.
     Page {
         /// The exact length of the response body, if the head states it.
@@ -744,7 +745,7 @@ pub enum ListHeadOutcome<'h> {
     /// The head reports a failure but names no error.
     ///
     /// This outcome is not final. Pass this failure and the response body to
-    /// [`Blobs::accept_list_error_body`](crate::Blobs::accept_list_error_body).
+    /// [`azure::accept_list_error_body`](crate::azure::accept_list_error_body).
     /// That call returns the final outcome. If you cannot read the body, pass
     /// an empty one and the error stays unnamed.
     ///
@@ -760,8 +761,8 @@ pub enum ListHeadOutcome<'h> {
 
 /// What one page of a listing held.
 ///
-/// [`Blobs::fill_listing`](crate::Blobs::fill_listing) and
-/// [`s3::Objects::fill_listing`](crate::s3::Objects::fill_listing) return
+/// [`azure::fill_listing`](crate::azure::fill_listing) and
+/// [`s3::fill_listing`](crate::s3::fill_listing) return
 /// this once the page has been read to its end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Listing<'b> {
@@ -772,17 +773,17 @@ pub struct Listing<'b> {
     /// Where the next page starts, or [`None`] when the listing is complete.
     ///
     /// Copy this text into your own storage and pass it as
-    /// [`PhysicalList::marker`](crate::PhysicalList::marker); the next page
+    /// [`ListItem::marker`](crate::ListItem::marker); the next page
     /// overwrites the body it borrows.
     ///
     /// A page names a next one whenever more keys follow, even if it reported
     /// fewer entries than it asked for. An S3 listing of versions names it
     /// as a [`ListMarker::Version`](crate::ListMarker::Version), and every
     /// other listing as a [`ListMarker::Text`](crate::ListMarker::Text).
-    pub next_marker: Option<crate::ListMarker<'b>>,
+    pub next_marker: Option<ListMarker<'b>>,
 }
 
-/// The result of [`classify_error`](crate::classify_error).
+/// The result of [`classify_error`](crate::azure::classify_error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Classification {
@@ -940,6 +941,136 @@ impl fmt::Display for ListHeadOutcome<'_> {
         }
     }
 }
+
+impl<'h> Failure<'h> {
+    // The one record that every failing head becomes, whichever operation
+    // asked.
+    pub(crate) fn new(
+        status: u16,
+        kind: Option<ServiceErrorKind>,
+        request_id: Option<&'h [u8]>,
+    ) -> Self {
+        Self {
+            status,
+            class: FailureClass::of(status, kind),
+            kind,
+            request_id,
+        }
+    }
+}
+
+impl FailureClass {
+    // The category of a failure with `status`, or of the error `kind` that
+    // the service named, which decides when there is one.
+    pub(crate) fn of(status: u16, kind: Option<ServiceErrorKind>) -> Self {
+        match kind {
+            Some(ServiceErrorKind::Unauthorized) => Self::Auth,
+            Some(ServiceErrorKind::Throttled) => Self::Throttled,
+            Some(ServiceErrorKind::Service | ServiceErrorKind::Timeout) => Self::Server,
+            _ => match status {
+                300..=399 => Self::Redirect,
+                401 | 403 => Self::Auth,
+                408 | 429 => Self::Throttled,
+                500..=599 => Self::Server,
+                _ => Self::Other,
+            },
+        }
+    }
+}
+
+// The two outcomes that `finish_with_body` produces, for one operation's
+// outcome type. An outcome whose request names no object, such as a
+// listing, has no `NotFound`: its 404 can only mean a missing container,
+// so `not_found` returns the failure.
+pub(crate) trait FailureOutcome<'h> {
+    fn need_error_body(failure: Failure<'h>) -> Self;
+    fn not_found(failure: Failure<'h>) -> Self;
+    fn service_failure(failure: Failure<'h>) -> Self;
+}
+
+// Finishes a failure with the error `kind` that its head or body named. A
+// 404 is not found, unless it names a missing container. That is a failure
+// of the service, as any other status is: a caller must never read a
+// missing container as a missing object.
+pub(crate) fn finish_with_body<'h, O: FailureOutcome<'h>>(
+    head_failure: Failure<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    let failure = Failure::new(head_failure.status, kind, head_failure.request_id);
+    if failure.status == 404 && kind != Some(ServiceErrorKind::NoSuchContainer) {
+        O::not_found(failure)
+    } else {
+        O::service_failure(failure)
+    }
+}
+
+// The outcome of a 404 whose head names its error, as Azure's does.
+pub(crate) fn not_found_in_head<'h, O: FailureOutcome<'h>>(
+    head: &ResponseHead<'h>,
+    kind: Option<ServiceErrorKind>,
+) -> O {
+    finish_with_body(Failure::new(404, None, head.request_id), kind)
+}
+
+// The outcomes whose request names an object, which report a 404 for the
+// object as `NotFound`.
+macro_rules! failure_outcome {
+    ($($outcome:ty),*) => {$(
+        impl<'h> $crate::outcome::FailureOutcome<'h> for $outcome {
+            fn need_error_body(failure: $crate::Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
+            fn not_found(failure: $crate::Failure<'h>) -> Self {
+                Self::NotFound { kind: failure.kind }
+            }
+
+            fn service_failure(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+pub(crate) use failure_outcome;
+
+// The outcomes whose request names no object, which report every 404 as a
+// failure of the service.
+macro_rules! container_failure_outcome {
+    ($($outcome:ty),*) => {$(
+        impl<'h> $crate::outcome::FailureOutcome<'h> for $outcome {
+            fn need_error_body(failure: $crate::Failure<'h>) -> Self {
+                Self::NeedErrorBody(failure)
+            }
+
+            fn not_found(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+
+            fn service_failure(failure: $crate::Failure<'h>) -> Self {
+                Self::ServiceFailure(failure)
+            }
+        }
+    )*};
+}
+pub(crate) use container_failure_outcome;
+
+failure_outcome!(
+    CopyHeadOutcome<'h>,
+    RestoreHeadOutcome<'h>,
+    GetHeadOutcome<'h>,
+    DeleteHeadOutcome<'h>,
+    StageHeadOutcome<'h>,
+    CommitHeadOutcome<'h>,
+    ListPartsHeadOutcome<'h>,
+    UpdateHeadOutcome<'h>,
+    TagsHeadOutcome<'h>
+);
+
+container_failure_outcome!(
+    PutHeadOutcome<'h>,
+    ListHeadOutcome<'h>,
+    DeleteManyHeadOutcome<'h>
+);
 
 #[cfg(test)]
 mod tests {

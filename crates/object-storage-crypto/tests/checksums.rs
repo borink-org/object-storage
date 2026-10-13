@@ -67,17 +67,3 @@ fn md5_matches_the_reference_vectors_and_what_azure_stored() {
         );
     }
 }
-
-#[test]
-fn every_implementation_fits_the_state_slot() {
-    // `provider` asserts this at compile time; this reports the numbers that
-    // `ChecksumState::LEN` is chosen against.
-    use borink_object_storage_proto::checksum::ChecksumState;
-    for (name, size) in [
-        ("Crc64", size_of::<Crc64>()),
-        ("Md5RustCrypto", size_of::<Md5RustCrypto>()),
-    ] {
-        assert!(size <= ChecksumState::LEN, "{name} is {size} bytes");
-    }
-    assert_eq!(size_of::<Md5RustCrypto>(), 88);
-}

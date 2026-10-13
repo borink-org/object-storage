@@ -5,7 +5,9 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use borink_object_storage_proto::{Blobs, Container, ListEntry, ListMarker, PhysicalList};
+use borink_object_storage_proto::azure as proto;
+use borink_object_storage_proto::azure::{AzureNamespace, Container};
+use borink_object_storage_proto::{ListEntry, ListItem, ListMarker, ListOptions};
 use borink_object_storage_ureq::azure;
 
 const PAGE: &str = "<EnumerationResults><Blobs>\
@@ -29,8 +31,8 @@ fn reads_the_page_that_the_generated_request_asked_for() {
         }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with(
-            "GET /container?restype=container&comp=list&prefix=directory%2F\
-             &delimiter=%2F&maxresults=1000 HTTP/1.1\r\n"
+            "GET /container?restype=container&comp=list&delimiter=%2F\
+             &maxresults=1000&prefix=directory%2F HTTP/1.1\r\n"
         ));
         stream
             .write_all(
@@ -43,19 +45,25 @@ fn reads_the_page_that_the_generated_request_asked_for() {
             .unwrap();
     });
 
-    let blobs = Blobs::new(
-        Container::new_allowing_http(&endpoint, "container").unwrap(),
-        "token",
-    )
-    .unwrap();
-    let plan = PhysicalList {
+    let container = Container::new_allowing_http(&endpoint, "container").unwrap();
+    let options = ListOptions {
         delimiter: Some("/"),
         max_results: Some(1000),
-        ..PhysicalList::new("directory/")
+        ..ListOptions::default()
     };
+    let mut bytes = vec![0; 1024];
+    let template = proto::prepare_list(
+        &container,
+        "token",
+        AzureNamespace::Unknown,
+        &options,
+        &mut bytes,
+    )
+    .unwrap();
+    let item = ListItem::new("directory/");
     let mut body = Vec::new();
     let mut entries = [ListEntry::default(); 4];
-    let page = azure::list(&blobs, &plan, &mut body, &mut entries).unwrap();
+    let page = azure::list(&template, &bytes, &item, &mut body, &mut entries).unwrap();
     assert_eq!(page.filled, 2);
     assert_eq!(entries[0].key, "directory/a.txt");
     assert_eq!(entries[0].size, Some(4));

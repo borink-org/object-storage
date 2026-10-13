@@ -4,25 +4,26 @@
 
 use crate::s3::Part;
 use crate::xml::page::{
-    check_body, check_room, decode_value_in_place, open_root_element, read_size, set_once, text,
+    check_body, check_room, decode_value_in_place, decoded_text, open_root_element, read_size,
+    set_once,
 };
-use crate::xml::s3::read_values;
-use crate::xml::scan::{Child, Scan, Span, fault};
+use crate::xml::s3::read_root_values;
+use crate::xml::scan::{ChildTag, Scan, Span, body_fault};
 use crate::{ListMarker, Listing, Result};
 
 // Reads an `InitiateMultipartUploadResult`, the answer to a
 // CreateMultipartUpload, and returns the ID of the upload.
 pub(crate) fn read_upload_id(body: &mut [u8]) -> Result<&str> {
-    let [id] = read_values(body, b"InitiateMultipartUploadResult", [b"UploadId"])?;
+    let [id] = read_root_values(body, b"InitiateMultipartUploadResult", [b"UploadId"])?;
     // S3 hands out no empty ID, and a request cannot name one.
-    id.filter(|id| !id.is_empty()).map_or_else(fault, Ok)
+    id.filter(|id| !id.is_empty()).map_or_else(body_fault, Ok)
 }
 
 // Reads a `CompleteMultipartUploadResult`, the answer to a commit that
 // succeeded, and returns the entity tag of the object.
 pub(crate) fn read_committed(body: &mut [u8]) -> Result<&str> {
-    let [e_tag] = read_values(body, b"CompleteMultipartUploadResult", [b"ETag"])?;
-    e_tag.map_or_else(fault, Ok)
+    let [e_tag] = read_root_values(body, b"CompleteMultipartUploadResult", [b"ETag"])?;
+    e_tag.map_or_else(body_fault, Ok)
 }
 
 const PARTS_ROOT: &[u8] = b"ListPartsResult";
@@ -46,12 +47,12 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
         // while reading it index the bytes that the next `take` returns.
         scan.take();
         let tag = match scan.child(PARTS_ROOT)? {
-            Child::Close => break,
-            Child::Open(tag) => tag,
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => tag,
         };
         match scan.text(tag.name) {
             // A part with nothing in it has no number.
-            b"Part" if tag.empty => return fault(),
+            b"Part" if tag.empty => return body_fault(),
             b"Part" => {
                 let fields = read_part(&mut scan)?;
                 let chunk = scan.take();
@@ -65,7 +66,7 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
                 let value = match scan.text(span).trim_ascii() {
                     b"true" => true,
                     b"false" => false,
-                    _ => return fault(),
+                    _ => return body_fault(),
                 };
                 set_once(&mut truncated, value)?;
             }
@@ -75,7 +76,7 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
                 let decoded = decode_value_in_place(chunk, Some(field))?;
                 let chunk: &'b [u8] = chunk;
                 let value = decoded.map(|(start, end)| &chunk[start..end]);
-                set_once(&mut marker, value.map(text).transpose()?)?;
+                set_once(&mut marker, value.map(decoded_text).transpose()?)?;
             }
             _ => scan.skip(tag)?,
         }
@@ -87,10 +88,10 @@ pub(crate) fn fill_parts<'b, E: From<Part<'b>>>(
     let next_marker = match truncated {
         Some(true) => match marker.flatten() {
             Some(marker) if !marker.is_empty() => Some(marker),
-            _ => return fault(),
+            _ => return body_fault(),
         },
         Some(false) => None,
-        None => return fault(),
+        None => return body_fault(),
     };
     Ok(Listing {
         filled: held,
@@ -113,8 +114,8 @@ fn read_part(scan: &mut Scan<'_>) -> Result<PartFields> {
     let mut fields = PartFields::default();
     loop {
         match scan.child(b"Part")? {
-            Child::Close => break,
-            Child::Open(tag) => match scan.text(tag.name) {
+            ChildTag::Close => break,
+            ChildTag::Open(tag) => match scan.text(tag.name) {
                 b"PartNumber" => set_once(&mut fields.number, scan.value(tag)?.0)?,
                 b"ETag" => set_once(&mut fields.e_tag, scan.value(tag)?)?,
                 b"Size" => set_once(&mut fields.size, scan.value(tag)?.0)?,
@@ -130,22 +131,22 @@ fn read_part(scan: &mut Scan<'_>) -> Result<PartFields> {
 // A part always has a number, an entity tag and a length.
 fn build_part(chunk: &mut [u8], fields: PartFields) -> Result<Part<'_>> {
     let (Some(number), Some(size), Some(_)) = (fields.number, fields.size, fields.e_tag) else {
-        return fault();
+        return body_fault();
     };
-    let number = u32::try_from(read_size(chunk, number)?).or_else(|_| fault())?;
+    let number = u32::try_from(read_size(chunk, number)?).or_else(|_| body_fault())?;
     let size = read_size(chunk, size)?;
     let e_tag = decode_value_in_place(chunk, fields.e_tag)?;
     let last_modified = decode_value_in_place(chunk, fields.last_modified)?;
     let chunk: &[u8] = chunk;
     let Some((start, end)) = e_tag else {
-        return fault();
+        return body_fault();
     };
     Ok(Part {
         number,
-        e_tag: text(&chunk[start..end])?,
+        e_tag: decoded_text(&chunk[start..end])?,
         size,
         last_modified: last_modified
-            .map(|(start, end)| text(&chunk[start..end]))
+            .map(|(start, end)| decoded_text(&chunk[start..end]))
             .transpose()?,
     })
 }

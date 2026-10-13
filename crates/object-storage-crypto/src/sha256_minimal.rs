@@ -1,10 +1,10 @@
 use crate::Sha256;
 
-/// SHA-256 and HMAC-SHA256 from the `hmac-sha256` crate.
+/// SHA-256 from the `hmac-sha256` crate.
 ///
 /// `hmac-sha256` has no dependencies and needs no `std`. It is portable
 /// code, and uses no SHA extensions of the CPU.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Sha256Minimal(hmac_sha256::Hash);
 
 impl Default for Sha256Minimal {
@@ -26,11 +26,6 @@ impl Sha256 for Sha256Minimal {
 
     fn finish(self) -> [u8; 32] {
         self.0.finalize()
-    }
-
-    fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
-        // `hmac-sha256` takes the message first and the key second.
-        hmac_sha256::HMAC::mac(message, key)
     }
 }
 

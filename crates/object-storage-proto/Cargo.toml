@@ -14,3 +14,9 @@ categories = ["no-std::no-alloc", "api-bindings", "network-programming"]
 
 [lints.rust]
 missing_docs = "deny"
+
+[features]
+# Writes every request by walking its template's table, one function for
+# every operation, in place of the code that each operation's layout
+# compiles to: less code, for a target where size matters more than speed.
+compact = []

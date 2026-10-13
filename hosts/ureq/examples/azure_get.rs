@@ -3,7 +3,7 @@
 use std::env;
 use std::io::Write;
 
-use borink_object_storage_proto::{Blobs, Container};
+use borink_object_storage_proto::azure::Container;
 use borink_object_storage_ureq::azure;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let container = env::var("AZURE_STORAGE_CONTAINER")?;
     let token = env::var("AZURE_STORAGE_ACCESS_TOKEN")?;
     let key = env::args().nth(1).ok_or("missing object key")?;
-    let blobs = Blobs::new(Container::new(&endpoint, &container)?, &token)?;
-    std::io::stdout().write_all(&azure::get(&blobs, &key)?)?;
+    let container = Container::new(&endpoint, &container)?;
+    std::io::stdout().write_all(&azure::get(&container, &token, &key)?)?;
     Ok(())
 }

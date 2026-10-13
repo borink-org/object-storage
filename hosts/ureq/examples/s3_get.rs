@@ -5,7 +5,7 @@
 use std::env;
 use std::io::Write;
 
-use borink_object_storage_proto::s3::{Bucket, Objects, Service};
+use borink_object_storage_proto::s3::{Bucket, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_ureq::s3;
 
@@ -27,11 +27,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(token) = &session_token {
         credentials = credentials.with_session_token(token)?;
     }
-    let objects = Objects::new(
-        bucket,
-        credentials,
-        borink_object_storage_crypto::SHA256_RUSTCRYPTO,
-    );
-    std::io::stdout().write_all(&s3::get(&objects, &key)?)?;
+    std::io::stdout().write_all(&s3::get(&bucket, &credentials, &key)?)?;
     Ok(())
 }

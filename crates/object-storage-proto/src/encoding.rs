@@ -3,20 +3,44 @@
 // element. None allocates. Each writes into a buffer or a callback that the
 // caller passes.
 
-use crate::request::ByteSink;
+use crate::request::{ByteSink, written_text};
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+// The value of each byte as a base64 digit, or 64 for a byte that is none.
+// A lookup per byte costs less than the comparisons it replaces on text as
+// short as a checksum or a block ID.
+static SEXTETS: [u8; 256] = {
+    let mut values = [64; 256];
+    let mut value = 0;
+    while value < 64 {
+        values[BASE64[value] as usize] = value as u8;
+        value += 1;
+    }
+    values
+};
+
 // Writes 32 bytes as lowercase hexadecimal, as SigV4 writes a digest.
-pub(crate) fn hex(bytes: &[u8; 32]) -> [u8; 64] {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+pub(crate) fn hex_digest(bytes: &[u8; 32]) -> [u8; 64] {
     let mut out = [0; 64];
-    for (index, byte) in bytes.iter().enumerate() {
-        out[2 * index] = DIGITS[usize::from(byte >> 4)];
-        out[2 * index + 1] = DIGITS[usize::from(byte & 0xF)];
+    for (pair, byte) in out.chunks_exact_mut(2).zip(bytes) {
+        pair.copy_from_slice(&HEX_PAIRS[usize::from(*byte)]);
     }
     out
 }
+
+// The two lowercase hexadecimal digits of each byte, so that a byte is one
+// lookup rather than two.
+static HEX_PAIRS: [[u8; 2]; 256] = {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut pairs = [[0; 2]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        pairs[byte] = [DIGITS[byte >> 4], DIGITS[byte & 0xF]];
+        byte += 1;
+    }
+    pairs
+};
 
 // Reads one hexadecimal digit of either case.
 pub(crate) fn hex_digit(c: u8) -> Option<u8> {
@@ -46,7 +70,24 @@ pub(crate) fn base64_into<'a>(bytes: &[u8], into: &'a mut [u8]) -> &'a str {
         }
     }
     // Every byte written is from the alphabet or padding, so this is ASCII.
-    crate::request::text(into)
+    written_text(into)
+}
+
+// The number of bytes that padded standard base64 `text` holds, or `None`
+// if `text` is not that: a multiple of four characters from the alphabet,
+// of which the last one or two may be `=`.
+pub(crate) fn base64_len(text: &[u8]) -> Option<usize> {
+    let data = match text {
+        [data @ .., b'=', b'='] | [data @ .., b'='] => data,
+        data => data,
+    };
+    let alphabet = data
+        .iter()
+        .fold(true, |valid, &byte| valid & (SEXTETS[byte as usize] < 64));
+    // A text with padding is at least four characters, so the subtraction
+    // leaves at least one byte.
+    (alphabet && text.len().is_multiple_of(4))
+        .then(|| text.len() / 4 * 3 - (text.len() - data.len()))
 }
 
 // Writes the bytes of padded standard base64 `text` into `into`, and returns
@@ -57,8 +98,8 @@ pub(crate) fn decode_base64(text: &[u8], into: &mut [u8]) -> Option<usize> {
         return None;
     }
     let sextet = |byte: u8| -> Option<u32> {
-        let index = BASE64.iter().position(|&digit| digit == byte)?;
-        Some(index as u32)
+        let value = SEXTETS[byte as usize];
+        (value < 64).then_some(u32::from(value))
     };
     let mut len = 0;
     let groups = text.len() / 4;
@@ -182,4 +223,47 @@ pub(crate) fn write_xml_text(out: &mut dyn ByteSink, text: &[u8]) {
         start = at + 1;
     }
     out.push(&text[start..]);
+}
+
+// Reads ASCII digits as a number. Returns `None` for no digits, for any other
+// byte, and for a number that does not fit.
+pub(crate) fn parse_decimal(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    // Up to 19 digits cannot overflow, so they need no checked arithmetic.
+    if bytes.len() <= 19 {
+        return bytes.iter().try_fold(0u64, |value, byte| {
+            let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+            Some(value * 10 + u64::from(digit))
+        });
+    }
+    bytes.iter().try_fold(0u64, |value, byte| {
+        let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+        value.checked_mul(10)?.checked_add(digit as u64)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_len;
+
+    #[test]
+    fn padded_base64_states_the_bytes_it_holds() {
+        for (text, len) in [
+            ("", Some(0)),
+            ("YQ==", Some(1)),
+            ("YWI=", Some(2)),
+            ("YWJj", Some(3)),
+            ("+/8=", Some(2)),
+            // Unpadded, padding in the middle, too much padding, and a
+            // character outside the alphabet.
+            ("YQ", None),
+            ("YQ==YWJj", None),
+            ("Y===", None),
+            ("YW-j", None),
+        ] {
+            assert_eq!(base64_len(text.as_bytes()), len, "{text}");
+        }
+    }
 }

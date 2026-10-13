@@ -57,7 +57,6 @@ static int compare_double(const void *a, const void *b) {
 }
 
 typedef struct {
-    const borink_session *session;
     uint8_t *work;
     size_t len;
     borink_list_entry *entries;
@@ -67,7 +66,7 @@ typedef struct {
 
 static size_t plain(const Round *r) {
     const borink_fill fill = borink_fill_listing(
-        r->session, (borink_bytes_mut){r->work, r->len}, r->entries, CAPACITY);
+        (borink_bytes_mut){r->work, r->len}, r->entries, CAPACITY);
     return fill.filled;
 }
 
@@ -77,7 +76,7 @@ static size_t plain(const Round *r) {
 static size_t with(const Round *r) {
     const size_t width = borink_property_set_len(r->wanted);
     const borink_fill fill = borink_fill_listing_with(
-        r->session, (borink_bytes_mut){r->work, r->len}, r->entries, CAPACITY, r->wanted,
+        (borink_bytes_mut){r->work, r->len}, r->entries, CAPACITY, r->wanted,
         r->values, CAPACITY * width);
     const size_t created = borink_property_slot(r->wanted, BORINK_BLOB_PROPERTY_CREATION_TIME);
     size_t seen = 0;
@@ -163,17 +162,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "hardware counters refused; instructions and cycles read 0\n");
     }
 
-    borink_session session;
-    session.endpoint = (borink_bytes){(const uint8_t *)"https://acct.blob.core.windows.net", 34};
-    session.container = (borink_bytes){(const uint8_t *)"data", 4};
-    session.token = (borink_bytes){(const uint8_t *)"token", 5};
-
     borink_property_set wanted = {0};
     wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_CREATION_TIME);
     wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_ACCESS_TIER);
     wanted = borink_property_set_with(wanted, BORINK_BLOB_PROPERTY_CONTENT_MD5);
     Round r = {
-        &session,
         malloc(len),
         len,
         calloc(CAPACITY, sizeof(borink_list_entry)),

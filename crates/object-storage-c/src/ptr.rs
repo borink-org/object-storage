@@ -7,29 +7,6 @@
 
 use crate::types::*;
 
-/// Initializes C header slots and borrows them with the core layout.
-///
-/// # Safety
-///
-/// `ptr` must address aligned, exclusive storage for `len` `RequestHeader`
-/// values in one allocation, with a byte size no greater than `isize::MAX`.
-/// The storage need not be initialized. Any pointer is accepted for zero slots.
-pub(crate) unsafe fn request_headers<'a>(
-    ptr: *mut RequestHeader,
-    len: usize,
-) -> &'a mut [borink_object_storage_proto::HeaderSpan] {
-    if len == 0 {
-        return &mut [];
-    }
-    // SAFETY: both types are repr(C), with identical integer fields. The
-    // layout assertions are in layout.rs. Zero initializes every field before
-    // a reference is formed; the caller supplies writable, exclusive storage.
-    unsafe {
-        ptr.write_bytes(0, len);
-        items_mut(ptr.cast(), len)
-    }
-}
-
 /// Reads `len` items at `ptr` as a slice.
 ///
 /// # Safety
@@ -78,12 +55,8 @@ pub(crate) unsafe fn items_mut<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
 /// reached through no other reference for the lifetime `'a`. Any `ptr` is
 /// accepted when `len` is 0.
 pub(crate) unsafe fn slice_mut<'a>(buf: BytesMut) -> &'a mut [u8] {
-    if buf.len == 0 {
-        return &mut [];
-    }
-    // SAFETY: the caller states that `buf.ptr` addresses `buf.len` bytes and
-    // that nothing else reaches them.
-    unsafe { core::slice::from_raw_parts_mut(buf.ptr, buf.len) }
+    // SAFETY: the caller states the contract of `items_mut`.
+    unsafe { items_mut(buf.ptr, buf.len) }
 }
 
 /// Reads a value the head may not have carried.
@@ -96,33 +69,72 @@ pub(crate) unsafe fn maybe_slice<'a>(value: MaybeBytes) -> Option<&'a [u8]> {
     value.present.then(|| unsafe { slice(value.bytes) })
 }
 
-/// The values of a session, as the core crate's client takes them.
+/// The values of a container, as the protocol crate's container takes them.
 #[derive(Clone, Copy)]
-pub(crate) struct SessionValues<'a> {
+pub(crate) struct ContainerValues<'a> {
     pub(crate) endpoint: &'a [u8],
-    pub(crate) container: &'a [u8],
-    pub(crate) token: &'a [u8],
+    pub(crate) name: &'a [u8],
     pub(crate) allow_http: bool,
+    pub(crate) object: &'a [u8],
 }
 
-/// Reads the endpoint, the container, the token and whether plain HTTP is
-/// allowed. A null `session` reads nothing.
+/// Reads the endpoint, the name, whether plain HTTP is allowed, and the one
+/// object. A null `container` reads nothing.
 ///
 /// # Safety
 ///
-/// `session` must be null or point at one readable value whose three byte
+/// `container` must be null or point at one readable value whose three byte
 /// values each satisfy `items` for the lifetime `'a`.
-pub(crate) unsafe fn session<'a>(session: *const Session) -> Option<SessionValues<'a>> {
-    // SAFETY: the caller states that a non-null `session` is readable, and
-    // that so are the three values it holds.
+pub(crate) unsafe fn container<'a>(container: *const Container) -> Option<ContainerValues<'a>> {
+    // SAFETY: the caller states that a non-null `container` is readable, and
+    // that so are the values it holds.
     unsafe {
-        session.as_ref().map(|session| SessionValues {
-            endpoint: slice(session.endpoint),
-            container: slice(session.container),
-            token: slice(session.token),
-            allow_http: session.allow_http,
+        container.as_ref().map(|container| ContainerValues {
+            endpoint: slice(container.endpoint),
+            name: slice(container.name),
+            allow_http: container.allow_http,
+            object: slice(container.object),
         })
     }
+}
+
+/// Reads the five content properties and the access tier of `options`, in
+/// the order of their fields.
+///
+/// # Safety
+///
+/// Each of the six values must satisfy `items` for the lifetime `'a`.
+pub(crate) unsafe fn write_options<'a>(options: &WriteOptions) -> [&'a [u8]; 6] {
+    let properties = options.properties;
+    // SAFETY: the caller states that each value addresses its stated bytes.
+    unsafe {
+        [
+            slice(properties.content_type),
+            slice(properties.content_encoding),
+            slice(properties.content_language),
+            slice(properties.content_disposition),
+            slice(properties.cache_control),
+            slice(options.storage_class),
+        ]
+    }
+}
+
+/// Reads the ID and the source of each of `count` blocks.
+///
+/// # Safety
+///
+/// `blocks` must satisfy `items` for `count` values, and the `id` of each
+/// must satisfy it too, for the lifetime `'a`.
+pub(crate) unsafe fn blocks<'a>(
+    blocks: *const BlockRef,
+    count: usize,
+) -> impl Iterator<Item = (&'a [u8], u16)> + Clone {
+    // SAFETY: the caller states that `blocks` addresses `count` values.
+    let blocks = unsafe { items(blocks, count) };
+    // SAFETY: the caller states that the ID of each addresses its bytes.
+    blocks
+        .iter()
+        .map(|block| unsafe { (slice(block.id), block.source) })
 }
 
 /// Reads the name and the value of each of `count` headers.
@@ -143,21 +155,15 @@ pub(crate) unsafe fn headers<'a>(
         .map(|header| unsafe { (slice(header.name), slice(header.value)) })
 }
 
-/// Reads a failure as the core crate's record. A null `failure` reads
-/// nothing, and so does one whose category this crate does not define.
+/// Reads a failure as the protocol crate's record. One whose category this
+/// crate does not define reads nothing.
 ///
 /// # Safety
 ///
-/// `failure` must be null or point at one readable value whose `request_id`
-/// satisfies `maybe_slice` for the lifetime `'a`.
+/// `failure.request_id` must satisfy `maybe_slice` for the lifetime `'a`.
 pub(crate) unsafe fn failure<'a>(
-    failure: *const Failure,
+    failure: &Failure,
 ) -> Option<borink_object_storage_proto::Failure<'a>> {
-    // SAFETY: the caller states that a non-null `failure` is readable, and
-    // that so is the identifier it borrows.
-    unsafe {
-        failure.as_ref().and_then(|failure| {
-            crate::sentence::failure_of(failure, maybe_slice(failure.request_id))
-        })
-    }
+    // SAFETY: the caller states that the identifier it borrows is readable.
+    crate::sentence::failure_of(failure, unsafe { maybe_slice(failure.request_id) })
 }

@@ -1,11 +1,11 @@
-//! What a listing call shares between the providers: the plan it asks for,
-//! the page a provider reads, and the result it reports. Each provider reads
-//! one page with its own client, as a [`PageSource`], and passes that source
-//! to [`list_page`] or [`list_all_keys`].
+//! What a listing call shares between the providers: the options and the
+//! page it asks for, the page a provider reads, and the result it reports.
+//! Each provider reads one page its own way, as a [`PageSource`], and passes
+//! that source to [`list_page`] or [`list_all_keys`].
 
 use crate::{AdapterError, optional_text, successful_result, unsupported_by_adapter};
 use borink_object_storage_proto::{
-    EntryKind, ListEntry, ListInclude, ListMarker, Listing, PhysicalList, layered,
+    EntryKind, ListEntry, ListInclude, ListItem, ListMarker, ListOptions, Listing, decode_property,
 };
 use serde_json::{Value, json};
 
@@ -28,9 +28,9 @@ pub(crate) trait Listed {
 
 /// Reads one page of a listing with one provider's client.
 pub(crate) trait PageSource {
-    /// Requests the page that `plan` names and reads it, or returns the
-    /// result to report instead.
-    fn read_page(&self, plan: &PhysicalList<'_>) -> PageRead;
+    /// Requests the page `item` of a listing with `options` and reads it,
+    /// or returns the result to report instead.
+    fn read_page(&self, options: &ListOptions<'_>, item: &ListItem<'_>) -> PageRead;
 }
 
 impl ListedPage {
@@ -68,7 +68,7 @@ impl ListedPage {
 /// The decoded text of a listed value, such as a metadata name or value.
 pub(crate) fn decoded_listing_text(raw_value: &[u8]) -> String {
     let mut decoded = vec![0; raw_value.len()];
-    match layered::decode_into(raw_value, &mut decoded) {
+    match decode_property(raw_value, &mut decoded) {
         Some(text) => String::from_utf8_lossy(text).into_owned(),
         None => String::from_utf8_lossy(raw_value).into_owned(),
     }
@@ -78,9 +78,9 @@ pub(crate) fn decoded_listing_text(raw_value: &[u8]) -> String {
 pub(crate) type PageRead = Result<Result<ListedPage, Value>, AdapterError>;
 
 /// An array of `max_results` entries always holds a whole page, and one of
-/// the service's maximum does when the plan names none.
-pub(crate) fn entry_slots<T: Clone + Default>(plan: &PhysicalList<'_>, maximum: usize) -> Vec<T> {
-    let count = plan
+/// the service's maximum does when the options name none.
+pub(crate) fn entry_slots<T: Clone + Default>(options: &ListOptions<'_>, maximum: usize) -> Vec<T> {
+    let count = options
         .max_results
         .map_or(maximum, |max_results| max_results as usize);
     vec![T::default(); count]
@@ -124,15 +124,17 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
     } else {
         token.map(ListMarker::Text)
     };
-    let list_plan = PhysicalList {
-        prefix: optional_text(call, "prefix").unwrap_or_default(),
-        marker,
-        start_after: optional_text(call, "start_after"),
+    let options = ListOptions {
         delimiter: optional_text(call, "delimiter"),
         max_results: requested_page_size(call),
         include,
     };
-    Ok(match source.read_page(&list_plan)? {
+    let item = ListItem {
+        prefix: optional_text(call, "prefix").unwrap_or_default(),
+        marker,
+        start_after: optional_text(call, "start_after"),
+    };
+    Ok(match source.read_page(&options, &item)? {
         Ok(page) => {
             let mut value = json!({
                 "entries": page.entries,
@@ -152,14 +154,17 @@ pub(crate) fn list_page(call: &Value, source: &impl PageSource) -> Result<Value,
 pub(crate) fn list_all_keys(call: &Value, source: &impl PageSource) -> Result<Value, AdapterError> {
     let prefix = optional_text(call, "prefix").unwrap_or_default();
     let mut keys = Vec::new();
+    let options = ListOptions {
+        max_results: requested_page_size(call),
+        ..ListOptions::default()
+    };
     let mut marker: Option<String> = None;
     loop {
-        let list_plan = PhysicalList {
+        let item = ListItem {
             marker: marker.as_deref().map(ListMarker::Text),
-            max_results: requested_page_size(call),
-            ..PhysicalList::new(prefix)
+            ..ListItem::new(prefix)
         };
-        let page = match source.read_page(&list_plan)? {
+        let page = match source.read_page(&options, &item)? {
             Ok(page) => page,
             Err(result) => return Ok(result),
         };

@@ -1,38 +1,44 @@
-//! Azure listing encoding, response interpretation and page reading.
+//! Azure listing encoding and page reading.
 
-use borink_object_storage_proto::{
-    AzureNamespace, BlobProperty, Blobs, CapacityError, Container, EntryKind, Error, HeaderSpan,
-    InvalidPlan, ListEntry, ListHeadOutcome, ListInclude, ListMarker, ListShape, Listing, Metadata,
-    Method, PhysicalList, PropertySet, PropertyValues, ResponseFault, ResponseHead,
-    ServiceErrorKind, Timestamps, layered,
+use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure::{
+    AzureNamespace, BlobProperty, Container, PropertySet, PropertyValues,
 };
-
-fn blobs() -> Blobs<'static> {
-    Blobs::new(
-        Container::new("https://account.blob.core.windows.net", "container").unwrap(),
-        "token",
-    )
-    .unwrap()
-}
+use borink_object_storage_proto::{
+    CapacityError, EntryKind, Error, InvalidRequest, ListEntry, ListInclude, ListItem, ListMarker,
+    ListOptions, Listing, Metadata, ResponseFault, Timestamps, decode_property, http_date_ms,
+};
 
 fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
-fn url(list: &PhysicalList<'_>) -> String {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let mut buf = vec![
-        0;
-        layered::list_requirements(&blobs, list, &now())
-            .map(|size| size.bytes)
-            .unwrap()
-    ];
-    blobs
-        .encode_list(&mut buf, &mut request_headers, list, &now())
-        .unwrap()
-        .url()
-        .to_owned()
+fn template(
+    namespace: AzureNamespace,
+    options: &ListOptions<'_>,
+) -> Result<(Template, Vec<u8>), Error> {
+    let container = Container::new("https://account.blob.core.windows.net", "container").unwrap();
+    let mut bytes = vec![0; 1024];
+    let template = azure::prepare_list(&container, "token", namespace, options, &mut bytes)?;
+    Ok((template, bytes))
+}
+
+// The URL of the page `item` of a listing with `options`, or the reason it
+// is refused.
+fn encode(
+    namespace: AzureNamespace,
+    options: &ListOptions<'_>,
+    item: &ListItem<'_>,
+) -> Result<String, Error> {
+    let (template, bytes) = template(namespace, options)?;
+    // A URL as long as Azure reads stands in the request twice.
+    let mut buf = vec![0; 2 * azure::MAX_URL_LEN + 1024];
+    let request = azure::encode_list(&template, &bytes, item, &now(), &mut buf)?;
+    Ok(request.url().to_owned())
+}
+
+fn url(options: &ListOptions<'_>, item: &ListItem<'_>) -> String {
+    encode(AzureNamespace::Unknown, options, item).unwrap()
 }
 
 // One page, with everything a flat account writes into it.
@@ -62,253 +68,135 @@ fn object(name: &str, size: u64) -> String {
 }
 
 fn fill<'b>(body: &'b mut [u8], into: &mut [ListEntry<'b>]) -> Listing<'b> {
-    blobs().fill_listing(body, into).unwrap()
-}
-
-#[test]
-fn a_listing_addresses_the_container_and_carries_no_content() {
-    let mut headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let list = PhysicalList::new("");
-    let mut buf = vec![
-        0;
-        layered::list_requirements(&blobs, &list, &now())
-            .unwrap()
-            .bytes
-    ];
-    let request = blobs
-        .encode_list(&mut buf, &mut headers, &list, &now())
-        .unwrap();
-
-    assert_eq!(request.method(), Method::Get);
-    assert_eq!(
-        request.url(),
-        "https://account.blob.core.windows.net/container?restype=container&comp=list"
-    );
-    assert!(request.payload().is_empty());
-
-    let headers: Vec<_> = request.headers().collect();
-    assert_eq!(
-        headers,
-        [
-            ("authorization", "Bearer token"),
-            ("x-ms-date", "Sat, 22 Aug 2026 12:00:00 GMT"),
-            ("x-ms-version", "2026-04-06"),
-        ]
-    );
+    azure::fill_listing(body, into).unwrap()
 }
 
 #[test]
 fn every_query_parameter_is_written_in_one_order() {
     let base = "https://account.blob.core.windows.net/container?restype=container&comp=list";
+    let plain = ListOptions::default();
 
     assert_eq!(
-        url(&PhysicalList::new("directory/")),
+        url(&plain, &ListItem::new("directory/")),
         format!("{base}&prefix=directory%2F")
     );
+    let delimited = ListOptions {
+        delimiter: Some("/"),
+        ..plain
+    };
     assert_eq!(
-        url(&PhysicalList {
-            delimiter: Some("/"),
-            ..PhysicalList::new("")
-        }),
+        url(&delimited, &ListItem::new("")),
         format!("{base}&delimiter=%2F")
     );
+    let paged = ListOptions {
+        max_results: Some(1000),
+        ..plain
+    };
     assert_eq!(
-        url(&PhysicalList {
-            max_results: Some(1000),
-            ..PhysicalList::new("")
-        }),
+        url(&paged, &ListItem::new("")),
         format!("{base}&maxresults=1000")
     );
 
     // A marker is the service's own opaque text, so every byte of it that is
     // not unreserved is encoded, including one that is already a percent.
     assert_eq!(
-        url(&PhysicalList {
-            marker: Some(ListMarker::Text("2!72!MDAwMDI4!a+b%c")),
-            ..PhysicalList::new("")
-        }),
+        url(
+            &plain,
+            &ListItem::new("").after(ListMarker::Text("2!72!MDAwMDI4!a+b%c"))
+        ),
         format!("{base}&marker=2%2172%21MDAwMDI4%21a%2Bb%25c")
     );
 
+    // The parameters of the template come first, then those each page
+    // fills.
+    let both = ListOptions {
+        delimiter: Some("/"),
+        max_results: Some(2),
+        ..plain
+    };
     assert_eq!(
-        url(&PhysicalList::from_shape(
-            ListShape {
-                delimited: true,
-                max_results: Some(2),
-                ..ListShape::default()
-            },
-            "directory/",
-            Some(ListMarker::Text("next")),
-        )),
-        format!("{base}&prefix=directory%2F&delimiter=%2F&marker=next&maxresults=2")
+        url(
+            &both,
+            &ListItem::new("directory/").after(ListMarker::Text("next"))
+        ),
+        format!("{base}&delimiter=%2F&maxresults=2&prefix=directory%2F&marker=next")
     );
 }
 
 #[test]
-fn a_listing_plan_is_validated_before_any_byte_is_written() {
-    let mut request_headers = [HeaderSpan::default(); 8];
+fn a_listing_is_refused_before_any_byte_is_written() {
+    let plain = ListOptions::default();
     // A prefix is not bounded like a name, on any account: a flat account
     // answers a prefix far longer than the names it takes. What bounds it is
     // the URL.
     let long = "k".repeat(1025);
-    for blobs in [blobs(), blobs().with_namespace(AzureNamespace::Flat)] {
-        assert!(
-            blobs
-                .encode_list(
-                    &mut [0; 4096],
-                    &mut request_headers,
-                    &PhysicalList::new(long.as_str()),
-                    &now()
-                )
-                .is_ok()
-        );
+    for namespace in [AzureNamespace::Unknown, AzureNamespace::Flat] {
+        assert!(encode(namespace, &plain, &ListItem::new(&long)).is_ok());
     }
     let fixed =
         "https://account.blob.core.windows.net/container?restype=container&comp=list&prefix=".len();
-    let fits = "k".repeat(borink_object_storage_proto::azure::MAX_URL_LEN - fixed);
-    let mut buf = vec![0; 65536];
-    let request = blobs()
-        .encode_list(
-            &mut buf,
-            &mut request_headers,
-            &PhysicalList::new(&fits),
-            &now(),
-        )
-        .unwrap();
-    assert_eq!(
-        request.url().len(),
-        borink_object_storage_proto::azure::MAX_URL_LEN
-    );
+    let fits = "k".repeat(azure::MAX_URL_LEN - fixed);
+    assert_eq!(url(&plain, &ListItem::new(&fits)).len(), azure::MAX_URL_LEN);
+
     let over = format!("{fits}k");
-    let blobs = blobs().with_namespace(AzureNamespace::Flat);
-    for (list, expected) in [
-        (PhysicalList::new(&over), InvalidPlan::UrlTooLong),
+    let refused = |options: &ListOptions<'_>, item: &ListItem<'_>| {
+        encode(AzureNamespace::Hierarchical, options, item).map(drop)
+    };
+    for (options, item, expected) in [
+        (plain, ListItem::new(&over), InvalidRequest::UrlTooLong),
         (
-            PhysicalList {
-                marker: Some(ListMarker::Text("")),
-                ..PhysicalList::new("")
-            },
-            InvalidPlan::Marker,
+            plain,
+            ListItem::new("").after(ListMarker::Text("")),
+            InvalidRequest::Marker,
         ),
         (
-            PhysicalList {
-                max_results: Some(0),
-                ..PhysicalList::new("")
+            plain,
+            ListItem::new("").after(ListMarker::Version {
+                key: "k",
+                version: None,
+            }),
+            InvalidRequest::Marker,
+        ),
+        // Azure starts a listing only at its own marker, and names no owner.
+        (
+            plain,
+            ListItem {
+                start_after: Some("k"),
+                ..ListItem::new("")
             },
-            InvalidPlan::MaxResults,
+            InvalidRequest::Option,
+        ),
+        (
+            ListOptions {
+                include: ListInclude::OWNER,
+                ..plain
+            },
+            ListItem::new(""),
+            InvalidRequest::Option,
+        ),
+        (
+            ListOptions {
+                max_results: Some(0),
+                ..plain
+            },
+            ListItem::new(""),
+            InvalidRequest::MaxResults,
+        ),
+        // A hierarchical account groups names at `/` alone.
+        (
+            ListOptions {
+                delimiter: Some("-"),
+                ..plain
+            },
+            ListItem::new(""),
+            InvalidRequest::Delimiter,
         ),
     ] {
         assert_eq!(
-            blobs
-                .encode_list(&mut [0; 512], &mut request_headers, &list, &now())
-                .map(drop),
-            Err(Error::InvalidPlan(expected))
-        );
-        // The plan is refused before the buffer is even looked at.
-        assert_eq!(
-            blobs
-                .encode_list(&mut [], &mut request_headers, &list, &now())
-                .map(drop),
-            Err(Error::InvalidPlan(expected))
+            refused(&options, &item),
+            Err(Error::InvalidRequest(expected))
         );
     }
-
-    // A prefix of exactly the longest key, and an empty one, both encode.
-    let longest = "k".repeat(1024);
-    assert!(
-        layered::list_requirements(&blobs, &PhysicalList::new(longest.as_str()), &now())
-            .map(|size| size.bytes)
-            .is_ok()
-    );
-    assert!(
-        layered::list_requirements(&blobs, &PhysicalList::new(""), &now())
-            .map(|size| size.bytes)
-            .is_ok()
-    );
-}
-
-#[test]
-fn an_undersized_buffer_states_the_exact_requirement() {
-    let mut request_headers = [HeaderSpan::default(); 8];
-    let blobs = blobs();
-    let list = PhysicalList::new("directory/");
-    let required = layered::list_requirements(&blobs, &list, &now())
-        .map(|size| size.bytes)
-        .unwrap();
-
-    let error = blobs
-        .encode_list(
-            &mut vec![0; required - 1],
-            &mut request_headers,
-            &list,
-            &now(),
-        )
-        .unwrap_err();
-    assert_eq!(error.capacity().unwrap().required, required);
-    assert!(
-        blobs
-            .encode_list(&mut vec![0; required], &mut request_headers, &list, &now())
-            .is_ok()
-    );
-}
-
-#[test]
-fn a_success_announces_the_page_and_a_failure_names_the_error() {
-    let blobs = blobs();
-
-    assert_eq!(
-        blobs.accept_list_head(ResponseHead::from_headers(
-            200,
-            [("Content-Length", b"512".as_slice())]
-        )),
-        Ok(ListHeadOutcome::Page {
-            expected_len: Some(512)
-        })
-    );
-    assert_eq!(
-        blobs.accept_list_head(ResponseHead::new(200)),
-        Ok(ListHeadOutcome::Page { expected_len: None })
-    );
-
-    // A missing container is a failure, never an empty page.
-    assert!(matches!(
-        blobs.accept_list_head(ResponseHead::from_headers(
-            404,
-            [("x-ms-error-code", b"ContainerNotFound".as_slice())]
-        )),
-        Ok(ListHeadOutcome::ServiceFailure(failure))
-            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
-    ));
-
-    // A status that a listing never answers with is a fault, not an outcome.
-    assert_eq!(
-        blobs.accept_list_head(ResponseHead::new(206)),
-        Err(Error::Response(ResponseFault::Status))
-    );
-    assert_eq!(
-        blobs.accept_list_head(ResponseHead::from_headers(
-            200,
-            [("Content-Length", b"not a number".as_slice())]
-        )),
-        Err(Error::Response(ResponseFault::Head))
-    );
-}
-
-#[test]
-fn a_failure_without_a_code_header_is_finished_by_the_body() {
-    let blobs = blobs();
-    let head = ResponseHead::from_headers(404, [("x-ms-request-id", b"request-1".as_slice())]);
-
-    let ListHeadOutcome::NeedErrorBody(failure) = blobs.accept_list_head(head).unwrap() else {
-        panic!("a 404 with no code header needs the body");
-    };
-    assert_eq!(failure.kind, None);
-    assert!(matches!(
-        blobs.accept_list_error_body(failure, b"<Error><Code>ContainerNotFound</Code></Error>"),
-        ListHeadOutcome::ServiceFailure(failure)
-            if failure.kind == Some(ServiceErrorKind::NoSuchContainer)
-    ));
 }
 
 #[test]
@@ -324,7 +212,7 @@ fn a_page_reports_every_object_it_holds() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].key, "b/c.txt");
@@ -358,6 +246,27 @@ fn a_delimited_page_interleaves_groups_with_objects() {
     // A group of keys is not an object: it has no size and no entity tag.
     assert_eq!(entries[1].size, None);
     assert_eq!(entries[1].e_tag, None);
+}
+
+/// For speed, the reader checks a key as UTF-8 together with the bytes
+/// around it. Where those bytes end inside a character, it checks the key
+/// alone. Each
+/// key length here puts that end somewhere else in the text after the key.
+#[test]
+fn a_group_is_read_whatever_text_follows_its_key() {
+    for len in 1..=16 {
+        let key = format!("{}/", "k".repeat(len));
+        let mut body = page(
+            &format!("<BlobPrefix><Name>{key}</Name><X>\u{e9}\u{e9}\u{e9}\u{e9}</X></BlobPrefix>"),
+            "",
+        );
+        let mut entries = [ListEntry::default(); 1];
+        fill(&mut body, &mut entries);
+        assert_eq!(
+            (entries[0].kind, entries[0].key),
+            (EntryKind::Prefix, key.as_str())
+        );
+    }
 }
 
 #[test]
@@ -409,11 +318,10 @@ fn content_type_is_decoded_and_shared_by_each_listing_access_path() {
                 "",
             );
             let mut entries = [(ListEntry::default(), None)];
-            blobs()
-                .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
-                    (entry, values.get(BlobProperty::ContentType))
-                })
-                .unwrap();
+            azure::fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+                (entry, values.get(BlobProperty::ContentType))
+            })
+            .unwrap();
             let (entry, selected) = entries[0];
             assert_eq!(entry.content_type, expected, "{xml}");
             assert_eq!(
@@ -518,11 +426,8 @@ fn an_array_smaller_than_the_page_is_refused_with_the_count_the_page_holds() {
     // its end for that count, so a damaged page is still reported as one.
     let mut entries = [ListEntry::default(); 2];
     assert_eq!(
-        blobs().fill_listing(&mut body, &mut entries),
-        Err(Error::Capacity(CapacityError {
-            required: 3,
-            ..CapacityError::default()
-        }))
+        azure::fill_listing(&mut body, &mut entries),
+        Err(Error::Capacity(CapacityError { required: 3 }))
     );
 }
 
@@ -538,11 +443,8 @@ fn an_array_with_no_room_is_refused_unless_the_page_is_empty() {
     let mut body = page(&object("a.txt", 1), "next");
     let mut none: [ListEntry; 0] = [];
     assert_eq!(
-        blobs().fill_listing(&mut body, &mut none),
-        Err(Error::Capacity(CapacityError {
-            required: 1,
-            ..CapacityError::default()
-        }))
+        azure::fill_listing(&mut body, &mut none),
+        Err(Error::Capacity(CapacityError { required: 1 }))
     );
 }
 
@@ -584,7 +486,7 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
     assert_eq!(entries[0].size, Some(8));
     assert_eq!(entries[0].e_tag, Some("0x8DF0046E8E555AF"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_787_400_000_000)
     );
     assert_eq!(entries[1].kind, EntryKind::Directory);
@@ -592,7 +494,6 @@ fn the_values_the_service_writes_are_read_without_the_space_around_them() {
 
 #[test]
 fn a_body_that_is_not_a_page_is_a_fault() {
-    let blobs = blobs();
     let fault = Err(Error::Response(ResponseFault::Body));
 
     for mut body in [
@@ -704,7 +605,7 @@ fn a_body_that_is_not_a_page_is_a_fault() {
     ] {
         let document = String::from_utf8_lossy(&body).into_owned();
         assert_eq!(
-            blobs.fill_listing(&mut body, &mut [ListEntry::default(); 4]),
+            azure::fill_listing(&mut body, &mut [ListEntry::default(); 4]),
             fault,
             "{document}"
         );
@@ -723,7 +624,7 @@ fn a_body_that_was_read_stops_being_a_document() {
 
     let mut entries = [ListEntry::default(); 1];
     assert!(matches!(
-        blobs().fill_listing(&mut body, &mut entries),
+        azure::fill_listing(&mut body, &mut entries),
         Err(Error::Capacity(_))
     ));
     assert_eq!(entries[0].key, "a&b");
@@ -735,7 +636,7 @@ fn a_body_that_was_read_stops_being_a_document() {
     // The decoding left zero bytes behind, which no document holds.
     let mut entries = [ListEntry::default(); 2];
     assert_eq!(
-        blobs().fill_listing(&mut body, &mut entries),
+        azure::fill_listing(&mut body, &mut entries),
         Err(Error::Response(ResponseFault::Body))
     );
 }
@@ -801,7 +702,7 @@ fn a_page_the_service_actually_sent() {
     assert_eq!(entries[0].size, Some(1));
     assert_eq!(entries[0].e_tag, Some("0x8DF085C5E09984C"));
     assert_eq!(
-        entries[0].last_modified.and_then(layered::http_date_ms),
+        entries[0].last_modified.and_then(http_date_ms),
         Some(1_788_289_691_000)
     );
     // The last page of the listing, written the way the service writes it.
@@ -932,21 +833,21 @@ fn a_value_that_was_decoded_in_place_is_reported_decoded_by_the_walk() {
 fn a_listed_value_is_decoded_into_a_buffer_of_the_caller() {
     let mut into = [0; 32];
     assert_eq!(
-        layered::decode_into(b"a&amp;b", &mut into),
+        decode_property(b"a&amp;b", &mut into),
         Some(b"a&b".as_slice())
     );
     assert_eq!(
-        layered::decode_into(b"caf&#233;", &mut into),
+        decode_property(b"caf&#233;", &mut into),
         Some("café".as_bytes())
     );
     // Text with nothing to decode is copied as it stands.
     assert_eq!(
-        layered::decode_into(b"text/plain", &mut into),
+        decode_property(b"text/plain", &mut into),
         Some(b"text/plain".as_slice())
     );
     // A buffer shorter than the value, and a reference no listing declares.
-    assert_eq!(layered::decode_into(b"a&amp;b", &mut [0; 6]), None);
-    assert_eq!(layered::decode_into(b"a&nbsp;b", &mut into), None);
+    assert_eq!(decode_property(b"a&amp;b", &mut [0; 6]), None);
+    assert_eq!(decode_property(b"a&nbsp;b", &mut into), None);
 }
 
 /// A prefix that a hierarchical account furnishes, and an entry whose
@@ -1025,9 +926,7 @@ fn the_properties_a_caller_asks_for_are_read_with_the_page() {
         "",
     );
     let mut entries = [Picked::default(); 3];
-    let listing = blobs()
-        .fill_listing_with(&mut body, &mut entries, WANTED, Picked::build)
-        .unwrap();
+    let listing = azure::fill_listing_with(&mut body, &mut entries, WANTED, Picked::build).unwrap();
 
     assert_eq!(listing.filled, 3);
     assert_eq!(
@@ -1079,9 +978,7 @@ fn a_spelling_the_service_does_not_use_is_still_read() {
         "",
     );
     let mut entries = [Picked::default(); 1];
-    blobs()
-        .fill_listing_with(&mut body, &mut entries, WANTED, Picked::build)
-        .unwrap();
+    azure::fill_listing_with(&mut body, &mut entries, WANTED, Picked::build).unwrap();
     assert_eq!(entries[0].encoding, Some(b"".as_slice()));
     assert_eq!(entries[0].tier, Some(b"Hot".as_slice()));
     assert_eq!(
@@ -1105,14 +1002,13 @@ fn an_element_beside_the_properties_element_is_read_the_same_way() {
     );
     let set = PropertySet::of(&[BlobProperty::VersionId, BlobProperty::IsCurrentVersion]);
     let mut entries = [[None; 2]; 1];
-    blobs()
-        .fill_listing_with(&mut body, &mut entries, set, |_, values| {
-            [
-                values.get(BlobProperty::VersionId),
-                values.get(BlobProperty::IsCurrentVersion),
-            ]
-        })
-        .unwrap();
+    azure::fill_listing_with(&mut body, &mut entries, set, |_, values| {
+        [
+            values.get(BlobProperty::VersionId),
+            values.get(BlobProperty::IsCurrentVersion),
+        ]
+    })
+    .unwrap();
     assert_eq!(
         entries[0],
         [
@@ -1129,11 +1025,10 @@ fn the_values_of_a_set_stand_in_the_order_the_enum_lists_them() {
     let mut body = page(&object("a.txt", 4), "");
     let set = PropertySet::of(&[BlobProperty::BlobType, BlobProperty::AccessTier]);
     let mut all = [[None; 2]; 1];
-    blobs()
-        .fill_listing_with(&mut body, &mut all, set, |_, values| {
-            <[_; 2]>::try_from(values.all()).unwrap()
-        })
-        .unwrap();
+    azure::fill_listing_with(&mut body, &mut all, set, |_, values| {
+        <[_; 2]>::try_from(values.all()).unwrap()
+    })
+    .unwrap();
     // `AccessTier` is numbered before `BlobType`.
     assert_eq!(all[0], [None, Some(b"BlockBlob".as_slice())]);
 }
@@ -1145,11 +1040,10 @@ fn a_value_read_with_the_page_is_what_the_walk_reports() {
     let mut body = page(&object("a.txt", 4), "");
     let set = PropertySet::of(&[BlobProperty::BlobType]);
     let mut entries = [(ListEntry::default(), None); 1];
-    blobs()
-        .fill_listing_with(&mut body, &mut entries, set, |entry, values| {
-            (entry, values.get(BlobProperty::BlobType))
-        })
-        .unwrap();
+    azure::fill_listing_with(&mut body, &mut entries, set, |entry, values| {
+        (entry, values.get(BlobProperty::BlobType))
+    })
+    .unwrap();
     let (entry, blob_type) = entries[0];
     assert_eq!(blob_type, entry.property("BlobType"));
     assert_eq!(blob_type, Some(b"BlockBlob".as_slice()));
@@ -1158,24 +1052,23 @@ fn a_value_read_with_the_page_is_what_the_walk_reports() {
 #[test]
 fn an_include_set_is_written_as_one_query_parameter() {
     let base = "https://account.blob.core.windows.net/container?restype=container&comp=list";
-
+    let metadata = ListOptions {
+        include: ListInclude::METADATA,
+        ..ListOptions::default()
+    };
     assert_eq!(
-        url(&PhysicalList {
-            include: ListInclude::METADATA,
-            ..PhysicalList::new("")
-        }),
+        url(&metadata, &ListItem::new("")),
         format!("{base}&include=metadata")
     );
-    // The set comes after the page size, and an empty set writes nothing.
+    let paged = ListOptions {
+        max_results: Some(2),
+        include: ListInclude::METADATA | ListInclude::default(),
+        ..ListOptions::default()
+    };
     assert_eq!(
-        url(&PhysicalList {
-            max_results: Some(2),
-            include: ListInclude::METADATA | ListInclude::default(),
-            ..PhysicalList::new("")
-        }),
+        url(&paged, &ListItem::new("")),
         format!("{base}&maxresults=2&include=metadata")
     );
-    assert_eq!(url(&PhysicalList::new("")), base);
     assert!(ListInclude::default().is_empty());
     assert!(!ListInclude::METADATA.is_empty());
     assert!(ListInclude::METADATA.contains(ListInclude::default()));
@@ -1220,7 +1113,7 @@ fn an_entry_reports_the_metadata_pairs_the_service_wrote() {
     // where the caller wants them resolved.
     let mut into = [0; 16];
     assert_eq!(
-        layered::decode_into(pairs[1].1, &mut into),
+        decode_property(pairs[1].1, &mut into),
         Some(b"a & b".as_slice())
     );
     // The entry's own fields are unchanged by the metadata beside them.
@@ -1280,15 +1173,14 @@ fn a_selected_metadata_property_is_read_in_the_same_pass_as_the_page() {
         "",
     );
     let mut entries = [(ListEntry::default(), None, None); 1];
-    blobs()
-        .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
-            (
-                entry,
-                values.get(BlobProperty::Metadata),
-                values.get(BlobProperty::ContentMd5),
-            )
-        })
-        .unwrap();
+    azure::fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+        (
+            entry,
+            values.get(BlobProperty::Metadata),
+            values.get(BlobProperty::ContentMd5),
+        )
+    })
+    .unwrap();
 
     let (entry, metadata, md5) = entries[0];
     assert_eq!(entry.key, "object.bin");
@@ -1311,11 +1203,10 @@ fn an_empty_metadata_element_is_read_as_a_property_with_no_pairs() {
         );
         let mut body = page(&entry, "");
         let mut entries = [(ListEntry::default(), None); 1];
-        blobs()
-            .fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
-                (entry, values.get(BlobProperty::Metadata))
-            })
-            .unwrap();
+        azure::fill_listing_with(&mut body, &mut entries, wanted, |entry, values| {
+            (entry, values.get(BlobProperty::Metadata))
+        })
+        .unwrap();
         assert_eq!(entries[0].1, Some(b"".as_slice()), "{written}");
     }
 }
@@ -1328,7 +1219,7 @@ fn a_metadata_element_the_page_reader_cannot_close_is_a_fault() {
     let mut body = page(entry, "");
     let mut entries = [ListEntry::default(); 1];
     assert_eq!(
-        blobs().fill_listing(&mut body, &mut entries).unwrap_err(),
+        azure::fill_listing(&mut body, &mut entries).unwrap_err(),
         Error::Response(ResponseFault::Body)
     );
 }

@@ -23,7 +23,7 @@
 // delimiter, and that CRLF stands for the empty line: the answer of an Azure
 // batch is written so, as its documentation shows.
 
-use crate::common::decimal;
+use crate::encoding::parse_decimal;
 use crate::{ResponseFault, ResponseHead, Result};
 
 // One response, read and checked.
@@ -39,7 +39,7 @@ impl<'b> Response<'b> {
     // Reads and checks the response that `message` holds, all of it.
     pub(crate) fn parse(message: &'b [u8]) -> Result<Self> {
         let (status_line, mut rest) = next_line(message)?;
-        let status = status(status_line)?;
+        let status = read_status_code(status_line)?;
         let fields_start = message.len() - rest.len();
         let (fields_end, content) = loop {
             if rest.is_empty() {
@@ -81,19 +81,19 @@ impl<'b> Response<'b> {
         let mut length = None;
         for (name, value) in self.fields() {
             if name.eq_ignore_ascii_case("transfer-encoding") {
-                return fault();
+                return message_fault();
             }
             if name.eq_ignore_ascii_case("content-length") {
                 if length.is_some() {
-                    return fault();
+                    return message_fault();
                 }
-                length = Some(decimal(value).ok_or(ResponseFault::Body)?);
+                length = Some(parse_decimal(value).ok_or(ResponseFault::Body)?);
             }
         }
         match length {
             None if self.content.is_empty() => Ok(()),
             Some(length) if length == self.content.len() as u64 => Ok(()),
-            _ => fault(),
+            _ => message_fault(),
         }
     }
 }
@@ -102,28 +102,28 @@ impl<'b> Response<'b> {
 // CRLF. A line holds no other CR or LF.
 pub(crate) fn next_line(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
     let Some(end) = bytes.iter().position(|byte| matches!(byte, b'\r' | b'\n')) else {
-        return fault();
+        return message_fault();
     };
     if bytes.get(end..end + 2) != Some(b"\r\n") {
-        return fault();
+        return message_fault();
     }
     Ok((&bytes[..end], &bytes[end + 2..]))
 }
 
 // Reads the status code of `HTTP/1.1 NNN reason`.
-fn status(line: &[u8]) -> Result<u16> {
+fn read_status_code(line: &[u8]) -> Result<u16> {
     let Some(rest) = line.strip_prefix(b"HTTP/1.1 ") else {
-        return fault();
+        return message_fault();
     };
     let (code, reason) = match rest {
         [a, b, c, b' ', reason @ ..] if [a, b, c].iter().all(|digit| digit.is_ascii_digit()) => (
             u16::from(a - b'0') * 100 + u16::from(b - b'0') * 10 + u16::from(c - b'0'),
             reason,
         ),
-        _ => return fault(),
+        _ => return message_fault(),
     };
-    if !(100..=599).contains(&code) || !reason.iter().all(|byte| text_byte(*byte)) {
-        return fault();
+    if !(100..=599).contains(&code) || !reason.iter().all(|byte| is_text_byte(*byte)) {
+        return message_fault();
     }
     Ok(code)
 }
@@ -132,14 +132,14 @@ fn status(line: &[u8]) -> Result<u16> {
 // whitespace around the value.
 pub(crate) fn field_line(line: &[u8]) -> Result<(&str, &[u8])> {
     let Some(colon) = line.iter().position(|byte| *byte == b':') else {
-        return fault();
+        return message_fault();
     };
     let (name, value) = (&line[..colon], &line[colon + 1..]);
-    if name.is_empty() || !name.iter().all(|byte| token_byte(*byte)) {
-        return fault();
+    if name.is_empty() || !name.iter().all(|byte| is_token_byte(*byte)) {
+        return message_fault();
     }
-    if !value.iter().all(|byte| text_byte(*byte)) {
-        return fault();
+    if !value.iter().all(|byte| is_text_byte(*byte)) {
+        return message_fault();
     }
     // A token is ASCII.
     let name = core::str::from_utf8(name).or(Err(ResponseFault::Body))?;
@@ -155,13 +155,13 @@ pub(crate) fn field_lines(fields: &[u8]) -> impl Iterator<Item = (&str, &[u8])> 
 }
 
 // The characters of a token, RFC 9110's `tchar`.
-pub(crate) fn token_byte(byte: u8) -> bool {
+pub(crate) fn is_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 // What a field value or a reason phrase may hold: visible characters, bytes
 // above ASCII, spaces and tabs.
-fn text_byte(byte: u8) -> bool {
+fn is_text_byte(byte: u8) -> bool {
     matches!(byte, b'\t' | b' '..=b'~' | 0x80..=0xff)
 }
 
@@ -176,6 +176,6 @@ pub(crate) fn trim_whitespace(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn fault<T>() -> Result<T> {
+fn message_fault<T>() -> Result<T> {
     Err(ResponseFault::Body.into())
 }

@@ -7,114 +7,116 @@
 // alone: a normal build would report it unused.
 #[cfg(doc)]
 use crate::Error;
-use crate::azure::{Blobs, body_kind, named, revision_parameter, validate_key};
-use crate::common::{encoded, failure, finish_with_body, missing, valid_header, validate_revision};
-use crate::request::HeadWriter;
-use crate::url;
+use crate::azure::template::{Field, FieldValue, Operation, Template};
+use crate::azure::{
+    AzureNamespace, Container, ObjectText, encode_object, kind_in_body, prepare_object,
+    read_failure_head,
+};
+use crate::outcome::finish_with_body;
+use crate::template::WireRequest;
+use crate::validate::is_header_value;
 use crate::{
-    Failure, HeaderSpan, InvalidPlan, Method, Payload, PhysicalRestore, RequestedRange,
-    ResponseFault, ResponseHead, RestoreHeadOutcome, RestorePriority, Result, Timestamps,
-    WireRequest,
+    ConditionKind, Failure, InvalidRequest, ObjectItem, ResponseFault, ResponseHead,
+    RestoreHeadOutcome, RestoreOptions, RestorePriority, Result, Timestamps,
 };
 
-impl<'a> Blobs<'a> {
-    /// Writes the request head of a Set Blob Tier into `buf` that rehydrates
-    /// an archived object into `plan.tier`, at `plan.priority`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidPlan`] for a key or a revision that
-    /// [`Self::encode_get`] refuses, [`InvalidPlan::ContentProperty`] for a
-    /// tier that is not one header value, and [`InvalidPlan::Option`] for a
-    /// plan without a tier, or with a number of days, a checksum or
-    /// [`RestorePriority::Bulk`].
-    ///
-    /// Returns [`Error::Capacity`] if `buf` or `headers` is too small, with
-    /// the required bytes and header slots, or call
-    /// [`layered::restore_requirements`](crate::layered::restore_requirements)
-    /// first.
-    pub fn encode_restore<'r>(
-        &self,
-        buf: &'r mut [u8],
-        headers: &'r mut [HeaderSpan],
-        plan: &PhysicalRestore<'_>,
-        now: &Timestamps,
-    ) -> Result<WireRequest<'r>> {
-        validate_key(plan.key, self.namespace)?;
-        validate_revision(plan.revision, true)?;
-        let priority = match plan.priority {
-            RestorePriority::Standard => "Standard",
-            RestorePriority::High => "High",
-            RestorePriority::Bulk => return Err(InvalidPlan::Option.into()),
-        };
-        // A rehydration is for good, and the request has no body.
-        let Some(tier) = plan.tier else {
-            return Err(InvalidPlan::Option.into());
-        };
-        if plan.days.is_some() || plan.checksum.is_some() {
-            return Err(InvalidPlan::Option.into());
-        }
-        if !valid_header(tier.as_bytes()) || tier.trim_ascii() != tier {
-            return Err(InvalidPlan::ContentProperty.into());
-        }
-        let query = [
-            url::literal("comp", "tier"),
-            revision_parameter(plan.revision),
-        ];
-        let mut head = HeadWriter::new(buf, headers);
-        self.build(
-            &mut head,
-            Some(plan.key),
-            &query,
-            RequestedRange::Whole,
-            now,
-        )?;
-        head.header("x-ms-access-tier", tier.as_bytes());
-        head.header("x-ms-rehydrate-priority", priority.as_bytes());
-        head.header("content-length", b"0");
-        encoded(head, Method::Put, Payload::Slice(&[]))
+/// Writes the template of rehydrations with `options` into `buf`: Set Blob
+/// Tiers that move blobs out of the `Archive` tier to the tier
+/// [`RestoreOptions::tier`], at [`RestoreOptions::priority`].
+///
+/// # Errors
+///
+/// Returns [`InvalidRequest::Option`] for [`RestorePriority::Bulk`], for no
+/// tier, for days and for a checksum: a rehydration is for good, and has no
+/// body. A tier that is not one header value is
+/// [`InvalidRequest::ContentProperty`].
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn prepare_restore(
+    container: &Container<'_>,
+    token: &str,
+    namespace: AzureNamespace,
+    options: &RestoreOptions<'_>,
+    buf: &mut [u8],
+) -> Result<Template> {
+    let priority = match options.priority {
+        RestorePriority::Standard => "Standard",
+        RestorePriority::High => "High",
+        RestorePriority::Bulk => return Err(InvalidRequest::Option.into()),
+    };
+    let Some(tier) = options.tier else {
+        return Err(InvalidRequest::Option.into());
+    };
+    if options.days.is_some() || options.checksum.is_some() {
+        return Err(InvalidRequest::Option.into());
     }
+    if !is_header_value(tier.as_bytes()) || tier.trim_ascii() != tier {
+        return Err(InvalidRequest::ContentProperty.into());
+    }
+    let fields = [
+        Field::new("x-ms-access-tier", FieldValue::Bytes(tier.as_bytes())),
+        Field::new(
+            "x-ms-rehydrate-priority",
+            FieldValue::Bytes(priority.as_bytes()),
+        ),
+        Field::new("content-length", FieldValue::Bytes(b"0")),
+    ];
+    prepare_object(
+        container,
+        token,
+        namespace,
+        Operation::Restore,
+        ConditionKind::None,
+        options.revision,
+        &ObjectText {
+            fields: &fields,
+            ..ObjectText::default()
+        },
+        buf,
+    )
+}
 
-    /// Reads the response head of a rehydration and reports what Azure did.
-    ///
-    /// Azure answers 202 when it starts to rehydrate an archived object,
-    /// which is [`RestoreHeadOutcome::Started`], and 200 when it moved an
-    /// object that was not archived at once, which is
-    /// [`RestoreHeadOutcome::Readable`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Response`] if the head cannot be read. Any other
-    /// success status is [`ResponseFault::Status`].
-    pub fn accept_restore_head<'h>(
-        &self,
-        head: ResponseHead<'h>,
-    ) -> Result<RestoreHeadOutcome<'h>> {
-        match head.status {
-            202 => Ok(RestoreHeadOutcome::Started),
-            200 => Ok(RestoreHeadOutcome::Readable),
-            201..=299 => Err(ResponseFault::Status.into()),
-            404 if head.error_code.is_some() => Ok(missing(&head, named(&head))),
-            status if head.error_code.is_none() => Ok(RestoreHeadOutcome::NeedErrorBody(failure(
-                status,
-                None,
-                head.request_id,
-            ))),
-            status => Ok(RestoreHeadOutcome::ServiceFailure(failure(
-                status,
-                named(&head),
-                head.request_id,
-            ))),
-        }
-    }
+/// Writes the rehydration of `item` at `now` from `template` into `buf`,
+/// and returns it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidRequest`] for a key that Azure refuses, see
+/// [Object keys](crate#object-keys), for a revision that is not the
+/// template's kind, for a condition value, and for a template of another
+/// operation.
+///
+/// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
+/// needs.
+pub fn encode_restore<'r>(
+    template: &Template,
+    bytes: &[u8],
+    item: &ObjectItem<'_>,
+    now: &Timestamps,
+    buf: &'r mut [u8],
+) -> Result<WireRequest<'r>> {
+    encode_object(template, bytes, Operation::Restore, item, now, buf)
+}
 
-    /// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response
-    /// body.
-    pub fn accept_restore_error_body<'h>(
-        &self,
-        failure: Failure<'h>,
-        body: &[u8],
-    ) -> RestoreHeadOutcome<'h> {
-        finish_with_body(failure, body_kind(body))
+/// Reads the response head of a rehydration and reports what Azure did:
+/// [`RestoreHeadOutcome::Started`] for 202, and
+/// [`RestoreHeadOutcome::Readable`] for a blob that is online already.
+///
+/// # Errors
+///
+/// Returns [`Error::Response`] if the head cannot be read. A success status
+/// other than 200 and 202 is [`ResponseFault::Status`].
+pub fn accept_restore_head<'h>(head: ResponseHead<'h>) -> Result<RestoreHeadOutcome<'h>> {
+    match head.status {
+        202 => Ok(RestoreHeadOutcome::Started),
+        200 => Ok(RestoreHeadOutcome::Readable),
+        201..=299 => Err(ResponseFault::Status.into()),
+        _ => Ok(read_failure_head(&head)),
     }
+}
+
+/// Finishes a [`RestoreHeadOutcome::NeedErrorBody`] with the response body.
+pub fn accept_restore_error_body<'h>(failure: Failure<'h>, body: &[u8]) -> RestoreHeadOutcome<'h> {
+    finish_with_body(failure, kind_in_body(body))
 }

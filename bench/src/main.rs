@@ -1,4 +1,6 @@
-//! Measures the listing reader over one Azure page.
+//! Measures the listing reader over one page: the generated Azure page, or a
+//! page that `--page` names, read as `--service azure` (the default) or
+//! `--service s3` writes it.
 //!
 //! Each round copies the page into a work buffer (not measured, because the
 //! reader decodes in place and a real caller reads each body once), then
@@ -12,17 +14,49 @@ use std::hint::black_box;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use borink_object_storage_proto::{
-    BlobProperty, Blobs, Container, ListEntry, PropertySet, PropertyValues,
-};
+use borink_object_storage_proto::azure::{BlobProperty, PropertySet, PropertyValues};
+use borink_object_storage_proto::s3::{self, ObjectProperty};
+use borink_object_storage_proto::{ListEntry, azure};
 
 // Set on the process this one starts after granting itself the capability,
 // so that a refusal there is reported rather than asked about again.
 const ASKED: &str = "BORINK_BENCH_CAPABILITY_ASKED";
 
+// The service whose listing a page is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Service {
+    Azure,
+    S3,
+}
+
+impl Service {
+    const fn flag(self) -> &'static str {
+        match self {
+            Self::Azure => "azure",
+            Self::S3 => "s3",
+        }
+    }
+
+    // The start tags of the entries of a page, to size the array for it.
+    const fn entry_tags(self) -> &'static [&'static [u8]] {
+        match self {
+            Self::Azure => &[b"<Blob>", b"<BlobPrefix>"],
+            Self::S3 => &[
+                b"<Contents>",
+                b"<Version>",
+                b"<DeleteMarker>",
+                b"<CommonPrefixes>",
+            ],
+        }
+    }
+}
+
 struct Args {
     rounds: Option<usize>,
     entries: usize,
+    // A page to read in place of the generated one, and its service.
+    page: Option<String>,
+    service: Service,
     callgrind: bool,
     // Write the page to this path instead of measuring, for `c/`.
     write: Option<String>,
@@ -32,6 +66,8 @@ fn args() -> Args {
     let mut args = Args {
         rounds: None,
         entries: 5000,
+        page: None,
+        service: Service::Azure,
         callgrind: false,
         write: None,
     };
@@ -41,6 +77,14 @@ fn args() -> Args {
         match flag.as_str() {
             "--rounds" => args.rounds = Some(value().parse().expect("a number of rounds")),
             "--entries" => args.entries = value().parse().expect("a number of entries"),
+            "--page" => args.page = Some(value()),
+            "--service" => {
+                args.service = match value().as_str() {
+                    "azure" => Service::Azure,
+                    "s3" => Service::S3,
+                    other => panic!("unknown service {other}"),
+                }
+            }
             "--callgrind" => args.callgrind = true,
             "--write" => args.write = Some(value()),
             other => panic!("unknown flag {other}"),
@@ -68,6 +112,8 @@ fn callgrind(args: &Args) {
             .arg(&exe)
             .args(["--rounds", &rounds.to_string()])
             .args(["--entries", &args.entries.to_string()])
+            .args(["--service", args.service.flag()])
+            .args(args.page.iter().flat_map(|page| ["--page", page.as_str()]))
             // Under valgrind the counters are refused; do not ask about it.
             .env(ASKED, "1")
             .output()
@@ -145,30 +191,49 @@ fn main() {
     }
     let rounds = args.rounds.unwrap_or(60);
     let counters = counters();
-    let page = fixture::azure(args.entries);
-    let container = Container::new("https://acct.blob.core.windows.net", "data").unwrap();
-    let blobs = Blobs::new(container, "token").unwrap();
+    let page = match &args.page {
+        Some(path) => std::fs::read(path).expect("reading the page"),
+        None => fixture::azure(args.entries),
+    };
+    // The array holds every entry of the page, and no more: it is allocated
+    // in each round.
+    let room: usize = args
+        .service
+        .entry_tags()
+        .iter()
+        .map(|tag| {
+            page.windows(tag.len())
+                .filter(|window| window == tag)
+                .count()
+        })
+        .sum();
     println!(
-        "Azure page: {} bytes, {} objects and 64 groups of keys, {} rounds\n",
+        "{} page {}: {} bytes, {room} entries, {rounds} rounds\n",
+        args.service.flag(),
+        args.page.as_deref().unwrap_or("generated"),
         page.len(),
-        args.entries,
-        rounds
     );
     println!(
         "{:<36} {:>10} {:>10} {:>12} {:>7} {:>9} {:>6}",
         "", "median", "best", "instructions", "per B", "cycles", "IPC"
     );
 
-    let room = args.entries + 64;
+    match args.service {
+        Service::Azure => azure_rows(&page, room, rounds, counters.as_ref()),
+        Service::S3 => s3_rows(&page, room, rounds, counters.as_ref()),
+    }
+}
+
+fn azure_rows(page: &[u8], room: usize, rounds: usize, counters: Option<&counters::Counters>) {
     measure(
         "fill_listing",
-        &page,
+        page,
         rounds,
-        counters.as_ref(),
+        counters,
         |_| (),
         |work, ()| {
             let mut entries = vec![ListEntry::default(); room];
-            let filled = blobs.fill_listing(work, &mut entries).unwrap().filled;
+            let filled = azure::fill_listing(work, &mut entries).unwrap().filled;
             black_box(&entries);
             filled
         },
@@ -177,22 +242,14 @@ fn main() {
     // cost of the boundary is measured apart from how the archive is built.
     // `c/` measures it from a C program.
     //
-    // Measured: the boundary itself costs nothing this bench can see, but
-    // linking the C crate at all, called or not, makes the plain read 12%
-    // slower in instructions and cycles, here and in the archive. The same
-    // functions compile to about five hundred more stack accesses when the
-    // exported entry points are in the link. The cause was not found; it is
-    // in LLVM's code generation, not in the source.
-    let session = borink_object_storage_c::Session {
-        endpoint: c_bytes(b"https://acct.blob.core.windows.net"),
-        container: c_bytes(b"data"),
-        token: c_bytes(b"token"),
-    };
+    // Measured on 2026-10-13: the boundary costs nothing this bench can see,
+    // and the plain read runs the same instructions whether this binary
+    // links the C crate or not. It once ran 12% more with the crate linked.
     measure(
         "borink_fill_listing, from Rust",
-        &page,
+        page,
         rounds,
-        counters.as_ref(),
+        counters,
         |_| (),
         |work, ()| {
             let mut entries = vec![borink_object_storage_c::ListEntry::default(); room];
@@ -200,7 +257,6 @@ fn main() {
             // nothing else reaches them.
             let fill = unsafe {
                 borink_object_storage_c::borink_fill_listing(
-                    &session,
                     borink_object_storage_c::BytesMut {
                         ptr: work.as_mut_ptr(),
                         len: work.len(),
@@ -222,27 +278,95 @@ fn main() {
     ]);
     measure(
         "fill_listing_with, three properties",
-        &page,
+        page,
         rounds,
-        counters.as_ref(),
+        counters,
         |_| (),
         |work, ()| {
             let mut entries = vec![Picked::default(); room];
-            let filled = blobs
-                .fill_listing_with(work, &mut entries, THREE, Picked::build)
+            let filled = azure::fill_listing_with(work, &mut entries, THREE, Picked::build)
                 .unwrap()
                 .filled;
             black_box(&entries);
             filled
         },
     );
+    // The same read, keeping every property, as a caller who wants all that
+    // Azure wrote asks for it.
+    const EVERY: PropertySet = PropertySet::of(BlobProperty::ALL);
+    measure(
+        "fill_listing_with, every property",
+        page,
+        rounds,
+        counters,
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![Every::default(); room];
+            let filled = azure::fill_listing_with(work, &mut entries, EVERY, |entry, values| {
+                Every::of(entry, values.all())
+            })
+            .unwrap()
+            .filled;
+            black_box(&entries);
+            filled
+        },
+    );
 }
 
-fn c_bytes(value: &'static [u8]) -> borink_object_storage_c::Bytes {
-    borink_object_storage_c::Bytes {
-        ptr: value.as_ptr(),
-        len: value.len(),
-    }
+fn s3_rows(page: &[u8], room: usize, rounds: usize, counters: Option<&counters::Counters>) {
+    measure(
+        "s3 fill_listing",
+        page,
+        rounds,
+        counters,
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![ListEntry::default(); room];
+            let filled = s3::fill_listing(work, &mut entries).unwrap().filled;
+            black_box(&entries);
+            filled
+        },
+    );
+    // The same read, keeping two properties of every object, into an entry
+    // type of the caller's own.
+    const TWO: s3::PropertySet = s3::PropertySet::of(&[
+        ObjectProperty::StorageClass,
+        ObjectProperty::ChecksumAlgorithm,
+    ]);
+    measure(
+        "s3 fill_listing_with, two properties",
+        page,
+        rounds,
+        counters,
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![S3Picked::default(); room];
+            let filled = s3::fill_listing_with(work, &mut entries, TWO, S3Picked::build)
+                .unwrap()
+                .filled;
+            black_box(&entries);
+            filled
+        },
+    );
+    // The same read, keeping every property.
+    const EVERY: s3::PropertySet = s3::PropertySet::of(ObjectProperty::ALL);
+    measure(
+        "s3 fill_listing_with, every property",
+        page,
+        rounds,
+        counters,
+        |_| (),
+        |work, ()| {
+            let mut entries = vec![Every::default(); room];
+            let filled = s3::fill_listing_with(work, &mut entries, EVERY, |entry, values| {
+                Every::of(entry, values.all())
+            })
+            .unwrap()
+            .filled;
+            black_box(&entries);
+            filled
+        },
+    );
 }
 
 // The fields are only read through `black_box`, which the compiler does not
@@ -265,6 +389,48 @@ impl<'b> Picked<'b> {
             created: values.get(BlobProperty::CreationTime),
             tier: values.get(BlobProperty::AccessTier),
             md5: values.get(BlobProperty::ContentMd5),
+        }
+    }
+}
+
+// The fields are only read through `black_box`, which the compiler does not
+// count.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Default)]
+struct S3Picked<'b> {
+    key: &'b str,
+    size: Option<u64>,
+    class: Option<&'b [u8]>,
+    checksum: Option<&'b [u8]>,
+}
+
+impl<'b> S3Picked<'b> {
+    fn build(entry: ListEntry<'b>, values: s3::PropertyValues<'_, 'b>) -> Self {
+        Self {
+            key: entry.key,
+            size: entry.size,
+            class: values.get(ObjectProperty::StorageClass),
+            checksum: values.get(ObjectProperty::ChecksumAlgorithm),
+        }
+    }
+}
+
+// An entry and how many of the wanted properties it gave a value for. The
+// fields are only read through `black_box`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Default)]
+struct Every<'b> {
+    key: &'b str,
+    size: Option<u64>,
+    present: usize,
+}
+
+impl<'b> Every<'b> {
+    fn of(entry: ListEntry<'b>, values: &[Option<&'b [u8]>]) -> Self {
+        Self {
+            key: entry.key,
+            size: entry.size,
+            present: values.iter().filter(|value| value.is_some()).count(),
         }
     }
 }
