@@ -652,6 +652,18 @@ fn kind_for_code(code: &[u8]) -> Option<ServiceErrorKind> {
     })
 }
 
+// Whether a write conditional on `If-None-Match` failed because an object
+// exists. Azure answers that with 409 `BlobAlreadyExists`, not 412.
+pub(crate) fn exists_where_none_asked(
+    status: u16,
+    condition: ConditionKind,
+    kind: Option<ServiceErrorKind>,
+) -> bool {
+    status == 409
+        && condition == ConditionKind::IfNoneMatch
+        && kind == Some(ServiceErrorKind::AlreadyExists)
+}
+
 // Whether a 412 is the plan's failed condition: the plan carried one, and
 // Azure names the failure. Azure also answers 412 for other reasons, such as
 // `LeaseIdMissing` on a leased blob.
@@ -1001,6 +1013,9 @@ pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<Pu
         {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
+        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+            Ok(PutHeadOutcome::PreconditionFailed)
+        }
         200..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(failed(&head)),
     }
@@ -1015,7 +1030,9 @@ pub fn accept_put_error_body<'h>(
     body: &[u8],
 ) -> PutHeadOutcome<'h> {
     let kind = body_kind(body);
-    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
+        || exists_where_none_asked(failure.status, shape.condition, kind)
+    {
         return PutHeadOutcome::PreconditionFailed;
     }
     finish_with_body(failure, kind)

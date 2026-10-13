@@ -1076,7 +1076,7 @@ fn copy(
             }
             successful_result(value)
         }
-        CopyHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        CopyHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
         CopyHeadOutcome::NotFound { .. } => error_result(&exchange, 404),
         CopyHeadOutcome::NeedErrorBody(failure) | CopyHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
@@ -1125,7 +1125,7 @@ fn put_from_url(
             }
             successful_result(value)
         }
-        PutHeadOutcome::PreconditionFailed => error_result(&exchange, 412),
+        PutHeadOutcome::PreconditionFailed => error_result(&exchange, exchange.status),
         PutHeadOutcome::NeedErrorBody(failure) | PutHeadOutcome::ServiceFailure(failure) => {
             error_result(&exchange, failure.status)
         }

@@ -38,6 +38,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
 
 - Functions `s3::accept_get_error_body`, `s3::accept_put_error_body` and `s3::accept_delete_error_body` take the shape of the request first, as Azure's do, so that a host reads both services alike.
 - Function `azure::accept_get_head` finishes the failure of a HEAD itself, since its answer has no body. It never returns `GetHeadOutcome::NeedErrorBody` for a HEAD.
+- On Azure, a put, a commit or a copy conditional on `If-None-Match` onto an object that exists is now `PreconditionFailed`, as on S3. Azure answers it with 409 `BlobAlreadyExists`, which was a `ServiceFailure` before.
 - The C ABI of `borink-object-storage-c` writes every request from a template, for reads, whole-object writes, writes in blocks and listings:
   - New functions `borink_prepare_get`, `borink_prepare_put`, `borink_prepare_stage_block`, `borink_prepare_commit_blocks` and `borink_prepare_list`. Each takes a `borink_container` and the token, as `azure::prepare_*` does.
   - New functions `borink_encode_*` for the same five operations. Each takes a `borink_timestamps`, as `azure::encode_*` takes `&Timestamps`.

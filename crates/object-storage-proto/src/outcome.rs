@@ -93,6 +93,9 @@ pub enum CopyHeadOutcome<'h> {
     },
     /// The condition on the target or on the source did not hold, so the
     /// service copied nothing.
+    ///
+    /// On Azure, this includes a copy conditional on `If-None-Match` onto an
+    /// object that exists, which Azure answers with 409 rather than 412.
     PreconditionFailed,
     /// The source does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
@@ -103,9 +106,6 @@ pub enum CopyHeadOutcome<'h> {
     /// Read the error body to finish this response.
     NeedErrorBody(Failure<'h>),
     /// The service refused the copy, or failed to carry it out.
-    ///
-    /// A copy conditional on `If-None-Match: *` onto an object that exists
-    /// is refused here on Azure, with [`ServiceErrorKind::AlreadyExists`].
     ServiceFailure(Failure<'h>),
 }
 
@@ -311,6 +311,9 @@ pub enum CommitHeadOutcome<'h> {
         expected_len: Option<u64>,
     },
     /// The commit's condition failed.
+    ///
+    /// On Azure, this includes a commit conditional on `If-None-Match` onto
+    /// an object that exists, which Azure answers with 409 rather than 412.
     PreconditionFailed,
     /// On S3, the upload does not exist. A missing container is a
     /// [`Self::ServiceFailure`] with [`ServiceErrorKind::NoSuchContainer`].
@@ -654,11 +657,9 @@ pub enum PutHeadOutcome<'h> {
     },
     /// The entity tag in the condition did not match, so Azure stored nothing.
     ///
-    /// A write conditional on `If-None-Match: *` does not report a lost race
-    /// here. Azure answers that with status 409, which reaches you as
-    /// [`Self::ServiceFailure`] whose kind is
-    /// [`ServiceErrorKind::AlreadyExists`]. The Azure documentation states 412
-    /// for that case; this crate follows the service.
+    /// A write conditional on `If-None-Match: *` that loses a race is
+    /// reported here too. Azure answers that with 409 `BlobAlreadyExists`,
+    /// though its documentation states 412.
     PreconditionFailed,
     /// The head reports a failure but names no error.
     ///

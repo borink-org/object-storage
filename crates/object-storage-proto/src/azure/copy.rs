@@ -17,9 +17,9 @@ use crate::azure::template::{
     encode as encode_template, prepare as prepare_template,
 };
 use crate::azure::{
-    AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind, failed, named,
-    names_failed_condition, push_metadata, push_stored, revision_parameter, validate_key,
-    validate_metadata, validate_options,
+    AzureNamespace, Bearer, Blobs, Container, Write, azure_tag_char, body_kind,
+    exists_where_none_asked, failed, named, names_failed_condition, push_metadata, push_stored,
+    revision_parameter, validate_key, validate_metadata, validate_options,
 };
 use crate::azure::{stored_fields, utf8_properties};
 use crate::common::{
@@ -957,6 +957,9 @@ pub fn accept_copy_head<'h>(
         412 if carries_condition(shape) && named(&head) == Some(ServiceErrorKind::Precondition) => {
             Ok(CopyHeadOutcome::PreconditionFailed)
         }
+        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+            Ok(CopyHeadOutcome::PreconditionFailed)
+        }
         200..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(failed(&head)),
     }
@@ -969,7 +972,9 @@ pub fn accept_copy_error_body<'h>(
     body: &[u8],
 ) -> CopyHeadOutcome<'h> {
     let kind = body_kind(body);
-    if names_failed_condition(failure.status, carries_condition(shape), kind) {
+    if names_failed_condition(failure.status, carries_condition(shape), kind)
+        || exists_where_none_asked(failure.status, shape.condition, kind)
+    {
         return CopyHeadOutcome::PreconditionFailed;
     }
     finish_with_body(failure, kind)
@@ -996,6 +1001,9 @@ pub fn accept_put_from_url_head<'h>(
         412 if carries_condition(shape) && named(&head) == Some(ServiceErrorKind::Precondition) => {
             Ok(PutHeadOutcome::PreconditionFailed)
         }
+        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+            Ok(PutHeadOutcome::PreconditionFailed)
+        }
         200..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(failed(&head)),
     }
@@ -1009,7 +1017,9 @@ pub fn accept_put_from_url_error_body<'h>(
     body: &[u8],
 ) -> PutHeadOutcome<'h> {
     let kind = body_kind(body);
-    if names_failed_condition(failure.status, carries_condition(shape), kind) {
+    if names_failed_condition(failure.status, carries_condition(shape), kind)
+        || exists_where_none_asked(failure.status, shape.condition, kind)
+    {
         return PutHeadOutcome::PreconditionFailed;
     }
     PutHeadOutcome::ServiceFailure(crate::common::failure(

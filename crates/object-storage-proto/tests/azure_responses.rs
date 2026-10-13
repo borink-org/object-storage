@@ -202,6 +202,36 @@ fn a_head_that_fails_needs_no_body() {
 }
 
 #[test]
+fn an_object_that_exists_fails_a_write_for_none() {
+    use borink_object_storage_proto::{PutHeadOutcome, PutShape};
+    let absent = PutShape {
+        condition: ConditionKind::IfNoneMatch,
+    };
+    let exists =
+        || ResponseHead::from_headers(409, [("x-ms-error-code", b"BlobAlreadyExists".as_slice())]);
+    assert!(matches!(
+        azure::accept_put_head(absent, exists()),
+        Ok(PutHeadOutcome::PreconditionFailed)
+    ));
+    // A 409 that only the body names ends the same way.
+    let Ok(PutHeadOutcome::NeedErrorBody(failure)) =
+        azure::accept_put_head(absent, ResponseHead::new(409))
+    else {
+        panic!("the head names no error");
+    };
+    let body = b"<Error><Code>BlobAlreadyExists</Code></Error>";
+    assert!(matches!(
+        azure::accept_put_error_body(absent, failure, body),
+        PutHeadOutcome::PreconditionFailed
+    ));
+    // Without the condition, the 409 stays the service's failure.
+    assert!(matches!(
+        azure::accept_put_head(PutShape::default(), exists()),
+        Ok(PutHeadOutcome::ServiceFailure(failure)) if failure.kind == Some(ServiceErrorKind::AlreadyExists)
+    ));
+}
+
+#[test]
 fn a_template_states_the_shape_of_its_responses() {
     use borink_object_storage_proto::{
         AzureNamespace, Container, DeleteKind, DeleteOptions, GetItem, InvalidPlan,

@@ -14,8 +14,9 @@ use crate::azure::template::{
     prepare as prepare_template,
 };
 use crate::azure::{
-    AzureNamespace, Blobs, Write, body_kind, failed, named, names_failed_condition, push_metadata,
-    push_stored, validate_key, validate_metadata, validate_options,
+    AzureNamespace, Blobs, Write, body_kind, exists_where_none_asked, failed, named,
+    names_failed_condition, push_metadata, push_stored, validate_key, validate_metadata,
+    validate_options,
 };
 use crate::azure::{
     Container, ObjectText, azure_tag_char, encode_object, prepare_object, stored_fields,
@@ -1086,6 +1087,9 @@ pub fn accept_commit_blocks_head<'h>(
         {
             Ok(CommitHeadOutcome::PreconditionFailed)
         }
+        409 if exists_where_none_asked(409, shape.condition, named(&head)) => {
+            Ok(CommitHeadOutcome::PreconditionFailed)
+        }
         200..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(failed(&head)),
     }
@@ -1098,7 +1102,9 @@ pub fn accept_commit_blocks_error_body<'h>(
     body: &[u8],
 ) -> CommitHeadOutcome<'h> {
     let kind = body_kind(body);
-    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind) {
+    if names_failed_condition(failure.status, shape.condition != ConditionKind::None, kind)
+        || exists_where_none_asked(failure.status, shape.condition, kind)
+    {
         return CommitHeadOutcome::PreconditionFailed;
     }
     finish_with_body(failure, kind)
