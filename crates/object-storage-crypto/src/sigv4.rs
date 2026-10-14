@@ -11,8 +11,8 @@
 //!    the key and the start of the string to sign, which every request
 //!    signed in that second shares.
 //! 3. Encode the request with the operation's `encode_*`, and pass the
-//!    result to [`sign`]. It returns where the signed request is in the
-//!    buffer, and `Placement::request` reads it from there to send.
+//!    result to [`sign`]. It returns the signed [`WireRequest`], which
+//!    reads each part of the request from the buffer.
 //!
 //! # Signing many requests
 //!
@@ -22,7 +22,7 @@
 
 use borink_object_storage_proto::s3::{self, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned};
 use borink_object_storage_proto::sigv4::Credentials;
-use borink_object_storage_proto::{Placement, Result, Timestamps};
+use borink_object_storage_proto::{Result, Timestamps, WireRequest};
 
 use crate::Sha256;
 
@@ -172,7 +172,7 @@ pub fn stamp<S: Sha256>(
 /// function computes first. Write in a checksum of the body with
 /// `borink_object_storage_proto::s3::set_body_checksum` before you call it.
 /// Another buffer gives a wrong request, but never a panic.
-pub fn sign<S: Sha256>(stamp: &Stamp<S>, unsigned: &Unsigned, buf: &mut [u8]) -> Placement {
+pub fn sign<S: Sha256>(stamp: &Stamp<S>, unsigned: &Unsigned, buf: &mut [u8]) -> WireRequest {
     hash_body::<S>(unsigned, buf);
     let mac = stamp.sign(&sha256::<S>(unsigned.canonical(buf)));
     s3::set_signature(unsigned, buf, &mac)

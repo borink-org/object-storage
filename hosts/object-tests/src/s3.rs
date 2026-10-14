@@ -199,7 +199,7 @@ fn signed<'b>(
     prepare: &impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
     encode: &impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
     buf: &'b mut Vec<u8>,
-) -> Result<(Template, WireRequest<'b>), CrateError> {
+) -> Result<(Template, (WireRequest, &'b [u8])), CrateError> {
     let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
     let mut bytes = vec![0; CapacityError::required_by(write)?];
     let template = write(&mut bytes)?;
@@ -213,9 +213,8 @@ fn signed<'b>(
         let digest = crate::digest_of(kind, unsigned.body(buf).unwrap_or_default());
         s3::set_body_checksum(&unsigned, buf, &digest)?;
     }
-    let placed = sigv4::sign(&stamp, &unsigned, buf);
-    let buf: &'b Vec<u8> = buf;
-    Ok((template, placed.request(buf)))
+    let request = sigv4::sign(&stamp, &unsigned, buf);
+    Ok((template, (request, buf.as_slice())))
 }
 
 /// Sends a CreateSession, signed with the case's own credentials, and reads

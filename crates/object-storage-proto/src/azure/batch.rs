@@ -24,7 +24,7 @@ use crate::http_message::Response;
 use crate::multipart::{self, MixedContentType, Part};
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, HeaderValue, U64Decimal, Writer};
-use crate::template::{Fill, Hole, HoleValues, ParamValue, Placement, TemplateBody};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
 use crate::validate::validate_revision;
 use crate::{
@@ -261,7 +261,7 @@ pub fn encode_delete_many(
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::Batch { path, tail } = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

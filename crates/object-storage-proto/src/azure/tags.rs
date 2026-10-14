@@ -16,7 +16,7 @@ use crate::azure::{
 use crate::head::{read_decimal_header, read_text_header};
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, write_tag_set};
-use crate::template::Placement;
+use crate::template::WireRequest;
 use crate::validate::{is_header_value, validate_properties, validate_tags};
 use crate::{
     ConditionKind, ContentProperties, Failure, InvalidRequest, MetadataPair, ObjectItem,
@@ -142,7 +142,7 @@ pub fn encode_set_tier(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetTier, item, now, buf)
 }
 
@@ -202,7 +202,7 @@ pub fn encode_set_metadata(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetMetadata, item, now, buf)
 }
 
@@ -275,7 +275,7 @@ pub fn encode_set_properties(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetProperties, item, now, buf)
 }
 
@@ -352,7 +352,7 @@ pub fn encode_set_tags(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetTags, item, now, buf)
 }
 
@@ -406,7 +406,7 @@ pub fn encode_get_tags(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::GetTags, item, now, buf)
 }
 

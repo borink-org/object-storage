@@ -18,8 +18,8 @@ use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
     ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, CopyItem, CopyOptions,
     DeleteTarget, Digest, GetItem, GetOptions, ListInclude, ListItem, ListMarker, ListOptions,
-    MetadataPair, ObjectItem, Payload, Placement, PutItem, PutOptions, Ranging, RequestedRange,
-    Result, Revision, RevisionKind, StageOptions, Tag, Timestamps,
+    MetadataPair, ObjectItem, Payload, PutItem, PutOptions, Ranging, RequestedRange, Result,
+    Revision, RevisionKind, StageOptions, Tag, Timestamps, WireRequest,
 };
 
 const KEY: &str = "dir/file name.sst";
@@ -97,25 +97,23 @@ fn now() -> Timestamps {
     Timestamps::from_unix(NOW)
 }
 
-// Reads every part of a placed request, and of the request it places in
-// `buf`, and returns whether there is one.
-fn read(placed: Result<Placement>, buf: &[u8]) -> bool {
-    let written = placed.is_ok();
-    if let Ok(placed) = placed {
+// Reads every part of a written request from `buf`, and returns whether
+// there is one.
+fn read(request: Result<WireRequest>, buf: &[u8]) -> bool {
+    let written = request.is_ok();
+    if let Ok(request) = request {
         let _ = (
-            placed.method(),
-            placed.url_span(),
-            placed.head_span(),
-            placed.fields_span(),
-            placed.body_span(),
-            placed.content_len(),
+            request.method(),
+            request.url_span(),
+            request.head_span(),
+            request.fields_span(),
+            request.body_span(),
+            request.content_len(),
         );
-        let request = placed.request(buf);
-        let _ = request.method();
-        let _ = request.url().len();
-        let _ = request.headers().count();
-        let _ = request.head().len();
-        let _ = request.payload();
+        let _ = request.url(buf).len();
+        let _ = request.headers(buf).count();
+        let _ = request.head(buf).len();
+        let _ = request.payload(buf);
     }
     written
 }

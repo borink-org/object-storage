@@ -16,9 +16,9 @@ use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
     ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties, CopyItem,
     CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
-    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, Placement,
-    PutItem, PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result,
-    RevisionKind, StageOptions, Tag, Timestamps, WriteOptions,
+    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, PutItem,
+    PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind,
+    StageOptions, Tag, Timestamps, WireRequest, WriteOptions,
 };
 
 const KEY: &str = "dir/file name.sst";
@@ -90,12 +90,12 @@ fn azure_one(
     encode(&template, &bytes, &mut buf);
 }
 
-// The URL, the head and the content of an Azure request placed in `buf`.
-fn azure_request(placed: Result<Placement>, buf: &[u8]) -> Vec<u8> {
-    let request = placed.expect("the request is written").request(buf);
-    let mut text = request.url().as_bytes().to_vec();
-    text.extend_from_slice(request.head());
-    match request.payload() {
+// The URL, the head and the content of an Azure request written in `buf`.
+fn azure_request(request: Result<WireRequest>, buf: &[u8]) -> Vec<u8> {
+    let request = request.expect("the request is written");
+    let mut text = request.url(buf).as_bytes().to_vec();
+    text.extend_from_slice(request.head(buf));
+    match request.payload(buf) {
         Payload::Slice(body) => text.extend_from_slice(body),
         Payload::Streamed { len } => text.extend_from_slice(&len.to_le_bytes()),
     }
@@ -180,9 +180,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 let request = azure::encode_put(template, bytes, &item, &now, &mut buf);
                 // A write sends the content it was given.
                 assert!(matches!(
-                    request
-                        .as_ref()
-                        .map(|placed| placed.request(&buf).payload()),
+                    request.as_ref().map(|request| request.payload(&buf)),
                     Ok(Payload::Streamed { len: 4096 })
                 ));
                 azure_request(request, &buf)

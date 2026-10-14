@@ -13,7 +13,7 @@ use crate::azure::{
     read_failure_head,
 };
 use crate::outcome::finish_with_body;
-use crate::template::Placement;
+use crate::template::WireRequest;
 use crate::validate::is_header_value;
 use crate::{
     ConditionKind, Failure, InvalidRequest, ObjectItem, ResponseFault, ResponseHead,
@@ -95,7 +95,7 @@ pub fn encode_restore(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::Restore, item, now, buf)
 }
 

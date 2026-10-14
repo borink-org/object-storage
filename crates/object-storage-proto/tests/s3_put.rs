@@ -43,9 +43,9 @@ fn encode(
     let mut buf = vec![0; 4096];
     let unsigned = s3::encode_put(&template, &bytes, item, content_sha256, &now(), &mut buf)
         .map_err(refusal)?;
-    let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]).request(&buf);
+    let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
     Ok(request
-        .headers()
+        .headers(&buf)
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect())
 }

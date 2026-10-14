@@ -11,9 +11,8 @@
 //! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
 //!    [`encode_get`] or [`encode_put`] to write it into a second buffer. The request is
 //!    [`Unsigned`]: sign it, as [Signing](#signing) describes. [`set_signature`]
-//!    returns its [`Placement`](crate::Placement), and
-//!    [`Placement::request`](crate::Placement::request) reads the request to
-//!    send with your HTTP client.
+//!    returns the signed [`WireRequest`](crate::WireRequest), whose parts
+//!    you read from the buffer and send with your HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call
 //!    [`accept_get_head`] or [`accept_put_head`].
 //!
@@ -53,10 +52,9 @@
 //! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
 //! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
 //! let mac = hmac_of_string_to_sign(unsigned.canonical(&buffer));
-//! let placed = s3::set_signature(&unsigned, &mut buffer, &mac);
-//! let request = placed.request(&buffer);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &mac);
 //! assert_eq!(
-//!     request.url(),
+//!     request.url(&buffer),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/directory/object.txt"
 //! );
 //!
@@ -157,10 +155,9 @@
 //! let pages = s3::prepare_list(&bucket, &credentials, &options, &mut template)?;
 //! let mut buffer = vec![0; 2048];
 //! let unsigned = s3::encode_list(&pages, &template, &ListItem::new("photos/"), &now, &mut buffer)?;
-//! let placed = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
-//! let request = placed.request(&buffer);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
-//!     request.url(),
+//!     request.url(&buffer),
 //!     "https://s3.eu-west-1.amazonaws.com/objects\
 //!      ?delimiter=%2F&encoding-type=url&list-type=2&prefix=photos%2F"
 //! );
@@ -237,10 +234,9 @@
 //! // `borink_object_storage_crypto::sigv4::sign` writes in the body's SHA-256
 //! // with `s3::set_body_hash`, and then signs.
 //! # s3::set_body_hash(&unsigned, &mut buffer, &[0; 32]);
-//! let placed = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
-//! let request = placed.request(&buffer);
+//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
-//!     request.url(),
+//!     request.url(&buffer),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploadId=VXBsb2FkSUQ"
 //! );
 //!

@@ -16,8 +16,8 @@ use crate::s3::{
 };
 use crate::sigv4::{ALGORITHM, Credentials, EMPTY_SHA256, MAX_REGION_LEN, MAX_SECRET_LEN};
 use crate::template::{
-    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Placement, Section, Table,
-    TemplateBody, Written,
+    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Section, Table, TemplateBody,
+    WireRequest, Written,
 };
 use crate::url::{encode_object_key, write_query_value};
 use crate::{
@@ -1171,11 +1171,11 @@ pub fn string_to_sign_prefix<'o>(
 /// `mac` is the HMAC-SHA256 of the string to sign: the prefix that
 /// [`string_to_sign_prefix`] writes, followed by the lowercase hexadecimal
 /// of the SHA-256 of [`Unsigned::canonical`].
-pub fn set_signature(unsigned: &Unsigned, buf: &mut [u8], mac: &[u8; 32]) -> Placement {
+pub fn set_signature(unsigned: &Unsigned, buf: &mut [u8], mac: &[u8; 32]) -> WireRequest {
     if let Some(span) = unsigned.written.signature {
         overwrite_placeholder(buf, span, &encoding::hex_digest(mac));
     }
-    Placement::new(unsigned.method, &unsigned.written, unsigned.content_len)
+    WireRequest::new(unsigned.method, &unsigned.written, unsigned.content_len)
 }
 
 /// Computes the key that signs every request of the day of `now`.

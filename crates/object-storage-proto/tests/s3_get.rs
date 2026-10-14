@@ -34,8 +34,7 @@ fn encode(bucket: &Bucket<'_>, options: GetOptions, item: &GetItem<'_>) -> Resul
     let mut buf = vec![0; 3 * MAX_KEY_LEN + 2048];
     let unsigned = s3::encode_get(&template, &bytes, item, &now(), &mut buf)?;
     Ok(s3::set_signature(&unsigned, &mut buf, &[0; 32])
-        .request(&buf)
-        .url()
+        .url(&buf)
         .to_owned())
 }
 

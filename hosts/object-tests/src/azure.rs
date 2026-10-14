@@ -26,8 +26,8 @@ use borink_object_storage_proto::{
     CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
     DeleteHeadOutcome, DeleteManyHeadOutcome, EntryKind, Error as CrateError, GetHeadOutcome,
     GetKind, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome,
-    ObjectItem, Placement, PutHeadOutcome, PutItem, PutOptions, RequestedRange, RestoreHeadOutcome,
-    Revision, RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome, UpdateHeadOutcome,
+    ObjectItem, PutHeadOutcome, PutItem, PutOptions, RequestedRange, RestoreHeadOutcome, Revision,
+    RevisionKind, StageHeadOutcome, Tag, TagsHeadOutcome, UpdateHeadOutcome, WireRequest,
     WriteOptions,
 };
 use serde_json::{Map, Value, json};
@@ -97,17 +97,17 @@ impl Account<'_> {
             AzureNamespace,
             &mut [u8],
         ) -> Result<azure::Template, CrateError>,
-        encode: impl Fn(&azure::Template, &[u8], &mut [u8]) -> Result<Placement, CrateError>,
+        encode: impl Fn(&azure::Template, &[u8], &mut [u8]) -> Result<WireRequest, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
     ) -> Result<Result<HttpExchange, Value>, AdapterError> {
         let written = self.template(prepare).and_then(|(template, bytes)| {
             let mut buf =
                 vec![0; CapacityError::required_by(|buf| encode(&template, &bytes, buf))?];
-            let placed = encode(&template, &bytes, &mut buf)?;
+            let request = encode(&template, &bytes, &mut buf)?;
             Ok(send_request_with(
                 context,
-                &placed.request(&buf),
+                &(request, buf.as_slice()),
                 body,
                 read,
             ))
@@ -146,10 +146,10 @@ fn read_object(
     }));
     let encode = |buf: &mut [u8]| azure::encode_get(&template, &bytes, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
-    let request = crate_step!(encode(&mut buf)).request(&buf);
+    let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
         context,
-        &request,
+        &(request, buf.as_slice()),
         None,
         BodyRead::of(call)
     ));
@@ -252,10 +252,10 @@ fn write_object(
     }));
     let encode = |buf: &mut [u8]| azure::encode_put(&template, &bytes, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
-    let request = crate_step!(encode(&mut buf)).request(&buf);
+    let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
         context,
-        &request,
+        &(request, buf.as_slice()),
         Some(&body),
         BodyRead::Hold
     ));
@@ -300,8 +300,8 @@ fn delete_object(
     }));
     let encode = |buf: &mut [u8]| azure::encode_delete(&template, &bytes, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
-    let request = crate_step!(encode(&mut buf)).request(&buf);
-    let exchange = transport_step!(send_request(context, &request));
+    let request = crate_step!(encode(&mut buf));
+    let exchange = transport_step!(send_request(context, &(request, buf.as_slice())));
 
     let shape = options.shape();
     let head_outcome = crate_step!(azure::accept_delete_head(shape, exchange.response_head()));
@@ -383,8 +383,8 @@ impl PageSource for BlobPages<'_> {
             }));
         let encode = |buf: &mut [u8]| azure::encode_list(&template, &bytes, item, &now, buf);
         let mut buf = vec![0; page_step!(CapacityError::required_by(encode))];
-        let request = page_step!(encode(&mut buf)).request(&buf);
-        let mut exchange = match send_request(self.context, &request) {
+        let request = page_step!(encode(&mut buf));
+        let mut exchange = match send_request(self.context, &(request, buf.as_slice())) {
             Ok(exchange) => exchange,
             Err(error) => return Ok(Err(transport_failure(&error))),
         };
@@ -463,10 +463,10 @@ fn stage_block(
     }));
     let encode = |buf: &mut [u8]| azure::encode_stage_block(&template, &bytes, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
-    let request = crate_step!(encode(&mut buf)).request(&buf);
+    let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
         context,
-        &request,
+        &(request, buf.as_slice()),
         Some(&body),
         BodyRead::Hold
     ));

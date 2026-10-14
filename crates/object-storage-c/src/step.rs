@@ -17,7 +17,7 @@ use crate::ptr::ContainerValues;
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::azure::Container;
 use borink_object_storage_proto::{
-    Error, InvalidRequest, ListMarker, Listing, Placement, ResponseHead, azure,
+    Error, InvalidRequest, ListMarker, Listing, ResponseHead, azure,
 };
 
 // The protocol crate's container, which every template is written from. A
@@ -88,9 +88,9 @@ pub(crate) fn prepared_template(template: proto::Result<azure::Template>) -> Pre
 // The written request as offsets into its buffer, or the exact size that it
 // needed, or why it was refused. All three are one status and one
 // `required`.
-pub(crate) fn written_request(placed: proto::Result<Placement>) -> WireRequest {
-    let placed = match placed {
-        Ok(placed) => placed,
+pub(crate) fn written_request(request: proto::Result<proto::WireRequest>) -> WireRequest {
+    let request = match request {
+        Ok(request) => request,
         Err(error) => {
             return WireRequest {
                 status: status_of(&error),
@@ -100,11 +100,11 @@ pub(crate) fn written_request(placed: proto::Result<Placement>) -> WireRequest {
         }
     };
     let (url, head, fields) = (
-        span(placed.url_span()),
-        span(placed.head_span()),
-        span(placed.fields_span()),
+        span(request.url_span()),
+        span(request.head_span()),
+        span(request.fields_span()),
     );
-    let body = placed.body_span().map(span);
+    let body = request.body_span().map(span);
     WireRequest {
         status: Status::default(),
         required: [Some(url), Some(head), body]
@@ -113,7 +113,7 @@ pub(crate) fn written_request(placed: proto::Result<Placement>) -> WireRequest {
             .map(|span| span.start + span.len)
             .max()
             .unwrap_or(0),
-        method: placed.method() as u16,
+        method: request.method() as u16,
         url,
         head,
         fields,
@@ -121,7 +121,7 @@ pub(crate) fn written_request(placed: proto::Result<Placement>) -> WireRequest {
             present: true,
             span,
         }),
-        payload_len: placed.content_len(),
+        payload_len: request.content_len(),
     }
 }
 

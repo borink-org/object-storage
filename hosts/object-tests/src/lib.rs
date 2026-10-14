@@ -823,18 +823,19 @@ pub(crate) trait Outgoing {
     fn payload(&self) -> Payload<'_>;
 }
 
-impl Outgoing for WireRequest<'_> {
+/// A request, and the buffer it was written into.
+impl Outgoing for (WireRequest, &[u8]) {
     fn method(&self) -> borink_object_storage_proto::Method {
-        WireRequest::method(self)
+        self.0.method()
     }
     fn url(&self) -> &str {
-        WireRequest::url(self)
+        self.0.url(self.1)
     }
     fn fields(&self) -> Vec<(&str, &str)> {
-        self.headers().collect()
+        self.0.headers(self.1).collect()
     }
     fn payload(&self) -> Payload<'_> {
-        WireRequest::payload(self)
+        self.0.payload(self.1)
     }
 }
 

@@ -42,7 +42,7 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     };
     let get = GetItem::new("object");
     let mut buf = [0; 512];
-    let Ok(placed) = azure::encode_get(&template, &bytes, &get, &now, &mut buf) else {
+    let Ok(request) = azure::encode_get(&template, &bytes, &get, &now, &mut buf) else {
         return 3;
     };
     let headers = [("content-length", b"4".as_slice())];
@@ -52,7 +52,7 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     ) else {
         return 4;
     };
-    placed.request(&buf).url().len()
+    request.url(&buf).len()
         + body.expected_len.unwrap_or_default() as usize
         + listing(&container, &now)
         + computed_checksums(&container, &now)
@@ -109,10 +109,7 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
     else {
         return 12;
     };
-    let mut written = sigv4::sign(&stamp, &unsigned, &mut buf)
-        .request(&buf)
-        .url()
-        .len();
+    let mut written = sigv4::sign(&stamp, &unsigned, &mut buf).url(&buf).len();
 
     let metadata = [MetadataPair {
         name: "Colour",
@@ -146,10 +143,7 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
     else {
         return 14;
     };
-    written += sigv4::sign(&stamp, &unsigned, &mut buf)
-        .request(&buf)
-        .url()
-        .len();
+    written += sigv4::sign(&stamp, &unsigned, &mut buf).url(&buf).len();
     written
 }
 
@@ -196,10 +190,10 @@ fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
             ..PutItem::new("object", Payload::Slice(content))
         };
         let mut buf = [0; 512];
-        let Ok(placed) = azure::encode_put(&template, &bytes, &item, now, &mut buf) else {
+        let Ok(request) = azure::encode_put(&template, &bytes, &item, now, &mut buf) else {
             return 9;
         };
-        written += placed.request(&buf).url().len();
+        written += request.url(&buf).len();
     }
     written
 }
@@ -224,10 +218,10 @@ fn listing(container: &Container<'_>, now: &Timestamps) -> usize {
     };
     let mut buf = [0; 512];
     let item = ListItem::new("directory/").after(ListMarker::Text("marker"));
-    let Ok(placed) = azure::encode_list(&template, &bytes, &item, now, &mut buf) else {
+    let Ok(request) = azure::encode_list(&template, &bytes, &item, now, &mut buf) else {
         return 5;
     };
-    let url = placed.request(&buf).url().len();
+    let url = request.url(&buf).len();
     let Ok(ListHeadOutcome::Page { .. }) = azure::accept_list_head(ResponseHead::new(200)) else {
         return 6;
     };

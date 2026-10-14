@@ -30,14 +30,9 @@ fn template(options: GetOptions, namespace: AzureNamespace) -> (Template, Vec<u8
 }
 
 // Writes `item` from a template of `options` into `buf`.
-fn encode<'r>(
-    options: GetOptions,
-    item: &GetItem<'_>,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>, Error> {
+fn encode(options: GetOptions, item: &GetItem<'_>, buf: &mut [u8]) -> Result<WireRequest, Error> {
     let (template, bytes) = template(options, AzureNamespace::Unknown);
-    let placed = azure::encode_get(&template, &bytes, item, &now(), buf)?;
-    Ok(placed.request(buf))
+    azure::encode_get(&template, &bytes, item, &now(), buf)
 }
 
 fn shape(range: RequestedRange) -> GetShape {
@@ -86,11 +81,11 @@ fn encodes_a_bearer_get_in_caller_memory() {
 
     assert_eq!(request.method(), Method::Get);
     assert_eq!(
-        request.url(),
+        request.url(&buf),
         "https://account.blob.core.windows.net/objects/directory/a%20key%2B%C3%A9"
     );
     assert_eq!(
-        request.headers().collect::<Vec<_>>(),
+        request.headers(&buf).collect::<Vec<_>>(),
         [
             ("authorization", "Bearer access-token"),
             ("x-ms-version", VERSION),
@@ -98,7 +93,7 @@ fn encodes_a_bearer_get_in_caller_memory() {
         ]
     );
     assert_eq!(
-        request.head(),
+        request.head(&buf),
         format!(
             "GET /objects/directory/a%20key%2B%C3%A9 HTTP/1.1\r\n\
              host: account.blob.core.windows.net\r\n\
@@ -111,7 +106,7 @@ fn encodes_a_bearer_get_in_caller_memory() {
 }
 
 #[test]
-fn the_request_borrows_nothing_but_its_buffer() {
+fn the_request_borrows_nothing() {
     let mut buf = [0; 512];
     let (template, bytes) = template(
         GetOptions {
@@ -132,16 +127,15 @@ fn the_request_borrows_nothing_but_its_buffer() {
         &Timestamps::from_unix(1_787_400_000),
         &mut buf,
     )
-    .unwrap()
-    .request(&buf);
+    .unwrap();
     assert!(
         request
-            .headers()
+            .headers(&buf)
             .any(|header| header == ("x-ms-date", "Sat, 22 Aug 2026 12:00:00 GMT"))
     );
     assert!(
         request
-            .headers()
+            .headers(&buf)
             .any(|header| header == ("if-match", "\"etag\""))
     );
 }
@@ -304,7 +298,7 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
     let key = format!("{}k", " ".repeat(spaces));
     let mut buf = vec![0; 3 * MAX_URL_LEN];
     let request = encode(GetOptions::new(), &GetItem::new(&key), &mut buf).unwrap();
-    assert_eq!(request.url().len(), MAX_URL_LEN);
+    assert_eq!(request.url(&buf).len(), MAX_URL_LEN);
     assert!(key.encode_utf16().count() * 2 < MAX_URL_LEN);
 
     // One more byte of URL, and the read is refused before the buffer is

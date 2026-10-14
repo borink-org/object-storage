@@ -60,16 +60,16 @@ fn signed(
         let stamp = sigv4::stamp(&key, &template, &bytes, now).unwrap();
         let mut buf = exact(|buf| encode(&template, &bytes, buf));
         let unsigned = encode(&template, &bytes, &mut buf).unwrap();
-        let request = sigv4::sign(&stamp, &unsigned, &mut buf).request(&buf);
+        let request = sigv4::sign(&stamp, &unsigned, &mut buf);
         let mut headers: Vec<_> = request
-            .headers()
+            .headers(&buf)
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
         headers.sort();
         (
-            request.url().to_owned(),
+            request.url(&buf).to_owned(),
             headers,
-            String::from_utf8(request.head().to_vec()).unwrap(),
+            String::from_utf8(request.head(&buf).to_vec()).unwrap(),
         )
     }
     Vec::from([
@@ -217,13 +217,11 @@ fn a_batch_is_signed_as_each_request_is() {
     for ((unsigned, mut buf), mac) in unsigned.iter().zip(bufs.clone()).zip(&macs) {
         let mut copy = buf.clone();
         let batched: Vec<_> = s3::set_signature(unsigned, &mut buf, mac)
-            .request(&buf)
-            .headers()
+            .headers(&buf)
             .map(|(n, v)| (n.to_owned(), v.to_owned()))
             .collect();
         let single: Vec<_> = sigv4::sign(&stamp, unsigned, &mut copy)
-            .request(&copy)
-            .headers()
+            .headers(&copy)
             .map(|(n, v)| (n.to_owned(), v.to_owned()))
             .collect();
         assert_eq!(batched, single);

@@ -25,9 +25,9 @@ use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteOptions, DeleteShape,
     Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape, InvalidRequest,
     ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions, Listing,
-    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, Placement, PutHeadOutcome, PutItem,
-    PutOptions, PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
-    RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
+    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem, PutOptions,
+    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
+    ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, Holes};
 
@@ -511,7 +511,7 @@ pub fn encode_get(
     item: &GetItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::Get(options) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -694,7 +694,7 @@ pub fn encode_put(
     item: &PutItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::Put {
         condition,
         checksum,
@@ -854,7 +854,7 @@ pub fn encode_delete(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::Delete, item, now, buf)
 }
 
@@ -867,7 +867,7 @@ fn encode_object(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::Object {
         condition,
         revision,
@@ -1094,7 +1094,7 @@ pub fn encode_snapshot(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::Snapshot, item, now, buf)
 }
 
@@ -1265,7 +1265,7 @@ pub fn encode_list(
     item: &ListItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::List = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

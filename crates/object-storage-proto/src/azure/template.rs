@@ -17,8 +17,8 @@ use crate::url::{encode_object_key, write_query_value};
 use crate::validate::is_header_value;
 use crate::{
     CommitShape, ConditionKind, CopyShape, DeleteKind, DeleteShape, Error, GetItem, GetKind,
-    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, Placement, PutShape,
-    Ranging, Result, RevisionKind, Span, Tag,
+    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, PutShape, Ranging, Result,
+    RevisionKind, Span, Tag, WireRequest,
 };
 
 /// The operation that a template writes requests for.
@@ -819,7 +819,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
     payload: Payload<'_>,
     buf: &mut [u8],
     describe: &Describe<'_, Q>,
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     // A URL that Azure would refuse is refused before any byte is written.
     // It is counted only when its values could make it too long.
     let surely_short = template
@@ -850,7 +850,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
         template::walk_request(&template.table, bytes, fill, &mut out)?
     };
     let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
-    Ok(Placement::new(template.method, &written, payload.len()))
+    Ok(WireRequest::new(template.method, &written, payload.len()))
 }
 
 impl Template {

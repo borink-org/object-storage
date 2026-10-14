@@ -4,7 +4,7 @@ use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
     ConditionKind, ConditionValue, DeleteKind, DeleteOptions, GetItem, GetOptions, ObjectItem,
-    Payload, Placement, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps,
+    Payload, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -28,12 +28,11 @@ struct Parts {
     fields: (Span, usize),
 }
 
-fn parts(placed: &Placement, buf: &[u8]) -> Parts {
-    let request = placed.request(buf);
+fn parts(request: &WireRequest, buf: &[u8]) -> Parts {
     Parts {
-        url: (placed.url_span(), request.url().to_owned()),
-        head: (placed.head_span(), request.head().to_vec()),
-        fields: (placed.fields_span(), request.headers().count()),
+        url: (request.url_span(), request.url(buf).to_owned()),
+        head: (request.head_span(), request.head(buf).to_vec()),
+        fields: (request.fields_span(), request.headers(buf).count()),
     }
 }
 

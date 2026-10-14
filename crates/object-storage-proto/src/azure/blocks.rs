@@ -22,7 +22,7 @@ use crate::encoding::{base64_into, base64_len};
 use crate::head::{read_decimal_header, read_text_header};
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, Writer, condition_header_name};
-use crate::template::{Fill, Hole, HoleValues, ParamValue, Placement, TemplateBody};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
 use crate::validate::{
     validate_checksum_item, validate_condition, validate_properties, validate_tags,
@@ -373,7 +373,7 @@ pub fn encode_stage_block(
     item: &StageBlockItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let Detail::Stage(checksum) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -555,7 +555,7 @@ pub fn encode_commit_blocks<'b, B>(
     item: &CommitItem<'_, B>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement>
+) -> Result<WireRequest>
 where
     B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
 {
@@ -702,7 +702,7 @@ pub fn encode_list_blocks(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::ListBlocks, item, now, buf)
 }
 

@@ -27,7 +27,7 @@ use crate::head::read_text_header;
 use crate::http::{PlainHttp, valid_http_origin};
 use crate::outcome::finish_with_body;
 use crate::request::condition_header_name;
-use crate::template::{Hole, HoleValues, ParamValue, Placement, TemplateBody};
+use crate::template::{Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
 use crate::url::QueryValue;
 use crate::validate::{
     validate_condition, validate_properties, validate_revision_item, validate_source_container,
@@ -269,7 +269,7 @@ fn encode_copy_kind(
     block_id: Option<&str>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     let detail @ Detail::Copy {
         condition,
         source_revision,
@@ -429,7 +429,7 @@ pub fn encode_copy(
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_copy_kind(template, bytes, CopyKind::Copy, item, None, now, buf)
 }
 
@@ -445,7 +445,7 @@ pub fn encode_copy_from_url(
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_copy_kind(template, bytes, CopyKind::CopyFromUrl, item, None, now, buf)
 }
 
@@ -461,7 +461,7 @@ pub fn encode_put_from_url(
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_copy_kind(template, bytes, CopyKind::PutFromUrl, item, None, now, buf)
 }
 
@@ -482,7 +482,7 @@ pub fn encode_stage_block_from_url(
     item: &StageBlockFromUrlItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     encode_copy_kind(
         template,
         bytes,
@@ -659,7 +659,7 @@ pub fn encode_abort_copy(
     item: &AbortCopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Placement> {
+) -> Result<WireRequest> {
     if template.operation != Operation::AbortCopy {
         return Err(InvalidRequest::Template.into());
     }

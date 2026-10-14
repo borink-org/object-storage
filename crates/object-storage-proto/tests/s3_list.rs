@@ -32,8 +32,8 @@ fn encode(
     let now = Timestamps::from_unix(1_787_400_061);
     let mut buf = vec![0; 4096];
     let unsigned = s3::encode_list(&template, &bytes, item, &now, &mut buf)?;
-    let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]).request(&buf);
-    Ok(request.url().to_owned())
+    let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
+    Ok(request.url(&buf).to_owned())
 }
 
 fn url(addressing: Addressing, options: &ListOptions<'_>, item: &ListItem<'_>) -> String {

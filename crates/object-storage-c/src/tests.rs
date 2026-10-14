@@ -207,14 +207,13 @@ fn sent(request: &WireRequest, buf: &[u8]) -> Sent {
     }
 }
 
-fn proto_sent(placed: proto::Result<proto::Placement>, buf: &[u8]) -> Sent {
-    let placed = placed.expect("the protocol crate writes the request");
-    let request = placed.request(buf);
+fn proto_sent(request: proto::Result<proto::WireRequest>, buf: &[u8]) -> Sent {
+    let request = request.expect("the protocol crate writes the request");
     Sent {
-        url: request.url().to_string(),
-        head: String::from_utf8(request.head().to_vec()).unwrap(),
-        body: request.payload().bytes().unwrap_or_default().to_vec(),
-        payload_len: placed.content_len(),
+        url: request.url(buf).to_string(),
+        head: String::from_utf8(request.head(buf).to_vec()).unwrap(),
+        body: request.payload(buf).bytes().unwrap_or_default().to_vec(),
+        payload_len: request.content_len(),
     }
 }
 
