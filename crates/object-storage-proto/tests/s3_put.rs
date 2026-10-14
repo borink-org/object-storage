@@ -45,7 +45,7 @@ fn encode(
         .map_err(refusal)?;
     let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
     Ok(request
-        .headers()
+        .headers(&buf)
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect())
 }

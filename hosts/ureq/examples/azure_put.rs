@@ -39,8 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut outgoing = ureq::http::Request::builder()
             .method(request.method().as_str())
-            .uri(request.url());
-        for (name, value) in request.headers() {
+            .uri(request.url(&buf));
+        for (name, value) in request.headers(&buf) {
             outgoing = outgoing.header(name, value);
         }
         let agent: ureq::Agent = ureq::Agent::config_builder()

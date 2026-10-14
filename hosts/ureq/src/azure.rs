@@ -64,11 +64,11 @@ impl Blobs {
         let now = crate::now()?;
         let item = GetItem::new(key);
         let Prepared { template, bytes } = &self.get;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_get(template, bytes, &item, &now, buf).map(|request| request.placement())
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
+            azure::encode_get(template, bytes, &item, &now, buf)
         })?;
 
-        let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = item.shape(&GetOptions::new());
         match azure::accept_get_head(shape, crate::response_head(&parts))? {
             GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
@@ -93,12 +93,11 @@ impl Blobs {
         let now = crate::now()?;
         let item = PutItem::new(key, Payload::Slice(content));
         let Prepared { template, bytes } = &self.put;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_put(template, bytes, &item, &now, buf).map(|request| request.placement())
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
+            azure::encode_put(template, bytes, &item, &now, buf)
         })?;
 
-        let request = placed.request(&self.buf);
-        let (parts, mut body) = crate::send(&self.agent, &request, Some(content))?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, Some(content))?;
         let shape = item.shape(&PutOptions::default());
         match azure::accept_put_head(shape, crate::response_head(&parts))? {
             PutHeadOutcome::Created { .. } => Ok(()),
@@ -123,12 +122,11 @@ impl Blobs {
         let now = crate::now()?;
         let item = ObjectItem::new(key);
         let Prepared { template, bytes } = &self.delete;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
             azure::encode_delete(template, bytes, &item, &now, buf)
-                .map(|request| request.placement())
         })?;
 
-        let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = DeleteOptions::new().shape();
         match azure::accept_delete_head(shape, crate::response_head(&parts))? {
             DeleteHeadOutcome::Accepted => Ok(()),
@@ -157,11 +155,11 @@ impl Blobs {
     ) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
         let now = crate::now()?;
         let Prepared { template, bytes } = &self.list;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_list(template, bytes, item, &now, buf).map(|request| request.placement())
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
+            azure::encode_list(template, bytes, item, &now, buf)
         })?;
 
-        let (parts, mut incoming) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut incoming) = crate::send(&self.agent, &request, &self.buf, None)?;
         match azure::accept_list_head(crate::response_head(&parts))? {
             ListHeadOutcome::Page { .. } => {
                 // The whole page, in one buffer. The entries point into it,

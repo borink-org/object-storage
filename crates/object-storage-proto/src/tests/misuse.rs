@@ -97,28 +97,30 @@ fn now() -> Timestamps {
     Timestamps::from_unix(NOW)
 }
 
-// Reads every part of a written request, and returns whether there is one.
-fn read(request: Result<WireRequest<'_>>) -> bool {
+// Reads every part of a written request from `buf`, and returns whether
+// there is one.
+fn read(request: Result<WireRequest>, buf: &[u8]) -> bool {
     let written = request.is_ok();
     if let Ok(request) = request {
-        let _ = request.method();
-        let _ = request.url().len();
-        let _ = request.headers().count();
-        let _ = request.head().len();
         let _ = (
+            request.method(),
             request.url_span(),
             request.head_span(),
             request.fields_span(),
+            request.body_span(),
+            request.content_len(),
         );
-        let _ = request.body_span();
-        let _ = request.payload();
+        let _ = request.url(buf).len();
+        let _ = request.headers(buf).count();
+        let _ = request.head(buf).len();
+        let _ = request.payload(buf);
     }
     written
 }
 
 // Reads a written S3 request and signs it, in its own buffer and in one
 // that is not, and returns whether there is one.
-fn sign(unsigned: Result<s3::Unsigned<'_>>, buf: &mut [u8]) -> bool {
+fn sign(unsigned: Result<s3::Unsigned>, buf: &mut [u8]) -> bool {
     let Ok(unsigned) = unsigned else {
         return false;
     };
@@ -128,7 +130,7 @@ fn sign(unsigned: Result<s3::Unsigned<'_>>, buf: &mut [u8]) -> bool {
         let _ = (unsigned.body(buf), unsigned.signs_body());
         s3::set_body_hash(&unsigned, buf, &SHA);
         let _ = s3::set_body_checksum(&unsigned, buf, &Digest::crc64(7));
-        read(Ok(s3::set_signature(&unsigned, buf, &[9; 32])));
+        read(Ok(s3::set_signature(&unsigned, buf, &[9; 32])), buf);
     }
     true
 }
@@ -286,25 +288,25 @@ fn azure_cases() -> Vec<Case> {
             "azure get",
             false,
             move |c, buf| azure::prepare_get(c, TOKEN, NS, &get(snapshot), buf),
-            |t, b, key, buf| read(azure::encode_get(t, b, &get_item(key), &now(), buf)),
+            |t, b, key, buf| read(azure::encode_get(t, b, &get_item(key), &now(), buf), buf),
         ),
         azure(
             "azure get of one object",
             true,
             move |c, buf| azure::prepare_get(c, TOKEN, NS, &get(snapshot), buf),
-            |t, b, key, buf| read(azure::encode_get(t, b, &get_item(key), &now(), buf)),
+            |t, b, key, buf| read(azure::encode_get(t, b, &get_item(key), &now(), buf), buf),
         ),
         azure(
             "azure put",
             false,
             |c, buf| azure::prepare_put(c, TOKEN, NS, &put(), buf),
-            |t, b, key, buf| read(azure::encode_put(t, b, &put_item(key), &now(), buf)),
+            |t, b, key, buf| read(azure::encode_put(t, b, &put_item(key), &now(), buf), buf),
         ),
         azure(
             "azure list",
             false,
             |c, buf| azure::prepare_list(c, TOKEN, NS, &list(ListInclude::METADATA), buf),
-            |t, b, _, buf| read(azure::encode_list(t, b, &list_item(), &now(), buf)),
+            |t, b, _, buf| read(azure::encode_list(t, b, &list_item(), &now(), buf), buf),
         ),
         azure(
             "azure stage",
@@ -315,7 +317,7 @@ fn azure_cases() -> Vec<Case> {
                     checksum: CRC64,
                     ..azure::StageBlockItem::new(key, BLOCKS[0].id, Payload::Streamed { len: 8 })
                 };
-                read(azure::encode_stage_block(t, b, &item, &now(), buf))
+                read(azure::encode_stage_block(t, b, &item, &now(), buf), buf)
             },
         ),
         azure(
@@ -336,7 +338,7 @@ fn azure_cases() -> Vec<Case> {
                     content_md5: Some("1B2M2Y8AsgTpgAmY7PhCfg=="),
                     ..azure::CommitItem::new(key, &BLOCKS)
                 };
-                read(azure::encode_commit_blocks(t, b, &item, &now(), buf))
+                read(azure::encode_commit_blocks(t, b, &item, &now(), buf), buf)
             },
         ),
         azure(
@@ -348,7 +350,10 @@ fn azure_cases() -> Vec<Case> {
                     copy: copy_item(key),
                     id: BLOCKS[0].id,
                 };
-                read(azure::encode_stage_block_from_url(t, b, &item, &now(), buf))
+                read(
+                    azure::encode_stage_block_from_url(t, b, &item, &now(), buf),
+                    buf,
+                )
             },
         ),
         azure(
@@ -360,7 +365,7 @@ fn azure_cases() -> Vec<Case> {
                     key,
                     copy_id: "copy-1",
                 };
-                read(azure::encode_abort_copy(t, b, &item, &now(), buf))
+                read(azure::encode_abort_copy(t, b, &item, &now(), buf), buf)
             },
         ),
         azure(
@@ -372,14 +377,14 @@ fn azure_cases() -> Vec<Case> {
                     revision: Some("v1"),
                     ..ObjectItem::new(key)
                 };
-                read(azure::encode_set_tags(t, b, &item, &now(), buf))
+                read(azure::encode_set_tags(t, b, &item, &now(), buf), buf)
             },
         ),
         azure(
             "azure delete many",
             false,
             |c, buf| azure::prepare_delete_many(c, TOKEN, NS, buf),
-            |t, b, _, buf| read(azure::encode_delete_many(t, b, &TARGETS, &now(), buf)),
+            |t, b, _, buf| read(azure::encode_delete_many(t, b, &TARGETS, &now(), buf), buf),
         ),
     ]
 }

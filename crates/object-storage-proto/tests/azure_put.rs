@@ -17,22 +17,22 @@ fn now() -> Timestamps {
 
 // Writes `item` from a template of `options` for an account of `namespace`
 // into `buf`.
-fn encode_on<'r>(
+fn encode_on(
     namespace: AzureNamespace,
     options: &PutOptions<'_>,
-    item: &PutItem<'r>,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>, Error> {
+    item: &PutItem<'_>,
+    buf: &mut [u8],
+) -> Result<WireRequest, Error> {
     let mut bytes = vec![0; 2048];
     let template = azure::prepare_put(&container(), "token", namespace, options, &mut bytes)?;
     azure::encode_put(&template, &bytes, item, &now(), buf)
 }
 
-fn encode<'r>(
+fn encode(
     options: &PutOptions<'_>,
-    item: &PutItem<'r>,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>, Error> {
+    item: &PutItem<'_>,
+    buf: &mut [u8],
+) -> Result<WireRequest, Error> {
     encode_on(AzureNamespace::Unknown, options, item, buf)
 }
 
@@ -93,7 +93,7 @@ fn a_write_is_validated_before_any_byte_is_written() {
     for namespace in [AzureNamespace::Unknown, AzureNamespace::Hierarchical] {
         let mut buf = [0; 16384];
         let request = encode_on(namespace, &PutOptions::default(), &item, &mut buf).unwrap();
-        assert!(request.url().ends_with(&"%C3%A9".repeat(1025)));
+        assert!(request.url(&buf).ends_with(&"%C3%A9".repeat(1025)));
     }
 }
 
@@ -104,17 +104,20 @@ fn streamed_content_writes_the_same_head_without_the_bytes() {
     let held = PutItem::new("object.bin", Payload::Slice(&content));
     let streamed = PutItem::new("object.bin", Payload::Streamed { len: 4096 });
     let (mut held_buf, mut streamed_buf) = ([0; 1024], [0; 1024]);
-    let borrowed = encode(&options, &held, &mut held_buf).unwrap();
+    let held = encode(&options, &held, &mut held_buf).unwrap();
     let streaming = encode(&options, &streamed, &mut streamed_buf).unwrap();
 
     // The head is what the service sees, and it does not know the difference.
-    assert_eq!(borrowed.url(), streaming.url());
-    assert_eq!(borrowed.head(), streaming.head());
+    assert_eq!(held.url(&held_buf), streaming.url(&streamed_buf));
+    assert_eq!(held.head(&held_buf), streaming.head(&streamed_buf));
 
-    // Only the content differs: one is lent, the other is the host's to send.
-    assert_eq!(borrowed.payload().bytes(), Some(content.as_slice()));
-    assert_eq!(streaming.payload().bytes(), None);
-    assert_eq!(streaming.payload().len(), 4096);
+    // Neither lends the content: both state its length, and the host sends
+    // the bytes it holds.
+    assert_eq!(held.payload(&held_buf), Payload::Streamed { len: 4096 });
+    assert_eq!(
+        streaming.payload(&streamed_buf),
+        Payload::Streamed { len: 4096 }
+    );
 }
 
 #[test]
@@ -205,7 +208,7 @@ fn a_crc64_is_sent_as_its_own_header_in_azure_byte_order() {
         };
         let mut buf = [0; 1024];
         let request = encode(&options, &item, &mut buf).unwrap();
-        let headers: Vec<_> = request.headers().collect();
+        let headers: Vec<_> = request.headers(&buf).collect();
         assert!(
             headers.contains(&("x-ms-content-crc64", "HZz9TO6x+RU=")),
             "{headers:?}"

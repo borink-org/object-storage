@@ -207,13 +207,13 @@ fn sent(request: &WireRequest, buf: &[u8]) -> Sent {
     }
 }
 
-fn proto_sent(request: proto::Result<proto::WireRequest<'_>>) -> Sent {
+fn proto_sent(request: proto::Result<proto::WireRequest>, buf: &[u8]) -> Sent {
     let request = request.expect("the protocol crate writes the request");
     Sent {
-        url: request.url().to_string(),
-        head: String::from_utf8(request.head().to_vec()).unwrap(),
-        body: request.payload().bytes().unwrap_or_default().to_vec(),
-        payload_len: request.payload().len(),
+        url: request.url(buf).to_string(),
+        head: String::from_utf8(request.head(buf).to_vec()).unwrap(),
+        body: request.payload(buf).bytes().unwrap_or_default().to_vec(),
+        payload_len: request.content_len(),
     }
 }
 
@@ -909,13 +909,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        proto_sent(azure::encode_get(
-            &template,
-            &room,
-            &core_item,
-            &core_now,
-            &mut written
-        ))
+        proto_sent(
+            azure::encode_get(&template, &room, &core_item, &core_now, &mut written),
+            &written
+        )
     );
     assert_eq!(ours.method, Method::Get as u16);
     assert!(!ours.body.present);
@@ -957,13 +954,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        proto_sent(azure::encode_get(
-            &template,
-            &room,
-            &core_item,
-            &core_now,
-            &mut written
-        ))
+        proto_sent(
+            azure::encode_get(&template, &room, &core_item, &core_now, &mut written),
+            &written
+        )
     );
     assert_eq!(ours.method, Method::Head as u16);
 
@@ -1020,13 +1014,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        proto_sent(azure::encode_put(
-            &template,
-            &room,
-            &core_item,
-            &core_now,
-            &mut written
-        ))
+        proto_sent(
+            azure::encode_put(&template, &room, &core_item, &core_now, &mut written),
+            &written
+        )
     );
     assert_eq!(ours.payload_len, 4);
     // SAFETY: as above.
@@ -1067,13 +1058,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     assert_eq!(
         sent(&ours, &buf),
-        proto_sent(azure::encode_stage_block(
-            &template,
-            &room,
-            &core_item,
-            &core_now,
-            &mut written
-        ))
+        proto_sent(
+            azure::encode_stage_block(&template, &room, &core_item, &core_now, &mut written),
+            &written
+        )
     );
 
     // A commit of two blocks, if the blob is the one it was, with the MD5 of
@@ -1135,13 +1123,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
         content_md5: Some(MD5),
         ..azure::CommitItem::new(KEY, &core_blocks)
     };
-    let theirs = proto_sent(azure::encode_commit_blocks(
-        &template,
-        &room,
-        &core_item,
-        &core_now,
-        &mut written,
-    ));
+    let theirs = proto_sent(
+        azure::encode_commit_blocks(&template, &room, &core_item, &core_now, &mut written),
+        &written,
+    );
     assert_eq!(sent(&ours, &buf), theirs);
     assert!(ours.body.present);
     assert_eq!(ours.payload_len, theirs.body.len() as u64);
@@ -1190,13 +1175,10 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let ours = sent(&ours, &buf);
     assert_eq!(
         ours,
-        proto_sent(azure::encode_list(
-            &template,
-            &room,
-            &core_item,
-            &core_now,
-            &mut written
-        ))
+        proto_sent(
+            azure::encode_list(&template, &room, &core_item, &core_now, &mut written),
+            &written
+        )
     );
     assert!(ours.url.starts_with(
         "https://account.blob.core.windows.net/container\

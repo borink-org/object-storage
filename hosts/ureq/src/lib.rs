@@ -30,7 +30,7 @@ pub(crate) fn unix_now() -> Result<u64, Box<dyn std::error::Error>> {
 
 // Writes a template or a request with `write` into `buf`, and grows the
 // buffer and writes again only when it was too small. What `write` returns
-// borrows nothing, a template or a request's placement, so a host that
+// borrows nothing, a template or a request, so a host that
 // keeps `buf` between calls writes each later one once.
 pub(crate) fn grown_to_fit<T>(
     buf: &mut Vec<u8>,
@@ -71,21 +71,22 @@ pub(crate) fn new_agent() -> ureq::Agent {
         .into()
 }
 
-// Sends `request` with `agent`, with `content` for a write, and hands back
-// the response head and its body as two values, so that the head can be
-// read while the body is read too.
+// Sends `request`, written into `buf`, with `agent` and with `content` for
+// a write, and hands back the response head and its body as two values, so
+// that the head can be read while the body is read too.
 pub(crate) fn send(
     agent: &ureq::Agent,
-    request: &WireRequest<'_>,
+    request: &WireRequest,
+    buf: &[u8],
     content: Option<&[u8]>,
 ) -> Result<(ureq::http::response::Parts, ureq::Body), ureq::Error> {
     let mut builder = ureq::http::Request::builder()
         .method(request.method().as_str())
-        .uri(request.url());
-    for (name, value) in request.headers() {
+        .uri(request.url(buf));
+    for (name, value) in request.headers(buf) {
         builder = builder.header(name, value);
     }
-    let response = match (request.payload(), content) {
+    let response = match (request.payload(buf), content) {
         (Payload::Slice(bytes), _) if !bytes.is_empty() => agent.run(builder.body(bytes)?)?,
         (_, Some(bytes)) => agent.run(builder.body(bytes)?)?,
         _ => agent.run(builder.body(())?)?,

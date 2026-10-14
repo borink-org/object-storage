@@ -244,7 +244,7 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 }
 
 /// Writes the Blob Batch that removes `objects` at `now` from `template`
-/// into `buf`, with its parts as the body after the head, and returns it.
+/// into `buf`, with its parts as the body after the head, and returns where it is.
 ///
 /// # Errors
 ///
@@ -255,13 +255,13 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_delete_many<'r>(
+pub fn encode_delete_many(
     template: &Template,
     bytes: &[u8],
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     let Detail::Batch { path, tail } = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

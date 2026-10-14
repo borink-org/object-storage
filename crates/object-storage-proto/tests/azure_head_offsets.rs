@@ -20,19 +20,19 @@ fn template(prepare: impl Fn(&mut [u8]) -> Result<Template>) -> (Template, Vec<u
     (prepare(&mut bytes).unwrap(), bytes)
 }
 
-// The parts of a request, kept after the request is dropped. The request
-// borrows the buffer, so the parts are read back once it is gone.
+// The parts of a request, kept after the request read from the buffer is
+// dropped, so the parts are checked against the buffer itself.
 struct Parts {
     url: (Span, String),
     head: (Span, Vec<u8>),
     fields: (Span, usize),
 }
 
-fn parts(request: &WireRequest<'_>) -> Parts {
+fn parts(request: &WireRequest, buf: &[u8]) -> Parts {
     Parts {
-        url: (request.url_span(), request.url().to_owned()),
-        head: (request.head_span(), request.head().to_vec()),
-        fields: (request.fields_span(), request.headers().count()),
+        url: (request.url_span(), request.url(buf).to_owned()),
+        head: (request.head_span(), request.head(buf).to_vec()),
+        fields: (request.fields_span(), request.headers(buf).count()),
     }
 }
 
@@ -78,7 +78,7 @@ fn a_request_names_every_part_of_it_by_offset() {
         });
         let mut buf = vec![0; 512];
         let request = azure::encode_get(&template, &bytes, &get, &now(), &mut buf).unwrap();
-        let parts = parts(&request);
+        let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }
 
@@ -110,7 +110,7 @@ fn a_request_names_every_part_of_it_by_offset() {
         });
         let mut buf = vec![0; 512];
         let request = azure::encode_put(&template, &bytes, &put, &now(), &mut buf).unwrap();
-        let parts = parts(&request);
+        let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }
 
@@ -140,7 +140,7 @@ fn a_request_names_every_part_of_it_by_offset() {
         });
         let mut buf = vec![0; 512];
         let request = azure::encode_delete(&template, &bytes, &delete, &now(), &mut buf).unwrap();
-        let parts = parts(&request);
+        let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }
 }

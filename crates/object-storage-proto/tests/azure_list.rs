@@ -34,7 +34,7 @@ fn encode(
     // A URL as long as Azure reads stands in the request twice.
     let mut buf = vec![0; 2 * azure::MAX_URL_LEN + 1024];
     let request = azure::encode_list(&template, &bytes, item, &now(), &mut buf)?;
-    Ok(request.url().to_owned())
+    Ok(request.url(&buf).to_owned())
 }
 
 fn url(options: &ListOptions<'_>, item: &ListItem<'_>) -> String {

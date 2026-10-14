@@ -192,7 +192,7 @@ fn encode_copy_kind(
     part: Option<(&str, u32)>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let detail @ Detail::Copy {
         condition,
         source_revision,
@@ -281,7 +281,7 @@ pub fn encode_copy(
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_copy_kind(template, bytes, Operation::Copy, item, None, now, buf)
 }
 
@@ -316,7 +316,7 @@ pub fn encode_stage_part_copy(
     item: &StagePartCopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_copy_kind(
         template,
         bytes,
