@@ -370,7 +370,7 @@ pub fn encode_create_upload(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_object(template, bytes, Operation::CreateUpload, item, now, buf)
 }
 
@@ -473,14 +473,14 @@ fn describe_stage(checksum: Option<ChecksumKind>, signing: PayloadSigning) -> De
 ///
 /// Returns [`Error::Capacity`](crate::Error::Capacity) if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_stage_part<'i>(
+pub fn encode_stage_part(
     template: &Template,
     bytes: &[u8],
-    item: &StagePartItem<'i>,
+    item: &StagePartItem<'_>,
     content_sha256: Option<&[u8; 32]>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'i>> {
+) -> Result<Unsigned> {
     let Detail::Stage { checksum, signing } = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -641,7 +641,7 @@ pub fn encode_commit_parts(
     item: &CommitItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let Detail::Commit {
         condition,
         checksum,
@@ -794,7 +794,7 @@ pub fn encode_abort_upload(
     item: &UploadItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     if template.operation != Operation::AbortUpload {
         return Err(InvalidRequest::Template.into());
     }
@@ -894,7 +894,7 @@ pub fn encode_list_parts(
     item: &ListPartsItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     if template.operation != Operation::ListParts {
         return Err(InvalidRequest::Template.into());
     }

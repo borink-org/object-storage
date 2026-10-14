@@ -25,9 +25,9 @@ use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteOptions, DeleteShape,
     Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape, InvalidRequest,
     ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions, Listing,
-    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem, PutOptions,
-    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
-    ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
+    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, Placement, PutHeadOutcome, PutItem,
+    PutOptions, PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision,
+    RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, Holes};
 
@@ -491,8 +491,7 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
     }
 }
 
-/// Writes the read `item` at `now` from `template` into `buf`, and returns
-/// it.
+/// Writes the read `item` at `now` from `template` into `buf`, and returns where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_get`] wrote them.
 ///
@@ -506,13 +505,13 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_get<'r>(
+pub fn encode_get(
     template: &Template,
     bytes: &[u8],
     item: &GetItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::Get(options) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -673,7 +672,7 @@ fn describe_put<'p>(
 }
 
 /// Writes the whole-object write `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_put`] wrote them. The
 /// request lends a [`Payload::Slice`] to your HTTP client, and leaves a
@@ -689,13 +688,13 @@ fn describe_put<'p>(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_put<'r>(
+pub fn encode_put(
     template: &Template,
     bytes: &[u8],
-    item: &PutItem<'r>,
+    item: &PutItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::Put {
         condition,
         checksum,
@@ -834,7 +833,7 @@ pub fn prepare_delete(
 }
 
 /// Writes the removal `item` at `now` from `template` into `buf`, and
-/// returns it.
+/// returns where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_delete`] wrote them. The
 /// request has no content.
@@ -849,26 +848,26 @@ pub fn prepare_delete(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_delete<'r>(
+pub fn encode_delete(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_object(template, bytes, Operation::Delete, item, now, buf)
 }
 
 // Writes the request of `operation` that names the one object `item`, from
 // a template of that operation.
-fn encode_object<'r>(
+fn encode_object(
     template: &Template,
     bytes: &[u8],
     operation: Operation,
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::Object {
         condition,
         revision,
@@ -1078,7 +1077,7 @@ pub fn prepare_snapshot(
 }
 
 /// Writes the Snapshot Blob of `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// # Errors
 ///
@@ -1089,13 +1088,13 @@ pub fn prepare_snapshot(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_snapshot<'r>(
+pub fn encode_snapshot(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_object(template, bytes, Operation::Snapshot, item, now, buf)
 }
 
@@ -1240,7 +1239,7 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
 }
 
 /// Writes the page `item` at `now` from `template` into `buf`, and
-/// returns it.
+/// returns where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_list`] wrote them. The
 /// response carries the page as a document in its body: read it whole and
@@ -1260,13 +1259,13 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_list<'r>(
+pub fn encode_list(
     template: &Template,
     bytes: &[u8],
     item: &ListItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::List = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

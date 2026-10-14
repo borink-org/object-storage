@@ -65,7 +65,7 @@ impl Blobs {
         let item = GetItem::new(key);
         let Prepared { template, bytes } = &self.get;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_get(template, bytes, &item, &now, buf).map(|request| request.placement())
+            azure::encode_get(template, bytes, &item, &now, buf)
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
@@ -94,7 +94,7 @@ impl Blobs {
         let item = PutItem::new(key, Payload::Slice(content));
         let Prepared { template, bytes } = &self.put;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_put(template, bytes, &item, &now, buf).map(|request| request.placement())
+            azure::encode_put(template, bytes, &item, &now, buf)
         })?;
 
         let request = placed.request(&self.buf);
@@ -125,7 +125,6 @@ impl Blobs {
         let Prepared { template, bytes } = &self.delete;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
             azure::encode_delete(template, bytes, &item, &now, buf)
-                .map(|request| request.placement())
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
@@ -158,7 +157,7 @@ impl Blobs {
         let now = crate::now()?;
         let Prepared { template, bytes } = &self.list;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_list(template, bytes, item, &now, buf).map(|request| request.placement())
+            azure::encode_list(template, bytes, item, &now, buf)
         })?;
 
         let (parts, mut incoming) = crate::send(&self.agent, &placed.request(&self.buf), None)?;

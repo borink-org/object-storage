@@ -11,14 +11,14 @@ use crate::checksum::ChecksumKind;
 use crate::request::{HeaderValue, Writer, write_tags_as_query};
 use crate::template::{
     self, Builder, Fill, Hole, Param, ParamValue, Pass, Section, StoredReader, StoredWriter, Table,
-    TemplateBody, WireRequest,
+    TemplateBody,
 };
 use crate::url::{encode_object_key, write_query_value};
 use crate::validate::is_header_value;
 use crate::{
     CommitShape, ConditionKind, CopyShape, DeleteKind, DeleteShape, Error, GetItem, GetKind,
-    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, PutShape, Ranging, Result,
-    RevisionKind, Span, Tag,
+    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, Placement, PutShape,
+    Ranging, Result, RevisionKind, Span, Tag,
 };
 
 /// The operation that a template writes requests for.
@@ -808,17 +808,18 @@ pub(super) fn prepare_template<const Q: usize>(
 }
 
 /// Writes a request from `template` into `buf`, with the values that `fill`
-/// writes, and returns it. `describe` is the template's, without its text.
+/// writes, and returns where it is. `describe` is the template's, without
+/// its text.
 /// Inlined into each operation's encoder, which so runs its own layout.
 #[inline(always)]
-pub(super) fn encode_template<'r, F: Fill, const Q: usize>(
+pub(super) fn encode_template<F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
-    payload: Payload<'r>,
-    buf: &'r mut [u8],
+    payload: Payload<'_>,
+    buf: &mut [u8],
     describe: &Describe<'_, Q>,
-) -> Result<WireRequest<'r>> {
+) -> Result<Placement> {
     // A URL that Azure would refuse is refused before any byte is written.
     // It is counted only when its values could make it too long.
     let surely_short = template
@@ -849,8 +850,7 @@ pub(super) fn encode_template<'r, F: Fill, const Q: usize>(
         template::walk_request(&template.table, bytes, fill, &mut out)?
     };
     let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
-    let bytes: &'r [u8] = buf;
-    Ok(WireRequest::new(bytes, template.method, &written, payload))
+    Ok(Placement::new(template.method, &written, payload.len()))
 }
 
 impl Template {

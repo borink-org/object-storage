@@ -24,7 +24,7 @@ use crate::http_message::Response;
 use crate::multipart::{self, MixedContentType, Part};
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, HeaderValue, U64Decimal, Writer};
-use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, Placement, TemplateBody};
 use crate::url::QueryValue;
 use crate::validate::validate_revision;
 use crate::{
@@ -244,7 +244,7 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 }
 
 /// Writes the Blob Batch that removes `objects` at `now` from `template`
-/// into `buf`, with its parts as the body after the head, and returns it.
+/// into `buf`, with its parts as the body after the head, and returns where it is.
 ///
 /// # Errors
 ///
@@ -255,13 +255,13 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_delete_many<'r>(
+pub fn encode_delete_many(
     template: &Template,
     bytes: &[u8],
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::Batch { path, tail } = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

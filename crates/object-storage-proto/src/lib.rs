@@ -14,10 +14,11 @@
 //!    that you own. Keep the template and its bytes for as many reads as you
 //!    like.
 //! 2. Describe each read as a [`GetItem`], and call [`azure::encode_get`]
-//!    to write the request into a second buffer. Send the [`WireRequest`]
-//!    with your HTTP client. Every byte of the request is in that buffer, so
-//!    [`WireRequest`] can also name each part of it by offset and length: see
-//!    [`WireRequest::url_span`].
+//!    to write the request into a second buffer. It returns a [`Placement`]:
+//!    where each part of the request is in that buffer, by offset and
+//!    length. It borrows nothing, so you can grow the buffer and write the
+//!    request again if it was too small. Read the [`WireRequest`] from the
+//!    buffer with [`Placement::request`], and send it with your HTTP client.
 //! 3. Put the response headers into a [`ResponseHead`] and call
 //!    [`azure::accept_get_head`] with the read's [`GetItem::shape`]. It
 //!    returns a [`GetHeadOutcome`] that tells you what to do with the body.
@@ -25,10 +26,9 @@
 //! A write has the same three steps, with [`PutOptions`], [`PutItem`],
 //! [`azure::prepare_put`], [`azure::encode_put`] and
 //! [`azure::accept_put_head`]. The content stays where you put it: the
-//! request states its length in the head, and borrows the bytes or leaves
-//! them to you. Describe the content with a [`Payload`], which names a
-//! length whether or not you hold the bytes, so a write can stream from a
-//! file or a socket.
+//! request states its length in the head, and leaves the bytes to you.
+//! Describe the content with a [`Payload`], which names a length whether or
+//! not you hold the bytes, so a write can stream from a file or a socket.
 //!
 //! A removal has the same three steps too, with [`DeleteOptions`],
 //! [`ObjectItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
@@ -83,7 +83,8 @@
 //! // 2. Write each read into your own buffer, then send it.
 //! let get = GetItem::new("directory/object.txt");
 //! let mut buffer = vec![0; 1024];
-//! let request = azure::encode_get(&reads, &template, &get, &now, &mut buffer)?;
+//! let placed = azure::encode_get(&reads, &template, &get, &now, &mut buffer)?;
+//! let request = placed.request(&buffer);
 //! assert_eq!(request.method(), Method::Get);
 //! for (name, value) in request.headers() {
 //!     // your_client.header(name, value);
@@ -109,10 +110,10 @@
 //! let pages =
 //!     azure::prepare_list(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
 //! let mut buffer = vec![0; 1024];
-//! let request =
+//! let placed =
 //!     azure::encode_list(&pages, &template, &ListItem::new("directory/"), &now, &mut buffer)?;
 //! assert_eq!(
-//!     request.url(),
+//!     placed.request(&buffer).url(),
 //!     "https://account.blob.core.windows.net/objects\
 //!      ?restype=container&comp=list&delimiter=%2F&maxresults=2&prefix=directory%2F"
 //! );
@@ -142,9 +143,11 @@
 //!     azure::prepare_put(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
 //! let put = PutItem::new("directory/object.txt", Payload::Slice(b"contents"));
 //! let mut buffer = vec![0; 1024];
-//! let request = azure::encode_put(&writes, &template, &put, &now, &mut buffer)?;
+//! let placed = azure::encode_put(&writes, &template, &put, &now, &mut buffer)?;
+//! let request = placed.request(&buffer);
 //! assert_eq!(request.method(), Method::Put);
-//! assert_eq!(request.payload().bytes(), Some(b"contents".as_slice()));
+//! // The request states the content's length, and you send the bytes.
+//! assert_eq!(request.payload(), Payload::Streamed { len: 8 });
 //!
 //! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
 //! match azure::accept_put_head(put.shape(&options), head)? {

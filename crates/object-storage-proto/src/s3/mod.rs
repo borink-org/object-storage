@@ -10,9 +10,10 @@
 //!    a [`Template`] into a buffer that you own.
 //! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
 //!    [`encode_get`] or [`encode_put`] to write it into a second buffer. The request is
-//!    [`Unsigned`]: sign it, as [Signing](#signing) describes, and send the
-//!    [`WireRequest`](crate::WireRequest) that [`set_signature`] returns with your
-//!    HTTP client.
+//!    [`Unsigned`]: sign it, as [Signing](#signing) describes. [`set_signature`]
+//!    returns its [`Placement`](crate::Placement), and
+//!    [`Placement::request`](crate::Placement::request) reads the request to
+//!    send with your HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call
 //!    [`accept_get_head`] or [`accept_put_head`].
 //!
@@ -52,7 +53,8 @@
 //! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
 //! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
 //! let mac = hmac_of_string_to_sign(unsigned.canonical(&buffer));
-//! let request = s3::set_signature(&unsigned, &mut buffer, &mac);
+//! let placed = s3::set_signature(&unsigned, &mut buffer, &mac);
+//! let request = placed.request(&buffer);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/directory/object.txt"
@@ -155,7 +157,8 @@
 //! let pages = s3::prepare_list(&bucket, &credentials, &options, &mut template)?;
 //! let mut buffer = vec![0; 2048];
 //! let unsigned = s3::encode_list(&pages, &template, &ListItem::new("photos/"), &now, &mut buffer)?;
-//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
+//! let placed = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
+//! let request = placed.request(&buffer);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects\
@@ -234,7 +237,8 @@
 //! // `borink_object_storage_crypto::sigv4::sign` writes in the body's SHA-256
 //! // with `s3::set_body_hash`, and then signs.
 //! # s3::set_body_hash(&unsigned, &mut buffer, &[0; 32]);
-//! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
+//! let placed = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
+//! let request = placed.request(&buffer);
 //! assert_eq!(
 //!     request.url(),
 //!     "https://s3.eu-west-1.amazonaws.com/objects/large.bin?uploadId=VXBsb2FkSUQ"
@@ -1098,7 +1102,7 @@ pub fn encode_get(
     item: &GetItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let Detail::Get(options) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -1237,14 +1241,14 @@ fn describe_put(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_put<'i>(
+pub fn encode_put(
     template: &Template,
     bytes: &[u8],
-    item: &PutItem<'i>,
+    item: &PutItem<'_>,
     content_sha256: Option<&[u8; 32]>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'i>> {
+) -> Result<Unsigned> {
     let Detail::Put {
         condition,
         checksum,
@@ -1397,7 +1401,7 @@ pub fn encode_delete(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_object(template, bytes, Operation::Delete, item, now, buf)
 }
 /// Reads the response head of a removal and reports what S3 did.
@@ -1588,7 +1592,7 @@ pub fn encode_list(
     item: &ListItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let detail @ Detail::List { include, .. } = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -2134,7 +2138,7 @@ fn encode_object(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let Detail::Object {
         condition,
         revision,
@@ -2219,7 +2223,7 @@ pub fn encode_create_session(
     bytes: &[u8],
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     if template.operation != Operation::CreateSession {
         return Err(InvalidRequest::Template.into());
     }

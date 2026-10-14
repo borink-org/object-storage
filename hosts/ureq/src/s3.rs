@@ -107,7 +107,7 @@ impl<'a> Objects<'a> {
         let Prepared { template, bytes } = &self.get;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_get(template, bytes, &item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
@@ -143,7 +143,7 @@ impl<'a> Objects<'a> {
         let Prepared { template, bytes } = &self.put;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_put(template, bytes, &item, Some(&digest), &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let request = placed.request(&self.buf);
@@ -177,7 +177,7 @@ impl<'a> Objects<'a> {
         let Prepared { template, bytes } = &self.delete;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_delete(template, bytes, &item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
@@ -215,7 +215,7 @@ impl<'a> Objects<'a> {
         let Prepared { template, bytes } = &self.list;
         let placed = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_list(template, bytes, item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let (parts, mut incoming) = crate::send(&self.agent, &placed.request(&self.buf), None)?;

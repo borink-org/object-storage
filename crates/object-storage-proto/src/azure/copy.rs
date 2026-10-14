@@ -27,7 +27,7 @@ use crate::head::read_text_header;
 use crate::http::{PlainHttp, valid_http_origin};
 use crate::outcome::finish_with_body;
 use crate::request::condition_header_name;
-use crate::template::{Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
+use crate::template::{Hole, HoleValues, ParamValue, Placement, TemplateBody};
 use crate::url::QueryValue;
 use crate::validate::{
     validate_condition, validate_properties, validate_revision_item, validate_source_container,
@@ -261,15 +261,15 @@ fn describe_copy<'p>(
 
 // Writes the copy `item` of `operation`, to the block `block_id` when it
 // stages one.
-fn encode_copy_kind<'r>(
+fn encode_copy_kind(
     template: &Template,
     bytes: &[u8],
     kind: CopyKind,
     item: &CopyItem<'_>,
     block_id: Option<&str>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let detail @ Detail::Copy {
         condition,
         source_revision,
@@ -412,7 +412,7 @@ pub fn prepare_stage_block_from_url(
 }
 
 /// Writes the Copy Blob `item` at `now` from `template` into `buf`, and
-/// returns it.
+/// returns where it is.
 ///
 /// # Errors
 ///
@@ -423,50 +423,50 @@ pub fn prepare_stage_block_from_url(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_copy<'r>(
+pub fn encode_copy(
     template: &Template,
     bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_copy_kind(template, bytes, CopyKind::Copy, item, None, now, buf)
 }
 
 /// Writes the Copy Blob From URL `item` at `now` from `template` into
-/// `buf`, and returns it.
+/// `buf`, and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_copy`].
-pub fn encode_copy_from_url<'r>(
+pub fn encode_copy_from_url(
     template: &Template,
     bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_copy_kind(template, bytes, CopyKind::CopyFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Blob From URL `item` at `now` from `template` into
-/// `buf`, and returns it.
+/// `buf`, and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_copy`].
-pub fn encode_put_from_url<'r>(
+pub fn encode_put_from_url(
     template: &Template,
     bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_copy_kind(template, bytes, CopyKind::PutFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Block From URL `item` at `now` from `template` into
-/// `buf`, and returns it. Read the response with
+/// `buf`, and returns where it is. Read the response with
 /// [`accept_stage_block_head`](crate::azure::accept_stage_block_head).
 ///
 /// # Errors
@@ -476,13 +476,13 @@ pub fn encode_put_from_url<'r>(
 /// that is empty, or that is not bounded where the template names one:
 /// [`InvalidRequest::Range`], or [`InvalidRequest::UnsupportedRange`] for a
 /// suffix or an offset.
-pub fn encode_stage_block_from_url<'r>(
+pub fn encode_stage_block_from_url(
     template: &Template,
     bytes: &[u8],
     item: &StageBlockFromUrlItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_copy_kind(
         template,
         bytes,
@@ -642,7 +642,7 @@ fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 }
 
 /// Writes the Abort Copy Blob `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// # Errors
 ///
@@ -653,13 +653,13 @@ fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_abort_copy<'r>(
+pub fn encode_abort_copy(
     template: &Template,
     bytes: &[u8],
     item: &AbortCopyItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     if template.operation != Operation::AbortCopy {
         return Err(InvalidRequest::Template.into());
     }

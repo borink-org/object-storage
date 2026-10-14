@@ -36,7 +36,8 @@ fn encode<'r>(
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>, Error> {
     let (template, bytes) = template(options, AzureNamespace::Unknown);
-    azure::encode_get(&template, &bytes, item, &now(), buf)
+    let placed = azure::encode_get(&template, &bytes, item, &now(), buf)?;
+    Ok(placed.request(buf))
 }
 
 fn shape(range: RequestedRange) -> GetShape {
@@ -131,7 +132,8 @@ fn the_request_borrows_nothing_but_its_buffer() {
         &Timestamps::from_unix(1_787_400_000),
         &mut buf,
     )
-    .unwrap();
+    .unwrap()
+    .request(&buf);
     assert!(
         request
             .headers()

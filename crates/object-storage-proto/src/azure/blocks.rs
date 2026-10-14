@@ -22,7 +22,7 @@ use crate::encoding::{base64_into, base64_len};
 use crate::head::{read_decimal_header, read_text_header};
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, Writer, condition_header_name};
-use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
+use crate::template::{Fill, Hole, HoleValues, ParamValue, Placement, TemplateBody};
 use crate::url::QueryValue;
 use crate::validate::{
     validate_checksum_item, validate_condition, validate_properties, validate_tags,
@@ -352,7 +352,7 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 }
 
 /// Writes the Put Block `item` at `now` from `template` into `buf`, and
-/// returns it.
+/// returns where it is.
 ///
 /// The head states the length of the content, which stays where you put it:
 /// the request borrows it, or leaves it to you to send.
@@ -367,13 +367,13 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_stage_block<'r>(
+pub fn encode_stage_block(
     template: &Template,
     bytes: &[u8],
-    item: &StageBlockItem<'r>,
+    item: &StageBlockItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     let Detail::Stage(checksum) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };
@@ -537,7 +537,7 @@ where
 }
 
 /// Writes the Put Block List `item` at `now` from `template` into `buf`,
-/// with its block list as the body after the head, and returns it.
+/// with its block list as the body after the head, and returns where it is.
 ///
 /// # Errors
 ///
@@ -549,13 +549,13 @@ where
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_commit_blocks<'r, 'b, B>(
+pub fn encode_commit_blocks<'b, B>(
     template: &Template,
     bytes: &[u8],
     item: &CommitItem<'_, B>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>>
+    buf: &mut [u8],
+) -> Result<Placement>
 where
     B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
 {
@@ -684,7 +684,7 @@ pub fn prepare_list_blocks(
 }
 
 /// Writes the Get Block List of `item` at `now` from `template` into `buf`,
-/// and returns it. Read the whole response body and pass it to
+/// and returns where it is. Read the whole response body and pass it to
 /// [`fill_blocks`].
 ///
 /// # Errors
@@ -696,13 +696,13 @@ pub fn prepare_list_blocks(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_list_blocks<'r>(
+pub fn encode_list_blocks(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_object(template, bytes, Operation::ListBlocks, item, now, buf)
 }
 

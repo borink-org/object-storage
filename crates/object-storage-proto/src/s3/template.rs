@@ -16,8 +16,8 @@ use crate::s3::{
 };
 use crate::sigv4::{ALGORITHM, Credentials, EMPTY_SHA256, MAX_REGION_LEN, MAX_SECRET_LEN};
 use crate::template::{
-    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Section, Table, TemplateBody,
-    WireRequest, Written,
+    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Placement, Section, Table,
+    TemplateBody, Written,
 };
 use crate::url::{encode_object_key, write_query_value};
 use crate::{
@@ -966,16 +966,17 @@ pub(super) fn prepare_template<const Q: usize>(
 /// Pass every function that takes a buffer the one that the request was
 /// written into. Another buffer gives a wrong request, but never a panic.
 #[derive(Debug, Clone, Copy)]
-pub struct Unsigned<'c> {
+pub struct Unsigned {
     method: Method,
     written: Written,
-    payload: Payload<'c>,
+    // The length of the content that the caller sends.
+    content_len: u64,
     // The kind of checksum of a body that this crate wrote, if the request
     // sends one.
     body_checksum: Option<ChecksumKind>,
 }
 
-impl<'c> Unsigned<'c> {
+impl Unsigned {
     /// Returns the canonical request, which SigV4 signs, from the buffer
     /// that the request was written into.
     pub fn canonical<'b>(&self, buf: &'b [u8]) -> &'b [u8] {
@@ -1021,7 +1022,7 @@ impl<'c> Unsigned<'c> {
 /// Writes the SHA-256 of the body of `unsigned` into each place of `buf`
 /// that holds it: the field `x-amz-content-sha256` and the canonical
 /// request. Does nothing for a request that signs no body of its own.
-pub fn set_body_hash(unsigned: &Unsigned<'_>, buf: &mut [u8], sha256: &[u8; 32]) {
+pub fn set_body_hash(unsigned: &Unsigned, buf: &mut [u8], sha256: &[u8; 32]) {
     let hex = hex_digest(sha256);
     for span in unsigned.written.body_hash.iter().flatten() {
         overwrite_placeholder(buf, *span, &hex);
@@ -1048,7 +1049,7 @@ fn overwrite_placeholder(buf: &mut [u8], span: Span, text: &[u8]) {
 ///
 /// Returns [`InvalidRequest::Checksum`] for a digest of another kind than the
 /// template's.
-pub fn set_body_checksum(unsigned: &Unsigned<'_>, buf: &mut [u8], digest: &Digest) -> Result<()> {
+pub fn set_body_checksum(unsigned: &Unsigned, buf: &mut [u8], digest: &Digest) -> Result<()> {
     if unsigned.written.body_checksum[0].is_none() {
         return Ok(());
     }
@@ -1068,14 +1069,14 @@ pub fn set_body_checksum(unsigned: &Unsigned<'_>, buf: &mut [u8], digest: &Diges
 /// writes. `describe` is the template's, without its text. Inlined into
 /// each operation's encoder, which so runs its own layout.
 #[inline(always)]
-pub(super) fn encode_template<'c, F: Fill, const Q: usize>(
+pub(super) fn encode_template<F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
-    payload: Payload<'c>,
+    payload: Payload<'_>,
     buf: &mut [u8],
     describe: &Describe<'_, Q>,
-) -> Result<Unsigned<'c>> {
+) -> Result<Unsigned> {
     let mut out = Writer::new(buf);
     #[cfg(not(feature = "compact"))]
     let written = {
@@ -1100,7 +1101,7 @@ pub(super) fn encode_template<'c, F: Fill, const Q: usize>(
     Ok(Unsigned {
         method: template.method,
         written,
-        payload,
+        content_len: payload.len(),
         body_checksum,
     })
 }
@@ -1165,21 +1166,16 @@ pub fn string_to_sign_prefix<'o>(
     Ok(&out[..at])
 }
 
-/// Writes the signature into a request and returns the request.
+/// Writes the signature into a request and returns where the request is.
 ///
 /// `mac` is the HMAC-SHA256 of the string to sign: the prefix that
 /// [`string_to_sign_prefix`] writes, followed by the lowercase hexadecimal
 /// of the SHA-256 of [`Unsigned::canonical`].
-pub fn set_signature<'r>(
-    unsigned: &Unsigned<'r>,
-    buf: &'r mut [u8],
-    mac: &[u8; 32],
-) -> WireRequest<'r> {
+pub fn set_signature(unsigned: &Unsigned, buf: &mut [u8], mac: &[u8; 32]) -> Placement {
     if let Some(span) = unsigned.written.signature {
         overwrite_placeholder(buf, span, &encoding::hex_digest(mac));
     }
-    let bytes: &'r [u8] = buf;
-    WireRequest::new(bytes, unsigned.method, &unsigned.written, unsigned.payload)
+    Placement::new(unsigned.method, &unsigned.written, unsigned.content_len)
 }
 
 /// Computes the key that signs every request of the day of `now`.

@@ -35,7 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0; 4096];
     for (key, content) in [("a.txt", "one"), ("b.txt", "two"), ("c.txt", "three")] {
         let item = PutItem::new(key, Payload::Slice(content.as_bytes()));
-        let request = azure::encode_put(&template, &bytes, &item, &now, &mut buf)?;
+        let placed = azure::encode_put(&template, &bytes, &item, &now, &mut buf)?;
+        let request = placed.request(&buf);
 
         let mut outgoing = ureq::http::Request::builder()
             .method(request.method().as_str())

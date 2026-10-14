@@ -13,7 +13,7 @@ use crate::azure::{
     read_failure_head,
 };
 use crate::outcome::finish_with_body;
-use crate::template::WireRequest;
+use crate::template::Placement;
 use crate::validate::is_header_value;
 use crate::{
     ConditionKind, Failure, InvalidRequest, ObjectItem, ResponseFault, ResponseHead,
@@ -78,7 +78,7 @@ pub fn prepare_restore(
 }
 
 /// Writes the rehydration of `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// # Errors
 ///
@@ -89,13 +89,13 @@ pub fn prepare_restore(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_restore<'r>(
+pub fn encode_restore(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<Placement> {
     encode_object(template, bytes, Operation::Restore, item, now, buf)
 }
 

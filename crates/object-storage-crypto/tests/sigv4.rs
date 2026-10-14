@@ -30,14 +30,14 @@ fn credentials() -> Credentials<'static> {
 // that an empty buffer reports.
 type Signed = (String, Vec<(String, String)>, String);
 type Prepare<'p> = dyn Fn(&mut [u8]) -> borink_object_storage_proto::Result<Template> + 'p;
-type Encode<'e, 'c> =
-    dyn Fn(&Template, &[u8], &mut [u8]) -> borink_object_storage_proto::Result<Unsigned<'c>> + 'e;
+type Encode<'e> =
+    dyn Fn(&Template, &[u8], &mut [u8]) -> borink_object_storage_proto::Result<Unsigned> + 'e;
 
-fn signed<'c>(
+fn signed(
     credentials: &Credentials<'_>,
     now: &Timestamps,
     prepare: &Prepare<'_>,
-    encode: &Encode<'_, 'c>,
+    encode: &Encode<'_>,
 ) -> Vec<Signed> {
     fn exact<T>(encode: impl Fn(&mut [u8]) -> borink_object_storage_proto::Result<T>) -> Vec<u8> {
         let Err(Error::Capacity(capacity)) = encode(&mut []) else {
@@ -48,11 +48,11 @@ fn signed<'c>(
         assert!(encode(&mut buf[..capacity.required - 1]).is_err());
         buf
     }
-    fn one<'c, S: Sha256>(
+    fn one<S: Sha256>(
         credentials: &Credentials<'_>,
         now: &Timestamps,
         prepare: &Prepare<'_>,
-        encode: &Encode<'_, 'c>,
+        encode: &Encode<'_>,
     ) -> Signed {
         let bytes = exact(prepare);
         let template = prepare(&mut bytes.clone()).unwrap();
@@ -60,7 +60,7 @@ fn signed<'c>(
         let stamp = sigv4::stamp(&key, &template, &bytes, now).unwrap();
         let mut buf = exact(|buf| encode(&template, &bytes, buf));
         let unsigned = encode(&template, &bytes, &mut buf).unwrap();
-        let request = sigv4::sign(&stamp, &unsigned, &mut buf);
+        let request = sigv4::sign(&stamp, &unsigned, &mut buf).request(&buf);
         let mut headers: Vec<_> = request
             .headers()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -217,10 +217,12 @@ fn a_batch_is_signed_as_each_request_is() {
     for ((unsigned, mut buf), mac) in unsigned.iter().zip(bufs.clone()).zip(&macs) {
         let mut copy = buf.clone();
         let batched: Vec<_> = s3::set_signature(unsigned, &mut buf, mac)
+            .request(&buf)
             .headers()
             .map(|(n, v)| (n.to_owned(), v.to_owned()))
             .collect();
         let single: Vec<_> = sigv4::sign(&stamp, unsigned, &mut copy)
+            .request(&copy)
             .headers()
             .map(|(n, v)| (n.to_owned(), v.to_owned()))
             .collect();

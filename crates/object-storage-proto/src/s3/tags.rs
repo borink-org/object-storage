@@ -89,7 +89,7 @@ pub fn encode_put_tagging(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_object(template, bytes, Operation::PutTagging, item, now, buf)
 }
 
@@ -154,7 +154,7 @@ pub fn encode_get_tagging(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_object(template, bytes, Operation::GetTagging, item, now, buf)
 }
 

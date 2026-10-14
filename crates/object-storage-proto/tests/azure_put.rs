@@ -20,17 +20,18 @@ fn now() -> Timestamps {
 fn encode_on<'r>(
     namespace: AzureNamespace,
     options: &PutOptions<'_>,
-    item: &PutItem<'r>,
+    item: &PutItem<'_>,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>, Error> {
     let mut bytes = vec![0; 2048];
     let template = azure::prepare_put(&container(), "token", namespace, options, &mut bytes)?;
-    azure::encode_put(&template, &bytes, item, &now(), buf)
+    let placed = azure::encode_put(&template, &bytes, item, &now(), buf)?;
+    Ok(placed.request(buf))
 }
 
 fn encode<'r>(
     options: &PutOptions<'_>,
-    item: &PutItem<'r>,
+    item: &PutItem<'_>,
     buf: &'r mut [u8],
 ) -> Result<WireRequest<'r>, Error> {
     encode_on(AzureNamespace::Unknown, options, item, buf)
@@ -104,17 +105,17 @@ fn streamed_content_writes_the_same_head_without_the_bytes() {
     let held = PutItem::new("object.bin", Payload::Slice(&content));
     let streamed = PutItem::new("object.bin", Payload::Streamed { len: 4096 });
     let (mut held_buf, mut streamed_buf) = ([0; 1024], [0; 1024]);
-    let borrowed = encode(&options, &held, &mut held_buf).unwrap();
+    let held = encode(&options, &held, &mut held_buf).unwrap();
     let streaming = encode(&options, &streamed, &mut streamed_buf).unwrap();
 
     // The head is what the service sees, and it does not know the difference.
-    assert_eq!(borrowed.url(), streaming.url());
-    assert_eq!(borrowed.head(), streaming.head());
+    assert_eq!(held.url(), streaming.url());
+    assert_eq!(held.head(), streaming.head());
 
-    // Only the content differs: one is lent, the other is the host's to send.
-    assert_eq!(borrowed.payload().bytes(), Some(content.as_slice()));
-    assert_eq!(streaming.payload().bytes(), None);
-    assert_eq!(streaming.payload().len(), 4096);
+    // Neither lends the content: both state its length, and the host sends
+    // the bytes it holds.
+    assert_eq!(held.payload(), Payload::Streamed { len: 4096 });
+    assert_eq!(streaming.payload(), Payload::Streamed { len: 4096 });
 }
 
 #[test]
