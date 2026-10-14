@@ -7,6 +7,7 @@ use std::thread;
 
 use borink_object_storage_crypto::sigv4::sha256;
 use borink_object_storage_crypto::{Sha256RustCrypto, wipe};
+use borink_object_storage_proto::ListOptions;
 use borink_object_storage_proto::s3::{Bucket, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_ureq::s3;
@@ -86,8 +87,9 @@ fn executes_the_generated_requests() {
 
     let bucket = Bucket::new_allowing_http(&endpoint, "bucket", "us-east-1", Service::Aws).unwrap();
     let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe).unwrap();
-    assert_eq!(s3::get(&bucket, &credentials, "a key").unwrap(), b"body");
-    s3::put(&bucket, &credentials, "a key", b"content").unwrap();
-    s3::delete(&bucket, &credentials, "a key").unwrap();
+    let mut objects = s3::Objects::new(&bucket, credentials, &ListOptions::default()).unwrap();
+    assert_eq!(objects.get("a key").unwrap(), b"body");
+    objects.put("a key", b"content").unwrap();
+    objects.delete("a key").unwrap();
     server.join().unwrap();
 }

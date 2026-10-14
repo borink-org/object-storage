@@ -4,9 +4,9 @@
 
 use std::env;
 
-use borink_object_storage_proto::s3::{self as proto, Bucket, Service};
+use borink_object_storage_proto::s3::{Bucket, Service};
 use borink_object_storage_proto::sigv4::Credentials;
-use borink_object_storage_proto::{Error, ListEntry, ListItem, ListMarker, ListOptions};
+use borink_object_storage_proto::{ListEntry, ListItem, ListMarker, ListOptions};
 use borink_object_storage_ureq::s3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,19 +28,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials = credentials.with_session_token(token)?;
     }
 
-    // Every page shares the template: an empty buffer is refused with the
-    // size it needs.
+    // Every page shares the client's list template.
     let options = ListOptions {
         max_results: Some(1000),
         ..ListOptions::default()
     };
-    let prepare = |buf: &mut [u8]| proto::prepare_list(&bucket, &credentials, &options, buf);
-    let size = match prepare(&mut []) {
-        Err(Error::Capacity(capacity)) => capacity.required,
-        other => return Err(format!("{other:?}").into()),
-    };
-    let mut bytes = vec![0; size];
-    let template = prepare(&mut bytes)?;
+    let mut objects = s3::Objects::new(&bucket, credentials, &options)?;
 
     let mut marker: Option<String> = None;
     let mut body = Vec::new();
@@ -52,14 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             marker: marker.as_deref().map(ListMarker::Text),
             ..ListItem::new(&prefix)
         };
-        let page = s3::list(
-            &template,
-            &bytes,
-            &credentials,
-            &item,
-            &mut body,
-            &mut entries,
-        )?;
+        let page = objects.list(&item, &mut body, &mut entries)?;
         for entry in &entries[..page.filled] {
             println!("{}", entry.key);
         }
