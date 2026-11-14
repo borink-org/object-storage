@@ -1,8 +1,9 @@
 //! A synchronous `ureq` host for `borink-object-storage`.
 //!
-//! [`azure`] sends Azure requests, and [`s3`] sends S3 requests that it
-//! signs. Each module gets, puts, deletes and lists in the same way, from
-//! templates.
+//! [`azure::Blobs`] sends Azure requests, and [`s3::Objects`] sends S3
+//! requests that it signs. Each gets, puts, deletes and lists in the same
+//! way: it writes the template of each kind of request once, when it is
+//! made, and writes every request into one buffer that it keeps.
 
 pub mod azure;
 pub mod s3;
@@ -15,30 +16,66 @@ const MAX_PAGE: u64 = 8 * 1024 * 1024;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage_proto::{
-    CapacityError, Error, Payload, ResponseHead, Timestamps, WireRequest,
-};
+use borink_object_storage_proto::{Error, Payload, ResponseHead, Timestamps, WireRequest};
 
 // The current time, which the crate never reads itself.
 pub(crate) fn now() -> Result<Timestamps, Box<dyn std::error::Error>> {
-    let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    Ok(Timestamps::from_unix(unix))
+    Ok(Timestamps::from_unix(unix_now()?))
 }
 
-// Writes a template with `prepare` into a buffer of exactly its size, and
-// returns both.
-pub(crate) fn sized_template<T>(
-    prepare: impl Fn(&mut [u8]) -> Result<T, Error>,
-) -> Result<(T, Vec<u8>), Error> {
-    let mut bytes = vec![0; CapacityError::required_by(&prepare)?];
-    let template = prepare(&mut bytes)?;
-    Ok((template, bytes))
+// The current time in seconds since the Unix epoch.
+pub(crate) fn unix_now() -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
-// Sends `request`, with `content` for a write, and hands back the response
-// head and its body as two values, so that the head can be read while the
-// body is read too.
+// Writes a template or a request with `write` into `buf`, and grows the
+// buffer and writes again only when it was too small. What `write` returns
+// borrows nothing, a template or a request's placement, so a host that
+// keeps `buf` between calls writes each later one once.
+pub(crate) fn grown_to_fit<T>(
+    buf: &mut Vec<u8>,
+    write: impl Fn(&mut [u8]) -> Result<T, Error>,
+) -> Result<T, Error> {
+    match write(buf) {
+        Err(Error::Capacity(capacity)) => {
+            buf.resize(capacity.required, 0);
+            write(buf)
+        }
+        written => written,
+    }
+}
+
+// A template, and the bytes it was written into.
+pub(crate) struct Prepared<T> {
+    pub(crate) template: T,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl<T> Prepared<T> {
+    // Writes a template with `prepare`, into a buffer of its size.
+    pub(crate) fn new(prepare: impl Fn(&mut [u8]) -> Result<T, Error>) -> Result<Self, Error> {
+        let mut bytes = Vec::new();
+        let template = grown_to_fit(&mut bytes, prepare)?;
+        Ok(Self { template, bytes })
+    }
+}
+
+// The agent that a client sends every request with, which keeps its
+// connections. This host returns the stored bytes of an object and never
+// decompresses them: see the `ureq` dependency in Cargo.toml, which turns
+// the decoding off.
+pub(crate) fn new_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+// Sends `request` with `agent`, with `content` for a write, and hands back
+// the response head and its body as two values, so that the head can be
+// read while the body is read too.
 pub(crate) fn send(
+    agent: &ureq::Agent,
     request: &WireRequest<'_>,
     content: Option<&[u8]>,
 ) -> Result<(ureq::http::response::Parts, ureq::Body), ureq::Error> {
@@ -48,13 +85,6 @@ pub(crate) fn send(
     for (name, value) in request.headers() {
         builder = builder.header(name, value);
     }
-    // This host returns the stored bytes of an object and never decompresses
-    // them: see the `ureq` dependency in Cargo.toml, which turns the
-    // decoding off.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
     let response = match (request.payload(), content) {
         (Payload::Slice(bytes), _) if !bytes.is_empty() => agent.run(builder.body(bytes)?)?,
         (_, Some(bytes)) => agent.run(builder.body(bytes)?)?,
