@@ -1,0 +1,23 @@
+{
+  "name": "@borink/object-storage",
+  "version": "0.0.0",
+  "description": "An S3 client on fetch and Web Crypto, for Cloudflare Workers, browsers, Bun, Deno and Node",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json && tsc -p object-tests/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.21",
+    "typescript": "5.9.2",
+    "workerd": "1.20260926.1"
+  }
+}
