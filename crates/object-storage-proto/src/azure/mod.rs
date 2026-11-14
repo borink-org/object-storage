@@ -491,7 +491,8 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
     }
 }
 
-/// Writes the read `item` at `now` from `template` into `buf`, and returns where it is.
+/// Writes the read `item` at `now` from `template` into `buf`, and returns
+/// where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_get`] wrote them.
 ///
@@ -675,8 +676,7 @@ fn describe_put<'p>(
 /// and returns where it is.
 ///
 /// `bytes` are the template's own, as [`prepare_put`] wrote them. The
-/// request lends a [`Payload::Slice`] to your HTTP client, and leaves a
-/// [`Payload::Streamed`] for you to send.
+/// request states the length of the content, and you send the bytes.
 ///
 /// # Errors
 ///

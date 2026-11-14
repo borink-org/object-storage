@@ -692,9 +692,7 @@ pub struct PutItem<'i> {
     /// The object key, before percent-encoding: see
     /// [Object keys](crate#object-keys).
     pub key: &'i str,
-    /// The content. The head states its length. A request lends a
-    /// [`Payload::Slice`] to your HTTP client, and leaves a
-    /// [`Payload::Streamed`] for you to send.
+    /// The content. The head states its length, and you send the bytes.
     pub content: Payload<'i>,
     /// What the template's precondition compares against: see
     /// [`ConditionKind`]. Present exactly when the template carries one.
@@ -755,7 +753,8 @@ pub struct CommitShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Payload<'b> {
-    /// Content that you hold. The request lends these bytes and copies none.
+    /// Content that you hold. A request states the length of these bytes
+    /// and copies none. You send them.
     Slice(&'b [u8]),
     /// Content that you send yourself, of the length that you state.
     ///

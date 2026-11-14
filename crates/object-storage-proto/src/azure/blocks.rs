@@ -354,8 +354,8 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 /// Writes the Put Block `item` at `now` from `template` into `buf`, and
 /// returns where it is.
 ///
-/// The head states the length of the content, which stays where you put it:
-/// the request borrows it, or leaves it to you to send.
+/// The head states the length of the content, which stays where you put
+/// it. You send the bytes.
 ///
 /// # Errors
 ///

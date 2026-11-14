@@ -65,7 +65,7 @@ This file lists the changes in each release of `borink-object-storage-proto` and
   - Renamed `borink_validate` to `borink_container_check`. It checks the container alone; a template's preparation checks the token.
   - Removed `borink_encode_delete`, `borink_accept_delete_head`, `borink_delete_shape`, `borink_list_shape`, `borink_request_buffer` and `borink_request_head`. `borink_fill_listing` and `borink_fill_listing_with` take no session.
   - Renamed the outcome kind `Done` to `Created`, and replaced `Accepted` with `Staged` and `Committed`.
-- Struct `WireRequest` holds no borrow and no lifetime. It names where a request's URL, HTTP/1.1 head, field lines and body are in the buffer it was written into, so a host can grow its buffer and write a request again in one function. Each method that reads a part takes that buffer, as `request.url(&buf)` does. A host that writes HTTP/1.1 itself sends `request.head(&buf)` unchanged.
+- Struct `WireRequest` holds no borrow and no lifetime. It names where a request's URL, HTTP/1.1 head, field lines and body are in the buffer it was written into. A host can therefore grow its buffer and write a request again in one function. Each method that reads a part takes that buffer, as `request.url(&buf)` does. A host that writes HTTP/1.1 itself sends `request.head(&buf)` unchanged.
 - `WireRequest::payload` states the length of content passed as `Payload::Slice`, as `Payload::Streamed`, and does not lend the bytes back: the host sends them.
 - Struct `azure::CommitItem` has a type parameter `B`, the type of its field `blocks`. It is a slice of `BlockRef`, as before, or any iterator of them that can be cloned. `azure::encode_commit_blocks` takes either.
 

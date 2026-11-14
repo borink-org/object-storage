@@ -51,10 +51,11 @@
 //! object takes an [`ObjectItem`].
 //!
 //! A request whose body this crate writes, such as a list of blocks or a
-//! set of tags, holds the body after its head, and the request borrows it
-//! as its content. On S3 the request signs the body's SHA-256, which
-//! `borink_object_storage_crypto::sigv4::sign` computes, and a checksum of
-//! the body that the template asks for, which you compute over
+//! set of tags, holds the body after its head in the buffer, and
+//! [`WireRequest::payload`] lends it as the content. On S3 the request
+//! signs the body's SHA-256, which
+//! `borink_object_storage_crypto::sigv4::sign` computes. It also signs a
+//! checksum of the body that the template asks for, which you compute over
 //! [`s3::Unsigned::body`] and write in with [`s3::set_body_checksum`].
 //!
 //! S3 works the same way, as the [`s3`] module describes, with one more

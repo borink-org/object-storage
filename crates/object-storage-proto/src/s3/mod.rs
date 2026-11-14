@@ -9,10 +9,11 @@
 //!    [`PutOptions`], and call [`prepare_get`] or [`prepare_put`] to write
 //!    a [`Template`] into a buffer that you own.
 //! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
-//!    [`encode_get`] or [`encode_put`] to write it into a second buffer. The request is
-//!    [`Unsigned`]: sign it, as [Signing](#signing) describes. [`set_signature`]
-//!    returns the signed [`WireRequest`](crate::WireRequest), whose parts
-//!    you read from the buffer and send with your HTTP client.
+//!    [`encode_get`] or [`encode_put`] to write it into a second buffer.
+//!    The request is [`Unsigned`]: sign it, as [Signing](#signing)
+//!    describes. [`set_signature`] returns the signed
+//!    [`WireRequest`](crate::WireRequest), whose parts you read from the
+//!    buffer and send with your HTTP client.
 //! 4. Put the response headers into a [`ResponseHead`] and call
 //!    [`accept_get_head`] or [`accept_put_head`].
 //!

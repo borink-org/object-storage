@@ -1334,10 +1334,9 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 /// One request: where its parts are in the buffer it was written into.
 ///
 /// Every function that writes a request returns one. It borrows nothing, so
-/// you can keep it while you borrow the buffer again: to grow the buffer and
-/// write the request again when it was too small, or to send the request
-/// later. Read each part from the buffer, passing the buffer to the method
-/// that reads it:
+/// you can keep it while you borrow the buffer again. You can grow a buffer
+/// that was too small and write the request again, or send the request
+/// later. Pass the buffer to each method that reads a part:
 ///
 /// ```
 /// use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
@@ -1345,7 +1344,10 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 ///     Error, Payload, PutItem, PutOptions, Result, Timestamps, WireRequest,
 /// };
 ///
-/// fn write(buf: &mut Vec<u8>, encode: impl Fn(&mut [u8]) -> Result<WireRequest>) -> Result<WireRequest> {
+/// fn write(
+///     buf: &mut Vec<u8>,
+///     encode: impl Fn(&mut [u8]) -> Result<WireRequest>,
+/// ) -> Result<WireRequest> {
 ///     match encode(buf) {
 ///         Err(Error::Capacity(capacity)) => {
 ///             buf.resize(capacity.required, 0);
@@ -1358,8 +1360,9 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 /// # fn main() -> Result<()> {
 /// let container = Container::new("https://account.blob.core.windows.net", "container")?;
 /// let options = PutOptions::default();
+/// let namespace = AzureNamespace::Unknown;
 /// let mut bytes = vec![0; 1024];
-/// let template = azure::prepare_put(&container, "token", AzureNamespace::Unknown, &options, &mut bytes)?;
+/// let template = azure::prepare_put(&container, "token", namespace, &options, &mut bytes)?;
 /// let content = b"hello";
 /// let item = PutItem::new("greeting.txt", Payload::Slice(content));
 /// let now = Timestamps::from_unix(1_787_400_000);

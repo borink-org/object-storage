@@ -244,7 +244,8 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 }
 
 /// Writes the Blob Batch that removes `objects` at `now` from `template`
-/// into `buf`, with its parts as the body after the head, and returns where it is.
+/// into `buf`, with its parts as the body after the head, and returns
+/// where it is.
 ///
 /// # Errors
 ///
