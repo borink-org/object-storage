@@ -17,7 +17,7 @@ use crate::ptr::ContainerValues;
 use borink_object_storage_proto as proto;
 use borink_object_storage_proto::azure::Container;
 use borink_object_storage_proto::{
-    Error, InvalidRequest, ListMarker, Listing, ResponseHead, WireRequest as Request, azure,
+    Error, InvalidRequest, ListMarker, Listing, ResponseHead, azure,
 };
 
 // The protocol crate's container, which every template is written from. A
@@ -88,7 +88,7 @@ pub(crate) fn prepared_template(template: proto::Result<azure::Template>) -> Pre
 // The written request as offsets into its buffer, or the exact size that it
 // needed, or why it was refused. All three are one status and one
 // `required`.
-pub(crate) fn written_request(request: proto::Result<Request<'_>>) -> WireRequest {
+pub(crate) fn written_request(request: proto::Result<proto::WireRequest>) -> WireRequest {
     let request = match request {
         Ok(request) => request,
         Err(error) => {
@@ -121,7 +121,7 @@ pub(crate) fn written_request(request: proto::Result<Request<'_>>) -> WireReques
             present: true,
             span,
         }),
-        payload_len: request.payload().len(),
+        payload_len: request.content_len(),
     }
 }
 

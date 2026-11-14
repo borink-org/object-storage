@@ -155,7 +155,7 @@ pub fn encode_delete_many(
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     let Detail::DeleteMany(checksum) = template.detail else {
         return Err(InvalidRequest::Template.into());
     };

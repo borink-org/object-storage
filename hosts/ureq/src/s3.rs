@@ -105,12 +105,12 @@ impl<'a> Objects<'a> {
         let stamp = self.stamp(unix, &now)?;
         let item = GetItem::new(key);
         let Prepared { template, bytes } = &self.get;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_get(template, bytes, &item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
-        let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = item.shape(&GetOptions::new());
         match s3::accept_get_head(template.service(), shape, crate::response_head(&parts))? {
             GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
@@ -141,13 +141,12 @@ impl<'a> Objects<'a> {
         let item = PutItem::new(key, Payload::Slice(content));
         let digest = sigv4::sha256::<Sha256RustCrypto>(content);
         let Prepared { template, bytes } = &self.put;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_put(template, bytes, &item, Some(&digest), &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
-        let request = placed.request(&self.buf);
-        let (parts, mut body) = crate::send(&self.agent, &request, Some(content))?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, Some(content))?;
         let shape = item.shape(&PutOptions::default());
         match s3::accept_put_head(shape, crate::response_head(&parts))? {
             PutHeadOutcome::Created { .. } => Ok(()),
@@ -175,12 +174,12 @@ impl<'a> Objects<'a> {
         let stamp = self.stamp(unix, &now)?;
         let item = ObjectItem::new(key);
         let Prepared { template, bytes } = &self.delete;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_delete(template, bytes, &item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
-        let (parts, mut body) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = DeleteOptions::new().shape();
         let head = crate::response_head(&parts);
         match s3::accept_delete_head(template.service(), shape, head)? {
@@ -213,12 +212,12 @@ impl<'a> Objects<'a> {
         let now = Timestamps::from_unix(unix);
         let stamp = self.stamp(unix, &now)?;
         let Prepared { template, bytes } = &self.list;
-        let placed = crate::grown_to_fit(&mut self.buf, |buf| {
+        let request = crate::grown_to_fit(&mut self.buf, |buf| {
             let unsigned = s3::encode_list(template, bytes, item, &now, buf)?;
-            Ok(sigv4::sign(&stamp, &unsigned, buf).placement())
+            Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
-        let (parts, mut incoming) = crate::send(&self.agent, &placed.request(&self.buf), None)?;
+        let (parts, mut incoming) = crate::send(&self.agent, &request, &self.buf, None)?;
         match s3::accept_list_head(crate::response_head(&parts))? {
             ListHeadOutcome::Page { .. } => {
                 // S3 often sends a page without its length, so the read is

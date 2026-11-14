@@ -103,7 +103,7 @@ pub fn encode_restore(
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
-) -> Result<Unsigned<'static>> {
+) -> Result<Unsigned> {
     encode_object(template, bytes, Operation::Restore, item, now, buf)
 }
 

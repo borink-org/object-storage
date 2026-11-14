@@ -125,7 +125,7 @@ pub fn prepare_set_tier(
 }
 
 /// Writes the Set Blob Tier of `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// # Errors
 ///
@@ -136,13 +136,13 @@ pub fn prepare_set_tier(
 ///
 /// Returns [`Error::Capacity`] if `buf` is too small, with the bytes it
 /// needs.
-pub fn encode_set_tier<'r>(
+pub fn encode_set_tier(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetTier, item, now, buf)
 }
 
@@ -190,19 +190,19 @@ pub fn prepare_set_metadata(
 }
 
 /// Writes the Set Blob Metadata of `item` at `now` from `template` into
-/// `buf`, and returns it.
+/// `buf`, and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_set_tier`], with the condition value that the template's
 /// condition needs.
-pub fn encode_set_metadata<'r>(
+pub fn encode_set_metadata(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetMetadata, item, now, buf)
 }
 
@@ -264,18 +264,18 @@ pub fn prepare_set_properties(
 }
 
 /// Writes the Set Blob Properties of `item` at `now` from `template` into
-/// `buf`, and returns it.
+/// `buf`, and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_set_metadata`].
-pub fn encode_set_properties<'r>(
+pub fn encode_set_properties(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetProperties, item, now, buf)
 }
 
@@ -341,18 +341,18 @@ pub fn prepare_set_tags(
 }
 
 /// Writes the Set Blob Tags of `item` at `now` from `template` into `buf`,
-/// with its body after the head, and returns it.
+/// with its body after the head, and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_set_tier`], with the revision that the template names.
-pub fn encode_set_tags<'r>(
+pub fn encode_set_tags(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::SetTags, item, now, buf)
 }
 
@@ -395,18 +395,18 @@ pub fn prepare_get_tags(
 }
 
 /// Writes the Get Blob Tags of `item` at `now` from `template` into `buf`,
-/// and returns it.
+/// and returns where it is.
 ///
 /// # Errors
 ///
 /// As [`encode_set_tags`].
-pub fn encode_get_tags<'r>(
+pub fn encode_get_tags(
     template: &Template,
     bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
-    buf: &'r mut [u8],
-) -> Result<WireRequest<'r>> {
+    buf: &mut [u8],
+) -> Result<WireRequest> {
     encode_object(template, bytes, Operation::GetTags, item, now, buf)
 }
 

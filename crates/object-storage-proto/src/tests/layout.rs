@@ -90,12 +90,12 @@ fn azure_one(
     encode(&template, &bytes, &mut buf);
 }
 
-// The URL, the head and the content of an Azure request.
-fn azure_request(request: Result<WireRequest<'_>>) -> Vec<u8> {
+// The URL, the head and the content of an Azure request written in `buf`.
+fn azure_request(request: Result<WireRequest>, buf: &[u8]) -> Vec<u8> {
     let request = request.expect("the request is written");
-    let mut text = request.url().as_bytes().to_vec();
-    text.extend_from_slice(request.head());
-    match request.payload() {
+    let mut text = request.url(buf).as_bytes().to_vec();
+    text.extend_from_slice(request.head(buf));
+    match request.payload(buf) {
         Payload::Slice(body) => text.extend_from_slice(body),
         Payload::Streamed { len } => text.extend_from_slice(&len.to_le_bytes()),
     }
@@ -146,7 +146,10 @@ fn every_azure_layout_writes_what_its_table_writes() {
                             revision: (revision != RevisionKind::Current).then_some("2024-01-01"),
                             ..GetItem::new(key)
                         };
-                        azure_request(azure::encode_get(template, bytes, &item, &now, &mut buf))
+                        azure_request(
+                            azure::encode_get(template, bytes, &item, &now, &mut buf),
+                            &buf,
+                        )
                     },
                 );
             }
@@ -177,10 +180,10 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 let request = azure::encode_put(template, bytes, &item, &now, &mut buf);
                 // A write sends the content it was given.
                 assert!(matches!(
-                    request.as_ref().map(WireRequest::payload),
+                    request.as_ref().map(|request| request.payload(&buf)),
                     Ok(Payload::Streamed { len: 4096 })
                 ));
-                azure_request(request)
+                azure_request(request, &buf)
             },
         );
     }
@@ -201,7 +204,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
             azure::Operation::ListBlocks => azure::encode_list_blocks,
             _ => azure::encode_restore,
         };
-        azure_request(encode(template, bytes, &item, &now, &mut buf))
+        azure_request(encode(template, bytes, &item, &now, &mut buf), &buf)
     };
     for revision in [RevisionKind::Current, RevisionKind::Version] {
         let named = revision != RevisionKind::Current;
@@ -288,9 +291,10 @@ fn every_azure_layout_writes_what_its_table_writes() {
                         Payload::Streamed { len: 8 },
                     )
                 };
-                azure_request(azure::encode_stage_block(
-                    template, bytes, &item, &now, &mut buf,
-                ))
+                azure_request(
+                    azure::encode_stage_block(template, bytes, &item, &now, &mut buf),
+                    &buf,
+                )
             },
         );
     }
@@ -320,9 +324,10 @@ fn every_azure_layout_writes_what_its_table_writes() {
                     content_md5: content_md5.then_some(MD5),
                     ..azure::CommitItem::new(key, &blocks)
                 };
-                azure_request(azure::encode_commit_blocks(
-                    template, bytes, &item, &now, &mut buf,
-                ))
+                azure_request(
+                    azure::encode_commit_blocks(template, bytes, &item, &now, &mut buf),
+                    &buf,
+                )
             },
         );
     }
@@ -389,7 +394,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                             )
                         }
                     };
-                    azure_request(request)
+                    azure_request(request, &buf)
                 },
             );
         }
@@ -402,9 +407,10 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 key,
                 copy_id: "copy-1",
             };
-            azure_request(azure::encode_abort_copy(
-                template, bytes, &item, &now, &mut buf,
-            ))
+            azure_request(
+                azure::encode_abort_copy(template, bytes, &item, &now, &mut buf),
+                &buf,
+            )
         },
     );
     let targets = [
@@ -806,6 +812,6 @@ fn every_s3_layout_writes_what_its_table_writes() {
 }
 
 // The length of an S3 request.
-fn len(unsigned: Result<s3::Unsigned<'_>>) -> Result<usize> {
+fn len(unsigned: Result<s3::Unsigned>) -> Result<usize> {
     unsigned.map(|unsigned| unsigned.len())
 }

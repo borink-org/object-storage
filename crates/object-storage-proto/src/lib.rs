@@ -14,10 +14,12 @@
 //!    that you own. Keep the template and its bytes for as many reads as you
 //!    like.
 //! 2. Describe each read as a [`GetItem`], and call [`azure::encode_get`]
-//!    to write the request into a second buffer. Send the [`WireRequest`]
-//!    with your HTTP client. Every byte of the request is in that buffer, so
-//!    [`WireRequest`] can also name each part of it by offset and length: see
-//!    [`WireRequest::url_span`].
+//!    to write the request into a second buffer. It returns a
+//!    [`WireRequest`]: where each part of the request is in that buffer, by
+//!    offset and length. It borrows nothing, so you can grow the buffer and
+//!    write the request again if it was too small. Read each part from the
+//!    buffer, such as [`WireRequest::url`], and send them with your HTTP
+//!    client.
 //! 3. Put the response headers into a [`ResponseHead`] and call
 //!    [`azure::accept_get_head`] with the read's [`GetItem::shape`]. It
 //!    returns a [`GetHeadOutcome`] that tells you what to do with the body.
@@ -25,10 +27,9 @@
 //! A write has the same three steps, with [`PutOptions`], [`PutItem`],
 //! [`azure::prepare_put`], [`azure::encode_put`] and
 //! [`azure::accept_put_head`]. The content stays where you put it: the
-//! request states its length in the head, and borrows the bytes or leaves
-//! them to you. Describe the content with a [`Payload`], which names a
-//! length whether or not you hold the bytes, so a write can stream from a
-//! file or a socket.
+//! request states its length in the head, and leaves the bytes to you.
+//! Describe the content with a [`Payload`], which names a length whether or
+//! not you hold the bytes, so a write can stream from a file or a socket.
 //!
 //! A removal has the same three steps too, with [`DeleteOptions`],
 //! [`ObjectItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
@@ -50,10 +51,11 @@
 //! object takes an [`ObjectItem`].
 //!
 //! A request whose body this crate writes, such as a list of blocks or a
-//! set of tags, holds the body after its head, and the request borrows it
-//! as its content. On S3 the request signs the body's SHA-256, which
-//! `borink_object_storage_crypto::sigv4::sign` computes, and a checksum of
-//! the body that the template asks for, which you compute over
+//! set of tags, holds the body after its head in the buffer, and
+//! [`WireRequest::payload`] lends it as the content. On S3 the request
+//! signs the body's SHA-256, which
+//! `borink_object_storage_crypto::sigv4::sign` computes. It also signs a
+//! checksum of the body that the template asks for, which you compute over
 //! [`s3::Unsigned::body`] and write in with [`s3::set_body_checksum`].
 //!
 //! S3 works the same way, as the [`s3`] module describes, with one more
@@ -85,7 +87,7 @@
 //! let mut buffer = vec![0; 1024];
 //! let request = azure::encode_get(&reads, &template, &get, &now, &mut buffer)?;
 //! assert_eq!(request.method(), Method::Get);
-//! for (name, value) in request.headers() {
+//! for (name, value) in request.headers(&buffer) {
 //!     // your_client.header(name, value);
 //! }
 //!
@@ -112,7 +114,7 @@
 //! let request =
 //!     azure::encode_list(&pages, &template, &ListItem::new("directory/"), &now, &mut buffer)?;
 //! assert_eq!(
-//!     request.url(),
+//!     request.url(&buffer),
 //!     "https://account.blob.core.windows.net/objects\
 //!      ?restype=container&comp=list&delimiter=%2F&maxresults=2&prefix=directory%2F"
 //! );
@@ -144,7 +146,8 @@
 //! let mut buffer = vec![0; 1024];
 //! let request = azure::encode_put(&writes, &template, &put, &now, &mut buffer)?;
 //! assert_eq!(request.method(), Method::Put);
-//! assert_eq!(request.payload().bytes(), Some(b"contents".as_slice()));
+//! // The request states the content's length, and you send the bytes.
+//! assert_eq!(request.payload(&buffer), Payload::Streamed { len: 8 });
 //!
 //! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
 //! match azure::accept_put_head(put.shape(&options), head)? {
@@ -285,7 +288,7 @@ pub use outcome::{
 };
 pub use properties::decode_property;
 pub use request::{Method, Span};
-pub use template::{Placement, WireRequest};
+pub use template::WireRequest;
 pub use time::{Timestamps, http_date_ms, iso8601_ms};
 pub use types::{
     ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties, CopyItem,

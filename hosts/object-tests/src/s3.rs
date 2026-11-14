@@ -118,10 +118,10 @@ impl<'a> Client<'a> {
     /// The crate checks the request against the case's own credentials
     /// first, so that a refused request sends nothing, not even a
     /// CreateSession.
-    fn send<'c>(
+    fn send(
         &self,
         prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
     ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
@@ -131,21 +131,21 @@ impl<'a> Client<'a> {
     /// Writes, signs and sends one request as `send` does, with the case's
     /// own credentials even for a directory bucket: AWS authorizes a copy
     /// by them, never by those of a session.
-    fn send_own<'c>(
+    fn send_own(
         &self,
         prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
     ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
         self.send_signed(true, prepare, encode, body, read)
     }
 
-    fn send_signed<'c>(
+    fn send_signed(
         &self,
         own: bool,
         prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
     ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
@@ -192,14 +192,14 @@ impl<'a> Client<'a> {
 /// Writes the template that `prepare` writes, and the request that
 /// `encode` writes from it into `buf`, signed with `credentials` at
 /// `now`.
-fn signed<'b, 'c: 'b>(
+fn signed<'b>(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     now: &Timestamps,
     prepare: &impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-    encode: &impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned<'c>, CrateError>,
+    encode: &impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
     buf: &'b mut Vec<u8>,
-) -> Result<(Template, WireRequest<'b>), CrateError> {
+) -> Result<(Template, (WireRequest, &'b [u8])), CrateError> {
     let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
     let mut bytes = vec![0; CapacityError::required_by(write)?];
     let template = write(&mut bytes)?;
@@ -213,7 +213,8 @@ fn signed<'b, 'c: 'b>(
         let digest = crate::digest_of(kind, unsigned.body(buf).unwrap_or_default());
         s3::set_body_checksum(&unsigned, buf, &digest)?;
     }
-    Ok((template, sigv4::sign(&stamp, &unsigned, buf)))
+    let request = sigv4::sign(&stamp, &unsigned, buf);
+    Ok((template, (request, buf.as_slice())))
 }
 
 /// Sends a CreateSession, signed with the case's own credentials, and reads
@@ -502,14 +503,15 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         .get("part_number")
         .and_then(Value::as_u64)
         .ok_or("missing part_number")?;
-    let body = decode_base64_field(call, "body_base64")?;
+    let content = decode_base64_field(call, "body_base64")?;
+    let digest = sigv4::sha256::<Sha256RustCrypto>(&content);
+    let body = CallBody::Held(content);
     let item = s3::StagePartItem::new(
         optional_text(call, "key").unwrap_or_default(),
         optional_text(call, "upload_id").unwrap_or_default(),
         u32::try_from(number).unwrap_or(u32::MAX),
-        Payload::Slice(&body),
+        body.payload(),
     );
-    let digest = sigv4::sha256::<Sha256RustCrypto>(&body);
     let now = current_timestamps();
     let (_, exchange) = sent!(client.send(
         |bucket, credentials, buf| {
@@ -529,7 +531,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
             &now,
             buf
         ),
-        None,
+        Some(&body),
         BodyRead::Hold,
     ));
 

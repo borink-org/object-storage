@@ -112,7 +112,7 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
         let unsigned = s3::encode_put(&template, &bytes, &item, None, &now, &mut buf).unwrap();
         let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
         let found = request
-            .headers()
+            .headers(&buf)
             .find(|(found, _)| *found == name)
             .map(|(_, value)| value.to_owned());
         let expected = match kind {
@@ -125,7 +125,7 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
         };
         assert_eq!(found, Some(expected), "{kind:?}");
         let authorization = request
-            .headers()
+            .headers(&buf)
             .find(|(found, _)| *found == "authorization")
             .unwrap()
             .1;
