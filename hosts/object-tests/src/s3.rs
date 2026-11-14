@@ -503,14 +503,15 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         .get("part_number")
         .and_then(Value::as_u64)
         .ok_or("missing part_number")?;
-    let body = decode_base64_field(call, "body_base64")?;
+    let content = decode_base64_field(call, "body_base64")?;
+    let digest = sigv4::sha256::<Sha256RustCrypto>(&content);
+    let body = CallBody::Held(content);
     let item = s3::StagePartItem::new(
         optional_text(call, "key").unwrap_or_default(),
         optional_text(call, "upload_id").unwrap_or_default(),
         u32::try_from(number).unwrap_or(u32::MAX),
-        Payload::Slice(&body),
+        body.payload(),
     );
-    let digest = sigv4::sha256::<Sha256RustCrypto>(&body);
     let now = current_timestamps();
     let (_, exchange) = sent!(client.send(
         |bucket, credentials, buf| {
@@ -530,7 +531,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
             &now,
             buf
         ),
-        None,
+        Some(&body),
         BodyRead::Hold,
     ));
 

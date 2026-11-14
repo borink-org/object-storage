@@ -881,10 +881,14 @@ fn send_request_with(
         builder = builder.header(name, value);
     }
 
-    // The request states the length of a streamed payload as its
-    // Content-Length, which ureq keeps.
+    // The request lends a body that the crate wrote. Of any other content
+    // it states only the length, as its Content-Length, which ureq keeps,
+    // and the adapter sends the call's body.
     let mut response = match (request.payload(), body) {
-        (Payload::Slice(payload), _) => agent.run(builder.body(payload.to_vec())?)?,
+        (Payload::Slice(written), _) => agent.run(builder.body(written)?)?,
+        (Payload::Streamed { .. }, Some(CallBody::Held(bytes))) => {
+            agent.run(builder.body(bytes.as_slice())?)?
+        }
         (Payload::Streamed { len }, Some(CallBody::Generated { pattern, .. })) => {
             let mut reader = Repeat::new(pattern, len);
             agent.run(builder.body(ureq::SendBody::from_reader(&mut reader))?)?
