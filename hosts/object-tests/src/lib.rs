@@ -14,7 +14,7 @@ use borink_object_storage_crypto::{Checksum, Crc64, Md5RustCrypto, Sha256RustCry
 use borink_object_storage_proto::{
     BodyWindow, ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties,
     CopyItem, CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, Error as CrateError, GetItem,
-    GetKind, GetOptions, MetadataPair, ObjectItem, ObjectMeta, Payload, Ranging, RequestedRange,
+    GetKind, GetOptions, MetadataPair, ObjectItem, ObjectMeta, Ranging, RequestedRange,
     ResponseHead, RestoreHeadOutcome, RestoreOptions, RestorePriority, Revision, RevisionKind,
     ServiceErrorKind, Tag, Timestamps, WireRequest, WriteOptions,
 };
@@ -86,10 +86,10 @@ impl CallBody {
         Ok(Self::Generated { pattern, length })
     }
 
-    fn payload(&self) -> Payload<'_> {
+    fn len(&self) -> u64 {
         match self {
-            Self::Held(bytes) => Payload::Slice(bytes),
-            Self::Generated { length, .. } => Payload::Streamed { len: *length },
+            Self::Held(bytes) => bytes.len() as u64,
+            Self::Generated { length, .. } => *length,
         }
     }
 }
@@ -820,7 +820,8 @@ pub(crate) trait Outgoing {
     fn method(&self) -> borink_object_storage_proto::Method;
     fn url(&self) -> &str;
     fn fields(&self) -> Vec<(&str, &str)>;
-    fn payload(&self) -> Payload<'_>;
+    fn body(&self) -> Option<&[u8]>;
+    fn content_length(&self) -> u64;
 }
 
 /// A request, and the buffer it was written into.
@@ -834,8 +835,11 @@ impl Outgoing for (WireRequest, &[u8]) {
     fn fields(&self) -> Vec<(&str, &str)> {
         self.0.headers(self.1).collect()
     }
-    fn payload(&self) -> Payload<'_> {
-        self.0.payload(self.1)
+    fn body(&self) -> Option<&[u8]> {
+        self.0.body(self.1)
+    }
+    fn content_length(&self) -> u64 {
+        self.0.content_length()
     }
 }
 
@@ -884,16 +888,14 @@ fn send_request_with(
     // The request lends a body that the crate wrote. Of any other content
     // it states only the length, as its Content-Length, which ureq keeps,
     // and the adapter sends the call's body.
-    let mut response = match (request.payload(), body) {
-        (Payload::Slice(written), _) => agent.run(builder.body(written)?)?,
-        (Payload::Streamed { .. }, Some(CallBody::Held(bytes))) => {
-            agent.run(builder.body(bytes.as_slice())?)?
-        }
-        (Payload::Streamed { len }, Some(CallBody::Generated { pattern, .. })) => {
-            let mut reader = Repeat::new(pattern, len);
+    let mut response = match (request.body(), body) {
+        (Some(written), _) => agent.run(builder.body(written)?)?,
+        (None, Some(CallBody::Held(bytes))) => agent.run(builder.body(bytes.as_slice())?)?,
+        (None, Some(CallBody::Generated { pattern, .. })) => {
+            let mut reader = Repeat::new(pattern, request.content_length());
             agent.run(builder.body(ureq::SendBody::from_reader(&mut reader))?)?
         }
-        _ => agent.run(builder.body(())?)?,
+        (None, None) => agent.run(builder.body(())?)?,
     };
 
     let status = response.status().as_u16();

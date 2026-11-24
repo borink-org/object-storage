@@ -28,7 +28,7 @@
 //! use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 //! use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 //! use borink_object_storage_proto::{
-//!     GetHeadOutcome, GetItem, GetOptions, Payload, PutHeadOutcome, PutItem, PutOptions,
+//!     ContentLength, GetHeadOutcome, GetItem, GetOptions, PutHeadOutcome, PutItem, PutOptions,
 //!     ResponseHead, Timestamps,
 //! };
 //! # fn hmac_of_string_to_sign(_canonical: &[u8]) -> [u8; 32] {
@@ -48,7 +48,7 @@
 //! let writes =
 //!     s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Unsigned, &mut template)?;
 //!
-//! let put = PutItem::new("directory/object.txt", Payload::Slice(b"contents"));
+//! let put = PutItem::new("directory/object.txt", ContentLength(8));
 //! let mut buffer = vec![0; 2048];
 //! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
 //! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
@@ -340,9 +340,8 @@ use crate::{
     Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions,
     DeleteShape, Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
     InvalidRequest, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions,
-    Listing, MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem,
-    PutOptions, PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result,
-    RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
+    Listing, MetadataPair, Method, ObjectItem, ObjectMeta, PutHeadOutcome, PutItem, PutOptions,
+    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, S3Values};
 
@@ -1117,7 +1116,7 @@ pub fn encode_get(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_get(&options),
     )
@@ -1255,7 +1254,7 @@ pub fn encode_put(
         return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
-    if item.content.len() > MAX_PUT_LEN {
+    if item.content_length.as_u64() > MAX_PUT_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_write_condition(condition, item.condition_value, template.service)?;
@@ -1270,7 +1269,7 @@ pub fn encode_put(
         now: Some(now),
         key,
         condition: item.condition_value,
-        content_length: Some(item.content.len()),
+        content_length: Some(item.content_length.as_u64()),
         checksum: checksum_base64(item.checksum, &mut text, true),
         payload_hash: hex.as_ref(),
         ..HoleValues::default()
@@ -1279,7 +1278,7 @@ pub fn encode_put(
         template,
         bytes,
         &values,
-        item.content,
+        item.content_length.as_u64(),
         buf,
         &describe_put(condition, checksum, signing),
     )
@@ -1628,7 +1627,7 @@ pub fn encode_list(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_list(detail, None),
     )
@@ -2162,7 +2161,7 @@ fn encode_object(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_object(operation, condition, revision, checksum, None),
     )
@@ -2232,7 +2231,7 @@ pub fn encode_create_session(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_session(),
     )

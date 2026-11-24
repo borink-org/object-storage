@@ -12,8 +12,9 @@ use borink_object_storage_proto::s3::{
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, DeleteOptions, Error, GetItem,
-    GetOptions, MetadataPair, ObjectItem, Payload, PutItem, PutOptions, RequestedRange, Timestamps,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, DeleteOptions,
+    Error, GetItem, GetOptions, MetadataPair, ObjectItem, PutItem, PutOptions, RequestedRange,
+    Timestamps,
 };
 
 const KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -317,7 +318,7 @@ fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
     let content = b"Welcome to Amazon S3.";
     let item = PutItem {
         condition_value: Some(ConditionValue::ETag(b"*")),
-        ..PutItem::new("dir/a key+é.txt", Payload::Slice(content))
+        ..PutItem::new("dir/a key+é.txt", ContentLength::of(content))
     };
     let digest = unhex(CONTENT_SHA256);
     #[cfg(feature = "sha256-rustcrypto")]
@@ -367,7 +368,7 @@ fn signs_a_streamed_write_without_its_content() {
     .with_addressing(Addressing::VirtualHosted);
     let now = Timestamps::from_unix(1_787_400_061);
     let options = PutOptions::default();
-    let item = PutItem::new("large.bin", Payload::Streamed { len: 1024 });
+    let item = PutItem::new("large.bin", ContentLength(1024));
     let expected = sorted(&[
         (
             "authorization",
@@ -412,7 +413,7 @@ fn an_md5_is_sent_beside_the_signature() {
     md5.update(content);
     let item = PutItem {
         checksum: Some(ChecksumValue::Digest(md5.finish())),
-        ..PutItem::new("object.bin", Payload::Slice(content))
+        ..PutItem::new("object.bin", ContentLength::of(content))
     };
     let credentials = credentials();
     for (_, headers, _) in signed(

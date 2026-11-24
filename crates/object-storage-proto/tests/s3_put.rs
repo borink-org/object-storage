@@ -3,8 +3,8 @@
 use borink_object_storage_proto::s3::{self, Bucket, MAX_PUT_LEN, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidRequest,
-    MetadataPair, Payload, PutItem, PutOptions, Timestamps,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, Digest, Error,
+    InvalidRequest, MetadataPair, PutItem, PutOptions, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -61,7 +61,7 @@ fn refused(
 
 #[test]
 fn a_write_that_s3_cannot_take_is_refused() {
-    let slice = Payload::Slice(b"0123456789");
+    let slice = 10;
     let plain = PutOptions::default();
     let unsigned = PayloadSigning::Unsigned;
 
@@ -72,7 +72,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     };
     let etag = PutItem {
         condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-        ..PutItem::new("k", slice)
+        ..PutItem::new("k", ContentLength(slice))
     };
     assert_eq!(
         refused(&create, unsigned, &etag, None),
@@ -84,7 +84,12 @@ fn a_write_that_s3_cannot_take_is_refused() {
         ..plain
     };
     assert_eq!(
-        refused(&dated, unsigned, &PutItem::new("k", slice), None),
+        refused(
+            &dated,
+            unsigned,
+            &PutItem::new("k", ContentLength(slice)),
+            None
+        ),
         InvalidRequest::Condition
     );
     // A signed template needs the SHA-256 of each write, and an unsigned one
@@ -93,21 +98,21 @@ fn a_write_that_s3_cannot_take_is_refused() {
         refused(
             &plain,
             PayloadSigning::Signed,
-            &PutItem::new("k", slice),
+            &PutItem::new("k", ContentLength(slice)),
             None
         ),
         InvalidRequest::Option
     );
     assert_eq!(
-        refused(&plain, unsigned, &PutItem::new("k", slice), Some(&[0; 32])),
+        refused(
+            &plain,
+            unsigned,
+            &PutItem::new("k", ContentLength(slice)),
+            Some(&[0; 32])
+        ),
         InvalidRequest::Option
     );
-    let too_long = PutItem::new(
-        "k",
-        Payload::Streamed {
-            len: MAX_PUT_LEN + 1,
-        },
-    );
+    let too_long = PutItem::new("k", ContentLength(MAX_PUT_LEN + 1));
     assert_eq!(
         refused(&plain, unsigned, &too_long, None),
         InvalidRequest::PayloadTooLarge
@@ -118,7 +123,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
     };
     let not_base64 = PutItem {
         checksum: Some(ChecksumValue::Base64("not base64")),
-        ..PutItem::new("k", slice)
+        ..PutItem::new("k", ContentLength(slice))
     };
     assert_eq!(
         refused(&md5, unsigned, &not_base64, None),
@@ -130,7 +135,12 @@ fn a_write_that_s3_cannot_take_is_refused() {
             metadata: pairs,
             ..plain
         };
-        refused(&options, unsigned, &PutItem::new("k", slice), None)
+        refused(
+            &options,
+            unsigned,
+            &PutItem::new("k", ContentLength(slice)),
+            None,
+        )
     };
     let pair = |name, value| MetadataPair { name, value };
     assert_eq!(metadata(&[pair("", "v")]), InvalidRequest::MetadataName);
@@ -144,7 +154,7 @@ fn a_write_that_s3_cannot_take_is_refused() {
 
 #[test]
 fn a_checksum_goes_where_s3_reads_it() {
-    let slice = Payload::Slice(b"0123456789");
+    let slice = 10;
     let with = |kind, value| {
         let options = PutOptions {
             checksum: Some(kind),
@@ -152,7 +162,7 @@ fn a_checksum_goes_where_s3_reads_it() {
         };
         let item = PutItem {
             checksum: Some(value),
-            ..PutItem::new("k", slice)
+            ..PutItem::new("k", ContentLength(slice))
         };
         encode(&options, PayloadSigning::Unsigned, &item, None).unwrap()
     };

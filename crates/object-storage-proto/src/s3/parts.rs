@@ -24,9 +24,9 @@ use crate::url::QueryValue;
 use crate::validate::{is_header_value, validate_checksum_item};
 use crate::xml::s3::parts::read_committed;
 use crate::{
-    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue,
+    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, ContentLength,
     DeleteHeadOutcome, Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair,
-    Method, ObjectItem, ObjectMeta, Payload, ResponseFault, ResponseHead, Result, RevisionKind,
+    Method, ObjectItem, ObjectMeta, ResponseFault, ResponseHead, Result, RevisionKind,
     ServiceErrorKind, StageHeadOutcome, StageOptions, Timestamps, WriteOptions, encoding,
 };
 
@@ -215,23 +215,27 @@ pub struct StagePartItem<'i> {
     pub upload_id: &'i str,
     /// The part's number, from 1, and at most [`MAX_PARTS`] on AWS.
     pub number: u32,
-    /// The part's bytes, or the length of those you send yourself. At most
-    /// [`MAX_PART_LEN`].
-    pub content: Payload<'i>,
+    /// The length of the part in bytes, at most [`MAX_PART_LEN`].
+    pub content_length: ContentLength,
     /// The checksum of the part, of the template's kind. Present exactly when
     /// the template names a kind.
     pub checksum: Option<ChecksumValue<'i>>,
 }
 
 impl<'i> StagePartItem<'i> {
-    /// Creates the stage of `content` as the part `number` of the upload
-    /// `upload_id` of `key`.
-    pub const fn new(key: &'i str, upload_id: &'i str, number: u32, content: Payload<'i>) -> Self {
+    /// Creates the stage of `content_length` bytes as the part `number` of the
+    /// upload `upload_id` of `key`.
+    pub const fn new(
+        key: &'i str,
+        upload_id: &'i str,
+        number: u32,
+        content_length: ContentLength,
+    ) -> Self {
         Self {
             key,
             upload_id,
             number,
-            content,
+            content_length,
             checksum: None,
         }
     }
@@ -487,7 +491,7 @@ pub fn encode_stage_part(
     let key = template.request_key(bytes, item.key)?;
     validate_upload_id(item.upload_id)?;
     validate_part_number(item.number, template.service)?;
-    if item.content.len() > MAX_PART_LEN {
+    if item.content_length.as_u64() > MAX_PART_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_checksum_item(checksum, item.checksum)?;
@@ -502,7 +506,7 @@ pub fn encode_stage_part(
         key,
         upload_id: Some(item.upload_id),
         part_number: Some(item.number),
-        content_length: Some(item.content.len()),
+        content_length: Some(item.content_length.as_u64()),
         checksum: checksum_base64(item.checksum, &mut text, true),
         payload_hash: hex.as_ref(),
         ..HoleValues::default()
@@ -511,7 +515,7 @@ pub fn encode_stage_part(
         template,
         bytes,
         &values,
-        item.content,
+        item.content_length.as_u64(),
         buf,
         &describe_stage(checksum, signing),
     )
@@ -676,7 +680,7 @@ pub fn encode_commit_parts(
         template,
         bytes,
         &fill,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_commit(condition, checksum, sized),
     )
@@ -810,7 +814,7 @@ pub fn encode_abort_upload(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_abort_upload(),
     )
@@ -914,7 +918,7 @@ pub fn encode_list_parts(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_list_parts(None),
     )

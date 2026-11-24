@@ -22,8 +22,8 @@ use crate::template::{
 use crate::url::{encode_object_key, write_query_value};
 use crate::{
     CommitShape, ConditionKind, ConditionValue, CopyShape, DeleteKind, DeleteShape, Digest, Error,
-    GetItem, GetOptions, GetShape, InvalidRequest, ListInclude, MetadataPair, Method, Payload,
-    PutShape, Ranging, Result, RevisionKind, Span, Tag, Timestamps, encoding,
+    GetItem, GetOptions, GetShape, InvalidRequest, ListInclude, MetadataPair, Method, PutShape,
+    Ranging, Result, RevisionKind, Span, Tag, Timestamps, encoding,
 };
 
 /// The operation that a template writes requests for.
@@ -1073,7 +1073,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
-    payload: Payload<'_>,
+    content_len: u64,
     buf: &mut [u8],
     describe: &Describe<'_, Q>,
 ) -> Result<Unsigned> {
@@ -1101,7 +1101,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
     Ok(Unsigned {
         method: template.method,
         written,
-        content_len: payload.len(),
+        content_len,
         body_checksum,
     })
 }

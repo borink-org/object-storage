@@ -8,9 +8,9 @@ use borink_object_storage_crypto::{Sha256RustCrypto, sigv4};
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Template};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions, ListEntry,
-    ListHeadOutcome, ListItem, ListOptions, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem,
-    PutOptions, Timestamps,
+    ContentLength, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
+    ListEntry, ListHeadOutcome, ListItem, ListOptions, Listing, ObjectItem, PutHeadOutcome,
+    PutItem, PutOptions, Timestamps,
 };
 
 use crate::Prepared;
@@ -138,7 +138,7 @@ impl<'a> Objects<'a> {
         let unix = crate::unix_now()?;
         let now = Timestamps::from_unix(unix);
         let stamp = self.stamp(unix, &now)?;
-        let item = PutItem::new(key, Payload::Slice(content));
+        let item = PutItem::new(key, ContentLength::of(content));
         let digest = sigv4::sha256::<Sha256RustCrypto>(content);
         let Prepared { template, bytes } = &self.put;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {

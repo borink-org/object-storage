@@ -40,8 +40,7 @@ use crate::url::{
     QueryValue, encode_object_key, encode_query_value, key_is_plain, write_query_value,
 };
 use crate::{
-    CapacityError, ConditionValue, InvalidRequest, Method, Payload, RequestedRange, Result, Span,
-    Timestamps,
+    CapacityError, ConditionValue, InvalidRequest, Method, RequestedRange, Result, Span, Timestamps,
 };
 
 /// The value that a request writes into one hole of its template.
@@ -1341,7 +1340,7 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 /// ```
 /// use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
 /// use borink_object_storage_proto::{
-///     Error, Payload, PutItem, PutOptions, Result, Timestamps, WireRequest,
+///     ContentLength, Error, PutItem, PutOptions, Result, Timestamps, WireRequest,
 /// };
 ///
 /// fn write(
@@ -1364,12 +1363,13 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 /// let mut bytes = vec![0; 1024];
 /// let template = azure::prepare_put(&container, "token", namespace, &options, &mut bytes)?;
 /// let content = b"hello";
-/// let item = PutItem::new("greeting.txt", Payload::Slice(content));
+/// let item = PutItem::new("greeting.txt", ContentLength::of(content));
 /// let now = Timestamps::from_unix(1_787_400_000);
 /// let mut buf = Vec::new();
 /// let request = write(&mut buf, |buf| azure::encode_put(&template, &bytes, &item, &now, buf))?;
 /// assert!(request.head(&buf).starts_with(b"PUT /container/greeting.txt HTTP/1.1\r\n"));
-/// assert_eq!(request.payload(&buf), Payload::Streamed { len: 5 });
+/// assert_eq!(request.content_length(), 5);
+/// assert_eq!(request.body(&buf), None);
 /// # Ok(())
 /// # }
 /// ```
@@ -1442,21 +1442,14 @@ impl WireRequest {
         span_bytes(buf, self.head)
     }
 
-    /// Returns the content of the request.
+    /// Returns the body that this crate wrote into `buf`, such as a list of
+    /// parts or a set of tags.
     ///
-    /// A read has no content, so this is an empty [`Payload::Slice`].
-    /// Content that you passed as [`Payload::Slice`] is not lent back: this
-    /// states its length as [`Payload::Streamed`], and you send the bytes.
-    /// For a body that this crate wrote, such as a list of parts, it lends
-    /// that body from the buffer.
-    pub fn payload<'b>(&self, buf: &'b [u8]) -> Payload<'b> {
-        match self.body {
-            Some(body) => Payload::Slice(span_bytes(buf, body)),
-            None if self.content_len == 0 => Payload::Slice(&[]),
-            None => Payload::Streamed {
-                len: self.content_len,
-            },
-        }
+    /// Returns [`None`] for a request with no body, and for a write whose
+    /// content you send yourself. Read [`Self::content_length`] for the length
+    /// of that content.
+    pub fn body<'b>(&self, buf: &'b [u8]) -> Option<&'b [u8]> {
+        self.body.map(|body| span_bytes(buf, body))
     }
 
     /// Returns where the URL is in the buffer.
@@ -1483,7 +1476,7 @@ impl WireRequest {
 
     /// Returns the length of the content: of the body that this crate
     /// wrote, or of the content that you send.
-    pub fn content_len(&self) -> u64 {
+    pub fn content_length(&self) -> u64 {
         match self.body {
             Some(body) => body.len as u64,
             None => self.content_len,

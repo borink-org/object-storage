@@ -3,8 +3,8 @@
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    ConditionKind, ConditionValue, DeleteKind, DeleteOptions, GetItem, GetOptions, ObjectItem,
-    Payload, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps, WireRequest,
+    ConditionKind, ConditionValue, ContentLength, DeleteKind, DeleteOptions, GetItem, GetOptions,
+    ObjectItem, PutItem, PutOptions, RequestedRange, Result, Span, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -89,13 +89,13 @@ fn a_request_names_every_part_of_it_by_offset() {
     for (options, put) in [
         (
             PutOptions::default(),
-            PutItem::new("object.bin", Payload::Slice(b"contents")),
+            PutItem::new("object.bin", ContentLength(8)),
         ),
         (
             create,
             PutItem {
                 condition_value: Some(ConditionValue::ETag(b"*")),
-                ..PutItem::new("object.bin", Payload::Streamed { len: 1024 })
+                ..PutItem::new("object.bin", ContentLength(1024))
             },
         ),
     ] {

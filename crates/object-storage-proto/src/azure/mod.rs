@@ -25,8 +25,8 @@ use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteOptions, DeleteShape,
     Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape, InvalidRequest,
     ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions, Listing,
-    MetadataPair, Method, ObjectItem, ObjectMeta, Payload, PutHeadOutcome, PutItem, PutOptions,
-    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
+    MetadataPair, Method, ObjectItem, ObjectMeta, PutHeadOutcome, PutItem, PutOptions, PutShape,
+    Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
     ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, Holes};
@@ -533,7 +533,7 @@ pub fn encode_get(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_get(&options),
     )
@@ -703,7 +703,7 @@ pub fn encode_put(
         return Err(InvalidRequest::Template.into());
     };
     let key = template.request_key(bytes, item.key)?;
-    if item.content.len() > MAX_PUT_LEN {
+    if item.content_length.as_u64() > MAX_PUT_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_condition(condition, item.condition_value)?;
@@ -713,7 +713,7 @@ pub fn encode_put(
         now: Some(now),
         key,
         condition: item.condition_value,
-        content_length: Some(item.content.len()),
+        content_length: Some(item.content_length.as_u64()),
         checksum: checksum_base64(item.checksum, &mut text, false),
         ..HoleValues::default()
     };
@@ -721,7 +721,7 @@ pub fn encode_put(
         template,
         bytes,
         &values,
-        item.content,
+        item.content_length.as_u64(),
         buf,
         &describe_put(condition, checksum, &[], &[]),
     )
@@ -893,7 +893,7 @@ fn encode_object(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_object(operation, condition, revision, None),
     )
@@ -1296,7 +1296,7 @@ pub fn encode_list(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_list(None),
     )

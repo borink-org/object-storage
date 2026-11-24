@@ -29,7 +29,7 @@ use crate::url::QueryValue;
 use crate::validate::validate_revision;
 use crate::{
     CapacityError, DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Error,
-    Failure, InvalidRequest, Method, Payload, ResponseFault, ResponseHead, Result, Span,
+    Failure, InvalidRequest, Method, ResponseFault, ResponseHead, Result, Span,
     Timestamps, url,
 };
 
@@ -293,7 +293,7 @@ pub fn encode_delete_many(
         template,
         bytes,
         &fill,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_batch(&[]),
     )

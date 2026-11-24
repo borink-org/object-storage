@@ -3,9 +3,9 @@
 use borink_object_storage_proto::azure::{self, Template};
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions, ListEntry,
-    ListHeadOutcome, ListItem, ListOptions, Listing, ObjectItem, Payload, PutHeadOutcome, PutItem,
-    PutOptions,
+    ContentLength, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
+    ListEntry, ListHeadOutcome, ListItem, ListOptions, Listing, ObjectItem, PutHeadOutcome,
+    PutItem, PutOptions,
 };
 
 use crate::Prepared;
@@ -91,7 +91,7 @@ impl Blobs {
     /// stored no object.
     pub fn put(&mut self, key: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         let now = crate::now()?;
-        let item = PutItem::new(key, Payload::Slice(content));
+        let item = PutItem::new(key, ContentLength::of(content));
         let Prepared { template, bytes } = &self.put;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
             azure::encode_put(template, bytes, &item, &now, buf)

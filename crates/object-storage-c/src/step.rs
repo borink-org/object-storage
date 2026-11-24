@@ -121,7 +121,7 @@ pub(crate) fn written_request(request: proto::Result<proto::WireRequest>) -> Wir
             present: true,
             span,
         }),
-        payload_len: request.content_len(),
+        payload_len: request.content_length(),
     }
 }
 

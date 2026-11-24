@@ -23,7 +23,7 @@ use borink_object_storage_proto::azure::{
 };
 use borink_object_storage_proto::azure::{AzureNamespace, Container, PropertySet};
 use borink_object_storage_proto::{
-    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
+    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, ContentLength, CopyHeadOutcome,
     DeleteHeadOutcome, DeleteManyHeadOutcome, EntryKind, Error as CrateError, GetHeadOutcome,
     GetKind, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListOptions, ListPartsHeadOutcome,
     ObjectItem, PutHeadOutcome, PutItem, PutOptions, RequestedRange, RestoreHeadOutcome, Revision,
@@ -241,7 +241,7 @@ fn write_object(
     };
     let item = PutItem {
         key: optional_text(call, "key").unwrap_or_default(),
-        content: body.payload(),
+        content_length: ContentLength(body.len()),
         condition_value,
         checksum,
     };
@@ -449,7 +449,7 @@ fn stage_block(
     let item = azure::StageBlockItem::new(
         optional_text(call, "key").unwrap_or_default(),
         optional_text(call, "block_id_base64").unwrap_or_default(),
-        body.payload(),
+        ContentLength(body.len()),
     );
     let now = current_timestamps();
     let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {

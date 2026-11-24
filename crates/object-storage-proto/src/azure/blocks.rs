@@ -28,9 +28,10 @@ use crate::validate::{
     validate_checksum_item, validate_condition, validate_properties, validate_tags,
 };
 use crate::{
-    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, Failure,
-    InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem, ObjectMeta,
-    Payload, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
+    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, ContentLength,
+    Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem,
+    ObjectMeta,
+    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
     StageOptions, Timestamps, WriteOptions,
 };
 
@@ -220,21 +221,21 @@ pub struct StageBlockItem<'i> {
     pub key: &'i str,
     /// The block ID, under the rules of [`BlockRef::id`].
     pub id: &'i str,
-    /// The block's bytes, or the length of those you send yourself. At most
-    /// [`MAX_STAGE_LEN`].
-    pub content: Payload<'i>,
+    /// The length of the block in bytes, at most [`MAX_STAGE_LEN`].
+    pub content_length: ContentLength,
     /// The checksum of the block, of the template's kind. Present exactly
     /// when the template names a kind.
     pub checksum: Option<ChecksumValue<'i>>,
 }
 
 impl<'i> StageBlockItem<'i> {
-    /// Creates a Put Block of `content` as the block `id` of `key`.
-    pub const fn new(key: &'i str, id: &'i str, content: Payload<'i>) -> Self {
+    /// Creates a Put Block of `content_length` bytes as the block `id` of
+    /// `key`.
+    pub const fn new(key: &'i str, id: &'i str, content_length: ContentLength) -> Self {
         Self {
             key,
             id,
-            content,
+            content_length,
             checksum: None,
         }
     }
@@ -379,7 +380,7 @@ pub fn encode_stage_block(
     };
     let key = template.request_key(bytes, item.key)?;
     validate_block_id(item.id)?;
-    if item.content.len() > MAX_STAGE_LEN {
+    if item.content_length.as_u64() > MAX_STAGE_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_checksum_item(checksum, item.checksum)?;
@@ -388,7 +389,7 @@ pub fn encode_stage_block(
         now: Some(now),
         key,
         block_id: Some(item.id),
-        content_length: Some(item.content.len()),
+        content_length: Some(item.content_length.as_u64()),
         checksum: checksum_base64(item.checksum, &mut text, false),
         ..HoleValues::default()
     };
@@ -396,7 +397,7 @@ pub fn encode_stage_block(
         template,
         bytes,
         &values,
-        item.content,
+        item.content_length.as_u64(),
         buf,
         &describe_stage(checksum),
     )
@@ -593,7 +594,7 @@ where
         template,
         bytes,
         &fill,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_commit(condition, content_md5, &[], &[]),
     )

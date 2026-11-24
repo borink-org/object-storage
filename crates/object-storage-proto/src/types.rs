@@ -682,18 +682,39 @@ pub enum ChecksumValue<'i> {
     Digest(Digest),
 }
 
+/// The length of a request's content in bytes.
+///
+/// The request head states this length in `Content-Length`, and you send the
+/// bytes from memory, a file or a socket.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentLength(pub u64);
+
+impl ContentLength {
+    /// Returns the byte length of `bytes` as a content length.
+    #[inline]
+    pub const fn of(bytes: &[u8]) -> Self {
+        Self(bytes.len() as u64)
+    }
+
+    /// Returns the length in bytes as a [`u64`].
+    #[inline]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 /// What one write of a whole object from a template writes.
 ///
-/// Build this for each request and let it go afterwards: it borrows the key,
-/// the content and the values it names. To read the response, keep
-/// [`Self::shape`].
+/// Build this for each request and let it go afterwards: it borrows the key
+/// and the values it names. To read the response, keep [`Self::shape`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutItem<'i> {
     /// The object key, before percent-encoding: see
     /// [Object keys](crate#object-keys).
     pub key: &'i str,
-    /// The content. The head states its length, and you send the bytes.
-    pub content: Payload<'i>,
+    /// The length of the content in bytes. The head states this length, and
+    /// you send the bytes.
+    pub content_length: ContentLength,
     /// What the template's precondition compares against: see
     /// [`ConditionKind`]. Present exactly when the template carries one.
     pub condition_value: Option<ConditionValue<'i>>,
@@ -703,11 +724,11 @@ pub struct PutItem<'i> {
 }
 
 impl<'i> PutItem<'i> {
-    /// Creates a write of `content` to `key`.
-    pub const fn new(key: &'i str, content: Payload<'i>) -> Self {
+    /// Creates a write of `content_length` bytes to `key`.
+    pub const fn new(key: &'i str, content_length: ContentLength) -> Self {
         Self {
             key,
-            content,
+            content_length,
             condition_value: None,
             checksum: None,
         }
@@ -743,59 +764,6 @@ pub struct PutShape {
 pub struct CommitShape {
     /// The precondition on the object being committed.
     pub condition: ConditionKind,
-}
-
-/// The content of a write, and where it comes from.
-///
-/// A write states how long its content is, so this always names a length.
-/// Azure refuses a write whose head does not state it, so content of an
-/// unknown length cannot be written in one request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Payload<'b> {
-    /// Content that you hold. A request states the length of these bytes
-    /// and copies none. You send them.
-    Slice(&'b [u8]),
-    /// Content that you send yourself, of the length that you state.
-    ///
-    /// Use this to write from a file, a socket, or anything else that you do
-    /// not hold in memory. The request then carries no content, and you give
-    /// your HTTP client the same number of bytes that you state here.
-    Streamed {
-        /// The number of bytes that you will send.
-        len: u64,
-    },
-}
-
-impl<'b> Payload<'b> {
-    /// Returns the number of bytes of content.
-    pub fn len(&self) -> u64 {
-        match *self {
-            Self::Slice(bytes) => bytes.len() as u64,
-            Self::Streamed { len } => len,
-        }
-    }
-
-    /// Returns `true` if the content is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Returns the content, if you passed it as [`Self::Slice`].
-    ///
-    /// Returns [`None`] for [`Self::Streamed`], where you hold the content.
-    pub fn bytes(&self) -> Option<&'b [u8]> {
-        match *self {
-            Self::Slice(bytes) => Some(bytes),
-            Self::Streamed { .. } => None,
-        }
-    }
-}
-
-impl<'b> From<&'b [u8]> for Payload<'b> {
-    fn from(bytes: &'b [u8]) -> Self {
-        Self::Slice(bytes)
-    }
 }
 
 /// What a removal takes with it.

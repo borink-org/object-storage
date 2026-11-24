@@ -18,7 +18,7 @@ use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody};
 use crate::url::QueryValue;
 use crate::validate::validate_revision;
 use crate::{
-    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidRequest, Method, Payload, ResponseFault,
+    DeleteManyHeadOutcome, DeleteTarget, Failure, InvalidRequest, Method, ResponseFault,
     ResponseHead, Result, Revision, Timestamps, encoding,
 };
 
@@ -185,7 +185,7 @@ pub fn encode_delete_many(
         template,
         bytes,
         &fill,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_delete_many(checksum),
     )

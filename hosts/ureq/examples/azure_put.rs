@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
+    ContentLength, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = Timestamps::from_unix(unix);
     let mut buf = vec![0; 4096];
     for (key, content) in [("a.txt", "one"), ("b.txt", "two"), ("c.txt", "three")] {
-        let item = PutItem::new(key, Payload::Slice(content.as_bytes()));
+        let item = PutItem::new(key, ContentLength::of(content.as_bytes()));
         let request = azure::encode_put(&template, &bytes, &item, &now, &mut buf)?;
 
         let mut outgoing = ureq::http::Request::builder()

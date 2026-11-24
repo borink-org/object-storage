@@ -16,9 +16,9 @@ use crate::azure::{self, AzureNamespace, BlockRef, BlockSource, Container};
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, CopyItem, CopyOptions,
-    DeleteTarget, Digest, GetItem, GetOptions, ListInclude, ListItem, ListMarker, ListOptions,
-    MetadataPair, ObjectItem, Payload, PutItem, PutOptions, Ranging, RequestedRange, Result,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, CopyItem,
+    CopyOptions, DeleteTarget, Digest, GetItem, GetOptions, ListInclude, ListItem, ListMarker,
+    ListOptions, MetadataPair, ObjectItem, PutItem, PutOptions, Ranging, RequestedRange, Result,
     Revision, RevisionKind, StageOptions, Tag, Timestamps, WireRequest,
 };
 
@@ -108,12 +108,12 @@ fn read(request: Result<WireRequest>, buf: &[u8]) -> bool {
             request.head_span(),
             request.fields_span(),
             request.body_span(),
-            request.content_len(),
+            request.content_length(),
         );
         let _ = request.url(buf).len();
         let _ = request.headers(buf).count();
         let _ = request.head(buf).len();
-        let _ = request.payload(buf);
+        let _ = (request.body(buf), request.content_length());
     }
     written
 }
@@ -221,7 +221,7 @@ fn put_item(key: &str) -> PutItem<'_> {
     PutItem {
         condition_value: Some(ConditionValue::ETag(b"*")),
         checksum: CRC64,
-        ..PutItem::new(key, Payload::Streamed { len: 4096 })
+        ..PutItem::new(key, ContentLength(4096))
     }
 }
 
@@ -315,7 +315,7 @@ fn azure_cases() -> Vec<Case> {
             |t, b, key, buf| {
                 let item = azure::StageBlockItem {
                     checksum: CRC64,
-                    ..azure::StageBlockItem::new(key, BLOCKS[0].id, Payload::Streamed { len: 8 })
+                    ..azure::StageBlockItem::new(key, BLOCKS[0].id, ContentLength(8))
                 };
                 read(azure::encode_stage_block(t, b, &item, &now(), buf), buf)
             },
@@ -442,7 +442,7 @@ fn s3_cases() -> Vec<Case> {
             |t, b, key, buf| {
                 let item = s3::StagePartItem {
                     checksum: CRC64,
-                    ..s3::StagePartItem::new(key, "upload-1", 3, Payload::Streamed { len: 8 })
+                    ..s3::StagePartItem::new(key, "upload-1", 3, ContentLength(8))
                 };
                 sign(
                     s3::encode_stage_part(t, b, &item, Some(&SHA), &now(), buf),

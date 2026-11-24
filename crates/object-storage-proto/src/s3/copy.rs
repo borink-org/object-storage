@@ -31,7 +31,7 @@ use crate::validate::{
 use crate::xml::s3::copy::{read_copied, read_part_copied};
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, Failure, InvalidRequest,
-    Method, ObjectMeta, Payload, Ranging, ResponseFault, ResponseHead, Result, RevisionKind,
+    Method, ObjectMeta, Ranging, ResponseFault, ResponseHead, Result, RevisionKind,
     ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
 };
 
@@ -231,7 +231,7 @@ fn encode_copy_kind(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_copy(operation == Operation::StagePartCopy, detail, ""),
     )

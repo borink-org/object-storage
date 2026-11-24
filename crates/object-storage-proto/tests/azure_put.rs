@@ -3,8 +3,8 @@
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, Digest, Error, InvalidRequest,
-    MetadataPair, Payload, PutItem, PutOptions, Timestamps, WireRequest,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, Digest, Error,
+    InvalidRequest, MetadataPair, PutItem, PutOptions, Timestamps, WireRequest,
 };
 
 fn container() -> Container<'static> {
@@ -42,23 +42,23 @@ fn a_write_is_validated_before_any_byte_is_written() {
         condition: ConditionKind::IfMatch,
         ..PutOptions::default()
     };
-    let content = Payload::Slice(b"one");
+    let content = 3;
     for (options, item, expected) in [
         (
             PutOptions::default(),
-            PutItem::new("", content),
+            PutItem::new("", ContentLength(content)),
             InvalidRequest::EmptyKey,
         ),
         (
             if_match,
-            PutItem::new("object.bin", content),
+            PutItem::new("object.bin", ContentLength(content)),
             InvalidRequest::Condition,
         ),
         (
             PutOptions::default(),
             PutItem {
                 condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-                ..PutItem::new("object.bin", content)
+                ..PutItem::new("object.bin", ContentLength(content))
             },
             InvalidRequest::Condition,
         ),
@@ -75,7 +75,7 @@ fn a_write_is_validated_before_any_byte_is_written() {
     // not by byte count: these are two-byte characters. Only a template told
     // it is for a flat account refuses it.
     let long = "\u{e9}".repeat(1025);
-    let item = PutItem::new(&long, content);
+    let item = PutItem::new(&long, ContentLength(content));
     assert_eq!(
         encode_on(
             AzureNamespace::Flat,
@@ -98,49 +98,26 @@ fn a_write_is_validated_before_any_byte_is_written() {
 }
 
 #[test]
-fn streamed_content_writes_the_same_head_without_the_bytes() {
-    let content = [7u8; 4096];
+fn a_write_states_the_content_length_and_carries_no_generated_body() {
     let options = PutOptions::default();
-    let held = PutItem::new("object.bin", Payload::Slice(&content));
-    let streamed = PutItem::new("object.bin", Payload::Streamed { len: 4096 });
-    let (mut held_buf, mut streamed_buf) = ([0; 1024], [0; 1024]);
-    let held = encode(&options, &held, &mut held_buf).unwrap();
-    let streaming = encode(&options, &streamed, &mut streamed_buf).unwrap();
+    let item = PutItem::new("object.bin", ContentLength(4096));
+    let mut buf = [0; 1024];
+    let request = encode(&options, &item, &mut buf).unwrap();
 
-    // The head is what the service sees, and it does not know the difference.
-    assert_eq!(held.url(&held_buf), streaming.url(&streamed_buf));
-    assert_eq!(held.head(&held_buf), streaming.head(&streamed_buf));
-
-    // Neither lends the content: both state its length, and the host sends
-    // the bytes it holds.
-    assert_eq!(held.payload(&held_buf), Payload::Streamed { len: 4096 });
-    assert_eq!(
-        streaming.payload(&streamed_buf),
-        Payload::Streamed { len: 4096 }
-    );
+    assert_eq!(request.content_length(), 4096);
+    assert_eq!(request.body(&buf), None);
 }
 
 #[test]
-fn a_streamed_payload_is_refused_at_the_same_length_as_a_held_one() {
-    // 5000 MiB is the most Azure writes in one request, so this cannot be a
-    // slice on any machine. Only the streamed form can state it at all.
+fn a_write_longer_than_the_service_limit_is_refused() {
+    // 5000 MiB is the most Azure writes in one request.
     let options = PutOptions::default();
-    let too_long = PutItem::new(
-        "object.bin",
-        Payload::Streamed {
-            len: azure::MAX_PUT_LEN + 1,
-        },
-    );
+    let too_long = PutItem::new("object.bin", ContentLength(azure::MAX_PUT_LEN + 1));
     assert_eq!(
         encode(&options, &too_long, &mut [0; 1024]).err(),
         Some(Error::InvalidRequest(InvalidRequest::PayloadTooLarge))
     );
-    let longest = PutItem::new(
-        "object.bin",
-        Payload::Streamed {
-            len: azure::MAX_PUT_LEN,
-        },
-    );
+    let longest = PutItem::new("object.bin", ContentLength(azure::MAX_PUT_LEN));
     assert!(encode(&options, &longest, &mut [0; 1024]).is_ok());
 }
 
@@ -204,7 +181,7 @@ fn a_crc64_is_sent_as_its_own_header_in_azure_byte_order() {
     ] {
         let item = PutItem {
             checksum: Some(checksum),
-            ..PutItem::new("object.bin", Payload::Slice(b"0123456789"))
+            ..PutItem::new("object.bin", ContentLength(10))
         };
         let mut buf = [0; 1024];
         let request = encode(&options, &item, &mut buf).unwrap();
@@ -226,7 +203,7 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
         };
         let item = PutItem {
             checksum: Some(ChecksumValue::Base64(value)),
-            ..PutItem::new("object.bin", Payload::Slice(b""))
+            ..PutItem::new("object.bin", ContentLength(0))
         };
         encode(&options, &item, &mut [0; 1024])
             .map(drop)
@@ -267,7 +244,7 @@ fn a_checksum_that_is_not_the_base64_of_its_kind_is_refused() {
     };
     let other = PutItem {
         checksum: Some(ChecksumValue::Digest(Digest::crc64(1))),
-        ..PutItem::new("object.bin", Payload::Slice(b""))
+        ..PutItem::new("object.bin", ContentLength(0))
     };
     assert_eq!(
         encode(&options, &other, &mut [0; 1024]).map(drop),

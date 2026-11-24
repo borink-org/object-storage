@@ -17,7 +17,7 @@ use crate::url::{encode_object_key, write_query_value};
 use crate::validate::is_header_value;
 use crate::{
     CommitShape, ConditionKind, CopyShape, DeleteKind, DeleteShape, Error, GetItem, GetKind,
-    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, Payload, PutShape, Ranging, Result,
+    GetOptions, GetShape, InvalidRequest, MetadataPair, Method, PutShape, Ranging, Result,
     RevisionKind, Span, Tag, WireRequest,
 };
 
@@ -816,7 +816,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
     template: &Template,
     bytes: &[u8],
     fill: &F,
-    payload: Payload<'_>,
+    content_len: u64,
     buf: &mut [u8],
     describe: &Describe<'_, Q>,
 ) -> Result<WireRequest> {
@@ -850,7 +850,7 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
         template::walk_request(&template.table, bytes, fill, &mut out)?
     };
     let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
-    Ok(WireRequest::new(template.method, &written, payload.len()))
+    Ok(WireRequest::new(template.method, &written, content_len))
 }
 
 impl Template {

@@ -14,11 +14,11 @@ use crate::azure::{self, AzureNamespace, BlockListKind, BlockRef, BlockSource, C
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties, CopyItem,
-    CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
-    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, PutItem,
-    PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind,
-    StageOptions, Tag, Timestamps, WireRequest, WriteOptions,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, ContentProperties,
+    CopyItem, CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
+    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, PutItem, PutOptions,
+    Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind, StageOptions,
+    Tag, Timestamps, WireRequest, WriteOptions,
 };
 
 const KEY: &str = "dir/file name.sst";
@@ -95,9 +95,9 @@ fn azure_request(request: Result<WireRequest>, buf: &[u8]) -> Vec<u8> {
     let request = request.expect("the request is written");
     let mut text = request.url(buf).as_bytes().to_vec();
     text.extend_from_slice(request.head(buf));
-    match request.payload(buf) {
-        Payload::Slice(body) => text.extend_from_slice(body),
-        Payload::Streamed { len } => text.extend_from_slice(&len.to_le_bytes()),
+    match request.body(buf) {
+        Some(body) => text.extend_from_slice(body),
+        None => text.extend_from_slice(&request.content_length().to_le_bytes()),
     }
     text
 }
@@ -175,13 +175,15 @@ fn every_azure_layout_writes_what_its_table_writes() {
                             CRC64
                         })
                     }),
-                    ..PutItem::new(key, Payload::Streamed { len: 4096 })
+                    ..PutItem::new(key, ContentLength(4096))
                 };
                 let request = azure::encode_put(template, bytes, &item, &now, &mut buf);
                 // A write sends the content it was given.
                 assert!(matches!(
-                    request.as_ref().map(|request| request.payload(&buf)),
-                    Ok(Payload::Streamed { len: 4096 })
+                    request
+                        .as_ref()
+                        .map(|request| (request.body(&buf), request.content_length())),
+                    Ok((None, 4096))
                 ));
                 azure_request(request, &buf)
             },
@@ -285,11 +287,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 let mut buf = vec![0; 4096];
                 let item = azure::StageBlockItem {
                     checksum: checksum.map(|_| ChecksumValue::Base64(CRC64)),
-                    ..azure::StageBlockItem::new(
-                        key,
-                        "YmxvY2stMDAwMDA=",
-                        Payload::Streamed { len: 8 },
-                    )
+                    ..azure::StageBlockItem::new(key, "YmxvY2stMDAwMDA=", ContentLength(8))
                 };
                 azure_request(
                     azure::encode_stage_block(template, bytes, &item, &now, &mut buf),
@@ -565,7 +563,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
                             CRC64
                         })
                     }),
-                    ..PutItem::new(key, Payload::Streamed { len: 4096 })
+                    ..PutItem::new(key, ContentLength(4096))
                 };
                 let sha = (signing == PayloadSigning::Signed).then_some(&digest);
                 len(s3::encode_put(template, bytes, &item, sha, &now, buf))
@@ -644,7 +642,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
             |template, bytes, key, buf| {
                 let item = s3::StagePartItem {
                     checksum: checksum.map(|_| ChecksumValue::Base64(CRC64)),
-                    ..s3::StagePartItem::new(key, "upload-1", 3, Payload::Streamed { len: 8 })
+                    ..s3::StagePartItem::new(key, "upload-1", 3, ContentLength(8))
                 };
                 let sha = (signing == PayloadSigning::Signed).then_some(&digest);
                 len(s3::encode_stage_part(

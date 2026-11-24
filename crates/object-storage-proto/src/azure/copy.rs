@@ -35,7 +35,7 @@ use crate::validate::{
 };
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, DeleteKind, Failure,
-    InvalidRequest, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome, Ranging,
+    InvalidRequest, MetadataPair, Method, ObjectMeta, PutHeadOutcome, Ranging,
     ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps,
     UpdateHeadOutcome, WriteOptions,
 };
@@ -306,7 +306,7 @@ fn encode_copy_kind(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_copy(kind, detail, None),
     )
@@ -677,7 +677,7 @@ pub fn encode_abort_copy(
         template,
         bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_abort_copy(&[]),
     )

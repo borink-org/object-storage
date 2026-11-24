@@ -27,9 +27,8 @@
 //! A write has the same three steps, with [`PutOptions`], [`PutItem`],
 //! [`azure::prepare_put`], [`azure::encode_put`] and
 //! [`azure::accept_put_head`]. The content stays where you put it: the
-//! request states its length in the head, and leaves the bytes to you.
-//! Describe the content with a [`Payload`], which names a length whether or
-//! not you hold the bytes, so a write can stream from a file or a socket.
+//! request states its length in the head, and you send the bytes from
+//! memory, a file or a socket.
 //!
 //! A removal has the same three steps too, with [`DeleteOptions`],
 //! [`ObjectItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
@@ -52,7 +51,7 @@
 //!
 //! A request whose body this crate writes, such as a list of blocks or a
 //! set of tags, holds the body after its head in the buffer, and
-//! [`WireRequest::payload`] lends it as the content. On S3 the request
+//! [`WireRequest::body`] lends it. On S3 the request
 //! signs the body's SHA-256, which
 //! `borink_object_storage_crypto::sigv4::sign` computes. It also signs a
 //! checksum of the body that the template asks for, which you compute over
@@ -67,8 +66,8 @@
 //! ```
 //! use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
 //! use borink_object_storage_proto::{
-//!     GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem, ListOptions,
-//!     Method, Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
+//!     ContentLength, GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem,
+//!     ListOptions, Method, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -142,12 +141,13 @@
 //! let mut template = vec![0; 512];
 //! let writes =
 //!     azure::prepare_put(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
-//! let put = PutItem::new("directory/object.txt", Payload::Slice(b"contents"));
+//! let put = PutItem::new("directory/object.txt", ContentLength(8));
 //! let mut buffer = vec![0; 1024];
 //! let request = azure::encode_put(&writes, &template, &put, &now, &mut buffer)?;
 //! assert_eq!(request.method(), Method::Put);
 //! // The request states the content's length, and you send the bytes.
-//! assert_eq!(request.payload(&buffer), Payload::Streamed { len: 8 });
+//! assert_eq!(request.content_length(), 8);
+//! assert_eq!(request.body(&buffer), None);
 //!
 //! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
 //! match azure::accept_put_head(put.shape(&options), head)? {
@@ -291,10 +291,10 @@ pub use request::{Method, Span};
 pub use template::WireRequest;
 pub use time::{Timestamps, http_date_ms, iso8601_ms};
 pub use types::{
-    ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties, CopyItem,
-    CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget, EntryKind,
-    GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem, ListMarker,
-    ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PutItem, PutOptions,
+    ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentLength, ContentProperties,
+    CopyItem, CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget,
+    EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem,
+    ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Properties, PutItem, PutOptions,
     PutShape, RangeForm, Ranging, RequestedRange, RestoreOptions, RestorePriority, Revision,
     RevisionKind, StageOptions, Tag, WriteOptions, quoted_etag,
 };

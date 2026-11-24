@@ -17,7 +17,7 @@ use borink_object_storage_proto::checksum::BASE64_LEN;
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, Digest, Payload, PutItem, PutOptions, Timestamps,
+    ChecksumKind, ChecksumValue, ContentLength, Digest, PutItem, PutOptions, Timestamps,
 };
 
 fn base64<C: Checksum>(pieces: &[&[u8]]) -> String {
@@ -106,7 +106,7 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
         .unwrap();
         let item = PutItem {
             checksum: Some(ChecksumValue::Digest(value)),
-            ..PutItem::new("object", Payload::Slice(content))
+            ..PutItem::new("object", ContentLength::of(content))
         };
         let mut buf = vec![0; 2048];
         let unsigned = s3::encode_put(&template, &bytes, &item, None, &now, &mut buf).unwrap();

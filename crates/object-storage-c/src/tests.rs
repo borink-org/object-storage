@@ -212,8 +212,8 @@ fn proto_sent(request: proto::Result<proto::WireRequest>, buf: &[u8]) -> Sent {
     Sent {
         url: request.url(buf).to_string(),
         head: String::from_utf8(request.head(buf).to_vec()).unwrap(),
-        body: request.payload(buf).bytes().unwrap_or_default().to_vec(),
-        payload_len: request.content_len(),
+        body: request.body(buf).unwrap_or_default().to_vec(),
+        payload_len: request.content_length(),
     }
 }
 
@@ -1010,7 +1010,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let core_item = proto::PutItem {
         condition_value: Some(proto::ConditionValue::ETag(b"*")),
         checksum: Some(proto::ChecksumValue::Base64("AAAAAAAAAAA=")),
-        ..proto::PutItem::new(KEY, proto::Payload::Streamed { len: 4 })
+        ..proto::PutItem::new(KEY, proto::ContentLength(4))
     };
     assert_eq!(
         sent(&ours, &buf),
@@ -1054,7 +1054,7 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     .unwrap();
     let core_item = azure::StageBlockItem {
         checksum: Some(proto::ChecksumValue::Base64(MD5)),
-        ..azure::StageBlockItem::new(KEY, BLOCK_IDS[0], proto::Payload::Streamed { len: 8 })
+        ..azure::StageBlockItem::new(KEY, BLOCK_IDS[0], proto::ContentLength(8))
     };
     assert_eq!(
         sent(&ours, &buf),

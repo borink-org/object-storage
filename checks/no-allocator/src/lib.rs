@@ -8,9 +8,9 @@ use borink_object_storage_proto::azure::{AzureNamespace, BlobProperty, Container
 use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    ChecksumKind, ChecksumValue, GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome,
-    ListItem, ListMarker, ListOptions, MetadataPair, Payload, PutItem, PutOptions, ResponseHead,
-    Timestamps, decode_property,
+    ChecksumKind, ChecksumValue, ContentLength, GetHeadOutcome, GetItem, GetOptions, ListEntry,
+    ListHeadOutcome, ListItem, ListMarker, ListOptions, MetadataPair, PutItem, PutOptions,
+    ResponseHead, Timestamps, decode_property,
 };
 
 // Required to link this no_std artifact; the exported check does not panic.
@@ -135,7 +135,7 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
         checksum: Some(ChecksumValue::Digest(digest::<
             borink_object_storage_crypto::Md5RustCrypto,
         >(content))),
-        ..PutItem::new("object", Payload::Slice(content))
+        ..PutItem::new("object", ContentLength::of(content))
     };
     let sha256 = sigv4::sha256::<S>(content);
     let mut buf = [0; 1024];
@@ -187,7 +187,7 @@ fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
         };
         let item = PutItem {
             checksum: Some(ChecksumValue::Digest(value)),
-            ..PutItem::new("object", Payload::Slice(content))
+            ..PutItem::new("object", ContentLength::of(content))
         };
         let mut buf = [0; 512];
         let Ok(request) = azure::encode_put(&template, &bytes, &item, now, &mut buf) else {

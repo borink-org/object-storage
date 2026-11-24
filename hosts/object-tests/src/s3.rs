@@ -28,10 +28,10 @@ use borink_object_storage_proto::s3::{
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
+    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, ContentLength, CopyHeadOutcome,
     DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
     GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
-    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload,
+    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem,
     PutHeadOutcome, PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision,
     RevisionKind, StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps,
     UpdateHeadOutcome, WireRequest, WriteOptions, iso8601_ms,
@@ -369,7 +369,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     };
     let item = PutItem {
         key: optional_text(call, "key").unwrap_or_default(),
-        content: body.payload(),
+        content_length: ContentLength(body.len()),
         condition_value,
         checksum,
     };
@@ -510,7 +510,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         optional_text(call, "key").unwrap_or_default(),
         optional_text(call, "upload_id").unwrap_or_default(),
         u32::try_from(number).unwrap_or(u32::MAX),
-        body.payload(),
+        ContentLength(body.len()),
     );
     let now = current_timestamps();
     let (_, exchange) = sent!(client.send(
@@ -1257,7 +1257,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
         }
         "PUT" if range == RequestedRange::Whole && version.is_none() => {
             let options = PutOptions::default();
-            let item = PutItem::new(key, Payload::Slice(&body));
+            let item = PutItem::new(key, ContentLength::of(&body));
             let digest = match signing {
                 PayloadSigning::Unsigned => None,
                 PayloadSigning::Signed => Some(sigv4::sha256::<Sha256RustCrypto>(&body)),
