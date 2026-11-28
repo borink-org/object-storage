@@ -20,7 +20,7 @@
 //! over all of them before the next. Pass each signature to
 //! `borink_object_storage_proto::s3::set_signature`.
 
-use borink_object_storage_proto::s3::{self, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned};
+use borink_object_storage_proto::s3::{self, STRING_TO_SIGN_PREFIX_LEN, Scope, Unsigned};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{Result, Timestamps, WireRequest};
 
@@ -89,7 +89,7 @@ pub fn hmac<S: Sha256>(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// service.
 pub type SigningKey<S> = HmacKey<S>;
 
-/// Derives the key that signs every request from `template` on the day of
+/// Derives the key that signs every request under `scope` on the day of
 /// `now`, from the secret of `credentials`.
 ///
 /// It takes four HMACs. Derive it once a day and keep it.
@@ -98,12 +98,11 @@ pub type SigningKey<S> = HmacKey<S>;
 ///
 /// Returns what [`s3::signing_key`] returns.
 pub fn signing_key<S: Sha256>(
-    template: &Template,
-    bytes: &[u8],
+    scope: &Scope,
     credentials: &Credentials<'_>,
     now: &Timestamps,
 ) -> Result<SigningKey<S>> {
-    let mut key = s3::signing_key(template, bytes, credentials, now, hmac::<S>)?;
+    let mut key = s3::signing_key(scope, credentials, now, hmac::<S>)?;
     let hmac_key = HmacKey::new(&key);
     crate::wipe(&mut key);
     Ok(hmac_key)
@@ -144,25 +143,16 @@ impl<S: Sha256> Stamp<S> {
     }
 }
 
-/// Builds the stamp of `key` for requests from `template` signed at `now`.
-///
-/// # Errors
-///
-/// Returns what [`s3::string_to_sign_prefix`] returns.
-pub fn stamp<S: Sha256>(
-    key: &SigningKey<S>,
-    template: &Template,
-    bytes: &[u8],
-    now: &Timestamps,
-) -> Result<Stamp<S>> {
+/// Builds the stamp of `key` for requests under `scope` signed at `now`.
+pub fn stamp<S: Sha256>(key: &SigningKey<S>, scope: &Scope, now: &Timestamps) -> Stamp<S> {
     let mut prefix = [0u8; STRING_TO_SIGN_PREFIX_LEN];
-    let prefix = s3::string_to_sign_prefix(template, bytes, now, &mut prefix)?;
+    let prefix = s3::string_to_sign_prefix(scope, now, &mut prefix);
     let mut inner = key.inner;
     inner.update(prefix);
-    Ok(Stamp {
+    Stamp {
         inner,
         outer: key.outer,
-    })
+    }
 }
 
 /// Signs one request and returns where it is in `buf`, ready to send.

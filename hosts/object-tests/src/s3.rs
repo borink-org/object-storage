@@ -203,8 +203,9 @@ fn signed<'b>(
     let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
     let mut bytes = vec![0; CapacityError::required_by(write)?];
     let template = write(&mut bytes)?;
-    let key = sigv4::signing_key::<Sha256RustCrypto>(&template, &bytes, credentials, now)?;
-    let stamp = sigv4::stamp(&key, &template, &bytes, now)?;
+    let scope = bucket.scope();
+    let key = sigv4::signing_key::<Sha256RustCrypto>(&scope, credentials, now)?;
+    let stamp = sigv4::stamp(&key, &scope, now);
     *buf = vec![0; CapacityError::required_by(|out| encode(&template, &bytes, out))?];
     let unsigned = encode(&template, &bytes, buf)?;
     // The crate writes a body of its own with a placeholder for its

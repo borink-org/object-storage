@@ -84,9 +84,6 @@ pub struct Template {
     pub(super) operation: Operation,
     pub(super) method: Method,
     pub(super) service: Service,
-    // The scope of a signature after its date:
-    // `/<region>/<service>/aws4_request`.
-    pub(super) scope: Span,
     pub(super) detail: Detail,
     // Where the template holds the key of its object, for a template of
     // one object.
@@ -943,7 +940,6 @@ pub(super) fn prepare_template<const Q: usize>(
     };
     let mut b = Builder::new(buf);
     layout(&mut b, describe, Some(&fixed), object.is_some());
-    let scope = b.stash(|out| write_scope(out, bucket));
     let object = object.map(|key| b.stash(|out| out.push(key.as_bytes())));
     let table = b.finish()?;
     Ok(Template {
@@ -951,7 +947,6 @@ pub(super) fn prepare_template<const Q: usize>(
         operation: describe.operation,
         method: describe.method,
         service: bucket.service,
-        scope,
         detail: describe.detail,
         object,
     })
@@ -1127,8 +1122,64 @@ impl Template {
     }
 }
 
+// The most bytes of a credential scope after the date:
+// `/<region>/s3express/aws4_request`.
+const MAX_SCOPE_LEN: usize = 1 + MAX_REGION_LEN + 1 + 9 + 13;
+
+/// The signing scope of a bucket, without the date: its region and its
+/// service.
+///
+/// [`Bucket::scope`] returns one. It holds no borrow, so you can keep it
+/// beside the day's signing key. Pass it to [`signing_key`] and
+/// [`string_to_sign_prefix`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scope {
+    // `/<region>/<service>/aws4_request`, ASCII.
+    bytes: [u8; MAX_SCOPE_LEN],
+    len: u8,
+    region_len: u8,
+    service: Service,
+}
+
+impl Scope {
+    pub(super) fn of(bucket: &Bucket<'_>) -> Self {
+        let mut bytes = [0u8; MAX_SCOPE_LEN];
+        let mut out = Writer::new(&mut bytes);
+        write_scope(&mut out, bucket);
+        let len = out.position() as u8;
+        Self {
+            bytes,
+            len,
+            region_len: bucket.region.len() as u8,
+            service: bucket.service,
+        }
+    }
+
+    /// Returns the service that answers requests under this scope.
+    pub const fn service(&self) -> Service {
+        self.service
+    }
+
+    /// Returns the region that requests under this scope are signed for.
+    pub fn region(&self) -> &str {
+        // `Bucket::create` checks that the region is ASCII.
+        core::str::from_utf8(&self.bytes[1..1 + usize::from(self.region_len)]).unwrap_or_default()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    const fn signing_service(&self) -> &'static str {
+        match self.service {
+            Service::AwsDirectory => "s3express",
+            Service::Aws | Service::Compatible => "s3",
+        }
+    }
+}
+
 /// The most bytes [`string_to_sign_prefix`] writes.
-pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + 1 + MAX_REGION_LEN + 23 + 1;
+pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + MAX_SCOPE_LEN + 1;
 
 /// Writes what the string to sign of every request at `now` starts with,
 /// and returns it.
@@ -1138,15 +1189,10 @@ pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + 1 + MAX_REGION_LE
 /// `auto`, it is 64 bytes: one block of SHA-256, which an HMAC can absorb
 /// once for every request signed at that instant.
 pub fn string_to_sign_prefix<'o>(
-    template: &Template,
-    bytes: &[u8],
+    scope: &Scope,
     now: &Timestamps,
     out: &'o mut [u8; STRING_TO_SIGN_PREFIX_LEN],
-) -> Result<&'o [u8]> {
-    let scope = template.scope;
-    let scope = bytes
-        .get(scope.start..scope.start + scope.len)
-        .ok_or(InvalidRequest::Template)?;
+) -> &'o [u8] {
     let mut at = 0;
     for piece in [
         ALGORITHM.as_bytes(),
@@ -1154,16 +1200,14 @@ pub fn string_to_sign_prefix<'o>(
         now.iso8601_bytes(),
         b"\n",
         now.date(),
-        scope,
+        scope.as_bytes(),
         b"\n",
     ] {
         let end = at + piece.len();
-        out.get_mut(at..end)
-            .ok_or(InvalidRequest::Template)?
-            .copy_from_slice(piece);
+        out[at..end].copy_from_slice(piece);
         at = end;
     }
-    Ok(&out[..at])
+    &out[..at]
 }
 
 /// Writes the signature into a request and returns where the request is.
@@ -1186,20 +1230,13 @@ pub fn set_signature(unsigned: &Unsigned, buf: &mut [u8], mac: &[u8; 32]) -> Wir
 /// # Errors
 ///
 /// Returns [`Error::InvalidCredentials`] if the secret of `credentials` is
-/// longer than [`MAX_SECRET_LEN`] bytes, and [`InvalidRequest::Template`] if
-/// `bytes` are not the template's.
+/// longer than [`MAX_SECRET_LEN`] bytes.
 pub fn signing_key(
-    template: &Template,
-    bytes: &[u8],
+    scope: &Scope,
     credentials: &Credentials<'_>,
     now: &Timestamps,
     mut hmac: impl FnMut(&[u8], &[u8]) -> [u8; 32],
 ) -> Result<[u8; 32]> {
-    let scope = template.scope;
-    // The scope after its date and the `/` that follows it.
-    let scope = bytes
-        .get(scope.start + 1..scope.start + scope.len)
-        .ok_or(InvalidRequest::Template)?;
     let wipe = credentials.wipe();
     let secret = credentials.secret().as_bytes();
     if secret.len() > MAX_SECRET_LEN {
@@ -1211,7 +1248,11 @@ pub fn signing_key(
     seed[4..len].copy_from_slice(secret);
     let mut key = hmac(&seed[..len], now.date());
     wipe(&mut seed);
-    for part in scope.split(|&byte| byte == b'/') {
+    for part in [
+        scope.region().as_bytes(),
+        scope.signing_service().as_bytes(),
+        b"aws4_request",
+    ] {
         let mut next = hmac(&key, part);
         core::mem::swap(&mut key, &mut next);
         wipe(&mut next);

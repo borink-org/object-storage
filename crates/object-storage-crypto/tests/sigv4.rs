@@ -8,7 +8,7 @@
 
 use borink_object_storage_crypto::{Sha256, sigv4};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, PayloadSigning, Service, Template, Unsigned,
+    self, Addressing, Bucket, PayloadSigning, Scope, Service, Template, Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
@@ -35,6 +35,7 @@ type Encode<'e> =
     dyn Fn(&Template, &[u8], &mut [u8]) -> borink_object_storage_proto::Result<Unsigned> + 'e;
 
 fn signed(
+    scope: &Scope,
     credentials: &Credentials<'_>,
     now: &Timestamps,
     prepare: &Prepare<'_>,
@@ -50,6 +51,7 @@ fn signed(
         buf
     }
     fn one<S: Sha256>(
+        scope: &Scope,
         credentials: &Credentials<'_>,
         now: &Timestamps,
         prepare: &Prepare<'_>,
@@ -57,8 +59,8 @@ fn signed(
     ) -> Signed {
         let bytes = exact(prepare);
         let template = prepare(&mut bytes.clone()).unwrap();
-        let key = sigv4::signing_key::<S>(&template, &bytes, credentials, now).unwrap();
-        let stamp = sigv4::stamp(&key, &template, &bytes, now).unwrap();
+        let key = sigv4::signing_key::<S>(scope, credentials, now).unwrap();
+        let stamp = sigv4::stamp(&key, scope, now);
         let mut buf = exact(|buf| encode(&template, &bytes, buf));
         let unsigned = encode(&template, &bytes, &mut buf).unwrap();
         let request = sigv4::sign(&stamp, &unsigned, &mut buf);
@@ -75,9 +77,21 @@ fn signed(
     }
     Vec::from([
         #[cfg(feature = "sha256-rustcrypto")]
-        one::<borink_object_storage_crypto::Sha256RustCrypto>(credentials, now, prepare, encode),
+        one::<borink_object_storage_crypto::Sha256RustCrypto>(
+            scope,
+            credentials,
+            now,
+            prepare,
+            encode,
+        ),
         #[cfg(feature = "sha256-minimal")]
-        one::<borink_object_storage_crypto::Sha256Minimal>(credentials, now, prepare, encode),
+        one::<borink_object_storage_crypto::Sha256Minimal>(
+            scope,
+            credentials,
+            now,
+            prepare,
+            encode,
+        ),
     ])
 }
 
@@ -89,6 +103,7 @@ fn signed_get(
     now: &Timestamps,
 ) -> Vec<Signed> {
     signed(
+        &bucket.scope(),
         credentials,
         now,
         &|buf| s3::prepare_get(bucket, credentials, options, buf),
@@ -196,8 +211,9 @@ fn a_batch_is_signed_as_each_request_is() {
     let options = GetOptions::new().ranged();
     let mut bytes = vec![0; 1024];
     let template = s3::prepare_get(&bucket, &credentials, &options, &mut bytes).unwrap();
-    let key = sigv4::signing_key::<S>(&template, &bytes, &credentials, &now).unwrap();
-    let stamp = sigv4::stamp(&key, &template, &bytes, &now).unwrap();
+    let scope = bucket.scope();
+    let key = sigv4::signing_key::<S>(&scope, &credentials, &now).unwrap();
+    let stamp = sigv4::stamp(&key, &scope, &now);
     let keys = ["a", "dir/b c", "é/+"];
     let mut bufs = vec![vec![0u8; 1024]; keys.len()];
     let unsigned: Vec<_> = keys
@@ -271,6 +287,7 @@ fn signs_a_virtual_hosted_conditional_removal() {
     ]);
     let credentials = credentials();
     for (url, headers, _) in signed(
+        &bucket.scope(),
         &credentials,
         &now,
         &|buf| s3::prepare_delete(&bucket, &credentials, &options, buf),
@@ -343,6 +360,7 @@ fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
         ("content-length", "21"),
     ]);
     for (url, headers, _) in signed(
+        &bucket.scope(),
         &credentials,
         &now,
         &|buf| s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Signed, buf),
@@ -382,6 +400,7 @@ fn signs_a_streamed_write_without_its_content() {
     ]);
     let credentials = credentials();
     for (_, headers, _) in signed(
+        &bucket.scope(),
         &credentials,
         &now,
         &|buf| {
@@ -417,6 +436,7 @@ fn an_md5_is_sent_beside_the_signature() {
     };
     let credentials = credentials();
     for (_, headers, _) in signed(
+        &bucket.scope(),
         &credentials,
         &now,
         &|buf| {

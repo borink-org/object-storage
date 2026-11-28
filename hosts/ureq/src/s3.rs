@@ -5,7 +5,7 @@
 //! `borink-object-storage-crypto`, as the `s3_get` example does.
 
 use borink_object_storage_crypto::{Sha256RustCrypto, sigv4};
-use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Template};
+use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Scope, Template};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ContentLength, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
@@ -28,6 +28,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// derives the signing key once a day, and sends with one `ureq` agent,
 /// which keeps its connections.
 pub struct Objects<'a> {
+    scope: Scope,
     credentials: Credentials<'a>,
     // The day's signing key, with the day it signs on, counted in days
     // since the Unix epoch.
@@ -64,6 +65,7 @@ impl<'a> Objects<'a> {
                 s3::prepare_delete(bucket, &credentials, &DeleteOptions::new(), buf)
             })?,
             list: Prepared::new(|buf| s3::prepare_list(bucket, &credentials, list, buf))?,
+            scope: bucket.scope(),
             credentials,
             signing_key: None,
             buf: Vec::new(),
@@ -73,24 +75,22 @@ impl<'a> Objects<'a> {
 
     // The stamp for signing at `now`, `unix` seconds after the epoch, from
     // the day's signing key, which this derives on the first request of each
-    // day. Every template of the bucket has the same scope, so the get
-    // template serves them all.
+    // day.
     fn stamp(
         &mut self,
         unix: u64,
         now: &Timestamps,
     ) -> Result<sigv4::Stamp<Sha256RustCrypto>, Error> {
         let day = unix / SECONDS_PER_DAY;
-        let Prepared { template, bytes } = &self.get;
         let key = match self.signing_key {
             Some((signs_on, key)) if signs_on == day => key,
             _ => {
-                let key = sigv4::signing_key(template, bytes, &self.credentials, now)?;
+                let key = sigv4::signing_key(&self.scope, &self.credentials, now)?;
                 self.signing_key = Some((day, key));
                 key
             }
         };
-        sigv4::stamp(&key, template, bytes, now)
+        Ok(sigv4::stamp(&key, &self.scope, now))
     }
 
     /// Gets the object `key`, and returns its bytes.
@@ -260,10 +260,8 @@ mod tests {
     // The signature that a stamp freshly derived at `unix` gives a request.
     fn fresh_signature(objects: &Objects<'_>, unix: u64) -> [u8; 32] {
         let now = Timestamps::from_unix(unix);
-        let Prepared { template, bytes } = &objects.get;
-        let key = sigv4::signing_key(template, bytes, &objects.credentials, &now).unwrap();
-        let stamp: sigv4::Stamp<Sha256RustCrypto> =
-            sigv4::stamp(&key, template, bytes, &now).unwrap();
+        let key = sigv4::signing_key(&objects.scope, &objects.credentials, &now).unwrap();
+        let stamp: sigv4::Stamp<Sha256RustCrypto> = sigv4::stamp(&key, &objects.scope, &now);
         stamp.sign(&[7; 32])
     }
 
@@ -287,9 +285,8 @@ mod tests {
 
         // A key of another secret, kept for today, signs the rest of today.
         let other = Credentials::new("AKIAIOSFODNN7EXAMPLE", "other", wipe).unwrap();
-        let Prepared { template, bytes } = &objects.get;
         let now = Timestamps::from_unix(morning);
-        let planted = sigv4::signing_key(template, bytes, &other, &now).unwrap();
+        let planted = sigv4::signing_key(&objects.scope, &other, &now).unwrap();
         objects.signing_key = Some((day, planted));
         let later = morning + 10_000;
         let stamp = objects.stamp(later, &Timestamps::from_unix(later)).unwrap();

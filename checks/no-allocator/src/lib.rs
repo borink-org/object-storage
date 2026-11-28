@@ -98,12 +98,11 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
     let Ok(template) = s3::prepare_get(bucket, credentials, &options, &mut bytes) else {
         return 15;
     };
-    let Ok(key) = sigv4::signing_key::<S>(&template, &bytes, credentials, now) else {
+    let scope = bucket.scope();
+    let Ok(key) = sigv4::signing_key::<S>(&scope, credentials, now) else {
         return 16;
     };
-    let Ok(stamp) = sigv4::stamp(&key, &template, &bytes, now) else {
-        return 17;
-    };
+    let stamp = sigv4::stamp(&key, &scope, now);
     let mut buf = [0; 1024];
     let Ok(unsigned) = s3::encode_get(&template, &bytes, &GetItem::new("object"), now, &mut buf)
     else {

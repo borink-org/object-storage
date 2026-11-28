@@ -381,8 +381,8 @@ pub use tags::{
     prepare_get_tagging, prepare_put_tagging,
 };
 pub use template::{
-    Operation, STRING_TO_SIGN_PREFIX_LEN, Template, Unsigned, set_body_checksum, set_body_hash,
-    set_signature, signing_key, string_to_sign_prefix,
+    Operation, STRING_TO_SIGN_PREFIX_LEN, Scope, Template, Unsigned, set_body_checksum,
+    set_body_hash, set_signature, signing_key, string_to_sign_prefix,
 };
 
 // What `x-amz-content-sha256` carries for content that is not signed.
@@ -701,8 +701,16 @@ impl<'a> Bucket<'a> {
         self.region
     }
 
+    /// Returns the signing scope of this bucket.
+    ///
+    /// The scope holds no borrow, so you can keep it beside the day's signing
+    /// key and pass it to [`signing_key`] and [`string_to_sign_prefix`].
+    pub fn scope(&self) -> Scope {
+        Scope::of(self)
+    }
+
     // The service name that requests to this bucket are signed for.
-    fn signing_service(&self) -> &'static str {
+    pub(super) const fn signing_service(&self) -> &'static str {
         match self.service {
             Service::AwsDirectory => "s3express",
             Service::Aws | Service::Compatible => "s3",

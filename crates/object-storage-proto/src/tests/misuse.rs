@@ -194,16 +194,7 @@ fn s3(
         name,
         bytes,
         check: Box::new(move |bytes| template.check(bytes).is_ok()),
-        encode: Box::new(move |bytes, buf| {
-            // The signing key and the string to sign read the template's
-            // bytes too.
-            let credentials =
-                Credentials::new("AKIDEXAMPLE", "secret/key", wipe_best_effort).unwrap();
-            let _ = s3::signing_key(&template, bytes, &credentials, &now(), |_, _| [1; 32]);
-            let mut prefix = [0; s3::STRING_TO_SIGN_PREFIX_LEN];
-            let _ = s3::string_to_sign_prefix(&template, bytes, &now(), &mut prefix);
-            encode(&template, bytes, key, buf)
-        }),
+        encode: Box::new(move |bytes, buf| encode(&template, bytes, key, buf)),
         azure: None,
     }
 }
