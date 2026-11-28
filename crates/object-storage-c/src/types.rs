@@ -482,42 +482,6 @@ impl Default for Timestamps {
     }
 }
 
-/// The length of a stored template, in bytes.
-pub const TEMPLATE_LEN: usize = 80;
-
-/// A template that a `borink_prepare_*` call wrote: the values that read the
-/// bytes it wrote into your buffer.
-///
-/// Those bytes are the part of every request of one operation that is the
-/// same for each object. The template holds no pointer. Keep it beside the bytes it was written into, and
-/// pass both to each `borink_encode_*` call of its operation. You may copy
-/// it, and store it with those bytes, such as in flash, to write requests
-/// again without preparing again. It ends in a hash of the rest. A template
-/// that was changed since it was written is refused with `InvalidRequest`, and
-/// so is one that another version of the library wrote.
-///
-/// # Bytes
-///
-/// Encoding trusts that the bytes passed with a template are its own, and
-/// checks nothing of them that would cost each request time. Bytes that are
-/// not write a wrong request or are refused, but never make a call read
-/// outside them. Where bytes could be another template's, such as bytes read
-/// back from storage, check them once with `borink_template_check`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Template {
-    /// The template, as this library stores it.
-    pub stored: [u8; TEMPLATE_LEN],
-}
-
-impl Default for Template {
-    fn default() -> Self {
-        Self {
-            stored: [0; TEMPLATE_LEN],
-        }
-    }
-}
-
 /// What a `borink_prepare_*` call wrote.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -531,8 +495,6 @@ pub struct Prepared {
     ///
     /// Those are its bytes: pass them to each request of the template.
     pub required: usize,
-    /// The template, when `status.code` is 0.
-    pub template: Template,
 }
 
 /// What a request's precondition compares against.

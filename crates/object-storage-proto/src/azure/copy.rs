@@ -15,7 +15,7 @@ use crate::Error;
 use crate::azure::blocks::validate_block_id;
 use crate::azure::tags::accept_update_head;
 use crate::azure::template::{
-    CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Holes, Operation, Template,
+    CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Header, Holes, Operation, Template,
     encode_template, prepare_template,
 };
 use crate::azure::{
@@ -23,7 +23,6 @@ use crate::azure::{
     names_failed_condition, push_stored_fields, read_failure_head, utf8_properties, validate_key,
     validate_metadata,
 };
-use crate::head::read_text_header;
 use crate::http::{PlainHttp, valid_http_origin};
 use crate::outcome::finish_with_body;
 use crate::request::condition_header_name;
@@ -35,9 +34,8 @@ use crate::validate::{
 };
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, DeleteKind, Failure,
-    InvalidRequest, MetadataPair, Method, ObjectMeta, Payload, PutHeadOutcome, Ranging,
-    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps,
-    UpdateHeadOutcome, WriteOptions,
+    InvalidRequest, MetadataPair, Method, PutHeadOutcome, Ranging, ResponseFault, ResponseHead,
+    Result, RevisionKind, ServiceErrorKind, Timestamps, UpdateHeadOutcome, WriteOptions,
 };
 
 // Whether a copy carried a condition on the target or on the source.
@@ -159,7 +157,7 @@ fn prepare_copy_kind(
     options: &CopyOptions<'_>,
     kind: CopyKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_copy_options(options, kind, namespace)?;
     let mut fields = FieldList::new();
     match kind {
@@ -205,7 +203,7 @@ fn prepare_copy_kind(
         kind.operation(),
         detail,
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -262,28 +260,28 @@ fn describe_copy<'p>(
 // Writes the copy `item` of `operation`, to the block `block_id` when it
 // stages one.
 fn encode_copy_kind(
-    template: &Template,
-    bytes: &[u8],
+    template: &[u8],
     kind: CopyKind,
     item: &CopyItem<'_>,
     block_id: Option<&str>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
+    let header = Header::load(template)?;
     let detail @ Detail::Copy {
         condition,
         source_revision,
         source_condition,
         source_ranging,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    if template.operation != kind.operation() {
+    if header.operation != kind.operation() {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
-    validate_key(item.source_key, template.namespace)?;
+    let key = header.request_key(template, item.key)?;
+    validate_key(item.source_key, header.namespace)?;
     if let Some(id) = block_id {
         validate_block_id(id)?;
     }
@@ -303,10 +301,10 @@ fn encode_copy_kind(
         ..HoleValues::default()
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_copy(kind, detail, None),
     )
@@ -334,7 +332,7 @@ pub fn prepare_copy(
     namespace: AzureNamespace,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(container, token, namespace, options, CopyKind::Copy, buf)
 }
 
@@ -351,7 +349,7 @@ pub fn prepare_copy_from_url(
     namespace: AzureNamespace,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(
         container,
         token,
@@ -375,7 +373,7 @@ pub fn prepare_put_from_url(
     namespace: AzureNamespace,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(
         container,
         token,
@@ -400,7 +398,7 @@ pub fn prepare_stage_block_from_url(
     namespace: AzureNamespace,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(
         container,
         token,
@@ -425,12 +423,12 @@ pub fn prepare_stage_block_from_url(
 /// needs.
 pub fn encode_copy(
     template: &Template,
-    bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_copy_kind(template, bytes, CopyKind::Copy, item, None, now, buf)
+    let template = template.as_bytes();
+    encode_copy_kind(template, CopyKind::Copy, item, None, now, buf)
 }
 
 /// Writes the Copy Blob From URL `item` at `now` from `template` into
@@ -441,12 +439,12 @@ pub fn encode_copy(
 /// As [`encode_copy`].
 pub fn encode_copy_from_url(
     template: &Template,
-    bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_copy_kind(template, bytes, CopyKind::CopyFromUrl, item, None, now, buf)
+    let template = template.as_bytes();
+    encode_copy_kind(template, CopyKind::CopyFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Blob From URL `item` at `now` from `template` into
@@ -457,12 +455,12 @@ pub fn encode_copy_from_url(
 /// As [`encode_copy`].
 pub fn encode_put_from_url(
     template: &Template,
-    bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_copy_kind(template, bytes, CopyKind::PutFromUrl, item, None, now, buf)
+    let template = template.as_bytes();
+    encode_copy_kind(template, CopyKind::PutFromUrl, item, None, now, buf)
 }
 
 /// Writes the Put Block From URL `item` at `now` from `template` into
@@ -478,14 +476,13 @@ pub fn encode_put_from_url(
 /// suffix or an offset.
 pub fn encode_stage_block_from_url(
     template: &Template,
-    bytes: &[u8],
     item: &StageBlockFromUrlItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
+    let template = template.as_bytes();
     encode_copy_kind(
         template,
-        bytes,
         CopyKind::StageBlock,
         &item.copy,
         Some(item.id),
@@ -508,13 +505,16 @@ pub fn accept_copy_head<'h>(
 ) -> Result<CopyHeadOutcome<'h>> {
     match head.status {
         202 => {
-            let meta = ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            };
+            let meta = head.write_meta()?;
             match head.copy_status.map(<[u8]>::trim_ascii) {
-                Some(b"success") => Ok(CopyHeadOutcome::Copied { meta }),
-                Some(b"pending") if head.copy_id.is_some() => Ok(CopyHeadOutcome::Pending { meta }),
+                Some(b"success") => Ok(CopyHeadOutcome::Copied {
+                    meta,
+                    copy_id: head.copy_id,
+                }),
+                Some(b"pending") => match head.copy_id {
+                    Some(copy_id) => Ok(CopyHeadOutcome::Pending { meta, copy_id }),
+                    None => Err(ResponseFault::Head.into()),
+                },
                 _ => Err(ResponseFault::Head.into()),
             }
         }
@@ -559,10 +559,7 @@ pub fn accept_put_from_url_head<'h>(
 ) -> Result<PutHeadOutcome<'h>> {
     match head.status {
         201 => Ok(PutHeadOutcome::Created {
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if carries_condition(shape)
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -604,7 +601,7 @@ pub fn prepare_abort_copy(
     token: &str,
     namespace: AzureNamespace,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let fields = [
         Field::new("x-ms-copy-action", FieldValue::Bytes(b"abort")),
         Field::new("content-length", FieldValue::Bytes(b"0")),
@@ -621,7 +618,7 @@ pub fn prepare_abort_copy(
             delete: DeleteKind::Object,
         },
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -655,15 +652,16 @@ fn describe_abort_copy<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 /// needs.
 pub fn encode_abort_copy(
     template: &Template,
-    bytes: &[u8],
     item: &AbortCopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    if template.operation != Operation::AbortCopy {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    if header.operation != Operation::AbortCopy {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     if item.copy_id.is_empty() {
         return Err(InvalidRequest::Option.into());
     }
@@ -674,10 +672,10 @@ pub fn encode_abort_copy(
         ..HoleValues::default()
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_abort_copy(&[]),
     )

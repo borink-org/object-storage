@@ -293,29 +293,29 @@ pub unsafe extern "C" fn borink_prepare_list(
     )
 }
 
-/// Checks that `bytes` are the bytes that `template` was written into.
+/// Checks that `template` holds an intact Azure template from this version of
+/// the library.
 ///
-/// Encoding trusts that they are, and checks nothing of them per request.
-/// Check bytes once where they could be another template's, such as bytes
-/// read back from storage. A `code` of 0 means that they are the template's
-/// own, and `InvalidRequest` with `Template` that they are not.
+/// Encoding reads the template header without hashing the whole buffer. Check
+/// bytes once where they come from storage or another untrusted source. A
+/// `code` of 0 means the template is intact, and `InvalidRequest` with
+/// `Template` that it is not.
 ///
 /// # Safety
 ///
-/// `template` must be null or point at one readable value. `bytes` must
-/// address its stated length.
+/// `template` must address its stated length.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn borink_template_check(template: *const Template, bytes: Bytes) -> Status {
+pub unsafe extern "C" fn borink_template_check(template: Bytes) -> Status {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes) = unsafe { (template.as_ref(), ptr::slice(bytes)) };
-    step::stored_template(template)
-        .and_then(|template| template.check(bytes))
+    let template = unsafe { ptr::slice(template) };
+    azure::Template::from_bytes(template)
+        .check()
         .map_or_else(|error| status_of(&error), |()| Status::default())
 }
 
 /// Writes the read `item` at `now` from `template` into `buf`.
 ///
-/// `bytes` are the template's own, as `borink_prepare_get` wrote them. Pass
+/// `template` holds the bytes that `borink_prepare_get` wrote. Pass
 /// an empty `buf` to learn the size that the request needs.
 ///
 /// A key that Azure refuses, a range that the template does not take and a
@@ -324,24 +324,22 @@ pub unsafe extern "C" fn borink_template_check(template: *const Template, bytes:
 ///
 /// # Safety
 ///
-/// `template`, `item` and `now` must each be null or point at one readable
-/// value, and each value of `item` must address its stated length. `bytes` must
+/// `item` and `now` must each be null or point at one readable
+/// value, and each value of `item` must address its stated length. `template` must
 /// address its stated length. `buf` must address its stated length and be
-/// reached through nothing else during the call: not through `bytes`, nor
+/// reached through nothing else during the call: not through `template`, nor
 /// through a value of `item`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_get(
-    template: *const Template,
-    bytes: Bytes,
+    template: Bytes,
     item: *const GetItem,
     now: *const Timestamps,
     buf: BytesMut,
 ) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes, item, now, buf) = unsafe {
+    let (template, item, now, buf) = unsafe {
         (
-            template.as_ref(),
-            ptr::slice(bytes),
+            ptr::slice(template),
             item.as_ref().map(|item| {
                 (
                     item,
@@ -354,11 +352,16 @@ pub unsafe extern "C" fn borink_encode_get(
             ptr::slice_mut(buf),
         )
     };
-    written_request(step::stored_template(template).and_then(|template| {
+    written_request((|| {
         let (item, key, e_tag, revision) = item.ok_or(UNKNOWN)?;
         let item = inputs::get_item(item, key, e_tag, revision)?;
-        azure::encode_get(&template, bytes, &item, &step::timestamps(now)?, buf)
-    }))
+        azure::encode_get(
+            azure::Template::from_bytes(template),
+            &item,
+            &step::timestamps(now)?,
+            buf,
+        )
+    })())
 }
 
 /// Writes the whole-object write `item` at `now` from `template`
@@ -374,17 +377,15 @@ pub unsafe extern "C" fn borink_encode_get(
 /// As `borink_encode_get`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_put(
-    template: *const Template,
-    bytes: Bytes,
+    template: Bytes,
     item: *const PutItem,
     now: *const Timestamps,
     buf: BytesMut,
 ) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes, item, now, buf) = unsafe {
+    let (template, item, now, buf) = unsafe {
         (
-            template.as_ref(),
-            ptr::slice(bytes),
+            ptr::slice(template),
             item.as_ref().map(|item| {
                 (
                     item,
@@ -397,11 +398,16 @@ pub unsafe extern "C" fn borink_encode_put(
             ptr::slice_mut(buf),
         )
     };
-    written_request(step::stored_template(template).and_then(|template| {
+    written_request((|| {
         let (item, key, e_tag, checksum) = item.ok_or(UNKNOWN)?;
         let item = inputs::put_item(item, key, e_tag, checksum)?;
-        azure::encode_put(&template, bytes, &item, &step::timestamps(now)?, buf)
-    }))
+        azure::encode_put(
+            azure::Template::from_bytes(template),
+            &item,
+            &step::timestamps(now)?,
+            buf,
+        )
+    })())
 }
 
 /// Writes the Put Block `item` at `now` from `template` into `buf`.
@@ -414,17 +420,15 @@ pub unsafe extern "C" fn borink_encode_put(
 /// As `borink_encode_get`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_stage_block(
-    template: *const Template,
-    bytes: Bytes,
+    template: Bytes,
     item: *const StageBlockItem,
     now: *const Timestamps,
     buf: BytesMut,
 ) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes, item, now, buf) = unsafe {
+    let (template, item, now, buf) = unsafe {
         (
-            template.as_ref(),
-            ptr::slice(bytes),
+            ptr::slice(template),
             item.as_ref().map(|item| {
                 (
                     item,
@@ -437,11 +441,16 @@ pub unsafe extern "C" fn borink_encode_stage_block(
             ptr::slice_mut(buf),
         )
     };
-    written_request(step::stored_template(template).and_then(|template| {
+    written_request((|| {
         let (item, key, id, checksum) = item.ok_or(UNKNOWN)?;
         let item = inputs::stage_item(item, key, id, checksum)?;
-        azure::encode_stage_block(&template, bytes, &item, &step::timestamps(now)?, buf)
-    }))
+        azure::encode_stage_block(
+            azure::Template::from_bytes(template),
+            &item,
+            &step::timestamps(now)?,
+            buf,
+        )
+    })())
 }
 
 /// Writes the Put Block List `item` at `now` from `template` into
@@ -457,17 +466,15 @@ pub unsafe extern "C" fn borink_encode_stage_block(
 /// length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_commit_blocks(
-    template: *const Template,
-    bytes: Bytes,
+    template: Bytes,
     item: *const CommitItem,
     now: *const Timestamps,
     buf: BytesMut,
 ) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes, item, now, buf) = unsafe {
+    let (template, item, now, buf) = unsafe {
         (
-            template.as_ref(),
-            ptr::slice(bytes),
+            ptr::slice(template),
             item.as_ref().map(|item| {
                 (
                     item,
@@ -481,11 +488,16 @@ pub unsafe extern "C" fn borink_encode_commit_blocks(
             ptr::slice_mut(buf),
         )
     };
-    written_request(step::stored_template(template).and_then(|template| {
+    written_request((|| {
         let (item, key, e_tag, content_md5, blocks) = item.ok_or(UNKNOWN)?;
         let item = inputs::commit_item(item, key, e_tag, content_md5, blocks)?;
-        azure::encode_commit_blocks(&template, bytes, &item, &step::timestamps(now)?, buf)
-    }))
+        azure::encode_commit_blocks(
+            azure::Template::from_bytes(template),
+            &item,
+            &step::timestamps(now)?,
+            buf,
+        )
+    })())
 }
 
 /// Writes the page `item` of a listing at `now` from `template`
@@ -500,28 +512,31 @@ pub unsafe extern "C" fn borink_encode_commit_blocks(
 /// As `borink_encode_get`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn borink_encode_list(
-    template: *const Template,
-    bytes: Bytes,
+    template: Bytes,
     item: *const ListItem,
     now: *const Timestamps,
     buf: BytesMut,
 ) -> WireRequest {
     // SAFETY: the caller states the contract of this function.
-    let (template, bytes, item, now, buf) = unsafe {
+    let (template, item, now, buf) = unsafe {
         (
-            template.as_ref(),
-            ptr::slice(bytes),
+            ptr::slice(template),
             item.as_ref()
                 .map(|item| (ptr::slice(item.prefix), ptr::slice(item.marker))),
             now.as_ref(),
             ptr::slice_mut(buf),
         )
     };
-    written_request(step::stored_template(template).and_then(|template| {
+    written_request((|| {
         let (prefix, marker) = item.ok_or(UNKNOWN)?;
         let item = inputs::list_item(prefix, marker)?;
-        azure::encode_list(&template, bytes, &item, &step::timestamps(now)?, buf)
-    }))
+        azure::encode_list(
+            azure::Template::from_bytes(template),
+            &item,
+            &step::timestamps(now)?,
+            buf,
+        )
+    })())
 }
 
 /// Reads the next header field of a request, and steps `fields` past it.

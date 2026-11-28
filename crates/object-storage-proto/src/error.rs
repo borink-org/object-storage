@@ -34,7 +34,7 @@ impl CapacityError {
     ///
     /// `write` is one call that writes a template or a request into the
     /// buffer it is passed, such as
-    /// `|buf| azure::encode_get(&template, &bytes, &item, &now, buf).map(drop)`.
+    /// `|buf| azure::encode_get(&template, &item, &now, buf).map(drop)`.
     /// Returns 0 if it writes nothing.
     ///
     /// # Errors

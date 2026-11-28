@@ -10,9 +10,8 @@
 //! A read has three steps.
 //!
 //! 1. Describe what every read shares as [`GetOptions`], and call
-//!    [`azure::prepare_get`] to write a [`azure::Template`] into a buffer
-//!    that you own. Keep the template and its bytes for as many reads as you
-//!    like.
+//!    [`azure::prepare_get`] to write the template into a buffer that you own.
+//!    Keep that byte slice for as many reads as you like.
 //! 2. Describe each read as a [`GetItem`], and call [`azure::encode_get`]
 //!    to write the request into a second buffer. It returns a
 //!    [`WireRequest`]: where each part of the request is in that buffer, by
@@ -27,9 +26,8 @@
 //! A write has the same three steps, with [`PutOptions`], [`PutItem`],
 //! [`azure::prepare_put`], [`azure::encode_put`] and
 //! [`azure::accept_put_head`]. The content stays where you put it: the
-//! request states its length in the head, and leaves the bytes to you.
-//! Describe the content with a [`Payload`], which names a length whether or
-//! not you hold the bytes, so a write can stream from a file or a socket.
+//! request states its length in the head, and you send the bytes from
+//! memory, a file or a socket.
 //!
 //! A removal has the same three steps too, with [`DeleteOptions`],
 //! [`ObjectItem`], [`azure::prepare_delete`], [`azure::encode_delete`] and
@@ -52,7 +50,7 @@
 //!
 //! A request whose body this crate writes, such as a list of blocks or a
 //! set of tags, holds the body after its head in the buffer, and
-//! [`WireRequest::payload`] lends it as the content. On S3 the request
+//! [`WireRequest::body`] lends it. On S3 the request
 //! signs the body's SHA-256, which
 //! `borink_object_storage_crypto::sigv4::sign` computes. It also signs a
 //! checksum of the body that the template asks for, which you compute over
@@ -67,8 +65,8 @@
 //! ```
 //! use borink_object_storage_proto::azure::{self, AzureNamespace, Container};
 //! use borink_object_storage_proto::{
-//!     GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem, ListOptions,
-//!     Method, Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
+//!     ContentLength, GetHeadOutcome, GetItem, GetOptions, ListEntry, ListHeadOutcome, ListItem,
+//!     ListOptions, Method, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,14 +76,15 @@
 //!
 //! // 1. Write the template of every read once.
 //! let options = GetOptions::new();
-//! let mut template = vec![0; 512];
-//! let reads =
-//!     azure::prepare_get(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
+//! let mut template_buf = vec![0; 512];
+//! let len =
+//!     azure::prepare_get(&container, token, AzureNamespace::Unknown, &options, &mut template_buf)?;
+//! let template = azure::Template::from_bytes(&template_buf[..len]);
 //!
 //! // 2. Write each read into your own buffer, then send it.
 //! let get = GetItem::new("directory/object.txt");
 //! let mut buffer = vec![0; 1024];
-//! let request = azure::encode_get(&reads, &template, &get, &now, &mut buffer)?;
+//! let request = azure::encode_get(template, &get, &now, &mut buffer)?;
 //! assert_eq!(request.method(), Method::Get);
 //! for (name, value) in request.headers(&buffer) {
 //!     // your_client.header(name, value);
@@ -107,12 +106,13 @@
 //!     max_results: Some(2),
 //!     ..ListOptions::default()
 //! };
-//! let mut template = vec![0; 512];
-//! let pages =
-//!     azure::prepare_list(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
+//! let mut template_buf = vec![0; 512];
+//! let len =
+//!     azure::prepare_list(&container, token, AzureNamespace::Unknown, &options, &mut template_buf)?;
+//! let template = azure::Template::from_bytes(&template_buf[..len]);
 //! let mut buffer = vec![0; 1024];
 //! let request =
-//!     azure::encode_list(&pages, &template, &ListItem::new("directory/"), &now, &mut buffer)?;
+//!     azure::encode_list(template, &ListItem::new("directory/"), &now, &mut buffer)?;
 //! assert_eq!(
 //!     request.url(&buffer),
 //!     "https://account.blob.core.windows.net/objects\
@@ -139,15 +139,17 @@
 //!
 //! // A write follows the same three steps.
 //! let options = PutOptions::default();
-//! let mut template = vec![0; 512];
-//! let writes =
-//!     azure::prepare_put(&container, token, AzureNamespace::Unknown, &options, &mut template)?;
-//! let put = PutItem::new("directory/object.txt", Payload::Slice(b"contents"));
+//! let mut template_buf = vec![0; 512];
+//! let len =
+//!     azure::prepare_put(&container, token, AzureNamespace::Unknown, &options, &mut template_buf)?;
+//! let template = azure::Template::from_bytes(&template_buf[..len]);
+//! let put = PutItem::new("directory/object.txt", ContentLength(8));
 //! let mut buffer = vec![0; 1024];
-//! let request = azure::encode_put(&writes, &template, &put, &now, &mut buffer)?;
+//! let request = azure::encode_put(template, &put, &now, &mut buffer)?;
 //! assert_eq!(request.method(), Method::Put);
 //! // The request states the content's length, and you send the bytes.
-//! assert_eq!(request.payload(&buffer), Payload::Streamed { len: 8 });
+//! assert_eq!(request.content_length(), 8);
+//! assert_eq!(request.body(&buffer), None);
 //!
 //! let head = ResponseHead::from_headers(201, [("ETag", b"\"tag\"".as_slice())]);
 //! match azure::accept_put_head(put.shape(&options), head)? {
@@ -253,7 +255,9 @@
 //! retry can succeed. When to retry, and how often, is your decision.
 
 #![no_std]
-#![forbid(unsafe_code)]
+// Only `azure::Template::from_bytes` and `s3::Template::from_bytes` use unsafe
+// code, for the `#[repr(transparent)]` `&[u8]` -> `&Template` DST cast.
+#![deny(unsafe_code)]
 
 pub mod azure;
 pub mod checksum;
@@ -284,17 +288,17 @@ pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
     ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, RestoreHeadOutcome,
-    ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
+    ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome, WriteMeta,
 };
 pub use properties::decode_property;
 pub use request::{Method, Span};
 pub use template::WireRequest;
 pub use time::{Timestamps, http_date_ms, iso8601_ms};
 pub use types::{
-    ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentProperties, CopyItem,
-    CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget, EntryKind,
-    GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem, ListMarker,
-    ListOptions, Metadata, MetadataPair, ObjectItem, Payload, Properties, PutItem, PutOptions,
+    ChecksumValue, CommitShape, ConditionKind, ConditionValue, ContentLength, ContentProperties,
+    CopyItem, CopyOptions, CopyShape, DeleteKind, DeleteOptions, DeleteShape, DeleteTarget,
+    EntryKind, GetItem, GetKind, GetOptions, GetShape, ListEntry, ListInclude, ListItem,
+    ListMarker, ListOptions, Metadata, MetadataPair, ObjectItem, Properties, PutItem, PutOptions,
     PutShape, RangeForm, Ranging, RequestedRange, RestoreOptions, RestorePriority, Revision,
     RevisionKind, StageOptions, Tag, WriteOptions, quoted_etag,
 };

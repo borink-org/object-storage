@@ -64,14 +64,10 @@ pub struct Layout {
     pub sizeof_timestamps: usize,
     pub alignof_timestamps: usize,
     pub offsetof_timestamps_stored: usize,
-    pub sizeof_template: usize,
-    pub alignof_template: usize,
-    pub offsetof_template_stored: usize,
     pub sizeof_prepared: usize,
     pub alignof_prepared: usize,
     pub offsetof_prepared_status: usize,
     pub offsetof_prepared_required: usize,
-    pub offsetof_prepared_template: usize,
     pub sizeof_condition_value: usize,
     pub alignof_condition_value: usize,
     pub offsetof_condition_value_form: usize,
@@ -283,14 +279,10 @@ pub(crate) fn compiled_layout() -> Layout {
         sizeof_timestamps: size_of::<Timestamps>(),
         alignof_timestamps: align_of::<Timestamps>(),
         offsetof_timestamps_stored: offset_of!(Timestamps, stored),
-        sizeof_template: size_of::<Template>(),
-        alignof_template: align_of::<Template>(),
-        offsetof_template_stored: offset_of!(Template, stored),
         sizeof_prepared: size_of::<Prepared>(),
         alignof_prepared: align_of::<Prepared>(),
         offsetof_prepared_status: offset_of!(Prepared, status),
         offsetof_prepared_required: offset_of!(Prepared, required),
-        offsetof_prepared_template: offset_of!(Prepared, template),
         sizeof_condition_value: size_of::<ConditionValue>(),
         alignof_condition_value: align_of::<ConditionValue>(),
         offsetof_condition_value_form: offset_of!(ConditionValue, form),
@@ -657,7 +649,5 @@ const _: () = {
     assert!(ServiceError::Service as u16 == proto::ServiceErrorKind::Service as u16);
     assert!(ServiceError::InvalidUpload as u16 == proto::ServiceErrorKind::InvalidUpload as u16);
     assert!(ServiceError::NoSuchUpload as u16 == proto::ServiceErrorKind::NoSuchUpload as u16);
-    // A stored template is the protocol crate's, byte for byte.
-    assert!(TEMPLATE_LEN == proto::azure::Template::STORED_LEN);
     assert!(TIMESTAMPS_LEN == proto::Timestamps::STORED_LEN);
 };

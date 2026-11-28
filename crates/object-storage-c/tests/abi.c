@@ -79,14 +79,10 @@ static void the_two_compilers_agree_on_every_struct(void) {
         .sizeof_timestamps = sizeof(borink_timestamps),
         .alignof_timestamps = _Alignof(borink_timestamps),
         .offsetof_timestamps_stored = offsetof(borink_timestamps, stored),
-        .sizeof_template = sizeof(borink_template),
-        .alignof_template = _Alignof(borink_template),
-        .offsetof_template_stored = offsetof(borink_template, stored),
         .sizeof_prepared = sizeof(borink_prepared),
         .alignof_prepared = _Alignof(borink_prepared),
         .offsetof_prepared_status = offsetof(borink_prepared, status),
         .offsetof_prepared_required = offsetof(borink_prepared, required),
-        .offsetof_prepared_template = offsetof(borink_prepared, template_),
         .sizeof_condition_value = sizeof(borink_condition_value),
         .alignof_condition_value = _Alignof(borink_condition_value),
         .offsetof_condition_value_form = offsetof(borink_condition_value, form),
@@ -292,13 +288,12 @@ static void one_read_is_written_from_its_template(void) {
     CHECK(reads.status.code == 0);
     CHECK(reads.required > 0 && reads.required <= sizeof template_buffer);
     const borink_bytes template_bytes = {template_buffer, reads.required};
-    CHECK(borink_template_check(&reads.template_, template_bytes).code == 0);
+    CHECK(borink_template_check(template_bytes).code == 0);
 
     const borink_get_item item = {.key = as_bytes("object.bin"),
                                   .range = {BORINK_RANGE_FORM_BOUNDED, 2, 6}};
     uint8_t buffer[1024];
-    const borink_wire_request request = borink_encode_get(
-        &reads.template_, template_bytes, &item, &now, (borink_bytes_mut){buffer, sizeof buffer});
+    const borink_wire_request request = borink_encode_get(template_bytes, &item, &now, (borink_bytes_mut){buffer, sizeof buffer});
 
     CHECK(request.status.code == 0);
     CHECK(request.method == BORINK_METHOD_GET);
@@ -319,11 +314,12 @@ static void one_read_is_written_from_its_template(void) {
     CHECK(shape.range.form == BORINK_RANGE_FORM_BOUNDED);
 
     // The template is plain bytes, so a copy of it writes the same request.
-    borink_template copied;
-    memcpy(&copied, &reads.template_, sizeof copied);
+    uint8_t copied[512];
+    memcpy(copied, template_buffer, reads.required);
+    const borink_bytes copied_bytes = {copied, reads.required};
     uint8_t again[1024];
     const borink_wire_request same = borink_encode_get(
-        &copied, template_bytes, &item, &now, (borink_bytes_mut){again, sizeof again});
+        copied_bytes, &item, &now, (borink_bytes_mut){again, sizeof again});
     CHECK(same.required == request.required);
     CHECK(memcmp(again, buffer, request.required) == 0);
 }
@@ -347,8 +343,7 @@ static void a_buffer_that_is_too_small_reports_the_size_it_needs(void) {
     CHECK(reads.required == sized.required);
     const borink_get_item item = {.key = as_bytes("object.bin"),
                                   .range = {BORINK_RANGE_FORM_WHOLE, 0, 0}};
-    const borink_wire_request refused = borink_encode_get(
-        &reads.template_, (borink_bytes){template_buffer, reads.required}, &item, &now, no_room);
+    const borink_wire_request refused = borink_encode_get((borink_bytes){template_buffer, reads.required}, &item, &now, no_room);
     CHECK(refused.status.code == BORINK_ERROR_CODE_CAPACITY);
     CHECK(refused.required > 0);
 
@@ -400,12 +395,11 @@ static void an_unknown_number_is_refused(void) {
     CHECK(refused.required == 0);
 
     // A template that this library did not write is refused too.
-    const borink_template zeros = {{0}};
     const borink_get_item item = {.key = as_bytes("object.bin"),
                                   .range = {BORINK_RANGE_FORM_WHOLE, 0, 0}};
+    const uint8_t zeros[128] = {0};
     const borink_wire_request request = borink_encode_get(
-        &zeros, (borink_bytes){buffer, sizeof buffer}, &item, &now,
-        (borink_bytes_mut){buffer, 0});
+        (borink_bytes){zeros, sizeof zeros}, &item, &now, (borink_bytes_mut){buffer, 0});
     CHECK(request.status.code == BORINK_ERROR_CODE_INVALID_REQUEST);
 }
 
@@ -425,7 +419,7 @@ static void a_blob_is_written_in_blocks(void) {
     const borink_stage_block_item block = {
         .key = as_bytes("blob.bin"), .id = as_bytes(ids[0]), .content_len = 4096};
     const borink_wire_request staged =
-        borink_encode_stage_block(&stages.template_, (borink_bytes){stage_buffer, stages.required},
+        borink_encode_stage_block((borink_bytes){stage_buffer, stages.required},
                                   &block, &now, (borink_bytes_mut){buffer, sizeof buffer});
     CHECK(staged.status.code == 0);
     CHECK(staged.method == BORINK_METHOD_PUT);
@@ -447,8 +441,7 @@ static void a_blob_is_written_in_blocks(void) {
     };
     const borink_commit_item item = {
         .key = as_bytes("blob.bin"), .blocks = blocks, .block_count = 2};
-    const borink_wire_request committed = borink_encode_commit_blocks(
-        &commits.template_, (borink_bytes){commit_buffer, commits.required}, &item, &now,
+    const borink_wire_request committed = borink_encode_commit_blocks((borink_bytes){commit_buffer, commits.required}, &item, &now,
         (borink_bytes_mut){buffer, sizeof buffer});
     CHECK(committed.status.code == 0);
     CHECK(committed.body.present);
@@ -477,7 +470,7 @@ static void one_page_is_read_out_of_a_body(void) {
     const borink_list_item item = {.prefix = as_bytes("directory/")};
     uint8_t buffer[1024];
     const borink_wire_request request =
-        borink_encode_list(&pages.template_, (borink_bytes){template_buffer, pages.required},
+        borink_encode_list((borink_bytes){template_buffer, pages.required},
                            &item, &now, (borink_bytes_mut){buffer, sizeof buffer});
     CHECK(request.status.code == 0);
     CHECK(request.method == BORINK_METHOD_GET);

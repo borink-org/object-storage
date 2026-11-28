@@ -7,9 +7,9 @@
 use borink_object_storage_proto::s3::{self, Bucket, MAX_METADATA_LEN, PayloadSigning, Service};
 use borink_object_storage_proto::sigv4::{Credentials, wipe_best_effort};
 use borink_object_storage_proto::{
-    BodyWindow, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions, Error,
-    GetHeadOutcome, InvalidRequest, MetadataPair, Payload, PutItem, PutOptions, ResponseFault,
-    ResponseHead, Timestamps,
+    BodyWindow, ConditionKind, ConditionValue, ContentLength, DeleteHeadOutcome, DeleteKind,
+    DeleteOptions, Error, GetHeadOutcome, InvalidRequest, MetadataPair, PutItem, PutOptions,
+    ResponseFault, ResponseHead, Timestamps,
 };
 
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -163,10 +163,10 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
         name: "a",
         value: &over,
     }];
-    let content = Payload::Slice(b"0");
+    let content = 1;
     let etag = PutItem {
         condition_value: Some(ConditionValue::ETag(b"\"etag\"")),
-        ..PutItem::new("k", content)
+        ..PutItem::new("k", ContentLength(content))
     };
     let create = PutOptions {
         condition: ConditionKind::IfNoneMatch,
@@ -175,14 +175,21 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
     let put = |service, options: &PutOptions<'_>, item: &PutItem<'_>| {
         let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();
         let mut bytes = vec![0; 16384];
-        let template = s3::prepare_put(
+        let len = s3::prepare_put(
             &bucket,
             &credentials(),
             options,
             PayloadSigning::Unsigned,
             &mut bytes,
         )?;
-        s3::encode_put(&template, &bytes, item, None, &now, &mut vec![0; 16384]).map(drop)
+        s3::encode_put(
+            s3::Template::from_bytes(&bytes[..len]),
+            item,
+            None,
+            &now,
+            &mut vec![0; 16384],
+        )
+        .map(drop)
     };
     let remove = |service, options: &DeleteOptions| {
         let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();
@@ -192,7 +199,7 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
         metadata,
         ..PutOptions::default()
     };
-    let plain = PutItem::new("k", content);
+    let plain = PutItem::new("k", ContentLength(content));
 
     assert_eq!(
         put(Service::Aws, &create, &etag),

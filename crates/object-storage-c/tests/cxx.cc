@@ -131,14 +131,14 @@ void writes_a_request_from_a_template() {
     CHECK(reads.status.code == borink::ErrorCodeNone);
     const borink::Bytes bytes = borink::template_bytes(room, reads);
     CHECK(bytes.len == reads.required);
-    CHECK(borink_template_check(&reads.template_, bytes).code == borink::ErrorCodeNone);
+    CHECK(borink_template_check(bytes).code == borink::ErrorCodeNone);
 
     const borink::Timestamps stamped = now();
     borink::GetItem item = borink::get_item("dir/a key");
     item.range = borink::bounded(2, 6);
     std::array<std::uint8_t, 1024> buffer{};
     const borink::WireRequest request =
-        borink_encode_get(&reads.template_, bytes, &item, &stamped, borink::into(buffer));
+        borink_encode_get(bytes, &item, &stamped, borink::into(buffer));
     CHECK(request.status.code == borink::ErrorCodeNone);
     CHECK(borink::part(buffer, request.url) ==
           "https://account.blob.core.windows.net/container/dir/a%20key");
@@ -164,7 +164,7 @@ void writes_a_request_from_a_template() {
     borink::GetItem unnamed = borink::get_item("");
     unnamed.range = borink::bounded(2, 6);
     const borink::WireRequest same =
-        borink_encode_get(&object_reads.template_, borink::template_bytes(room, object_reads),
+        borink_encode_get(borink::template_bytes(room, object_reads),
                           &unnamed, &stamped, borink::into(buffer));
     CHECK(borink::part(buffer, same.url) ==
           "https://account.blob.core.windows.net/container/dir/a%20key");

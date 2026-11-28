@@ -28,10 +28,15 @@ fn encode(
         .with_addressing(addressing);
     let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort).unwrap();
     let mut bytes = vec![0; 2048];
-    let template = s3::prepare_list(&bucket, &credentials, options, &mut bytes)?;
+    let len = s3::prepare_list(&bucket, &credentials, options, &mut bytes)?;
     let now = Timestamps::from_unix(1_787_400_061);
     let mut buf = vec![0; 4096];
-    let unsigned = s3::encode_list(&template, &bytes, item, &now, &mut buf)?;
+    let unsigned = s3::encode_list(
+        s3::Template::from_bytes(&bytes[..len]),
+        item,
+        &now,
+        &mut buf,
+    )?;
     let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
     Ok(request.url(&buf).to_owned())
 }

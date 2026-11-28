@@ -20,11 +20,10 @@
 //! 1. Fill in a `borink_container` with the endpoint and the container's
 //!    name, and a `borink_get_options` with what every read does alike.
 //!    Call `borink_prepare_get` with them and the token to write the
-//!    template into a buffer of yours. Do this once, and keep the
-//!    `borink_template` it returns beside the bytes it wrote: `required` of
-//!    them, from the start of the buffer.
+//!    template into a buffer of yours. Do this once, and keep the `required`
+//!    bytes it wrote at the start of the buffer.
 //! 2. Describe one read as a `borink_get_item`, and call `borink_encode_get`
-//!    with the template, its bytes, the `borink_timestamps` of the current
+//!    with those template bytes, the `borink_timestamps` of the current
 //!    second and a second buffer. `borink_timestamps_from_unix` writes those
 //!    once a second. It returns a `borink_wire_request`, which names the URL,
 //!    the head and its header fields by offset into that buffer. Send them
@@ -66,7 +65,7 @@
 //! borink_timestamps now = borink_timestamps_from_unix(unix_seconds); // once a second
 //! borink_get_item item = {key, {BORINK_RANGE_FORM_WHOLE, 0, 0}};
 //! borink_wire_request request =
-//!     borink_encode_get(&reads.template_, template_bytes, &item, &now, buffer);
+//!     borink_encode_get(template_bytes, &item, &now, buffer);
 //! if (request.status.code == BORINK_ERROR_CODE_CAPACITY) { /* grow to request.required */ }
 //!
 //! // ... send request.url and each header with your HTTP client ...
@@ -84,11 +83,10 @@
 //!
 //! # Where each value lives
 //!
-//! A template is plain bytes: the `borink_template` value and the bytes it
-//! was written into, both yours. Neither holds a pointer, so you may copy
-//! them, or store them and read them back. `borink_template_check` checks
-//! bytes once where they could be another template's. A `borink_timestamps`
-//! is plain bytes too.
+//! A template is plain bytes in a buffer of yours. It holds no pointer, so
+//! you may copy it, or store it and read it back. `borink_template_check`
+//! checks bytes once where they come from storage or another untrusted source.
+//! A `borink_timestamps` is plain bytes too.
 //!
 //! The URL, the head and the body of a request are in your request buffer,
 //! addressed by offsets. Resizing that buffer moves the bytes; the offsets

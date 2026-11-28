@@ -16,13 +16,13 @@ use crate::s3::{
 };
 use crate::sigv4::{ALGORITHM, Credentials, EMPTY_SHA256, MAX_REGION_LEN, MAX_SECRET_LEN};
 use crate::template::{
-    self, Builder, Fill, Hole, HoleValues, Param, ParamValue, Pass, Section, Table, TemplateBody,
-    WireRequest, Written,
+    self, Builder, Fill, HEADER_LEN, Hole, HoleValues, META_LEN, Param, ParamValue, Pass, Section,
+    StoredWriter, Table, TemplateBody, WireRequest, Written, split_header,
 };
 use crate::url::{encode_object_key, write_query_value};
 use crate::{
     CommitShape, ConditionKind, ConditionValue, CopyShape, DeleteKind, DeleteShape, Digest, Error,
-    GetItem, GetOptions, GetShape, InvalidRequest, ListInclude, MetadataPair, Method, Payload,
+    GetItem, GetKind, GetOptions, GetShape, InvalidRequest, ListInclude, MetadataPair, Method,
     PutShape, Ranging, Result, RevisionKind, Span, Tag, Timestamps, encoding,
 };
 
@@ -65,28 +65,13 @@ pub enum Operation {
     StagePartCopy,
 }
 
-/// The part of every S3 request that is the same for each object, written
-/// once into a buffer you own.
-///
-/// A template holds no borrow. Keep it beside the bytes it was written
-/// into, and pass both to each encoding function of its operation.
-///
-/// # Bytes
-///
-/// Encoding trusts that the bytes are the template's own, and checks
-/// nothing of them that would cost each request time. Bytes that are not
-/// write a wrong request or are refused, but never make an encoder read
-/// outside them or panic. Where bytes could be another template's, such as
-/// bytes read back from storage, check them once with [`Template::check`].
+// The decoded header of an S3 template buffer.
 #[derive(Debug, Clone, Copy)]
-pub struct Template {
+pub(super) struct Header {
     pub(super) table: Table,
     pub(super) operation: Operation,
     pub(super) method: Method,
     pub(super) service: Service,
-    // The scope of a signature after its date:
-    // `/<region>/<service>/aws4_request`.
-    pub(super) scope: Span,
     pub(super) detail: Detail,
     // Where the template holds the key of its object, for a template of
     // one object.
@@ -137,42 +122,109 @@ pub(super) enum Detail {
     DeleteMany(Option<ChecksumKind>),
 }
 
+const MAGIC: [u8; 3] = *b"BTS";
+
+/// A prepared S3 request template.
+///
+/// Wraps the bytes that an `s3::prepare_*` function wrote as an
+/// unsized slice view (like [`core::ffi::CStr`] or `std::path::Path`), with
+/// no extra fields and no borrow of its own. Call [`Self::from_bytes`] to
+/// view a prepared byte slice as `&Template`, and [`Self::check`] once if
+/// those bytes came from storage or another untrusted source.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Template([u8]);
+
 impl Template {
-    /// Returns the shape of the read `item` from this template, which
-    /// [`s3::accept_get_head`](crate::s3::accept_get_head) reads its response against.
+    /// Views `bytes` written by an `s3::prepare_*` function as a
+    /// template.
+    ///
+    /// Checks nothing of `bytes`; call [`Self::check`] once if they came from
+    /// storage or another untrusted source.
+    #[inline]
+    #[allow(unsafe_code)]
+    pub const fn from_bytes(bytes: &[u8]) -> &Self {
+        // SAFETY: `Self` is `#[repr(transparent)]` over `[u8]`, so a shared
+        // reference to `[u8]` has the exact layout and validity of `&Self`.
+        unsafe { &*(bytes as *const [u8] as *const Self) }
+    }
+
+    /// Returns the template's bytes.
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Checks that this template is an intact S3 template from this
+    /// version of the crate.
+    ///
+    /// Encoding reads the template header without hashing the whole buffer.
+    /// Call this once when the bytes came from storage or another untrusted
+    /// source.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if the bytes are truncated,
+    /// changed, or not a valid S3 template.
+    pub fn check(&self) -> Result<()> {
+        let bytes = self.as_bytes();
+        Header::load(bytes)?.table.check(bytes)
+    }
+
+    /// Returns the operation that this template writes requests for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequest::Template`] if this is not a valid
+    /// S3 template.
+    pub fn operation(&self) -> Result<Operation> {
+        Ok(Header::load(self.as_bytes())?.operation)
+    }
+
+    /// Returns the service that answers requests from this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequest::Template`] if this is not a valid S3
+    /// template.
+    pub fn service(&self) -> Result<Service> {
+        Ok(Header::load(self.as_bytes())?.service)
+    }
+
+    /// Returns the shape of the read `item` from this template, which
+    /// [`s3::accept_get_head`](crate::s3::accept_get_head)
+    /// reads its response against.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequest::Template`] if this is not a read template.
+    pub fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every whole-object write of this template.
+    /// Returns the shape of every whole-object write from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn put_shape(&self) -> Result<PutShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a write template.
+    pub fn put_shape(&self) -> Result<PutShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Put { condition, .. } => Ok(PutShape { condition }),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every removal of this template.
+    /// Returns the shape of every removal from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn delete_shape(&self) -> Result<DeleteShape> {
-        match (self.operation, self.detail) {
+    /// Returns [`InvalidRequest::Template`] if this is not a delete template.
+    pub fn delete_shape(&self) -> Result<DeleteShape> {
+        let header = Header::load(self.as_bytes())?;
+        match (header.operation, header.detail) {
             (Operation::Delete, Detail::Object { condition, .. }) => Ok(DeleteShape {
                 kind: DeleteKind::Object,
                 condition,
@@ -181,27 +233,25 @@ impl Template {
         }
     }
 
-    /// Returns the shape of every commit of this template.
+    /// Returns the shape of every commit from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn commit_shape(&self) -> Result<CommitShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a commit template.
+    pub fn commit_shape(&self) -> Result<CommitShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Commit { condition, .. } => Ok(CommitShape { condition }),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every copy of this template.
+    /// Returns the shape of every copy from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn copy_shape(&self) -> Result<CopyShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a copy template.
+    pub fn copy_shape(&self) -> Result<CopyShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Copy {
                 condition,
                 source_condition,
@@ -213,32 +263,264 @@ impl Template {
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
+}
 
-    /// Checks that `bytes` are the bytes that this template was written
-    /// into, as its `prepare_*` function wrote them. See [Bytes](Self#bytes).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidRequest::Template`] if they are not.
-    pub fn check(&self, bytes: &[u8]) -> Result<()> {
-        self.table.check(bytes)
+impl AsRef<[u8]> for Template {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
+}
 
-    /// Returns the operation this template writes requests for.
-    pub const fn operation(&self) -> Operation {
-        self.operation
+impl AsRef<Template> for Template {
+    #[inline]
+    fn as_ref(&self) -> &Self {
+        self
     }
+}
 
-    /// Returns the service that answers the requests.
-    pub const fn service(&self) -> Service {
-        self.service
+impl Header {
+    #[inline(always)]
+    pub(super) fn load(bytes: &[u8]) -> Result<Self> {
+        let (meta, table_bytes) = split_header(bytes).ok_or(InvalidRequest::Template)?;
+        let table = Table::load(table_bytes, bytes.len()).ok_or(InvalidRequest::Template)?;
+        load_meta(meta, table).ok_or_else(|| InvalidRequest::Template.into())
     }
+}
 
-    /// Returns how many bytes at the start of its buffer the template
-    /// takes. Those are its bytes, which each request is written from.
-    pub const fn bytes_len(&self) -> usize {
-        self.table.len()
+// The operations, at the number that `as u8` gives each.
+const OPERATIONS: [Operation; 16] = [
+    Operation::Get,
+    Operation::Put,
+    Operation::Delete,
+    Operation::List,
+    Operation::GetTagging,
+    Operation::PutTagging,
+    Operation::Restore,
+    Operation::DeleteMany,
+    Operation::CreateSession,
+    Operation::CreateUpload,
+    Operation::StagePart,
+    Operation::CommitParts,
+    Operation::AbortUpload,
+    Operation::ListParts,
+    Operation::Copy,
+    Operation::StagePartCopy,
+];
+
+const _: () = {
+    let mut at = 0;
+    while at < OPERATIONS.len() {
+        assert!(OPERATIONS[at] as usize == at);
+        at += 1;
     }
+};
+
+// What `write_meta` stores fits inside `META_LEN`.
+const _: () = assert!(4 + 3 + 8 + 5 <= META_LEN);
+
+fn checksum_number(kind: Option<ChecksumKind>) -> u8 {
+    kind.map_or(0, |kind| kind as u8)
+}
+
+fn checksum_kind(number: u8) -> Option<Option<ChecksumKind>> {
+    match number {
+        0 => Some(None),
+        number => ChecksumKind::from_discriminant(u16::from(number)).map(Some),
+    }
+}
+
+fn signing_number(signing: PayloadSigning) -> u8 {
+    match signing {
+        PayloadSigning::Unsigned => 0,
+        PayloadSigning::Signed => 1,
+    }
+}
+
+fn payload_signing(number: u8) -> Option<PayloadSigning> {
+    match number {
+        0 => Some(PayloadSigning::Unsigned),
+        1 => Some(PayloadSigning::Signed),
+        _ => None,
+    }
+}
+
+fn bool_byte(number: u8) -> Option<bool> {
+    match number {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+fn write_meta(
+    into: &mut StoredWriter<'_>,
+    operation: Operation,
+    method: Method,
+    service: Service,
+    detail: Detail,
+    object: Option<Span>,
+) {
+    into.put(&[MAGIC[0], MAGIC[1], MAGIC[2], operation as u8]);
+    into.put(&[method as u8, service as u8, u8::from(object.is_some())]);
+    let object = object.unwrap_or_default();
+    into.u32(object.start as u32);
+    into.u32(object.len as u32);
+    let detail_bytes = match detail {
+        Detail::Get(options) => [
+            0,
+            options.kind as u8,
+            options.ranging as u8,
+            options.condition as u8,
+            options.revision as u8,
+        ],
+        Detail::Put {
+            condition,
+            checksum,
+            signing,
+        } => [
+            1,
+            condition as u8,
+            checksum_number(checksum),
+            signing_number(signing),
+            0,
+        ],
+        Detail::Object {
+            condition,
+            revision,
+            checksum,
+        } => [
+            2,
+            condition as u8,
+            revision as u8,
+            checksum_number(checksum),
+            0,
+        ],
+        Detail::List {
+            include,
+            delimiter,
+            max_keys,
+        } => [
+            3,
+            include.bits() as u8,
+            u8::from(delimiter),
+            u8::from(max_keys),
+            0,
+        ],
+        Detail::Stage { checksum, signing } => {
+            [4, checksum_number(checksum), signing_number(signing), 0, 0]
+        }
+        Detail::Commit {
+            condition,
+            checksum,
+            sized,
+        } => [
+            5,
+            condition as u8,
+            checksum_number(checksum),
+            u8::from(sized),
+            0,
+        ],
+        Detail::Upload => [6, 0, 0, 0, 0],
+        Detail::Copy {
+            condition,
+            source_revision,
+            source_condition,
+            source_ranging,
+        } => [
+            7,
+            condition as u8,
+            source_revision as u8,
+            source_condition as u8,
+            source_ranging as u8,
+        ],
+        Detail::DeleteMany(checksum) => [8, checksum_number(checksum), 0, 0, 0],
+    };
+    into.put(&detail_bytes);
+}
+
+#[inline(always)]
+fn load_meta(stored: &[u8; META_LEN], table: Table) -> Option<Header> {
+    let u32_at =
+        |i: usize| u32::from_le_bytes([stored[i], stored[i + 1], stored[i + 2], stored[i + 3]]);
+    if [stored[0], stored[1], stored[2]] != MAGIC {
+        return None;
+    }
+    let operation = *OPERATIONS.get(usize::from(stored[3]))?;
+    let method = match stored[4] {
+        1 => Method::Get,
+        2 => Method::Head,
+        3 => Method::Put,
+        4 => Method::Delete,
+        5 => Method::Post,
+        _ => return None,
+    };
+    let service = Service::from_discriminant(u16::from(stored[5]))?;
+    let within = |start: u32, len: u32| {
+        let end = start.checked_add(len)?;
+        ((start as usize) >= HEADER_LEN && (end as usize) <= table.text_end()).then_some(Span {
+            start: start as usize,
+            len: len as usize,
+        })
+    };
+    let object = match stored[6] {
+        0 => None,
+        1 => Some(within(u32_at(7), u32_at(11))?),
+        _ => return None,
+    };
+    let [tag, a, b, c, d] = [stored[15], stored[16], stored[17], stored[18], stored[19]];
+    let condition = |number: u8| ConditionKind::from_discriminant(u16::from(number));
+    let revision = |number: u8| RevisionKind::from_discriminant(u16::from(number));
+    let ranging = |number: u8| Ranging::from_discriminant(u16::from(number));
+    let detail = match tag {
+        0 => Detail::Get(GetOptions {
+            kind: GetKind::from_discriminant(u16::from(a))?,
+            ranging: ranging(b)?,
+            condition: condition(c)?,
+            revision: revision(d)?,
+        }),
+        1 => Detail::Put {
+            condition: condition(a)?,
+            checksum: checksum_kind(b)?,
+            signing: payload_signing(c)?,
+        },
+        2 => Detail::Object {
+            condition: condition(a)?,
+            revision: revision(b)?,
+            checksum: checksum_kind(c)?,
+        },
+        3 => Detail::List {
+            include: ListInclude::from_bits(u32::from(a))?,
+            delimiter: bool_byte(b)?,
+            max_keys: bool_byte(c)?,
+        },
+        4 => Detail::Stage {
+            checksum: checksum_kind(a)?,
+            signing: payload_signing(b)?,
+        },
+        5 => Detail::Commit {
+            condition: condition(a)?,
+            checksum: checksum_kind(b)?,
+            sized: bool_byte(c)?,
+        },
+        6 => Detail::Upload,
+        7 => Detail::Copy {
+            condition: condition(a)?,
+            source_revision: revision(b)?,
+            source_condition: condition(c)?,
+            source_ranging: ranging(d)?,
+        },
+        8 => Detail::DeleteMany(checksum_kind(a)?),
+        _ => return None,
+    };
+    Some(Header {
+        table,
+        operation,
+        method,
+        service,
+        detail,
+        object,
+    })
 }
 
 // The value of one field that every request sends alike.
@@ -912,7 +1194,7 @@ pub(super) fn prepare_template<const Q: usize>(
     credentials: &Credentials<'_>,
     describe: &Describe<'_, Q>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let object = match bucket.object {
         Some(key) if describe.key => {
             validate_key(key)?;
@@ -943,17 +1225,16 @@ pub(super) fn prepare_template<const Q: usize>(
     };
     let mut b = Builder::new(buf);
     layout(&mut b, describe, Some(&fixed), object.is_some());
-    let scope = b.stash(|out| write_scope(out, bucket));
     let object = object.map(|key| b.stash(|out| out.push(key.as_bytes())));
-    let table = b.finish()?;
-    Ok(Template {
-        table,
-        operation: describe.operation,
-        method: describe.method,
-        service: bucket.service,
-        scope,
-        detail: describe.detail,
-        object,
+    b.finish(|into| {
+        write_meta(
+            into,
+            describe.operation,
+            describe.method,
+            bucket.service,
+            describe.detail,
+            object,
+        )
     })
 }
 
@@ -1070,28 +1351,19 @@ pub fn set_body_checksum(unsigned: &Unsigned, buf: &mut [u8], digest: &Digest) -
 /// each operation's encoder, which so runs its own layout.
 #[inline(always)]
 pub(super) fn encode_template<F: Fill, const Q: usize>(
-    template: &Template,
+    template: &Header,
     bytes: &[u8],
     fill: &F,
-    payload: Payload<'_>,
+    content_len: u64,
     buf: &mut [u8],
     describe: &Describe<'_, Q>,
 ) -> Result<Unsigned> {
     let mut out = Writer::new(buf);
-    #[cfg(not(feature = "compact"))]
-    let written = {
-        let mut state = template::WriteState::default();
-        let mut pass =
-            template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
-        layout(&mut pass, describe, None, template.object.is_some());
-        pass.finish()?
-    };
-    #[cfg(feature = "compact")]
-    let written = {
-        let _ = describe;
-        template::walk_request(&template.table, bytes, fill, &mut out)?
-    };
-    let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
+    let mut state = template::WriteState::default();
+    let mut pass = template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
+    layout(&mut pass, describe, None, template.object.is_some());
+    let written = pass.finish()?;
+    let written = template::check_fit(&out, written)?;
     let body_checksum = match template.detail {
         Detail::Object { checksum, .. }
         | Detail::Commit { checksum, .. }
@@ -1101,15 +1373,16 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
     Ok(Unsigned {
         method: template.method,
         written,
-        content_len: payload.len(),
+        content_len,
         body_checksum,
     })
 }
 
-impl Template {
+impl Header {
     // The key that a request names: `key`, checked, or `None` for a
     // template of one object, which writes its own. A request of such a
     // template passes that key, or an empty one.
+    #[inline(always)]
     pub(super) fn request_key<'k>(&self, bytes: &[u8], key: &'k str) -> Result<Option<&'k str>> {
         match self.object {
             None => {
@@ -1127,8 +1400,64 @@ impl Template {
     }
 }
 
+// The most bytes of a credential scope after the date:
+// `/<region>/s3express/aws4_request`.
+const MAX_SCOPE_LEN: usize = 1 + MAX_REGION_LEN + 1 + 9 + 13;
+
+/// The signing scope of a bucket, without the date: its region and its
+/// service.
+///
+/// [`Bucket::scope`] returns one. It holds no borrow, so you can keep it
+/// beside the day's signing key. Pass it to [`signing_key`] and
+/// [`string_to_sign_prefix`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scope {
+    // `/<region>/<service>/aws4_request`, ASCII.
+    bytes: [u8; MAX_SCOPE_LEN],
+    len: u8,
+    region_len: u8,
+    service: Service,
+}
+
+impl Scope {
+    pub(super) fn of(bucket: &Bucket<'_>) -> Self {
+        let mut bytes = [0u8; MAX_SCOPE_LEN];
+        let mut out = Writer::new(&mut bytes);
+        write_scope(&mut out, bucket);
+        let len = out.position() as u8;
+        Self {
+            bytes,
+            len,
+            region_len: bucket.region.len() as u8,
+            service: bucket.service,
+        }
+    }
+
+    /// Returns the service that answers requests under this scope.
+    pub const fn service(&self) -> Service {
+        self.service
+    }
+
+    /// Returns the region that requests under this scope are signed for.
+    pub fn region(&self) -> &str {
+        // `Bucket::create` checks that the region is ASCII.
+        core::str::from_utf8(&self.bytes[1..1 + usize::from(self.region_len)]).unwrap_or_default()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    const fn signing_service(&self) -> &'static str {
+        match self.service {
+            Service::AwsDirectory => "s3express",
+            Service::Aws | Service::Compatible => "s3",
+        }
+    }
+}
+
 /// The most bytes [`string_to_sign_prefix`] writes.
-pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + 1 + MAX_REGION_LEN + 23 + 1;
+pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + MAX_SCOPE_LEN + 1;
 
 /// Writes what the string to sign of every request at `now` starts with,
 /// and returns it.
@@ -1138,15 +1467,10 @@ pub const STRING_TO_SIGN_PREFIX_LEN: usize = 17 + 16 + 1 + 8 + 1 + MAX_REGION_LE
 /// `auto`, it is 64 bytes: one block of SHA-256, which an HMAC can absorb
 /// once for every request signed at that instant.
 pub fn string_to_sign_prefix<'o>(
-    template: &Template,
-    bytes: &[u8],
+    scope: &Scope,
     now: &Timestamps,
     out: &'o mut [u8; STRING_TO_SIGN_PREFIX_LEN],
-) -> Result<&'o [u8]> {
-    let scope = template.scope;
-    let scope = bytes
-        .get(scope.start..scope.start + scope.len)
-        .ok_or(InvalidRequest::Template)?;
+) -> &'o [u8] {
     let mut at = 0;
     for piece in [
         ALGORITHM.as_bytes(),
@@ -1154,16 +1478,14 @@ pub fn string_to_sign_prefix<'o>(
         now.iso8601_bytes(),
         b"\n",
         now.date(),
-        scope,
+        scope.as_bytes(),
         b"\n",
     ] {
         let end = at + piece.len();
-        out.get_mut(at..end)
-            .ok_or(InvalidRequest::Template)?
-            .copy_from_slice(piece);
+        out[at..end].copy_from_slice(piece);
         at = end;
     }
-    Ok(&out[..at])
+    &out[..at]
 }
 
 /// Writes the signature into a request and returns where the request is.
@@ -1186,20 +1508,13 @@ pub fn set_signature(unsigned: &Unsigned, buf: &mut [u8], mac: &[u8; 32]) -> Wir
 /// # Errors
 ///
 /// Returns [`Error::InvalidCredentials`] if the secret of `credentials` is
-/// longer than [`MAX_SECRET_LEN`] bytes, and [`InvalidRequest::Template`] if
-/// `bytes` are not the template's.
+/// longer than [`MAX_SECRET_LEN`] bytes.
 pub fn signing_key(
-    template: &Template,
-    bytes: &[u8],
+    scope: &Scope,
     credentials: &Credentials<'_>,
     now: &Timestamps,
     mut hmac: impl FnMut(&[u8], &[u8]) -> [u8; 32],
 ) -> Result<[u8; 32]> {
-    let scope = template.scope;
-    // The scope after its date and the `/` that follows it.
-    let scope = bytes
-        .get(scope.start + 1..scope.start + scope.len)
-        .ok_or(InvalidRequest::Template)?;
     let wipe = credentials.wipe();
     let secret = credentials.secret().as_bytes();
     if secret.len() > MAX_SECRET_LEN {
@@ -1211,7 +1526,11 @@ pub fn signing_key(
     seed[4..len].copy_from_slice(secret);
     let mut key = hmac(&seed[..len], now.date());
     wipe(&mut seed);
-    for part in scope.split(|&byte| byte == b'/') {
+    for part in [
+        scope.region().as_bytes(),
+        scope.signing_service().as_bytes(),
+        b"aws4_request",
+    ] {
         let mut next = hmac(&key, part);
         core::mem::swap(&mut key, &mut next);
         wipe(&mut next);

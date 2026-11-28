@@ -140,9 +140,7 @@ pub(crate) fn put_item<'a>(
 ) -> proto::Result<proto::PutItem<'a>> {
     Ok(proto::PutItem {
         key: text_or(key, InvalidRequest::KeyNotUtf8)?,
-        content: proto::Payload::Streamed {
-            len: item.content_len,
-        },
+        content_length: proto::ContentLength(item.content_len),
         condition_value: condition_value(&item.condition_value, e_tag)?,
         checksum: checksum_value(checksum)?,
     })
@@ -169,9 +167,7 @@ pub(crate) fn stage_item<'a>(
     Ok(azure::StageBlockItem {
         key: text_or(key, InvalidRequest::KeyNotUtf8)?,
         id: text_or(id, InvalidRequest::PartId)?,
-        content: proto::Payload::Streamed {
-            len: item.content_len,
-        },
+        content_length: proto::ContentLength(item.content_len),
         checksum: checksum_value(checksum)?,
     })
 }

@@ -24,17 +24,17 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use borink_object_storage_crypto::{Sha256RustCrypto, sigv4, wipe};
 use borink_object_storage_proto::s3::{
     self, Addressing, Bucket, CreateUploadHeadOutcome, DeleteResult, ObjectProperty, Part, PartRef,
-    PayloadSigning, PropertySet, Service, Session, SessionHeadOutcome, Template, Unsigned,
+    PayloadSigning, PropertySet, Service, Session, SessionHeadOutcome, Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
-    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, CopyHeadOutcome,
+    CapacityError, ChecksumKind, Classification, CommitHeadOutcome, ContentLength, CopyHeadOutcome,
     DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
     GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
-    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, Payload,
-    PutHeadOutcome, PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision,
-    RevisionKind, StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps,
-    UpdateHeadOutcome, WireRequest, WriteOptions, iso8601_ms,
+    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, PutHeadOutcome,
+    PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind,
+    StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+    WireRequest, WriteOptions, iso8601_ms,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -120,11 +120,11 @@ impl<'a> Client<'a> {
     /// CreateSession.
     fn send(
         &self,
-        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<usize, CrateError>,
+        encode: impl Fn(&s3::Template, &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
-    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+    ) -> Result<Result<(Service, HttpExchange), Value>, AdapterError> {
         self.send_signed(false, prepare, encode, body, read)
     }
 
@@ -133,22 +133,22 @@ impl<'a> Client<'a> {
     /// by them, never by those of a session.
     fn send_own(
         &self,
-        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<usize, CrateError>,
+        encode: impl Fn(&s3::Template, &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
-    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+    ) -> Result<Result<(Service, HttpExchange), Value>, AdapterError> {
         self.send_signed(true, prepare, encode, body, read)
     }
 
     fn send_signed(
         &self,
         own: bool,
-        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-        encode: impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
+        prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<usize, CrateError>,
+        encode: impl Fn(&s3::Template, &mut [u8]) -> Result<Unsigned, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
-    ) -> Result<Result<(Template, HttpExchange), Value>, AdapterError> {
+    ) -> Result<Result<(Service, HttpExchange), Value>, AdapterError> {
         let now = current_timestamps();
         let mut scratch = Vec::new();
         let checked = signed(
@@ -171,7 +171,7 @@ impl<'a> Client<'a> {
             },
         };
         let mut buf = Vec::new();
-        let (template, request) = match signed(
+        let (service, request) = match signed(
             &self.bucket,
             &credentials,
             &now,
@@ -183,7 +183,7 @@ impl<'a> Client<'a> {
             Err(error) => return Ok(Err(crate::result_for_crate_error(error))),
         };
         match send_request_with(&self.context, &request, body, read) {
-            Ok(exchange) => Ok(Ok((template, exchange))),
+            Ok(exchange) => Ok(Ok((service, exchange))),
             Err(error) => Ok(Err(transport_failure(&error))),
         }
     }
@@ -196,17 +196,20 @@ fn signed<'b>(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     now: &Timestamps,
-    prepare: &impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<Template, CrateError>,
-    encode: &impl Fn(&Template, &[u8], &mut [u8]) -> Result<Unsigned, CrateError>,
+    prepare: &impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<usize, CrateError>,
+    encode: &impl Fn(&s3::Template, &mut [u8]) -> Result<Unsigned, CrateError>,
     buf: &'b mut Vec<u8>,
-) -> Result<(Template, (WireRequest, &'b [u8])), CrateError> {
+) -> Result<(Service, (WireRequest, &'b [u8])), CrateError> {
     let write = |bytes: &mut [u8]| prepare(bucket, credentials, bytes);
-    let mut bytes = vec![0; CapacityError::required_by(write)?];
-    let template = write(&mut bytes)?;
-    let key = sigv4::signing_key::<Sha256RustCrypto>(&template, &bytes, credentials, now)?;
-    let stamp = sigv4::stamp(&key, &template, &bytes, now)?;
-    *buf = vec![0; CapacityError::required_by(|out| encode(&template, &bytes, out))?];
-    let unsigned = encode(&template, &bytes, buf)?;
+    let mut template = vec![0; CapacityError::required_by(write)?];
+    let len = write(&mut template)?;
+    template.truncate(len);
+    let template = s3::Template::from_bytes(&template);
+    let scope = bucket.scope();
+    let key = sigv4::signing_key::<Sha256RustCrypto>(&scope, credentials, now)?;
+    let stamp = sigv4::stamp(&key, &scope, now);
+    *buf = vec![0; CapacityError::required_by(|out| encode(template, out))?];
+    let unsigned = encode(template, buf)?;
     // The crate writes a body of its own with a placeholder for its
     // checksum, which the caller computes.
     if let Some(kind) = unsigned.body_checksum() {
@@ -214,7 +217,7 @@ fn signed<'b>(
         s3::set_body_checksum(&unsigned, buf, &digest)?;
     }
     let request = sigv4::sign(&stamp, &unsigned, buf);
-    Ok((template, (request, buf.as_slice())))
+    Ok((scope.service(), (request, buf.as_slice())))
 }
 
 /// Sends a CreateSession, signed with the case's own credentials, and reads
@@ -234,7 +237,7 @@ fn open_session(
         credentials,
         &now,
         &|bucket, credentials, buf| s3::prepare_create_session(bucket, credentials, buf),
-        &|template, bytes, buf| s3::encode_create_session(template, bytes, &now, buf),
+        &|template, buf| s3::encode_create_session(template, &now, buf),
         &mut buf
     ));
     let exchange = match send_request(context, &request) {
@@ -277,9 +280,9 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
         return Ok(unsupported_by_crate("a read carries one precondition"));
     };
     let now = current_timestamps();
-    let (template, exchange) = match client.send(
+    let (service, exchange) = match client.send(
         |bucket, credentials, buf| s3::prepare_get(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_get(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_get(template, &item, &now, buf),
         None,
         BodyRead::of(call),
     )? {
@@ -289,7 +292,7 @@ fn read_object(client: &Client<'_>, call: &Value, kind: GetKind) -> Result<Value
     let shape = item.shape(&options);
     let range = item.range;
     let head_outcome = crate_step!(s3::accept_get_head(
-        template.service(),
+        service,
         shape,
         exchange.response_head()
     ));
@@ -369,7 +372,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     };
     let item = PutItem {
         key: optional_text(call, "key").unwrap_or_default(),
-        content: body.payload(),
+        content_length: ContentLength(body.len()),
         condition_value,
         checksum,
     };
@@ -386,7 +389,7 @@ fn write_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let now = current_timestamps();
     let (_, exchange) = match client.send(
         |bucket, credentials, buf| s3::prepare_put(bucket, credentials, &options, signing, buf),
-        |template, bytes, buf| s3::encode_put(template, bytes, &item, digest.as_ref(), &now, buf),
+        |template, buf| s3::encode_put(template, &item, digest.as_ref(), &now, buf),
         Some(&body),
         BodyRead::Hold,
     )? {
@@ -424,9 +427,9 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
         return Ok(unsupported_by_crate("a removal carries one precondition"));
     };
     let now = current_timestamps();
-    let (template, exchange) = match client.send(
+    let (service, exchange) = match client.send(
         |bucket, credentials, buf| s3::prepare_delete(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_delete(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     )? {
@@ -435,7 +438,7 @@ fn delete_object(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
     };
     let shape = options.shape();
     let head_outcome = crate_step!(s3::accept_delete_head(
-        template.service(),
+        service,
         shape,
         exchange.response_head()
     ));
@@ -471,7 +474,7 @@ fn create_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterErro
     let now = current_timestamps();
     let (_, mut exchange) = sent!(client.send(
         |bucket, credentials, buf| s3::prepare_create_upload(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_create_upload(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_create_upload(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -510,7 +513,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         optional_text(call, "key").unwrap_or_default(),
         optional_text(call, "upload_id").unwrap_or_default(),
         u32::try_from(number).unwrap_or(u32::MAX),
-        body.payload(),
+        ContentLength(body.len()),
     );
     let now = current_timestamps();
     let (_, exchange) = sent!(client.send(
@@ -523,14 +526,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
                 buf,
             )
         },
-        |template, bytes, buf| s3::encode_stage_part(
-            template,
-            bytes,
-            &item,
-            Some(&digest),
-            &now,
-            buf
-        ),
+        |template, buf| s3::encode_stage_part(template, &item, Some(&digest), &now, buf),
         Some(&body),
         BodyRead::Hold,
     ));
@@ -567,7 +563,7 @@ fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let now = current_timestamps();
     let (_, mut exchange) = sent!(client.send_own(
         |bucket, credentials, buf| s3::prepare_copy(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_copy(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_copy(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -585,7 +581,7 @@ fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     // S3 can refuse a copy under status 200, which the result reports. The
     // outcome borrows the body, so the status of a failure is taken first.
     let copied = match outcome {
-        CopyHeadOutcome::Copied { meta } => {
+        CopyHeadOutcome::Copied { meta, .. } => {
             let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
             if let Some(version) = text_of(meta.version) {
                 value["version"] = json!(version);
@@ -624,7 +620,7 @@ fn stage_part_copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterEr
     let now = current_timestamps();
     let (_, mut exchange) = sent!(client.send_own(
         |bucket, credentials, buf| s3::prepare_stage_part_copy(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_stage_part_copy(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_stage_part_copy(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -695,7 +691,7 @@ fn commit_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
     let now = current_timestamps();
     let (_, mut exchange) = sent!(client.send(
         |bucket, credentials, buf| s3::prepare_commit_parts(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_commit_parts(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_commit_parts(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -731,15 +727,15 @@ fn abort_upload(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError
         upload_id: optional_text(call, "upload_id").unwrap_or_default(),
     };
     let now = current_timestamps();
-    let (template, exchange) = sent!(client.send(
+    let (service, exchange) = sent!(client.send(
         s3::prepare_abort_upload,
-        |template, bytes, buf| s3::encode_abort_upload(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_abort_upload(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
 
     let head_outcome = crate_step!(s3::accept_abort_upload_head(
-        template.service(),
+        service,
         exchange.response_head()
     ));
     let outcome = match head_outcome {
@@ -775,7 +771,7 @@ fn list_parts(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
         let now = current_timestamps();
         let (_, mut exchange) = sent!(client.send(
             |bucket, credentials, buf| s3::prepare_list_parts(bucket, credentials, None, buf),
-            |template, bytes, buf| s3::encode_list_parts(template, bytes, &item, &now, buf),
+            |template, buf| s3::encode_list_parts(template, &item, &now, buf),
             None,
             BodyRead::Hold,
         ));
@@ -821,7 +817,7 @@ impl PageSource for Client<'_> {
         let now = current_timestamps();
         let (_, mut exchange) = match self.send(
             |bucket, credentials, buf| s3::prepare_list(bucket, credentials, options, buf),
-            |template, bytes, buf| s3::encode_list(template, bytes, item, &now, buf),
+            |template, buf| s3::encode_list(template, item, &now, buf),
             None,
             BodyRead::Hold,
         )? {
@@ -1164,7 +1160,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                     revision,
                     buf
                 ),
-                &|template, bytes, buf| s3::encode_get_tagging(template, bytes, &item, &now, buf),
+                &|template, buf| s3::encode_get_tagging(template, &item, &now, buf),
                 &mut get_buf
             ));
             owned_url_and_fields(&request)
@@ -1212,7 +1208,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &signing_credentials,
                 &now,
                 &|bucket, credentials, buf| s3::prepare_list(bucket, credentials, &options, buf),
-                &|template, bytes, buf| s3::encode_list(template, bytes, &item, &now, buf),
+                &|template, buf| s3::encode_list(template, &item, &now, buf),
                 &mut get_buf
             ));
             owned_url_and_fields(&request)
@@ -1250,14 +1246,14 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &signing_credentials,
                 &now,
                 &|bucket, credentials, buf| s3::prepare_get(bucket, credentials, &options, buf),
-                &|template, bytes, buf| s3::encode_get(template, bytes, &item, &now, buf),
+                &|template, buf| s3::encode_get(template, &item, &now, buf),
                 &mut get_buf
             ));
             owned_url_and_fields(&request)
         }
         "PUT" if range == RequestedRange::Whole && version.is_none() => {
             let options = PutOptions::default();
-            let item = PutItem::new(key, Payload::Slice(&body));
+            let item = PutItem::new(key, ContentLength::of(&body));
             let digest = match signing {
                 PayloadSigning::Unsigned => None,
                 PayloadSigning::Signed => Some(sigv4::sha256::<Sha256RustCrypto>(&body)),
@@ -1269,9 +1265,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|bucket, credentials, buf| {
                     s3::prepare_put(bucket, credentials, &options, signing, buf)
                 },
-                &|template, bytes, buf| {
-                    s3::encode_put(template, bytes, &item, digest.as_ref(), &now, buf)
-                },
+                &|template, buf| { s3::encode_put(template, &item, digest.as_ref(), &now, buf) },
                 &mut get_buf
             ));
             owned_url_and_fields(&request)
@@ -1294,7 +1288,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &signing_credentials,
                 &now,
                 &|bucket, credentials, buf| s3::prepare_delete(bucket, credentials, &options, buf),
-                &|template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
+                &|template, buf| s3::encode_delete(template, &item, &now, buf),
                 &mut get_buf
             ));
             owned_url_and_fields(&request)
@@ -1578,7 +1572,7 @@ fn restore(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     let now = current_timestamps();
     let (_, exchange) = sent!(client.send(
         |bucket, credentials, buf| s3::prepare_restore(bucket, credentials, &options, buf),
-        |template, bytes, buf| s3::encode_restore(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_restore(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1619,7 +1613,7 @@ fn put_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
                 buf,
             )
         },
-        |template, bytes, buf| s3::encode_put_tagging(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_put_tagging(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1648,7 +1642,7 @@ fn get_tagging(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
     let now = current_timestamps();
     let (_, mut exchange) = sent!(client.send(
         |bucket, credentials, buf| s3::prepare_get_tagging(bucket, credentials, revision, buf),
-        |template, bytes, buf| s3::encode_get_tagging(template, bytes, &item, &now, buf),
+        |template, buf| s3::encode_get_tagging(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1684,7 +1678,7 @@ fn delete_many(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError>
         |bucket, credentials, buf| {
             s3::prepare_delete_many(bucket, credentials, Some(ChecksumKind::Crc64), buf)
         },
-        |template, bytes, buf| s3::encode_delete_many(template, bytes, &keys, &now, buf),
+        |template, buf| s3::encode_delete_many(template, &keys, &now, buf),
         None,
         BodyRead::Hold,
     ));

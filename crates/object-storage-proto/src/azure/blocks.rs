@@ -9,7 +9,7 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{
-    Describe, Detail, Field, FieldList, Holes, Operation, Template, encode_template,
+    Describe, Detail, Field, FieldList, Header, Holes, Operation, Template, encode_template,
     prepare_template,
 };
 use crate::azure::{
@@ -19,7 +19,7 @@ use crate::azure::{
 };
 use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
 use crate::encoding::{base64_into, base64_len};
-use crate::head::{read_decimal_header, read_text_header};
+use crate::head::read_decimal_header;
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, Writer, condition_header_name};
 use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
@@ -28,9 +28,9 @@ use crate::validate::{
     validate_checksum_item, validate_condition, validate_properties, validate_tags,
 };
 use crate::{
-    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, Failure,
-    InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem, ObjectMeta,
-    Payload, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
+    ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, ContentLength,
+    Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem,
+    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
     StageOptions, Timestamps, WriteOptions,
 };
 
@@ -163,13 +163,6 @@ const MAX_BLOCKS: usize = 50_000;
 const COMMIT_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
 const COMMIT_CLOSE: &[u8] = b"</BlockList>";
 
-fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
-    Ok(ObjectMeta {
-        last_modified: read_text_header(head.last_modified)?,
-        ..head.object_meta()
-    })
-}
-
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
 pub(super) fn validate_block_id(id: &str) -> Result<()> {
@@ -220,21 +213,21 @@ pub struct StageBlockItem<'i> {
     pub key: &'i str,
     /// The block ID, under the rules of [`BlockRef::id`].
     pub id: &'i str,
-    /// The block's bytes, or the length of those you send yourself. At most
-    /// [`MAX_STAGE_LEN`].
-    pub content: Payload<'i>,
+    /// The length of the block in bytes, at most [`MAX_STAGE_LEN`].
+    pub content_length: ContentLength,
     /// The checksum of the block, of the template's kind. Present exactly
     /// when the template names a kind.
     pub checksum: Option<ChecksumValue<'i>>,
 }
 
 impl<'i> StageBlockItem<'i> {
-    /// Creates a Put Block of `content` as the block `id` of `key`.
-    pub const fn new(key: &'i str, id: &'i str, content: Payload<'i>) -> Self {
+    /// Creates a Put Block of `content_length` bytes as the block `id` of
+    /// `key`.
+    pub const fn new(key: &'i str, id: &'i str, content_length: ContentLength) -> Self {
         Self {
             key,
             id,
-            content,
+            content_length,
             checksum: None,
         }
     }
@@ -315,7 +308,7 @@ pub fn prepare_stage_block(
     namespace: AzureNamespace,
     options: &StageOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
         return Err(InvalidRequest::Option.into());
     }
@@ -327,7 +320,7 @@ pub fn prepare_stage_block(
         Operation::StageBlock,
         Detail::Stage(options.checksum),
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -369,17 +362,18 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 /// needs.
 pub fn encode_stage_block(
     template: &Template,
-    bytes: &[u8],
     item: &StageBlockItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    let Detail::Stage(checksum) = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Stage(checksum) = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_block_id(item.id)?;
-    if item.content.len() > MAX_STAGE_LEN {
+    if item.content_length.as_u64() > MAX_STAGE_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
     validate_checksum_item(checksum, item.checksum)?;
@@ -388,15 +382,15 @@ pub fn encode_stage_block(
         now: Some(now),
         key,
         block_id: Some(item.id),
-        content_length: Some(item.content.len()),
+        content_length: Some(item.content_length.as_u64()),
         checksum: checksum_base64(item.checksum, &mut text, false),
         ..HoleValues::default()
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
-        item.content,
+        item.content_length.as_u64(),
         buf,
         &describe_stage(checksum),
     )
@@ -440,7 +434,7 @@ pub fn prepare_commit_blocks(
     namespace: AzureNamespace,
     options: &CommitOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -462,7 +456,7 @@ pub fn prepare_commit_blocks(
             content_md5: options.content_md5,
         },
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -551,7 +545,6 @@ where
 /// needs.
 pub fn encode_commit_blocks<'b, B>(
     template: &Template,
-    bytes: &[u8],
     item: &CommitItem<'_, B>,
     now: &Timestamps,
     buf: &mut [u8],
@@ -559,14 +552,16 @@ pub fn encode_commit_blocks<'b, B>(
 where
     B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
 {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
     let Detail::Commit {
         condition,
         content_md5,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_condition(condition, item.condition_value)?;
     match (content_md5, item.content_md5) {
         (false, None) => {}
@@ -590,10 +585,10 @@ where
         blocks: item.blocks.clone(),
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &fill,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_commit(condition, content_md5, &[], &[]),
     )
@@ -614,7 +609,7 @@ pub fn accept_commit_blocks_head<'h>(
 ) -> Result<CommitHeadOutcome<'h>> {
     match head.status {
         201 => Ok(CommitHeadOutcome::Committed {
-            meta: multipart_meta(head)?,
+            meta: head.write_meta()?,
         }),
         412 if shape.condition != ConditionKind::None
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -659,7 +654,7 @@ pub fn prepare_list_blocks(
     kind: BlockListKind,
     revision: RevisionKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let kind = match kind {
         BlockListKind::Committed => "committed",
         BlockListKind::Staged => "uncommitted",
@@ -698,12 +693,12 @@ pub fn prepare_list_blocks(
 /// needs.
 pub fn encode_list_blocks(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::ListBlocks, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::ListBlocks, item, now, buf)
 }
 
 /// Reads the response head of a Get Block List and reports what to do
@@ -716,7 +711,7 @@ pub fn encode_list_blocks(
 pub fn accept_list_blocks_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHeadOutcome<'h>> {
     match head.status {
         200 => Ok(ListPartsHeadOutcome::Parts {
-            meta: multipart_meta(head)?,
+            meta: head.write_meta()?,
             expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),

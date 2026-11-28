@@ -16,7 +16,7 @@ const MAX_PAGE: u64 = 8 * 1024 * 1024;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borink_object_storage_proto::{Error, Payload, ResponseHead, Timestamps, WireRequest};
+use borink_object_storage_proto::{Error, ResponseHead, Timestamps, WireRequest};
 
 // The current time, which the crate never reads itself.
 pub(crate) fn now() -> Result<Timestamps, Box<dyn std::error::Error>> {
@@ -45,19 +45,12 @@ pub(crate) fn grown_to_fit<T>(
     }
 }
 
-// A template, and the bytes it was written into.
-pub(crate) struct Prepared<T> {
-    pub(crate) template: T,
-    pub(crate) bytes: Vec<u8>,
-}
-
-impl<T> Prepared<T> {
-    // Writes a template with `prepare`, into a buffer of its size.
-    pub(crate) fn new(prepare: impl Fn(&mut [u8]) -> Result<T, Error>) -> Result<Self, Error> {
-        let mut bytes = Vec::new();
-        let template = grown_to_fit(&mut bytes, prepare)?;
-        Ok(Self { template, bytes })
-    }
+// Writes a template with `prepare`, into a buffer of its exact size.
+pub(crate) fn prepare(write: impl Fn(&mut [u8]) -> Result<usize, Error>) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    let len = grown_to_fit(&mut bytes, write)?;
+    bytes.truncate(len);
+    Ok(bytes)
 }
 
 // The agent that a client sends every request with, which keeps its
@@ -86,10 +79,9 @@ pub(crate) fn send(
     for (name, value) in request.headers(buf) {
         builder = builder.header(name, value);
     }
-    let response = match (request.payload(buf), content) {
-        (Payload::Slice(bytes), _) if !bytes.is_empty() => agent.run(builder.body(bytes)?)?,
-        (_, Some(bytes)) => agent.run(builder.body(bytes)?)?,
-        _ => agent.run(builder.body(())?)?,
+    let response = match (request.body(buf), content) {
+        (Some(bytes), _) | (None, Some(bytes)) => agent.run(builder.body(bytes)?)?,
+        (None, None) => agent.run(builder.body(())?)?,
     };
     Ok(response.into_parts())
 }

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
-    Payload, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
+    ContentLength, PutHeadOutcome, PutItem, PutOptions, ResponseHead, Timestamps,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,15 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(borink_object_storage_proto::Error::Capacity(capacity)) => capacity.required,
         other => return Err(format!("{other:?}").into()),
     };
-    let mut bytes = vec![0; size];
-    let template = prepare(&mut bytes)?;
+    let mut template_buf = vec![0; size];
+    prepare(&mut template_buf)?;
+    let template = azure::Template::from_bytes(&template_buf);
 
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let now = Timestamps::from_unix(unix);
     let mut buf = vec![0; 4096];
     for (key, content) in [("a.txt", "one"), ("b.txt", "two"), ("c.txt", "three")] {
-        let item = PutItem::new(key, Payload::Slice(content.as_bytes()));
-        let request = azure::encode_put(&template, &bytes, &item, &now, &mut buf)?;
+        let item = PutItem::new(key, ContentLength::of(content.as_bytes()));
+        let request = azure::encode_put(template, &item, &now, &mut buf)?;
 
         let mut outgoing = ureq::http::Request::builder()
             .method(request.method().as_str())

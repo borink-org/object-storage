@@ -51,7 +51,7 @@ pub(crate) fn get_outcome(outcome: &GetHeadOutcome<'_>) -> Outcome {
 pub(crate) fn put_outcome(outcome: &PutHeadOutcome<'_>) -> Outcome {
     match *outcome {
         PutHeadOutcome::Created { meta } => Outcome {
-            meta: meta_view(&meta),
+            meta: write_meta_view(&meta),
             ..only_kind(OutcomeKind::Created)
         },
         PutHeadOutcome::PreconditionFailed => only_kind(OutcomeKind::PreconditionFailed),
@@ -83,7 +83,7 @@ pub(crate) fn stage_outcome(outcome: &StageHeadOutcome<'_>) -> Outcome {
 pub(crate) fn commit_outcome(outcome: &CommitHeadOutcome<'_>) -> Outcome {
     match *outcome {
         CommitHeadOutcome::Committed { meta } => Outcome {
-            meta: meta_view(&meta),
+            meta: write_meta_view(&meta),
             ..only_kind(OutcomeKind::Committed)
         },
         CommitHeadOutcome::PreconditionFailed => only_kind(OutcomeKind::PreconditionFailed),
@@ -214,6 +214,15 @@ fn meta_view(meta: &proto::ObjectMeta<'_>) -> ObjectMeta {
         version: maybe_bytes(meta.version),
         content_encoding: maybe_bytes(meta.content_encoding),
         content_type: maybe_bytes(meta.content_type),
+    }
+}
+
+fn write_meta_view(meta: &proto::WriteMeta<'_>) -> ObjectMeta {
+    ObjectMeta {
+        e_tag: maybe_bytes(meta.e_tag),
+        last_modified: maybe_bytes(meta.last_modified.map(str::as_bytes)),
+        version: maybe_bytes(meta.version),
+        ..Default::default()
     }
 }
 

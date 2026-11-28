@@ -58,8 +58,6 @@ renaming_overrides_prefixing = true
 "Container" = "borink_container"
 "TIMESTAMPS_LEN" = "BORINK_TIMESTAMPS_LEN"
 "Timestamps" = "borink_timestamps"
-"TEMPLATE_LEN" = "BORINK_TEMPLATE_LEN"
-"Template" = "borink_template"
 "Prepared" = "borink_prepared"
 "ConditionValue" = "borink_condition_value"
 "Range" = "borink_range"
@@ -109,9 +107,8 @@ renaming_overrides_prefixing = true
 "OutcomeKind" = "borink_outcome_kind"
 "EntryKind" = "borink_entry_kind"
 "BlobProperty" = "borink_blob_property"
-# `class` and `template` are C++ keywords.
+# `class` is a C++ keyword.
 "class" = "class_"
-"template" = "template_"
 
 # A variant is named after its type, so a C consumer reads
 # `BORINK_GET_KIND_BYTES` without a second table.

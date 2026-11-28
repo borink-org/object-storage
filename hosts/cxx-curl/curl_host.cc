@@ -249,11 +249,11 @@ const std::string_view client = "libcurl";
 void Client::get(const GetItem &item, const Sink &sink, const GetOptions &options) {
     const Timestamps &now = timestamps();
     const Container container = this->container();
-    const Prepared &reads = prepare([&](BytesMut buf) {
+    (void)prepare([&](BytesMut buf) {
         return borink_prepare_get(&container, token(), AzureNamespaceUnknown, &options, buf);
     });
     const WireRequest &request = encode([&](BytesMut buf) {
-        return borink_encode_get(&reads.template_, template_bytes(), &item, &now, buf);
+        return borink_encode_get(template_bytes(), &item, &now, buf);
     });
 
     Reading reading{shape(item, options), sink,         head_,  diagnostic_,
@@ -324,11 +324,11 @@ void Client::put(PutItem item, std::span<const std::uint8_t> content, const PutO
     const Timestamps &now = timestamps();
     const Container container = this->container();
     item.content_len = content.size();
-    const Prepared &writes = prepare([&](BytesMut buf) {
+    (void)prepare([&](BytesMut buf) {
         return borink_prepare_put(&container, token(), AzureNamespaceUnknown, &options, buf);
     });
     encode([&](BytesMut buf) {
-        return borink_encode_put(&writes.template_, template_bytes(), &item, &now, buf);
+        return borink_encode_put(template_bytes(), &item, &now, buf);
     });
     upload(content);
 
@@ -347,11 +347,11 @@ void Client::stage(StageBlockItem item, std::span<const std::uint8_t> content,
     const Timestamps &now = timestamps();
     const Container container = this->container();
     item.content_len = content.size();
-    const Prepared &stages = prepare([&](BytesMut buf) {
+    (void)prepare([&](BytesMut buf) {
         return borink_prepare_stage_block(&container, token(), AzureNamespaceUnknown, &options, buf);
     });
     encode([&](BytesMut buf) {
-        return borink_encode_stage_block(&stages.template_, template_bytes(), &item, &now, buf);
+        return borink_encode_stage_block(template_bytes(), &item, &now, buf);
     });
     upload(content);
 
@@ -367,11 +367,11 @@ void Client::stage(StageBlockItem item, std::span<const std::uint8_t> content,
 void Client::commit(const CommitItem &item, const CommitOptions &options) {
     const Timestamps &now = timestamps();
     const Container container = this->container();
-    const Prepared &commits = prepare([&](BytesMut buf) {
+    (void)prepare([&](BytesMut buf) {
         return borink_prepare_commit_blocks(&container, token(), AzureNamespaceUnknown, &options, buf);
     });
     encode([&](BytesMut buf) {
-        return borink_encode_commit_blocks(&commits.template_, template_bytes(), &item, &now, buf);
+        return borink_encode_commit_blocks(template_bytes(), &item, &now, buf);
     });
     // The block list is the body that the library wrote after the head.
     upload(body());
@@ -406,11 +406,11 @@ Page Client::page(const ListItem &item, std::span<ListEntry> entries,
                   const ListOptions &options) {
     const Timestamps &now = timestamps();
     const Container container = this->container();
-    const Prepared &pages = prepare([&](BytesMut buf) {
+    (void)prepare([&](BytesMut buf) {
         return borink_prepare_list(&container, token(), AzureNamespaceUnknown, &options, buf);
     });
     const WireRequest &request = encode([&](BytesMut buf) {
-        return borink_encode_list(&pages.template_, template_bytes(), &item, &now, buf);
+        return borink_encode_list(template_bytes(), &item, &now, buf);
     });
 
     page_.clear();

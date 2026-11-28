@@ -52,7 +52,7 @@ pub fn prepare_put_tagging(
     revision: RevisionKind,
     checksum: Option<ChecksumKind>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let limits = bucket.service.is_aws().then_some((10, 128, 256));
     validate_tags(tags, s3_tag_char, limits)?;
     let write = |out: &mut dyn ByteSink| write_tagging(out, tags);
@@ -85,12 +85,12 @@ pub fn prepare_put_tagging(
 /// needs.
 pub fn encode_put_tagging(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_object(template, bytes, Operation::PutTagging, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::PutTagging, item, now, buf)
 }
 
 /// Reads the response head of a PutObjectTagging and reports what S3 did.
@@ -102,7 +102,7 @@ pub fn encode_put_tagging(
 pub fn accept_put_tagging_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
         200 => Ok(UpdateHeadOutcome::Updated {
-            meta: head.object_meta(),
+            meta: head.write_meta()?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(read_failure_head(&head)),
@@ -129,7 +129,7 @@ pub fn prepare_get_tagging(
     credentials: &Credentials<'_>,
     revision: RevisionKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_object(
         bucket,
         credentials,
@@ -150,12 +150,12 @@ pub fn prepare_get_tagging(
 /// As [`encode_put_tagging`].
 pub fn encode_get_tagging(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_object(template, bytes, Operation::GetTagging, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::GetTagging, item, now, buf)
 }
 
 /// Reads the response head of a GetObjectTagging and reports what to do

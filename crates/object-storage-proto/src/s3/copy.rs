@@ -14,8 +14,8 @@ use crate::head::read_decimal_header;
 use crate::outcome::finish_with_body;
 use crate::s3::parts::{validate_part_number, validate_upload_id};
 use crate::s3::template::{
-    self, CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Operation, Template, Unsigned,
-    encode_template,
+    self, CopyFrom, Describe, Detail, Field, FieldList, FieldValue, Header, Operation, Template,
+    Unsigned, encode_template,
 };
 use crate::s3::{
     Bucket, S3Values, is_error_document, kind_in_body, push_stored_fields, read_failure_head,
@@ -31,8 +31,8 @@ use crate::validate::{
 use crate::xml::s3::copy::{read_copied, read_part_copied};
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, Failure, InvalidRequest,
-    Method, ObjectMeta, Payload, Ranging, ResponseFault, ResponseHead, Result, RevisionKind,
-    ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
+    Method, Ranging, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind,
+    StageHeadOutcome, Timestamps, WriteMeta, WriteOptions,
 };
 
 // Whether a copy carried a condition on the target or on the source.
@@ -70,7 +70,7 @@ fn prepare_copy_kind(
     options: &CopyOptions<'_>,
     staged: bool,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let service = bucket.service;
     // AWS authorizes a copy into a directory bucket by the caller's own
     // credentials, and refuses those of a session.
@@ -185,34 +185,34 @@ fn describe_copy(staged: bool, detail: Detail, source_bucket: &str) -> Describe<
 // Writes the copy `item`, to the part `part` of an upload when it stages
 // one.
 fn encode_copy_kind(
-    template: &Template,
-    bytes: &[u8],
+    template: &[u8],
     operation: Operation,
     item: &CopyItem<'_>,
     part: Option<(&str, u32)>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
+    let header = Header::load(template)?;
     let detail @ Detail::Copy {
         condition,
         source_revision,
         source_condition,
         source_ranging,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    if template.operation != operation {
+    if header.operation != operation {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_key(item.source_key)?;
     if let Some((upload_id, number)) = part {
         validate_upload_id(upload_id)?;
-        validate_part_number(number, template.service)?;
+        validate_part_number(number, header.service)?;
     }
     validate_revision_item(source_revision, item.source_revision)?;
-    validate_write_condition(condition, item.condition_value, template.service)?;
+    validate_write_condition(condition, item.condition_value, header.service)?;
     validate_condition(source_condition, item.source_condition_value)?;
     validate_source_range(source_ranging, item.source_range)?;
     let values = S3Values(HoleValues {
@@ -228,10 +228,10 @@ fn encode_copy_kind(
         ..HoleValues::default()
     });
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
-        Payload::Slice(&[]),
+        0,
         buf,
         &describe_copy(operation == Operation::StagePartCopy, detail, ""),
     )
@@ -259,7 +259,7 @@ pub fn prepare_copy(
     credentials: &Credentials<'_>,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(bucket, credentials, options, false, buf)
 }
 
@@ -277,12 +277,12 @@ pub fn prepare_copy(
 /// needs.
 pub fn encode_copy(
     template: &Template,
-    bytes: &[u8],
     item: &CopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_copy_kind(template, bytes, Operation::Copy, item, None, now, buf)
+    let template = template.as_bytes();
+    encode_copy_kind(template, Operation::Copy, item, None, now, buf)
 }
 
 /// Writes the template of UploadPartCopies with `options` into `buf`,
@@ -297,7 +297,7 @@ pub fn prepare_stage_part_copy(
     credentials: &Credentials<'_>,
     options: &CopyOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_copy_kind(bucket, credentials, options, true, buf)
 }
 
@@ -312,14 +312,13 @@ pub fn prepare_stage_part_copy(
 /// template names one.
 pub fn encode_stage_part_copy(
     template: &Template,
-    bytes: &[u8],
     item: &StagePartCopyItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
+    let template = template.as_bytes();
     encode_copy_kind(
         template,
-        bytes,
         Operation::StagePartCopy,
         &item.copy,
         Some((item.upload_id, item.number)),
@@ -379,11 +378,12 @@ pub fn accept_copy_body<'h>(
     }
     let e_tag = read_copied(body)?;
     Ok(CopyHeadOutcome::Copied {
-        meta: ObjectMeta {
+        meta: WriteMeta {
             e_tag: Some(e_tag.as_bytes()),
             version: head.version,
-            ..ObjectMeta::default()
+            ..WriteMeta::default()
         },
+        copy_id: None,
     })
 }
 

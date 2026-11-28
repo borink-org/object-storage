@@ -1,8 +1,5 @@
-// Every operation's layout, run as a request's pass, writes what walking its
-// template's table writes: `template::write_request` checks that for each
-// request it writes in a test. These tests write one or more requests of
-// every operation on both services, so that the check covers each layout.
-// A template of one object writes the same request as a template of every
+// Exercises every operation's layout on both services, and checks that a
+// template of one object writes the same request as a template of every
 // object does for that object's key.
 
 extern crate std;
@@ -14,11 +11,11 @@ use crate::azure::{self, AzureNamespace, BlockListKind, BlockRef, BlockSource, C
 use crate::s3::{self, Bucket, PartRef, PayloadSigning, Service};
 use crate::sigv4::{Credentials, wipe_best_effort};
 use crate::{
-    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentProperties, CopyItem,
-    CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
-    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, Payload, PutItem,
-    PutOptions, Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind,
-    StageOptions, Tag, Timestamps, WireRequest, WriteOptions,
+    ChecksumKind, ChecksumValue, ConditionKind, ConditionValue, ContentLength, ContentProperties,
+    CopyItem, CopyOptions, DeleteKind, DeleteOptions, DeleteTarget, GetItem, GetKind, GetOptions,
+    ListInclude, ListItem, ListMarker, ListOptions, MetadataPair, ObjectItem, PutItem, PutOptions,
+    Ranging, RequestedRange, RestoreOptions, RestorePriority, Result, RevisionKind, StageOptions,
+    Tag, Timestamps, WireRequest, WriteOptions,
 };
 
 const KEY: &str = "dir/file name.sst";
@@ -52,42 +49,44 @@ fn stored() -> WriteOptions<'static> {
 }
 
 // Writes a template with `prepare` into a buffer of its size.
-fn written<T>(prepare: impl Fn(&mut [u8]) -> Result<T>) -> (T, Vec<u8>) {
+fn written(prepare: impl Fn(&mut [u8]) -> Result<usize>) -> Vec<u8> {
     let mut bytes = vec![0; 16 * 1024];
-    let template =
+    let len =
         prepare(&mut bytes).unwrap_or_else(|error| panic!("the template is refused: {error:?}"));
-    (template, bytes)
+    bytes.truncate(len);
+    bytes
 }
 
 // Writes an Azure template from a container of every object and from one of
 // `KEY`, writes a request of each with `encode`, which takes the item's key,
 // and checks that they are the same.
 fn azure_both(
-    prepare: impl Fn(&Container<'_>, &mut [u8]) -> Result<azure::Template>,
-    encode: impl Fn(&azure::Template, &[u8], &str) -> Vec<u8>,
+    prepare: impl Fn(&Container<'_>, &mut [u8]) -> Result<usize>,
+    encode: impl Fn(&azure::Template, &str) -> Vec<u8>,
 ) {
     let container = Container::new("https://account.blob.core.windows.net", "data").unwrap();
-    let (each, each_bytes) = written(|buf| prepare(&container, buf));
-    let request = encode(&each, &each_bytes, KEY);
+    let each = written(|buf| prepare(&container, buf));
+    let request = encode(azure::Template::from_bytes(&each), KEY);
     let one = container.object(KEY);
-    let (fixed, fixed_bytes) = written(|buf| prepare(&one, buf));
+    let fixed = written(|buf| prepare(&one, buf));
+    let fixed = azure::Template::from_bytes(&fixed);
     assert_eq!(
-        encode(&fixed, &fixed_bytes, ""),
+        encode(fixed, ""),
         request,
         "a template of one object writes alike"
     );
-    assert_eq!(encode(&fixed, &fixed_bytes, KEY), request);
+    assert_eq!(encode(fixed, KEY), request);
 }
 
 // Writes an Azure template of an operation that names no object.
 fn azure_one(
-    prepare: impl Fn(&Container<'_>, &mut [u8]) -> Result<azure::Template>,
-    encode: impl Fn(&azure::Template, &[u8], &mut [u8]),
+    prepare: impl Fn(&Container<'_>, &mut [u8]) -> Result<usize>,
+    encode: impl Fn(&azure::Template, &mut [u8]),
 ) {
     let container = Container::new("https://account.blob.core.windows.net", "data").unwrap();
-    let (template, bytes) = written(|buf| prepare(&container, buf));
+    let template = written(|buf| prepare(&container, buf));
     let mut buf = vec![0; 64 * 1024];
-    encode(&template, &bytes, &mut buf);
+    encode(azure::Template::from_bytes(&template), &mut buf);
 }
 
 // The URL, the head and the content of an Azure request written in `buf`.
@@ -95,9 +94,9 @@ fn azure_request(request: Result<WireRequest>, buf: &[u8]) -> Vec<u8> {
     let request = request.expect("the request is written");
     let mut text = request.url(buf).as_bytes().to_vec();
     text.extend_from_slice(request.head(buf));
-    match request.payload(buf) {
-        Payload::Slice(body) => text.extend_from_slice(body),
-        Payload::Streamed { len } => text.extend_from_slice(&len.to_le_bytes()),
+    match request.body(buf) {
+        Some(body) => text.extend_from_slice(body),
+        None => text.extend_from_slice(&request.content_length().to_le_bytes()),
     }
     text
 }
@@ -134,7 +133,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                 };
                 azure_both(
                     |container, buf| azure::prepare_get(container, token(), NS, &options, buf),
-                    |template, bytes, key| {
+                    |template, key| {
                         let mut buf = vec![0; 4096];
                         let item = GetItem {
                             range: if ranging == Ranging::Ranged {
@@ -146,10 +145,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                             revision: (revision != RevisionKind::Current).then_some("2024-01-01"),
                             ..GetItem::new(key)
                         };
-                        azure_request(
-                            azure::encode_get(template, bytes, &item, &now, &mut buf),
-                            &buf,
-                        )
+                        azure_request(azure::encode_get(template, &item, &now, &mut buf), &buf)
                     },
                 );
             }
@@ -164,7 +160,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
         };
         azure_both(
             |container, buf| azure::prepare_put(container, token(), NS, &options, buf),
-            |template, bytes, key| {
+            |template, key| {
                 let mut buf = vec![0; 4096];
                 let item = PutItem {
                     condition_value: Some(ConditionValue::ETag(b"*")),
@@ -175,25 +171,27 @@ fn every_azure_layout_writes_what_its_table_writes() {
                             CRC64
                         })
                     }),
-                    ..PutItem::new(key, Payload::Streamed { len: 4096 })
+                    ..PutItem::new(key, ContentLength(4096))
                 };
-                let request = azure::encode_put(template, bytes, &item, &now, &mut buf);
+                let request = azure::encode_put(template, &item, &now, &mut buf);
                 // A write sends the content it was given.
                 assert!(matches!(
-                    request.as_ref().map(|request| request.payload(&buf)),
-                    Ok(Payload::Streamed { len: 4096 })
+                    request
+                        .as_ref()
+                        .map(|request| (request.body(&buf), request.content_length())),
+                    Ok((None, 4096))
                 ));
                 azure_request(request, &buf)
             },
         );
     }
-    let object = |template: &azure::Template, bytes: &[u8], key: &str, revision: bool| {
+    let object = |template: &azure::Template, key: &str, revision: bool| {
         let mut buf = vec![0; 4096];
         let item = ObjectItem {
             revision: revision.then_some("2024-01-01"),
             ..ObjectItem::new(key)
         };
-        let encode = match template.operation() {
+        let encode = match template.operation().unwrap() {
             azure::Operation::Delete => azure::encode_delete,
             azure::Operation::SetTier => azure::encode_set_tier,
             azure::Operation::SetMetadata => azure::encode_set_metadata,
@@ -204,7 +202,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
             azure::Operation::ListBlocks => azure::encode_list_blocks,
             _ => azure::encode_restore,
         };
-        azure_request(encode(template, bytes, &item, &now, &mut buf), &buf)
+        azure_request(encode(template, &item, &now, &mut buf), &buf)
     };
     for revision in [RevisionKind::Current, RevisionKind::Version] {
         let named = revision != RevisionKind::Current;
@@ -219,19 +217,19 @@ fn every_azure_layout_writes_what_its_table_writes() {
         };
         azure_both(
             |c, buf| azure::prepare_delete(c, token(), NS, &delete, buf),
-            |t, b, k| object(t, b, k, named),
+            |t, k| object(t, k, named),
         );
         azure_both(
             |c, buf| azure::prepare_set_tags(c, token(), NS, &TAGS, revision, buf),
-            |t, b, k| object(t, b, k, named),
+            |t, k| object(t, k, named),
         );
         azure_both(
             |c, buf| azure::prepare_get_tags(c, token(), NS, revision, buf),
-            |t, b, k| object(t, b, k, named),
+            |t, k| object(t, k, named),
         );
         azure_both(
             |c, buf| azure::prepare_list_blocks(c, token(), NS, BlockListKind::All, revision, buf),
-            |t, b, k| object(t, b, k, named),
+            |t, k| object(t, k, named),
         );
         let restore = RestoreOptions {
             priority: RestorePriority::High,
@@ -241,12 +239,12 @@ fn every_azure_layout_writes_what_its_table_writes() {
         };
         azure_both(
             |c, buf| azure::prepare_restore(c, token(), NS, &restore, buf),
-            |t, b, k| object(t, b, k, named),
+            |t, k| object(t, k, named),
         );
     }
     azure_both(
         |c, buf| azure::prepare_set_tier(c, token(), NS, "Cool", buf),
-        |t, b, k| object(t, b, k, false),
+        |t, k| object(t, k, false),
     );
     azure_both(
         |c, buf| {
@@ -256,7 +254,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
             };
             azure::prepare_set_metadata(c, token(), NS, &options, buf)
         },
-        |t, b, k| object(t, b, k, false),
+        |t, k| object(t, k, false),
     );
     azure_both(
         |c, buf| {
@@ -266,7 +264,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
             };
             azure::prepare_set_properties(c, token(), NS, &options, buf)
         },
-        |t, b, k| object(t, b, k, false),
+        |t, k| object(t, k, false),
     );
     azure_both(
         |c, buf| {
@@ -276,23 +274,19 @@ fn every_azure_layout_writes_what_its_table_writes() {
             };
             azure::prepare_snapshot(c, token(), NS, &options, buf)
         },
-        |t, b, k| object(t, b, k, false),
+        |t, k| object(t, k, false),
     );
     for checksum in [None, Some(ChecksumKind::Crc64)] {
         azure_both(
             |c, buf| azure::prepare_stage_block(c, token(), NS, &StageOptions { checksum }, buf),
-            |template, bytes, key| {
+            |template, key| {
                 let mut buf = vec![0; 4096];
                 let item = azure::StageBlockItem {
                     checksum: checksum.map(|_| ChecksumValue::Base64(CRC64)),
-                    ..azure::StageBlockItem::new(
-                        key,
-                        "YmxvY2stMDAwMDA=",
-                        Payload::Streamed { len: 8 },
-                    )
+                    ..azure::StageBlockItem::new(key, "YmxvY2stMDAwMDA=", ContentLength(8))
                 };
                 azure_request(
-                    azure::encode_stage_block(template, bytes, &item, &now, &mut buf),
+                    azure::encode_stage_block(template, &item, &now, &mut buf),
                     &buf,
                 )
             },
@@ -317,7 +311,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
         };
         azure_both(
             |c, buf| azure::prepare_commit_blocks(c, token(), NS, &options, buf),
-            |template, bytes, key| {
+            |template, key| {
                 let mut buf = vec![0; 4096];
                 let item = azure::CommitItem {
                     condition_value: etag,
@@ -325,7 +319,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                     ..azure::CommitItem::new(key, &blocks)
                 };
                 azure_request(
-                    azure::encode_commit_blocks(template, bytes, &item, &now, &mut buf),
+                    azure::encode_commit_blocks(template, &item, &now, &mut buf),
                     &buf,
                 )
             },
@@ -360,7 +354,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                     2 => azure::prepare_put_from_url(c, token(), NS, &options, buf),
                     _ => azure::prepare_stage_block_from_url(c, token(), NS, &options, buf),
                 },
-                |template, bytes, key| {
+                |template, key| {
                     let mut buf = vec![0; 4096];
                     let copy = CopyItem {
                         source_revision: (source_revision != RevisionKind::Current)
@@ -374,24 +368,22 @@ fn every_azure_layout_writes_what_its_table_writes() {
                         },
                         ..CopyItem::new(key, SOURCE)
                     };
-                    let request = match template.operation() {
+                    let request = match template.operation().unwrap() {
                         azure::Operation::Copy => {
-                            azure::encode_copy(template, bytes, &copy, &now, &mut buf)
+                            azure::encode_copy(template, &copy, &now, &mut buf)
                         }
                         azure::Operation::CopyFromUrl => {
-                            azure::encode_copy_from_url(template, bytes, &copy, &now, &mut buf)
+                            azure::encode_copy_from_url(template, &copy, &now, &mut buf)
                         }
                         azure::Operation::PutFromUrl => {
-                            azure::encode_put_from_url(template, bytes, &copy, &now, &mut buf)
+                            azure::encode_put_from_url(template, &copy, &now, &mut buf)
                         }
                         _ => {
                             let item = azure::StageBlockFromUrlItem {
                                 copy,
                                 id: "YmxvY2stMDAwMDA=",
                             };
-                            azure::encode_stage_block_from_url(
-                                template, bytes, &item, &now, &mut buf,
-                            )
+                            azure::encode_stage_block_from_url(template, &item, &now, &mut buf)
                         }
                     };
                     azure_request(request, &buf)
@@ -401,14 +393,14 @@ fn every_azure_layout_writes_what_its_table_writes() {
     }
     azure_both(
         |c, buf| azure::prepare_abort_copy(c, token(), NS, buf),
-        |template, bytes, key| {
+        |template, key| {
             let mut buf = vec![0; 4096];
             let item = azure::AbortCopyItem {
                 key,
                 copy_id: "copy-1",
             };
             azure_request(
-                azure::encode_abort_copy(template, bytes, &item, &now, &mut buf),
+                azure::encode_abort_copy(template, &item, &now, &mut buf),
                 &buf,
             )
         },
@@ -425,8 +417,8 @@ fn every_azure_layout_writes_what_its_table_writes() {
     ];
     azure_one(
         |c, buf| azure::prepare_delete_many(c, token(), NS, buf),
-        |template, bytes, buf| {
-            azure::encode_delete_many(template, bytes, &targets, &now, buf).unwrap();
+        |template, buf| {
+            azure::encode_delete_many(template, &targets, &now, buf).unwrap();
         },
     );
     for options in [
@@ -439,7 +431,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
     ] {
         azure_one(
             |c, buf| azure::prepare_list(c, token(), NS, &options, buf),
-            |template, bytes, buf| {
+            |template, buf| {
                 for item in [
                     ListItem::new(""),
                     ListItem {
@@ -447,7 +439,7 @@ fn every_azure_layout_writes_what_its_table_writes() {
                         ..ListItem::new("dir/")
                     },
                 ] {
-                    azure::encode_list(template, bytes, &item, &now, buf).unwrap();
+                    azure::encode_list(template, &item, &now, buf).unwrap();
                 }
             },
         );
@@ -459,26 +451,27 @@ fn every_azure_layout_writes_what_its_table_writes() {
 // the same.
 fn s3_both(
     service: Service,
-    prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<s3::Template>,
-    encode: impl Fn(&s3::Template, &[u8], &str, &mut [u8]) -> Result<usize>,
+    prepare: impl Fn(&Bucket<'_>, &Credentials<'_>, &mut [u8]) -> Result<usize>,
+    encode: impl Fn(&s3::Template, &str, &mut [u8]) -> Result<usize>,
 ) {
     let (bucket, credentials) = s3_bucket(service);
-    let request = |template: &s3::Template, bytes: &[u8], key: &str| {
+    let request = |template: &s3::Template, key: &str| {
         let mut buf = vec![0; 8192];
-        let len = encode(template, bytes, key, &mut buf).expect("the request is written");
+        let len = encode(template, key, &mut buf).expect("the request is written");
         buf.truncate(len);
         buf
     };
-    let (each, each_bytes) = written(|buf| prepare(&bucket, &credentials, buf));
-    let expected = request(&each, &each_bytes, KEY);
+    let each = written(|buf| prepare(&bucket, &credentials, buf));
+    let expected = request(s3::Template::from_bytes(&each), KEY);
     let one = bucket.object(KEY);
-    let (fixed, fixed_bytes) = written(|buf| prepare(&one, &credentials, buf));
+    let fixed = written(|buf| prepare(&one, &credentials, buf));
+    let fixed = s3::Template::from_bytes(&fixed);
     assert_eq!(
-        request(&fixed, &fixed_bytes, ""),
+        request(fixed, ""),
         expected,
         "a template of one object writes alike"
     );
-    assert_eq!(request(&fixed, &fixed_bytes, KEY), expected);
+    assert_eq!(request(fixed, KEY), expected);
 }
 
 fn s3_bucket(service: Service) -> (Bucket<'static>, Credentials<'static>) {
@@ -524,7 +517,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
             s3_both(
                 aws,
                 |b, c, buf| s3::prepare_get(b, c, &options, buf),
-                |template, bytes, key, buf| {
+                |template, key, buf| {
                     let item = GetItem {
                         range: if ranging == Ranging::Ranged {
                             range
@@ -535,7 +528,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
                         revision: (revision != RevisionKind::Current).then_some("v1"),
                         ..GetItem::new(key)
                     };
-                    len(s3::encode_get(template, bytes, &item, &now, buf))
+                    len(s3::encode_get(template, &item, &now, buf))
                 },
             );
         }
@@ -555,7 +548,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
         s3_both(
             aws,
             |b, c, buf| s3::prepare_put(b, c, &options, signing, buf),
-            |template, bytes, key, buf| {
+            |template, key, buf| {
                 let item = PutItem {
                     condition_value: Some(ConditionValue::ETag(b"*")),
                     checksum: checksum.map(|kind| {
@@ -565,28 +558,27 @@ fn every_s3_layout_writes_what_its_table_writes() {
                             CRC64
                         })
                     }),
-                    ..PutItem::new(key, Payload::Streamed { len: 4096 })
+                    ..PutItem::new(key, ContentLength(4096))
                 };
                 let sha = (signing == PayloadSigning::Signed).then_some(&digest);
-                len(s3::encode_put(template, bytes, &item, sha, &now, buf))
+                len(s3::encode_put(template, &item, sha, &now, buf))
             },
         );
     }
-    let object =
-        |template: &s3::Template, bytes: &[u8], key: &str, buf: &mut [u8], version: bool| {
-            let item = ObjectItem {
-                revision: version.then_some("v1"),
-                ..ObjectItem::new(key)
-            };
-            let encode = match template.operation() {
-                s3::Operation::Delete => s3::encode_delete,
-                s3::Operation::GetTagging => s3::encode_get_tagging,
-                s3::Operation::PutTagging => s3::encode_put_tagging,
-                s3::Operation::Restore => s3::encode_restore,
-                _ => s3::encode_create_upload,
-            };
-            len(encode(template, bytes, &item, &now, buf))
+    let object = |template: &s3::Template, key: &str, buf: &mut [u8], version: bool| {
+        let item = ObjectItem {
+            revision: version.then_some("v1"),
+            ..ObjectItem::new(key)
         };
+        let encode = match template.operation().unwrap() {
+            s3::Operation::Delete => s3::encode_delete,
+            s3::Operation::GetTagging => s3::encode_get_tagging,
+            s3::Operation::PutTagging => s3::encode_put_tagging,
+            s3::Operation::Restore => s3::encode_restore,
+            _ => s3::encode_create_upload,
+        };
+        len(encode(template, &item, &now, buf))
+    };
     for revision in [RevisionKind::Current, RevisionKind::Version] {
         let version = revision == RevisionKind::Version;
         let delete = DeleteOptions {
@@ -596,18 +588,18 @@ fn every_s3_layout_writes_what_its_table_writes() {
         s3_both(
             aws,
             |b, c, buf| s3::prepare_delete(b, c, &delete, buf),
-            |t, b, k, buf| object(t, b, k, buf, version),
+            |t, k, buf| object(t, k, buf, version),
         );
         s3_both(
             aws,
             |b, c, buf| s3::prepare_get_tagging(b, c, revision, buf),
-            |t, b, k, buf| object(t, b, k, buf, version),
+            |t, k, buf| object(t, k, buf, version),
         );
         for checksum in [None, Some(ChecksumKind::Crc64), Some(ChecksumKind::Md5)] {
             s3_both(
                 aws,
                 |b, c, buf| s3::prepare_put_tagging(b, c, &TAGS, revision, checksum, buf),
-                |t, b, k, buf| object(t, b, k, buf, version),
+                |t, k, buf| object(t, k, buf, version),
             );
             let restore = RestoreOptions {
                 days: Some(3),
@@ -618,7 +610,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
             s3_both(
                 aws,
                 |b, c, buf| s3::prepare_restore(b, c, &restore, buf),
-                |t, b, k, buf| object(t, b, k, buf, version),
+                |t, k, buf| object(t, k, buf, version),
             );
         }
     }
@@ -631,7 +623,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
             };
             s3::prepare_create_upload(b, c, &options, buf)
         },
-        |t, b, k, buf| object(t, b, k, buf, false),
+        |t, k, buf| object(t, k, buf, false),
     );
     for (checksum, signing) in [
         (None, PayloadSigning::Unsigned),
@@ -641,15 +633,13 @@ fn every_s3_layout_writes_what_its_table_writes() {
         s3_both(
             aws,
             |b, c, buf| s3::prepare_stage_part(b, c, &StageOptions { checksum }, signing, buf),
-            |template, bytes, key, buf| {
+            |template, key, buf| {
                 let item = s3::StagePartItem {
                     checksum: checksum.map(|_| ChecksumValue::Base64(CRC64)),
-                    ..s3::StagePartItem::new(key, "upload-1", 3, Payload::Streamed { len: 8 })
+                    ..s3::StagePartItem::new(key, "upload-1", 3, ContentLength(8))
                 };
                 let sha = (signing == PayloadSigning::Signed).then_some(&digest);
-                len(s3::encode_stage_part(
-                    template, bytes, &item, sha, &now, buf,
-                ))
+                len(s3::encode_stage_part(template, &item, sha, &now, buf))
             },
         );
     }
@@ -672,38 +662,34 @@ fn every_s3_layout_writes_what_its_table_writes() {
         s3_both(
             aws,
             |b, c, buf| s3::prepare_commit_parts(b, c, &options, buf),
-            |template, bytes, key, buf| {
+            |template, key, buf| {
                 let item = s3::CommitItem {
                     condition_value: Some(ConditionValue::ETag(b"*")),
                     size: sized.then_some(1 << 20),
                     ..s3::CommitItem::new(key, "upload-1", &parts)
                 };
-                len(s3::encode_commit_parts(template, bytes, &item, &now, buf))
+                len(s3::encode_commit_parts(template, &item, &now, buf))
             },
         );
     }
-    s3_both(
-        aws,
-        s3::prepare_abort_upload,
-        |template, bytes, key, buf| {
-            let item = s3::UploadItem {
-                key,
-                upload_id: "upload-1",
-            };
-            len(s3::encode_abort_upload(template, bytes, &item, &now, buf))
-        },
-    );
+    s3_both(aws, s3::prepare_abort_upload, |template, key, buf| {
+        let item = s3::UploadItem {
+            key,
+            upload_id: "upload-1",
+        };
+        len(s3::encode_abort_upload(template, &item, &now, buf))
+    });
     for max_parts in [None, Some(50)] {
         s3_both(
             aws,
             |b, c, buf| s3::prepare_list_parts(b, c, max_parts, buf),
-            |template, bytes, key, buf| {
+            |template, key, buf| {
                 let item = s3::ListPartsItem {
                     key,
                     upload_id: "upload-1",
                     marker: Some("3"),
                 };
-                len(s3::encode_list_parts(template, bytes, &item, &now, buf))
+                len(s3::encode_list_parts(template, &item, &now, buf))
             },
         );
     }
@@ -731,7 +717,7 @@ fn every_s3_layout_writes_what_its_table_writes() {
                 false => s3::prepare_copy(b, c, &options, buf),
                 true => s3::prepare_stage_part_copy(b, c, &options, buf),
             },
-            |template, bytes, key, buf| {
+            |template, key, buf| {
                 let copy = CopyItem {
                     source_revision: (source_revision != RevisionKind::Current).then_some("v1"),
                     condition_value: (!staged).then_some(ConditionValue::ETag(b"*")),
@@ -740,16 +726,14 @@ fn every_s3_layout_writes_what_its_table_writes() {
                     ..CopyItem::new(key, SOURCE)
                 };
                 match staged {
-                    false => len(s3::encode_copy(template, bytes, &copy, &now, buf)),
+                    false => len(s3::encode_copy(template, &copy, &now, buf)),
                     true => {
                         let item = s3::StagePartCopyItem {
                             copy,
                             upload_id: "upload-1",
                             number: 4,
                         };
-                        len(s3::encode_stage_part_copy(
-                            template, bytes, &item, &now, buf,
-                        ))
+                        len(s3::encode_stage_part_copy(template, &item, &now, buf))
                     }
                 }
             },
@@ -767,11 +751,17 @@ fn every_s3_layout_writes_what_its_table_writes() {
             revision: None,
         },
     ];
-    let (template, bytes) = written(|buf| {
+    let template = written(|buf| {
         s3::prepare_delete_many(&bucket, &credentials, Some(ChecksumKind::Crc64), buf)
     });
     let mut buf = vec![0; 64 * 1024];
-    s3::encode_delete_many(&template, &bytes, &targets, &now, &mut buf).unwrap();
+    s3::encode_delete_many(
+        s3::Template::from_bytes(&template),
+        &targets,
+        &now,
+        &mut buf,
+    )
+    .unwrap();
     for options in [
         ListOptions::default(),
         ListOptions {
@@ -785,8 +775,8 @@ fn every_s3_layout_writes_what_its_table_writes() {
             include: ListInclude::VERSIONS,
         },
     ] {
-        let (template, bytes) =
-            written(|buf| s3::prepare_list(&bucket, &credentials, &options, buf));
+        let template = written(|buf| s3::prepare_list(&bucket, &credentials, &options, buf));
+        let template = s3::Template::from_bytes(&template);
         let versions = options.include.contains(ListInclude::VERSIONS);
         for item in [
             ListItem::new(""),
@@ -802,13 +792,12 @@ fn every_s3_layout_writes_what_its_table_writes() {
                 ..ListItem::new("dir/")
             },
         ] {
-            s3::encode_list(&template, &bytes, &item, &now, &mut buf).unwrap();
+            s3::encode_list(template, &item, &now, &mut buf).unwrap();
         }
     }
     let (directory, credentials) = s3_bucket(Service::AwsDirectory);
-    let (template, bytes) =
-        written(|buf| s3::prepare_create_session(&directory, &credentials, buf));
-    s3::encode_create_session(&template, &bytes, &now, &mut buf).unwrap();
+    let template = written(|buf| s3::prepare_create_session(&directory, &credentials, buf));
+    s3::encode_create_session(s3::Template::from_bytes(&template), &now, &mut buf).unwrap();
 }
 
 // The length of an S3 request.

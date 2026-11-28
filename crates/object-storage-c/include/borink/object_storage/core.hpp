@@ -40,7 +40,6 @@ using AzureRejection = borink_azure_rejection;
 using MaybeSpan     = borink_maybe_span;
 using Container     = borink_container;
 using Timestamps    = borink_timestamps;
-using Template      = borink_template;
 using Prepared      = borink_prepared;
 using ConditionValue = borink_condition_value;
 using Range         = borink_range;
@@ -90,7 +89,6 @@ using EntryKind     = borink_entry_kind;
 using BlobProperty  = borink_blob_property;
 using PropertySet   = borink_property_set;
 
-inline constexpr std::size_t TemplateLen = BORINK_TEMPLATE_LEN;
 inline constexpr std::size_t TimestampsLen = BORINK_TIMESTAMPS_LEN;
 
 inline constexpr ErrorCode ErrorCodeNone             = BORINK_ERROR_CODE_NONE;

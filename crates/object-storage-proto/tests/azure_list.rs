@@ -1,6 +1,6 @@
 //! Azure listing encoding and page reading.
 
-use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{
     AzureNamespace, BlobProperty, Container, PropertySet, PropertyValues,
 };
@@ -13,14 +13,12 @@ fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
-fn template(
-    namespace: AzureNamespace,
-    options: &ListOptions<'_>,
-) -> Result<(Template, Vec<u8>), Error> {
+fn template(namespace: AzureNamespace, options: &ListOptions<'_>) -> Result<Vec<u8>, Error> {
     let container = Container::new("https://account.blob.core.windows.net", "container").unwrap();
     let mut bytes = vec![0; 1024];
-    let template = azure::prepare_list(&container, "token", namespace, options, &mut bytes)?;
-    Ok((template, bytes))
+    let len = azure::prepare_list(&container, "token", namespace, options, &mut bytes)?;
+    bytes.truncate(len);
+    Ok(bytes)
 }
 
 // The URL of the page `item` of a listing with `options`, or the reason it
@@ -30,10 +28,15 @@ fn encode(
     options: &ListOptions<'_>,
     item: &ListItem<'_>,
 ) -> Result<String, Error> {
-    let (template, bytes) = template(namespace, options)?;
+    let template = template(namespace, options)?;
     // A URL as long as Azure reads stands in the request twice.
     let mut buf = vec![0; 2 * azure::MAX_URL_LEN + 1024];
-    let request = azure::encode_list(&template, &bytes, item, &now(), &mut buf)?;
+    let request = azure::encode_list(
+        azure::Template::from_bytes(&template),
+        item,
+        &now(),
+        &mut buf,
+    )?;
     Ok(request.url(&buf).to_owned())
 }
 

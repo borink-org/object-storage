@@ -13,19 +13,25 @@ fn container() -> Container<'static> {
 
 fn refusal(options: &DeleteOptions, item: &ObjectItem<'_>) -> Option<Error> {
     let mut bytes = [0; 512];
-    let template = match azure::prepare_delete(
+    let len = match azure::prepare_delete(
         &container(),
         "token",
         AzureNamespace::Unknown,
         options,
         &mut bytes,
     ) {
-        Ok(template) => template,
+        Ok(len) => len,
         Err(error) => return Some(error),
     };
     let mut untouched = [0xAA; 512];
     let now = Timestamps::from_unix(1_787_400_000);
-    let error = azure::encode_delete(&template, &bytes, item, &now, &mut untouched).err();
+    let error = azure::encode_delete(
+        azure::Template::from_bytes(&bytes[..len]),
+        item,
+        &now,
+        &mut untouched,
+    )
+    .err();
     if error.is_some() {
         assert!(untouched.iter().all(|byte| *byte == 0xAA));
     }

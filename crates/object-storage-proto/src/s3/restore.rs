@@ -62,7 +62,7 @@ pub fn prepare_restore(
     credentials: &Credentials<'_>,
     options: &RestoreOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     // S3 restores a copy in the object's own storage class, for at least a
     // day.
     if bucket.service == Service::AwsDirectory || options.tier.is_some() || options.days == Some(0)
@@ -99,12 +99,12 @@ pub fn prepare_restore(
 /// needs.
 pub fn encode_restore(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_object(template, bytes, Operation::Restore, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::Restore, item, now, buf)
 }
 
 /// Reads the response head of a RestoreObject and reports what S3 did:
