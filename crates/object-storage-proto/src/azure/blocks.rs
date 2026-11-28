@@ -19,7 +19,7 @@ use crate::azure::{
 };
 use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
 use crate::encoding::{base64_into, base64_len};
-use crate::head::{read_decimal_header, read_text_header};
+use crate::head::read_decimal_header;
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, Writer, condition_header_name};
 use crate::template::{Fill, Hole, HoleValues, ParamValue, TemplateBody, WireRequest};
@@ -30,7 +30,6 @@ use crate::validate::{
 use crate::{
     ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, ContentLength,
     Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair, Method, ObjectItem,
-    ObjectMeta,
     ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, StageHeadOutcome,
     StageOptions, Timestamps, WriteOptions,
 };
@@ -163,13 +162,6 @@ pub const MAX_STAGE_LEN: u64 = 4000 * 1024 * 1024;
 const MAX_BLOCKS: usize = 50_000;
 const COMMIT_OPEN: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>";
 const COMMIT_CLOSE: &[u8] = b"</BlockList>";
-
-fn multipart_meta(head: ResponseHead<'_>) -> Result<ObjectMeta<'_>> {
-    Ok(ObjectMeta {
-        last_modified: read_text_header(head.last_modified)?,
-        ..head.object_meta()
-    })
-}
 
 // The local half of the rules on `BlockRef::id`. Equal decoded lengths
 // within one blob, and whether a block exists, are the service's to check.
@@ -617,7 +609,7 @@ pub fn accept_commit_blocks_head<'h>(
 ) -> Result<CommitHeadOutcome<'h>> {
     match head.status {
         201 => Ok(CommitHeadOutcome::Committed {
-            meta: multipart_meta(head)?,
+            meta: head.write_meta()?,
         }),
         412 if shape.condition != ConditionKind::None
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -719,7 +711,7 @@ pub fn encode_list_blocks(
 pub fn accept_list_blocks_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHeadOutcome<'h>> {
     match head.status {
         200 => Ok(ListPartsHeadOutcome::Parts {
-            meta: multipart_meta(head)?,
+            meta: head.write_meta()?,
             expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),

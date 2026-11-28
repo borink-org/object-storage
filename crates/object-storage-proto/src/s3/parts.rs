@@ -26,8 +26,8 @@ use crate::xml::s3::parts::read_committed;
 use crate::{
     ChecksumValue, CommitHeadOutcome, CommitShape, ConditionKind, ConditionValue, ContentLength,
     DeleteHeadOutcome, Failure, InvalidRequest, ListPartsHeadOutcome, Listing, MetadataPair,
-    Method, ObjectItem, ObjectMeta, ResponseFault, ResponseHead, Result, RevisionKind,
-    ServiceErrorKind, StageHeadOutcome, StageOptions, Timestamps, WriteOptions, encoding,
+    Method, ObjectItem, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind,
+    StageHeadOutcome, StageOptions, Timestamps, WriteMeta, WriteOptions, encoding,
 };
 
 /// The most bytes that S3 takes in one part.
@@ -741,10 +741,10 @@ pub fn accept_commit_parts_body<'h>(
     }
     let e_tag = read_committed(body)?;
     Ok(CommitHeadOutcome::Committed {
-        meta: ObjectMeta {
+        meta: WriteMeta {
             e_tag: Some(e_tag.as_bytes()),
             version: head.version,
-            ..ObjectMeta::default()
+            ..WriteMeta::default()
         },
     })
 }
@@ -813,14 +813,7 @@ pub fn encode_abort_upload(
         upload_id: Some(item.upload_id),
         ..HoleValues::default()
     });
-    encode_template(
-        &header,
-        template,
-        &values,
-        0,
-        buf,
-        &describe_abort_upload(),
-    )
+    encode_template(&header, template, &values, 0, buf, &describe_abort_upload())
 }
 
 /// Reads the response head of an AbortMultipartUpload and reports what S3
@@ -937,7 +930,7 @@ pub fn encode_list_parts(
 pub fn accept_list_parts_head<'h>(head: ResponseHead<'h>) -> Result<ListPartsHeadOutcome<'h>> {
     match head.status {
         200 => Ok(ListPartsHeadOutcome::Parts {
-            meta: ObjectMeta::default(),
+            meta: WriteMeta::default(),
             expected_len: read_decimal_header(head.content_length)?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),

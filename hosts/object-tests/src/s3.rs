@@ -31,10 +31,10 @@ use borink_object_storage_proto::{
     CapacityError, ChecksumKind, Classification, CommitHeadOutcome, ContentLength, CopyHeadOutcome,
     DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteOptions, EntryKind, Error as CrateError,
     GetHeadOutcome, GetItem, GetKind, GetOptions, ListEntry, ListHeadOutcome, ListInclude,
-    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem,
-    PutHeadOutcome, PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision,
-    RevisionKind, StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps,
-    UpdateHeadOutcome, WireRequest, WriteOptions, iso8601_ms,
+    ListItem, ListMarker, ListOptions, ListPartsHeadOutcome, Metadata, ObjectItem, PutHeadOutcome,
+    PutItem, PutOptions, Ranging, RequestedRange, RestoreHeadOutcome, Revision, RevisionKind,
+    StageHeadOutcome, StageOptions, Tag, TagsHeadOutcome, Timestamps, UpdateHeadOutcome,
+    WireRequest, WriteOptions, iso8601_ms,
 };
 use serde_json::{Map, Value, json};
 use std::cell::OnceCell;
@@ -526,12 +526,7 @@ fn stage_part(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> 
                 buf,
             )
         },
-        |template, buf| s3::encode_stage_part(template,
-            &item,
-            Some(&digest),
-            &now,
-            buf
-        ),
+        |template, buf| s3::encode_stage_part(template, &item, Some(&digest), &now, buf),
         Some(&body),
         BodyRead::Hold,
     ));
@@ -586,7 +581,7 @@ fn copy(client: &Client<'_>, call: &Value) -> Result<Value, AdapterError> {
     // S3 can refuse a copy under status 200, which the result reports. The
     // outcome borrows the body, so the status of a failure is taken first.
     let copied = match outcome {
-        CopyHeadOutcome::Copied { meta } => {
+        CopyHeadOutcome::Copied { meta, .. } => {
             let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
             if let Some(version) = text_of(meta.version) {
                 value["version"] = json!(version);
@@ -1270,9 +1265,7 @@ fn sign(call: &Value) -> Result<Value, AdapterError> {
                 &|bucket, credentials, buf| {
                     s3::prepare_put(bucket, credentials, &options, signing, buf)
                 },
-                &|template, buf| {
-                    s3::encode_put(template, &item, digest.as_ref(), &now, buf)
-                },
+                &|template, buf| { s3::encode_put(template, &item, digest.as_ref(), &now, buf) },
                 &mut get_buf
             ));
             owned_url_and_fields(&request)

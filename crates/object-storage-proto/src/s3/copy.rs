@@ -31,8 +31,8 @@ use crate::validate::{
 use crate::xml::s3::copy::{read_copied, read_part_copied};
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, Failure, InvalidRequest,
-    Method, ObjectMeta, Ranging, ResponseFault, ResponseHead, Result, RevisionKind,
-    ServiceErrorKind, StageHeadOutcome, Timestamps, WriteOptions,
+    Method, Ranging, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind,
+    StageHeadOutcome, Timestamps, WriteMeta, WriteOptions,
 };
 
 // Whether a copy carried a condition on the target or on the source.
@@ -378,11 +378,12 @@ pub fn accept_copy_body<'h>(
     }
     let e_tag = read_copied(body)?;
     Ok(CopyHeadOutcome::Copied {
-        meta: ObjectMeta {
+        meta: WriteMeta {
             e_tag: Some(e_tag.as_bytes()),
             version: head.version,
-            ..ObjectMeta::default()
+            ..WriteMeta::default()
         },
+        copy_id: None,
     })
 }
 

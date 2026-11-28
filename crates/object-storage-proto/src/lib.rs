@@ -288,7 +288,7 @@ pub use outcome::{
     BodyWindow, Classification, CommitHeadOutcome, CopyHeadOutcome, DeleteHeadOutcome,
     DeleteManyHeadOutcome, Failure, FailureClass, GetHeadOutcome, ListHeadOutcome,
     ListPartsHeadOutcome, Listing, ObjectMeta, PutHeadOutcome, RestoreHeadOutcome,
-    ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome,
+    ServiceErrorKind, StageHeadOutcome, TagsHeadOutcome, UpdateHeadOutcome, WriteMeta,
 };
 pub use properties::decode_property;
 pub use request::{Method, Span};

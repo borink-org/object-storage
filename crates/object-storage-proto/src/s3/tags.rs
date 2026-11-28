@@ -102,7 +102,7 @@ pub fn encode_put_tagging(
 pub fn accept_put_tagging_head<'h>(head: ResponseHead<'h>) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
         200 => Ok(UpdateHeadOutcome::Updated {
-            meta: head.object_meta(),
+            meta: head.write_meta()?,
         }),
         201..=299 => Err(ResponseFault::Status.into()),
         _ => Ok(read_failure_head(&head)),

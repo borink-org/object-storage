@@ -1,7 +1,7 @@
 use crate::encoding::parse_decimal;
 use crate::{
     BodyWindow, Error, GetHeadOutcome, GetKind, GetShape, ObjectMeta, RequestedRange,
-    ResponseFault, Result,
+    ResponseFault, Result, WriteMeta,
 };
 
 /// The response header values that this crate reads.
@@ -240,6 +240,16 @@ impl<'h> ResponseHead<'h> {
             copy_status: self.copy_status,
             restore_status: self.restore_status,
         }
+    }
+
+    // The metadata that a write, commit, copy, update or snapshot head states.
+    pub(crate) fn write_meta(self) -> Result<WriteMeta<'h>> {
+        Ok(WriteMeta {
+            e_tag: self.e_tag,
+            last_modified: read_text_header(self.last_modified)?,
+            version: self.version,
+            content_md5: self.content_md5,
+        })
     }
 }
 

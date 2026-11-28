@@ -13,15 +13,15 @@ use crate::azure::{
     kind_in_head, prepare_object, push_stored_fields, read_failure_head, utf8_properties,
     validate_metadata,
 };
-use crate::head::{read_decimal_header, read_text_header};
+use crate::head::read_decimal_header;
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, write_tag_set};
 use crate::template::WireRequest;
 use crate::validate::{is_header_value, validate_properties, validate_tags};
 use crate::{
     ConditionKind, ContentProperties, Failure, InvalidRequest, MetadataPair, ObjectItem,
-    ObjectMeta, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Tag,
-    TagsHeadOutcome, Timestamps, UpdateHeadOutcome, WriteOptions,
+    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Tag, TagsHeadOutcome,
+    Timestamps, UpdateHeadOutcome, WriteOptions,
 };
 
 // The document that Set Blob Tags sends and Get Blob Tags answers with.
@@ -44,10 +44,7 @@ pub(super) fn accept_update_head<'h>(
 ) -> Result<UpdateHeadOutcome<'h>> {
     match head.status {
         status if success.contains(&status) => Ok(UpdateHeadOutcome::Updated {
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if condition != ConditionKind::None
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>

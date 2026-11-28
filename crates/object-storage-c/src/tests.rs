@@ -5,7 +5,8 @@ use borink_object_storage_proto as proto;
 use borink_object_storage_proto::{
     BodyWindow as CoreBodyWindow, CommitHeadOutcome, Error, Failure as CoreFailure,
     FailureClass as CoreFailureClass, GetHeadOutcome, InvalidRequest, ObjectMeta as CoreObjectMeta,
-    PutHeadOutcome, RequestedRange, ResponseFault, ServiceErrorKind, StageHeadOutcome, azure,
+    PutHeadOutcome, RequestedRange, ResponseFault, ServiceErrorKind, StageHeadOutcome,
+    WriteMeta as CoreWriteMeta, azure,
 };
 use std::format;
 use std::string::{String, ToString};
@@ -280,6 +281,15 @@ fn text(outcome: &Outcome) -> String {
     String::from_utf8(into[..length].to_vec()).unwrap()
 }
 
+fn write_meta() -> CoreWriteMeta<'static> {
+    CoreWriteMeta {
+        e_tag: Some(e_tag()),
+        last_modified: Some("Sat, 22 Aug 2026 12:00:00 GMT"),
+        version: Some(b"2026-08-22T12:00:00.0000000Z"),
+        content_md5: None,
+    }
+}
+
 fn full_meta() -> CoreObjectMeta<'static> {
     CoreObjectMeta {
         size: Some(10),
@@ -316,7 +326,7 @@ fn borrowed(value: MaybeBytes) -> Option<&'static [u8]> {
 
 #[test]
 fn every_write_and_block_outcome_crosses_whole() {
-    let created = put_outcome(&PutHeadOutcome::Created { meta: full_meta() });
+    let created = put_outcome(&PutHeadOutcome::Created { meta: write_meta() });
     assert_eq!(created.kind, OutcomeKind::Created as u16);
     assert!(created.meta.e_tag.present);
 
@@ -326,9 +336,9 @@ fn every_write_and_block_outcome_crosses_whole() {
         assert_eq!(borrowed(staged.meta.e_tag), tag);
     }
 
-    let committed = commit_outcome(&CommitHeadOutcome::Committed { meta: full_meta() });
+    let committed = commit_outcome(&CommitHeadOutcome::Committed { meta: write_meta() });
     assert_eq!(committed.kind, OutcomeKind::Committed as u16);
-    assert_eq!(borrowed(committed.meta.version), full_meta().version);
+    assert_eq!(borrowed(committed.meta.version), write_meta().version);
     assert_eq!(
         commit_outcome(&CommitHeadOutcome::PreconditionFailed).kind,
         OutcomeKind::PreconditionFailed as u16
@@ -642,14 +652,7 @@ fn an_unknown_number_is_refused_rather_than_read_as_another_value() {
         ..read_item(KEY.as_bytes())
     };
     // SAFETY: as above.
-    let refused = unsafe {
-        borink_encode_get(
-            reads.bytes(),
-            &item,
-            &now(),
-            writable(&mut buf),
-        )
-    };
+    let refused = unsafe { borink_encode_get(reads.bytes(), &item, &now(), writable(&mut buf)) };
     assert_eq!(refused.status, unknown());
 
     let shape = GetShape {
@@ -735,61 +738,29 @@ fn a_null_pointer_is_refused_rather_than_read() {
             status_of(&InvalidRequest::Template.into())
         );
         let written = [
-            borink_encode_get(
-                reads.bytes(),
-                core::ptr::null(),
-                &now(),
-                writable(&mut buf),
-            ),
-            borink_encode_put(
-                reads.bytes(),
-                core::ptr::null(),
-                &now(),
-                writable(&mut buf),
-            ),
-            borink_encode_stage_block(
-                reads.bytes(),
-                core::ptr::null(),
-                &now(),
-                writable(&mut buf),
-            ),
+            borink_encode_get(reads.bytes(), core::ptr::null(), &now(), writable(&mut buf)),
+            borink_encode_put(reads.bytes(), core::ptr::null(), &now(), writable(&mut buf)),
+            borink_encode_stage_block(reads.bytes(), core::ptr::null(), &now(), writable(&mut buf)),
             borink_encode_commit_blocks(
                 reads.bytes(),
                 core::ptr::null(),
                 &now(),
                 writable(&mut buf),
             ),
-            borink_encode_list(
-                reads.bytes(),
-                core::ptr::null(),
-                &now(),
-                writable(&mut buf),
-            ),
+            borink_encode_list(reads.bytes(), core::ptr::null(), &now(), writable(&mut buf)),
         ];
         for written in written {
             assert_eq!(written.status, unknown());
         }
         assert_eq!(
-            borink_encode_get(
-                reads.bytes(),
-                &item,
-                core::ptr::null(),
-                writable(&mut buf)
-            )
-            .status,
+            borink_encode_get(reads.bytes(), &item, core::ptr::null(), writable(&mut buf)).status,
             unknown()
         );
         let garbled = Timestamps {
             stored: [0xFF; TIMESTAMPS_LEN],
         };
         assert_eq!(
-            borink_encode_get(
-                reads.bytes(),
-                &item,
-                &garbled,
-                writable(&mut buf)
-            )
-            .status,
+            borink_encode_get(reads.bytes(), &item, &garbled, writable(&mut buf)).status,
             unknown()
         );
         assert!(!borink_next_header(core::ptr::null_mut()).present);
@@ -869,9 +840,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     let reads = reads(&options);
     // SAFETY: every pointer addresses a live value of this test.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_get(reads.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_get(reads.bytes(), &item, &now(), buf) });
     let core_options = proto::GetOptions {
         ranging: proto::Ranging::Ranged,
         condition: proto::ConditionKind::IfNoneMatch,
@@ -923,9 +893,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     };
     let heads = self::reads(&options);
     // SAFETY: as above.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_get(heads.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_get(heads.bytes(), &item, &now(), buf) });
     let core_options = proto::GetOptions {
         condition: proto::ConditionKind::IfModifiedSince,
         ..proto::GetOptions::head()
@@ -978,9 +947,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     // SAFETY: as above.
     let writes = kept(|buf| unsafe { borink_prepare_put(&container, token(), 0, &options, buf) });
     // SAFETY: as above.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_put(writes.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_put(writes.bytes(), &item, &now(), buf) });
     let core_options = proto::PutOptions {
         condition: proto::ConditionKind::IfNoneMatch,
         options: proto::WriteOptions {
@@ -1038,9 +1006,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let stages =
         kept(|buf| unsafe { borink_prepare_stage_block(&container, token(), 0, &options, buf) });
     // SAFETY: as above.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_stage_block(stages.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_stage_block(stages.bytes(), &item, &now(), buf) });
     let core_options = proto::StageOptions {
         checksum: Some(proto::ChecksumKind::Md5),
     };
@@ -1097,9 +1064,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     let commits =
         kept(|buf| unsafe { borink_prepare_commit_blocks(&container, token(), 0, &options, buf) });
     // SAFETY: as above.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_commit_blocks(commits.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_commit_blocks(commits.bytes(), &item, &now(), buf) });
     let core_options = azure::CommitOptions {
         condition: proto::ConditionKind::IfMatch,
         content_md5: true,
@@ -1162,9 +1128,8 @@ fn each_request_is_the_one_the_proto_crate_writes() {
     // SAFETY: as above.
     let pages = kept(|buf| unsafe { borink_prepare_list(&container, token(), 0, &options, buf) });
     // SAFETY: as above.
-    let (ours, buf) = request(|buf| unsafe {
-        borink_encode_list(pages.bytes(), &item, &now(), buf)
-    });
+    let (ours, buf) =
+        request(|buf| unsafe { borink_encode_list(pages.bytes(), &item, &now(), buf) });
     let core_options = proto::ListOptions {
         delimiter: Some("/"),
         max_results: Some(2),
@@ -1223,9 +1188,8 @@ fn the_header_fields_of_a_request_are_read_one_by_one() {
         ..read_item(b"object.bin")
     };
     // SAFETY: every pointer addresses a live value of this test.
-    let (request, buf) = request(|buf| unsafe {
-        borink_encode_get(reads.bytes(), &item, &now(), buf)
-    });
+    let (request, buf) =
+        request(|buf| unsafe { borink_encode_get(reads.bytes(), &item, &now(), buf) });
     let read = fields(&request, &buf);
     let names: Vec<&str> = read.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
@@ -1271,25 +1235,11 @@ fn a_buffer_that_is_too_small_reports_the_size_it_needs() {
     let reads = reads(&options);
     let item = read_item(b"object.bin");
     // SAFETY: as above.
-    let sized = unsafe {
-        borink_encode_get(
-            reads.bytes(),
-            &item,
-            &now(),
-            writable(&mut []),
-        )
-    };
+    let sized = unsafe { borink_encode_get(reads.bytes(), &item, &now(), writable(&mut [])) };
     assert_eq!(sized.status.code, ErrorCode::Capacity as u16);
     let mut short = vec![0; sized.required - 1];
     // SAFETY: as above.
-    let refused = unsafe {
-        borink_encode_get(
-            reads.bytes(),
-            &item,
-            &now(),
-            writable(&mut short),
-        )
-    };
+    let refused = unsafe { borink_encode_get(reads.bytes(), &item, &now(), writable(&mut short)) };
     assert_eq!(refused.status.code, ErrorCode::Capacity as u16);
     assert_eq!(refused.required, sized.required);
     let mut sentence = [0; 128];
@@ -1312,9 +1262,8 @@ fn a_template_of_one_object_writes_its_key() {
     for key in [b"".as_slice(), KEY.as_bytes()] {
         let item = read_item(key);
         // SAFETY: as above.
-        let (request, buf) = request(|buf| unsafe {
-            borink_encode_get(reads.bytes(), &item, &now(), buf)
-        });
+        let (request, buf) =
+            request(|buf| unsafe { borink_encode_get(reads.bytes(), &item, &now(), buf) });
         assert_eq!(
             String::from_utf8(part(&buf, request.url).to_vec()).unwrap(),
             "https://account.blob.core.windows.net/container/dir/object%20one.bin"
@@ -1323,14 +1272,7 @@ fn a_template_of_one_object_writes_its_key() {
     let item = read_item(b"other.bin");
     let mut buf = vec![0; 1024];
     // SAFETY: as above.
-    let refused = unsafe {
-        borink_encode_get(
-            reads.bytes(),
-            &item,
-            &now(),
-            writable(&mut buf),
-        )
-    };
+    let refused = unsafe { borink_encode_get(reads.bytes(), &item, &now(), writable(&mut buf)) };
     assert_eq!(refused.status, status_of(&InvalidRequest::Template.into()));
 
     // A listing names no object.
@@ -1432,12 +1374,7 @@ fn a_commit_refuses_a_block_it_cannot_read() {
         };
         // SAFETY: as above.
         let refused = unsafe {
-            borink_encode_commit_blocks(
-                commits.bytes(),
-                &item,
-                &now(),
-                writable(&mut buf),
-            )
+            borink_encode_commit_blocks(commits.bytes(), &item, &now(), writable(&mut buf))
         };
         assert_eq!(refused.status, status_of(&expected.into()), "{expected:?}");
     }
@@ -1450,9 +1387,8 @@ fn a_commit_refuses_a_block_it_cannot_read() {
         content_md5: Bytes::default(),
     };
     // SAFETY: as above, with no blocks.
-    let (written, buf) = request(|buf| unsafe {
-        borink_encode_commit_blocks(commits.bytes(), &item, &now(), buf)
-    });
+    let (written, buf) =
+        request(|buf| unsafe { borink_encode_commit_blocks(commits.bytes(), &item, &now(), buf) });
     assert!(written.body.present);
     assert!(part(&buf, written.body.span).ends_with(b"<BlockList></BlockList>"));
 }
@@ -1732,14 +1668,7 @@ fn local_rejections_keep_the_reason_and_map_only_known_service_responses() {
     ] {
         let item = read_item(key);
         // SAFETY: inputs are live; the output capacity is zero.
-        let written = unsafe {
-            borink_encode_get(
-                reads.bytes(),
-                &item,
-                &now(),
-                writable(&mut []),
-            )
-        };
+        let written = unsafe { borink_encode_get(reads.bytes(), &item, &now(), writable(&mut [])) };
         assert_eq!(written.status, status_of(&Error::InvalidRequest(reason)));
     }
 }

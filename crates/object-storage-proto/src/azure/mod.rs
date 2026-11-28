@@ -25,9 +25,9 @@ use crate::{
     Classification, ConditionKind, DeleteHeadOutcome, DeleteKind, DeleteOptions, DeleteShape,
     Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape, InvalidRequest,
     ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions, Listing,
-    MetadataPair, Method, ObjectItem, ObjectMeta, PutHeadOutcome, PutItem, PutOptions, PutShape,
-    Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
-    ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
+    MetadataPair, Method, ObjectItem, PutHeadOutcome, PutItem, PutOptions, PutShape, Ranging,
+    RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind, ServiceErrorKind,
+    Timestamps, WireRequest, WriteMeta, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, Header, Holes};
 
@@ -263,9 +263,6 @@ impl InvalidRequest {
 /// A head that reports a failure is one of these too.
 /// [`accept_snapshot_head`] returns an [`Err`] only for a head it
 /// cannot read.
-// The crate allocates nothing and its outcomes are `Copy`, so the variant
-// that carries the metadata cannot be boxed.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SnapshotHeadOutcome<'h> {
@@ -277,7 +274,7 @@ pub enum SnapshotHeadOutcome<'h> {
         /// The metadata that the head states: the entity tag and the last
         /// modification of the object, and its version on an account that
         /// keeps versions.
-        meta: ObjectMeta<'h>,
+        meta: WriteMeta<'h>,
     },
     /// The condition did not hold, so Azure took no snapshot.
     PreconditionFailed,
@@ -530,14 +527,7 @@ pub fn encode_get(
         revision: item.revision,
         ..HoleValues::default()
     };
-    template::encode_template(
-        &header,
-        template,
-        &values,
-        0,
-        buf,
-        &describe_get(&options),
-    )
+    template::encode_template(&header, template, &values, 0, buf, &describe_get(&options))
 }
 
 /// Reads the response head of a read and reports what to do next.
@@ -747,10 +737,7 @@ pub fn encode_put(
 pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<PutHeadOutcome<'h>> {
     match head.status {
         201 => Ok(PutHeadOutcome::Created {
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if shape.condition != ConditionKind::None
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -1116,10 +1103,7 @@ pub fn accept_snapshot_head<'h>(
     match head.status {
         201 => Ok(SnapshotHeadOutcome::Created {
             snapshot: read_text_header(head.snapshot)?.ok_or(ResponseFault::Head)?,
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if condition != ConditionKind::None
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>
@@ -1293,14 +1277,7 @@ pub fn encode_list(
         marker,
         ..HoleValues::default()
     };
-    template::encode_template(
-        &header,
-        template,
-        &values,
-        0,
-        buf,
-        &describe_list(None),
-    )
+    template::encode_template(&header, template, &values, 0, buf, &describe_list(None))
 }
 
 /// Reads the response head of a listing and reports what Azure did.

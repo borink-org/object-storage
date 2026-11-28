@@ -67,19 +67,21 @@ impl fmt::Display for StageHeadOutcome<'_> {
 pub enum CopyHeadOutcome<'h> {
     /// The service wrote the copy.
     Copied {
-        /// The metadata of the copy: its entity tag, and on Azure its last
-        /// modification, the copy's ID and its status, `success`.
-        meta: ObjectMeta<'h>,
+        /// The metadata that the copy head states.
+        meta: WriteMeta<'h>,
+        /// The copy identifier from `x-ms-copy-id`, if Azure returned one.
+        copy_id: Option<&'h [u8]>,
     },
     /// Azure started the copy and finishes it later.
     ///
-    /// `meta.copy_id` names the copy. Read its progress with a HEAD of the
-    /// target, in [`ObjectMeta::copy_status`], or stop it with
+    /// Read its progress with a HEAD of the target, in
+    /// [`ObjectMeta::copy_status`], or stop it with
     /// [`azure::encode_abort_copy`](crate::azure::encode_abort_copy).
     Pending {
-        /// The metadata of the target, with the copy's ID and its status,
-        /// `pending`.
-        meta: ObjectMeta<'h>,
+        /// The metadata that the copy head states.
+        meta: WriteMeta<'h>,
+        /// The copy identifier from `x-ms-copy-id`.
+        copy_id: &'h [u8],
     },
     /// S3 took the copy, and says in the body whether it succeeded.
     ///
@@ -183,7 +185,7 @@ pub enum UpdateHeadOutcome<'h> {
         /// The metadata that the head states, such as the object's new
         /// entity tag and last modification after Azure set its metadata or
         /// its properties. A change of tags or of the tier states none.
-        meta: ObjectMeta<'h>,
+        meta: WriteMeta<'h>,
     },
     /// The condition did not hold, so the service changed nothing.
     PreconditionFailed,
@@ -296,7 +298,7 @@ pub enum CommitHeadOutcome<'h> {
     /// The object is committed.
     Committed {
         /// The committed object's metadata.
-        meta: ObjectMeta<'h>,
+        meta: WriteMeta<'h>,
     },
     /// The service took the commit, and says in the body whether it
     /// succeeded.
@@ -348,9 +350,6 @@ impl fmt::Display for CommitHeadOutcome<'_> {
 ///
 /// A head that reports a failure is one of these too. The methods that read
 /// it return an [`Err`] only for a head they cannot read.
-// The crate allocates nothing and its outcomes are `Copy`, so the variant
-// that carries the metadata cannot be boxed.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListPartsHeadOutcome<'h> {
@@ -362,7 +361,7 @@ pub enum ListPartsHeadOutcome<'h> {
     #[non_exhaustive]
     Parts {
         /// Metadata of the committed object, if any. Only Azure sends it.
-        meta: ObjectMeta<'h>,
+        meta: WriteMeta<'h>,
         /// The result body's byte length.
         expected_len: Option<u64>,
     },
@@ -403,7 +402,25 @@ fn write_not_found(f: &mut fmt::Formatter<'_>, kind: Option<ServiceErrorKind>) -
     }
 }
 
-/// Object metadata borrowed from a response head.
+/// Metadata borrowed from a write, commit, copy, update or snapshot response
+/// head.
+///
+/// Each field holds the bytes that the service sent. `last_modified` holds
+/// them as text. To read it as an instant, use
+/// [`http_date_ms`](crate::http_date_ms).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteMeta<'h> {
+    /// The entity tag, if the service returned one.
+    pub e_tag: Option<&'h [u8]>,
+    /// The value of the `Last-Modified` header, if the service returned one.
+    pub last_modified: Option<&'h str>,
+    /// The version identifier, if the service returned one.
+    pub version: Option<&'h [u8]>,
+    /// The base64 MD5 that the service returned in `Content-MD5`, if any.
+    pub content_md5: Option<&'h [u8]>,
+}
+
+/// Object metadata borrowed from a read response head.
 ///
 /// Each field holds the bytes that the service sent. `last_modified` holds
 /// them as text. To read it as an instant, use
@@ -541,7 +558,8 @@ pub struct Failure<'h> {
     pub class: FailureClass,
     /// The specific error, if the head or the body named one.
     pub kind: Option<ServiceErrorKind>,
-    /// The value of the `x-ms-request-id` header, if Azure sent one.
+    /// The request identifier header (`x-ms-request-id` or `x-amz-request-id`),
+    /// if the service sent one.
     pub request_id: Option<&'h [u8]>,
 }
 
@@ -639,23 +657,21 @@ pub enum GetHeadOutcome<'h> {
 
 /// The result of reading the response head of a write.
 ///
-/// Every head that Azure sends becomes one of these values, including the
-/// heads that report a failure.
+/// Every head that the service sends becomes one of these values, including
+/// the heads that report a failure.
 ///
-/// [`azure::accept_put_head`](crate::azure::accept_put_head) returns an
-/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+/// [`azure::accept_put_head`](crate::azure::accept_put_head) and
+/// [`s3::accept_put_head`](crate::s3::accept_put_head) return an [`Err`] only
+/// if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PutHeadOutcome<'h> {
-    /// Azure stored the object.
+    /// The service stored the object.
     Created {
-        /// The metadata of the object that Azure stored.
-        ///
-        /// A write reports no size, because the size is the length of the
-        /// content that you sent.
-        meta: ObjectMeta<'h>,
+        /// The metadata that the write head states.
+        meta: WriteMeta<'h>,
     },
-    /// The entity tag in the condition did not match, so Azure stored nothing.
+    /// The condition did not match, so the service stored nothing.
     ///
     /// A write conditional on `If-None-Match: *` that loses a race is
     /// reported here too. Azure answers that with 409 `BlobAlreadyExists`,
@@ -679,15 +695,16 @@ pub enum PutHeadOutcome<'h> {
 
 /// The result of reading the response head of a removal.
 ///
-/// Every head that Azure sends becomes one of these values, including the
-/// heads that report a failure.
+/// Every head that the service sends becomes one of these values, including
+/// the heads that report a failure.
 ///
-/// [`azure::accept_delete_head`](crate::azure::accept_delete_head) returns an
-/// [`Err`] only if the head is invalid: see [`Error`](crate::Error).
+/// [`azure::accept_delete_head`](crate::azure::accept_delete_head) and
+/// [`s3::accept_delete_head`](crate::s3::accept_delete_head) return an [`Err`]
+/// only if the head is invalid: see [`Error`](crate::Error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeleteHeadOutcome<'h> {
-    /// Azure accepted the removal.
+    /// The service accepted the removal.
     ///
     /// The object is gone unless the request asked only for its snapshots: see
     /// [`DeleteKind::SnapshotsOnly`](crate::DeleteKind::SnapshotsOnly).

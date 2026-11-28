@@ -23,7 +23,6 @@ use crate::azure::{
     names_failed_condition, push_stored_fields, read_failure_head, utf8_properties, validate_key,
     validate_metadata,
 };
-use crate::head::read_text_header;
 use crate::http::{PlainHttp, valid_http_origin};
 use crate::outcome::finish_with_body;
 use crate::request::condition_header_name;
@@ -35,9 +34,8 @@ use crate::validate::{
 };
 use crate::{
     ConditionKind, CopyHeadOutcome, CopyItem, CopyOptions, CopyShape, DeleteKind, Failure,
-    InvalidRequest, MetadataPair, Method, ObjectMeta, PutHeadOutcome, Ranging,
-    ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps,
-    UpdateHeadOutcome, WriteOptions,
+    InvalidRequest, MetadataPair, Method, PutHeadOutcome, Ranging, ResponseFault, ResponseHead,
+    Result, RevisionKind, ServiceErrorKind, Timestamps, UpdateHeadOutcome, WriteOptions,
 };
 
 // Whether a copy carried a condition on the target or on the source.
@@ -507,13 +505,16 @@ pub fn accept_copy_head<'h>(
 ) -> Result<CopyHeadOutcome<'h>> {
     match head.status {
         202 => {
-            let meta = ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            };
+            let meta = head.write_meta()?;
             match head.copy_status.map(<[u8]>::trim_ascii) {
-                Some(b"success") => Ok(CopyHeadOutcome::Copied { meta }),
-                Some(b"pending") if head.copy_id.is_some() => Ok(CopyHeadOutcome::Pending { meta }),
+                Some(b"success") => Ok(CopyHeadOutcome::Copied {
+                    meta,
+                    copy_id: head.copy_id,
+                }),
+                Some(b"pending") => match head.copy_id {
+                    Some(copy_id) => Ok(CopyHeadOutcome::Pending { meta, copy_id }),
+                    None => Err(ResponseFault::Head.into()),
+                },
                 _ => Err(ResponseFault::Head.into()),
             }
         }
@@ -558,10 +559,7 @@ pub fn accept_put_from_url_head<'h>(
 ) -> Result<PutHeadOutcome<'h>> {
     match head.status {
         201 => Ok(PutHeadOutcome::Created {
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if carries_condition(shape)
             && kind_in_head(&head) == Some(ServiceErrorKind::Precondition) =>

@@ -103,8 +103,7 @@ impl Account<'_> {
         read: BodyRead<'_>,
     ) -> Result<Result<HttpExchange, Value>, AdapterError> {
         let written = self.template(prepare).and_then(|template| {
-            let mut buf =
-                vec![0; CapacityError::required_by(|buf| encode(&template, buf))?];
+            let mut buf = vec![0; CapacityError::required_by(|buf| encode(&template, buf))?];
             let request = encode(&template, &mut buf)?;
             Ok(send_request_with(
                 context,
@@ -378,10 +377,9 @@ struct BlobPages<'a> {
 impl PageSource for BlobPages<'_> {
     fn read_page(&self, options: &ListOptions<'_>, item: &ListItem<'_>) -> PageRead {
         let now = current_timestamps();
-        let template =
-            page_step!(self.account.template(|container, token, namespace, buf| {
-                azure::prepare_list(container, token, namespace, options, buf)
-            }));
+        let template = page_step!(self.account.template(|container, token, namespace, buf| {
+            azure::prepare_list(container, token, namespace, options, buf)
+        }));
         let encode = |buf: &mut [u8]| azure::encode_list(&template, item, &now, buf);
         let mut buf = vec![0; page_step!(CapacityError::required_by(encode))];
         let request = page_step!(encode(&mut buf));
@@ -1059,12 +1057,25 @@ fn copy(
         outcome => outcome,
     };
     Ok(match outcome {
-        CopyHeadOutcome::Copied { meta } | CopyHeadOutcome::Pending { meta } => {
-            let mut value = json!({"etag": text_of(meta.e_tag).unwrap_or_default()});
-            if let Some(copy_status) = text_of(meta.copy_status) {
-                value["copy_status"] = json!(copy_status);
+        CopyHeadOutcome::Copied { meta, copy_id } => {
+            let mut value = json!({
+                "etag": text_of(meta.e_tag).unwrap_or_default(),
+                "copy_status": "success",
+            });
+            if let Some(copy_id) = text_of(copy_id) {
+                value["copy_id"] = json!(copy_id);
             }
-            if let Some(copy_id) = text_of(meta.copy_id) {
+            if let Some(version) = text_of(meta.version) {
+                value["version"] = json!(version);
+            }
+            successful_result(value)
+        }
+        CopyHeadOutcome::Pending { meta, copy_id } => {
+            let mut value = json!({
+                "etag": text_of(meta.e_tag).unwrap_or_default(),
+                "copy_status": "pending",
+            });
+            if let Some(copy_id) = text_of(Some(copy_id)) {
                 value["copy_id"] = json!(copy_id);
             }
             if let Some(version) = text_of(meta.version) {
@@ -1149,9 +1160,7 @@ fn stage_block_from_url(
         |container, token, namespace, buf| {
             azure::prepare_stage_block_from_url(container, token, namespace, &options, buf)
         },
-        |template, buf| {
-            azure::encode_stage_block_from_url(template, &item, &now, buf)
-        },
+        |template, buf| { azure::encode_stage_block_from_url(template, &item, &now, buf) },
         None,
         BodyRead::Hold,
     ));

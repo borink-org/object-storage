@@ -322,7 +322,7 @@ use core::cmp::Ordering;
 use crate::checksum::{BASE64_LEN, ChecksumKind, checksum_base64};
 use crate::encoding::{self, rfc2047};
 use crate::head::{
-    ContentRange, accept_get_success, parse_content_range, read_decimal_header, read_text_header,
+    ContentRange, accept_get_success, parse_content_range, read_decimal_header,
     strip_metadata_prefix,
 };
 use crate::http::{PlainHttp, valid_http_origin};
@@ -344,8 +344,9 @@ use crate::{
     Classification, ConditionKind, ConditionValue, DeleteHeadOutcome, DeleteKind, DeleteOptions,
     DeleteShape, Error, Failure, GetHeadOutcome, GetItem, GetKind, GetOptions, GetShape,
     InvalidRequest, ListEntry, ListHeadOutcome, ListInclude, ListItem, ListMarker, ListOptions,
-    Listing, MetadataPair, Method, ObjectItem, ObjectMeta, PutHeadOutcome, PutItem, PutOptions,
-    PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
+    Listing, MetadataPair, Method, ObjectItem, PutHeadOutcome, PutItem, PutOptions, PutShape,
+    Ranging, RequestedRange, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind,
+    Timestamps, WriteOptions,
 };
 use template::{Describe, Detail, Field, FieldList, FieldValue, Header, S3Values};
 
@@ -1125,14 +1126,7 @@ pub fn encode_get(
         revision: item.revision,
         ..HoleValues::default()
     });
-    template::encode_template(
-        &header,
-        template,
-        &values,
-        0,
-        buf,
-        &describe_get(&options),
-    )
+    template::encode_template(&header, template, &values, 0, buf, &describe_get(&options))
 }
 
 /// Finishes a [`GetHeadOutcome::NeedErrorBody`] with the response body.
@@ -1312,10 +1306,7 @@ pub fn encode_put(
 pub fn accept_put_head<'h>(shape: PutShape, head: ResponseHead<'h>) -> Result<PutHeadOutcome<'h>> {
     match head.status {
         200 => Ok(PutHeadOutcome::Created {
-            meta: ObjectMeta {
-                last_modified: read_text_header(head.last_modified)?,
-                ..head.object_meta()
-            },
+            meta: head.write_meta()?,
         }),
         412 if shape.condition == ConditionKind::None => Err(ResponseFault::Status.into()),
         412 => Ok(PutHeadOutcome::PreconditionFailed),
@@ -2243,14 +2234,7 @@ pub fn encode_create_session(
         now: Some(now),
         ..HoleValues::default()
     });
-    template::encode_template(
-        &header,
-        template,
-        &values,
-        0,
-        buf,
-        &describe_session(),
-    )
+    template::encode_template(&header, template, &values, 0, buf, &describe_session())
 }
 
 /// Reads the response head of a CreateSession and reports what to do next.
