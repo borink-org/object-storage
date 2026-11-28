@@ -175,14 +175,21 @@ fn a_compatible_client_sends_what_aws_would_refuse() {
     let put = |service, options: &PutOptions<'_>, item: &PutItem<'_>| {
         let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();
         let mut bytes = vec![0; 16384];
-        let template = s3::prepare_put(
+        let len = s3::prepare_put(
             &bucket,
             &credentials(),
             options,
             PayloadSigning::Unsigned,
             &mut bytes,
         )?;
-        s3::encode_put(&template, &bytes, item, None, &now, &mut vec![0; 16384]).map(drop)
+        s3::encode_put(
+            s3::Template::from_bytes(&bytes[..len]),
+            item,
+            None,
+            &now,
+            &mut vec![0; 16384],
+        )
+        .map(drop)
     };
     let remove = |service, options: &DeleteOptions| {
         let bucket = Bucket::new("https://s3.example.com", "bucket", "auto", service).unwrap();

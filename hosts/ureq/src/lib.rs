@@ -45,19 +45,12 @@ pub(crate) fn grown_to_fit<T>(
     }
 }
 
-// A template, and the bytes it was written into.
-pub(crate) struct Prepared<T> {
-    pub(crate) template: T,
-    pub(crate) bytes: Vec<u8>,
-}
-
-impl<T> Prepared<T> {
-    // Writes a template with `prepare`, into a buffer of its size.
-    pub(crate) fn new(prepare: impl Fn(&mut [u8]) -> Result<T, Error>) -> Result<Self, Error> {
-        let mut bytes = Vec::new();
-        let template = grown_to_fit(&mut bytes, prepare)?;
-        Ok(Self { template, bytes })
-    }
+// Writes a template with `prepare`, into a buffer of its exact size.
+pub(crate) fn prepare(write: impl Fn(&mut [u8]) -> Result<usize, Error>) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    let len = grown_to_fit(&mut bytes, write)?;
+    bytes.truncate(len);
+    Ok(bytes)
 }
 
 // The agent that a client sends every request with, which keeps its

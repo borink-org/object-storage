@@ -29,7 +29,7 @@ use crate::{
     Ranging, RequestedRange, ResponseFault, ResponseHead, Result, Revision, RevisionKind,
     ServiceErrorKind, Timestamps, WireRequest, WriteOptions,
 };
-use template::{Describe, Detail, Field, FieldList, FieldValue, Holes};
+use template::{Describe, Detail, Field, FieldList, FieldValue, Header, Holes};
 
 mod batch;
 mod blocks;
@@ -457,7 +457,7 @@ pub fn prepare_get(
     namespace: AzureNamespace,
     options: &GetOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_get_options(options, true)?;
     template::prepare_template(
         container,
@@ -467,7 +467,7 @@ pub fn prepare_get(
         Operation::Get,
         Detail::Get(*options),
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -494,7 +494,7 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
 /// Writes the read `item` at `now` from `template` into `buf`, and returns
 /// where it is.
 ///
-/// `bytes` are the template's own, as [`prepare_get`] wrote them.
+/// `template` holds the bytes that [`prepare_get`] wrote.
 ///
 /// # Errors
 ///
@@ -508,15 +508,16 @@ fn describe_get(options: &GetOptions) -> Describe<'static, 1> {
 /// needs.
 pub fn encode_get(
     template: &Template,
-    bytes: &[u8],
     item: &GetItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    let Detail::Get(options) = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Get(options) = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     if let RequestedRange::Suffix(_) = item.range {
         return Err(InvalidRequest::UnsupportedRange.into());
     }
@@ -530,8 +531,8 @@ pub fn encode_get(
         ..HoleValues::default()
     };
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -615,7 +616,7 @@ pub fn prepare_put(
     namespace: AzureNamespace,
     options: &PutOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -644,7 +645,7 @@ pub fn prepare_put(
             checksum: options.checksum,
         },
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -675,8 +676,8 @@ fn describe_put<'p>(
 /// Writes the whole-object write `item` at `now` from `template` into `buf`,
 /// and returns where it is.
 ///
-/// `bytes` are the template's own, as [`prepare_put`] wrote them. The
-/// request states the length of the content, and you send the bytes.
+/// `template` holds the bytes that [`prepare_put`] wrote. The request states
+/// the length of the content, and you send the bytes.
 ///
 /// # Errors
 ///
@@ -690,19 +691,20 @@ fn describe_put<'p>(
 /// needs.
 pub fn encode_put(
     template: &Template,
-    bytes: &[u8],
     item: &PutItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
     let Detail::Put {
         condition,
         checksum,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     if item.content_length.as_u64() > MAX_PUT_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
@@ -718,8 +720,8 @@ pub fn encode_put(
         ..HoleValues::default()
     };
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         item.content_length.as_u64(),
         buf,
@@ -801,7 +803,7 @@ pub fn prepare_delete(
     namespace: AzureNamespace,
     options: &DeleteOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if options.revision != RevisionKind::Current && options.kind != DeleteKind::Object {
         return Err(InvalidRequest::Revision.into());
     }
@@ -813,7 +815,7 @@ pub fn prepare_delete(
             FieldValue::Bytes(snapshots.as_bytes()),
         )
     });
-    let mut template = prepare_object(
+    prepare_object(
         container,
         token,
         namespace,
@@ -822,21 +824,18 @@ pub fn prepare_delete(
         options.revision,
         &ObjectText {
             fields: snapshots.as_slice(),
+            delete: Some(options.kind),
             ..ObjectText::default()
         },
         buf,
-    )?;
-    if let Detail::Object { delete, .. } = &mut template.detail {
-        *delete = options.kind;
-    }
-    Ok(template)
+    )
 }
 
 /// Writes the removal `item` at `now` from `template` into `buf`, and
 /// returns where it is.
 ///
-/// `bytes` are the template's own, as [`prepare_delete`] wrote them. The
-/// request has no content.
+/// `template` holds the bytes that [`prepare_delete`] wrote. The request has
+/// no content.
 ///
 /// # Errors
 ///
@@ -850,36 +849,36 @@ pub fn prepare_delete(
 /// needs.
 pub fn encode_delete(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::Delete, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::Delete, item, now, buf)
 }
 
 // Writes the request of `operation` that names the one object `item`, from
 // a template of that operation.
 fn encode_object(
-    template: &Template,
-    bytes: &[u8],
+    template: &[u8],
     operation: Operation,
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
+    let header = Header::load(template)?;
     let Detail::Object {
         condition,
         revision,
         ..
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    if template.operation != operation {
+    if header.operation != operation {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
     let values = HoleValues {
@@ -890,8 +889,8 @@ fn encode_object(
         ..HoleValues::default()
     };
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -908,6 +907,7 @@ struct ObjectText<'p> {
     metadata: &'p [MetadataPair<'p>],
     param: Param<'p>,
     body: Option<FixedText<'p>>,
+    delete: Option<DeleteKind>,
 }
 
 // Writes the template of `operation`, which names one object, with the
@@ -922,7 +922,7 @@ fn prepare_object(
     revision: RevisionKind,
     text: &ObjectText<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     template::prepare_template(
         container,
         token,
@@ -932,10 +932,10 @@ fn prepare_object(
         Detail::Object {
             condition,
             revision,
-            delete: DeleteKind::Object,
+            delete: text.delete.unwrap_or(DeleteKind::Object),
         },
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -1058,7 +1058,7 @@ pub fn prepare_snapshot(
     namespace: AzureNamespace,
     options: &SnapshotOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata)?;
     prepare_object(
         container,
@@ -1090,12 +1090,12 @@ pub fn prepare_snapshot(
 /// needs.
 pub fn encode_snapshot(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::Snapshot, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::Snapshot, item, now, buf)
 }
 
 /// Reads the response head of a Snapshot Blob and reports what Azure did.
@@ -1171,7 +1171,7 @@ pub fn prepare_list(
     namespace: AzureNamespace,
     options: &ListOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if options.max_results == Some(0) {
         return Err(InvalidRequest::MaxResults.into());
     }
@@ -1198,7 +1198,7 @@ pub fn prepare_list(
         Operation::List,
         Detail::List,
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -1241,9 +1241,9 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
 /// Writes the page `item` at `now` from `template` into `buf`, and
 /// returns where it is.
 ///
-/// `bytes` are the template's own, as [`prepare_list`] wrote them. The
-/// response carries the page as a document in its body: read it whole and
-/// pass it to [`fill_listing`].
+/// `template` holds the bytes that [`prepare_list`] wrote. The response
+/// carries the page as a document in its body: read it whole and pass it to
+/// [`fill_listing`].
 ///
 /// # Errors
 ///
@@ -1261,12 +1261,13 @@ fn describe_list<'p>(text: Option<(&'p ListOptions<'p>, &'p [&'p str])>) -> Desc
 /// needs.
 pub fn encode_list(
     template: &Template,
-    bytes: &[u8],
     item: &ListItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    let Detail::List = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::List = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
     // No rule of `validate_key` applies to a prefix. It is written into the
@@ -1293,8 +1294,8 @@ pub fn encode_list(
         ..HoleValues::default()
     };
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,

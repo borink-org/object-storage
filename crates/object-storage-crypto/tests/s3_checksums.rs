@@ -96,7 +96,7 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
             ..PutOptions::default()
         };
         let mut bytes = vec![0; 1024];
-        let template = s3::prepare_put(
+        let len = s3::prepare_put(
             &bucket,
             &credentials,
             &options,
@@ -109,7 +109,14 @@ fn an_s3_write_signs_the_checksum_of_each_kind() {
             ..PutItem::new("object", ContentLength::of(content))
         };
         let mut buf = vec![0; 2048];
-        let unsigned = s3::encode_put(&template, &bytes, &item, None, &now, &mut buf).unwrap();
+        let unsigned = s3::encode_put(
+            s3::Template::from_bytes(&bytes[..len]),
+            &item,
+            None,
+            &now,
+            &mut buf,
+        )
+        .unwrap();
         let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
         let found = request
             .headers(&buf)

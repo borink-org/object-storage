@@ -5,7 +5,7 @@
 //! `borink-object-storage-crypto`, as the `s3_get` example does.
 
 use borink_object_storage_crypto::{Sha256RustCrypto, sigv4};
-use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Scope, Template};
+use borink_object_storage_proto::s3::{self, Bucket, PayloadSigning, Scope};
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
     ContentLength, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
@@ -13,11 +13,20 @@ use borink_object_storage_proto::{
     PutItem, PutOptions, Timestamps,
 };
 
-use crate::Prepared;
-
 // SigV4 signs with the key of the UTC day, and a Unix day is exactly this
 // long.
 const SECONDS_PER_DAY: u64 = 86_400;
+
+// An owned S3 template buffer that derefs to `&s3::Template`.
+struct TemplateBuf(Vec<u8>);
+
+impl std::ops::Deref for TemplateBuf {
+    type Target = s3::Template;
+
+    fn deref(&self) -> &Self::Target {
+        s3::Template::from_bytes(&self.0)
+    }
+}
 
 /// A client of one S3 bucket, which signs its requests with one set of
 /// credentials.
@@ -33,10 +42,10 @@ pub struct Objects<'a> {
     // The day's signing key, with the day it signs on, counted in days
     // since the Unix epoch.
     signing_key: Option<(u64, sigv4::SigningKey<Sha256RustCrypto>)>,
-    get: Prepared<Template>,
-    put: Prepared<Template>,
-    delete: Prepared<Template>,
-    list: Prepared<Template>,
+    get: TemplateBuf,
+    put: TemplateBuf,
+    delete: TemplateBuf,
+    list: TemplateBuf,
     buf: Vec<u8>,
     agent: ureq::Agent,
 }
@@ -55,16 +64,18 @@ impl<'a> Objects<'a> {
     ) -> Result<Self, Error> {
         let signing = PayloadSigning::Signed;
         Ok(Self {
-            get: Prepared::new(|buf| {
+            get: TemplateBuf(crate::prepare(|buf| {
                 s3::prepare_get(bucket, &credentials, &GetOptions::new(), buf)
-            })?,
-            put: Prepared::new(|buf| {
+            })?),
+            put: TemplateBuf(crate::prepare(|buf| {
                 s3::prepare_put(bucket, &credentials, &PutOptions::default(), signing, buf)
-            })?,
-            delete: Prepared::new(|buf| {
+            })?),
+            delete: TemplateBuf(crate::prepare(|buf| {
                 s3::prepare_delete(bucket, &credentials, &DeleteOptions::new(), buf)
-            })?,
-            list: Prepared::new(|buf| s3::prepare_list(bucket, &credentials, list, buf))?,
+            })?),
+            list: TemplateBuf(crate::prepare(|buf| {
+                s3::prepare_list(bucket, &credentials, list, buf)
+            })?),
             scope: bucket.scope(),
             credentials,
             signing_key: None,
@@ -104,15 +115,14 @@ impl<'a> Objects<'a> {
         let now = Timestamps::from_unix(unix);
         let stamp = self.stamp(unix, &now)?;
         let item = GetItem::new(key);
-        let Prepared { template, bytes } = &self.get;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            let unsigned = s3::encode_get(template, bytes, &item, &now, buf)?;
+            let unsigned = s3::encode_get(&self.get, &item, &now, buf)?;
             Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = item.shape(&GetOptions::new());
-        match s3::accept_get_head(template.service(), shape, crate::response_head(&parts))? {
+        match s3::accept_get_head(self.scope.service(), shape, crate::response_head(&parts))? {
             GetHeadOutcome::Body { .. } => body.read_to_vec().map_err(Into::into),
             GetHeadOutcome::Complete { .. } => Ok(Vec::new()),
             // S3 names every error in the body.
@@ -140,9 +150,8 @@ impl<'a> Objects<'a> {
         let stamp = self.stamp(unix, &now)?;
         let item = PutItem::new(key, ContentLength::of(content));
         let digest = sigv4::sha256::<Sha256RustCrypto>(content);
-        let Prepared { template, bytes } = &self.put;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            let unsigned = s3::encode_put(template, bytes, &item, Some(&digest), &now, buf)?;
+            let unsigned = s3::encode_put(&self.put, &item, Some(&digest), &now, buf)?;
             Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
@@ -173,16 +182,15 @@ impl<'a> Objects<'a> {
         let now = Timestamps::from_unix(unix);
         let stamp = self.stamp(unix, &now)?;
         let item = ObjectItem::new(key);
-        let Prepared { template, bytes } = &self.delete;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            let unsigned = s3::encode_delete(template, bytes, &item, &now, buf)?;
+            let unsigned = s3::encode_delete(&self.delete, &item, &now, buf)?;
             Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
         let shape = DeleteOptions::new().shape();
         let head = crate::response_head(&parts);
-        match s3::accept_delete_head(template.service(), shape, head)? {
+        match s3::accept_delete_head(self.scope.service(), shape, head)? {
             DeleteHeadOutcome::Accepted => Ok(()),
             DeleteHeadOutcome::NeedErrorBody(failure) => Err(not_removed(
                 s3::accept_delete_error_body(shape, failure, &crate::error_body(&mut body)),
@@ -211,9 +219,8 @@ impl<'a> Objects<'a> {
         let unix = crate::unix_now()?;
         let now = Timestamps::from_unix(unix);
         let stamp = self.stamp(unix, &now)?;
-        let Prepared { template, bytes } = &self.list;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            let unsigned = s3::encode_list(template, bytes, item, &now, buf)?;
+            let unsigned = s3::encode_list(&self.list, item, &now, buf)?;
             Ok(sigv4::sign(&stamp, &unsigned, buf))
         })?;
 

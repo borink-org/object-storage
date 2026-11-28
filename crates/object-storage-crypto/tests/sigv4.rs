@@ -8,7 +8,7 @@
 
 use borink_object_storage_crypto::{Sha256, sigv4};
 use borink_object_storage_proto::s3::{
-    self, Addressing, Bucket, PayloadSigning, Scope, Service, Template, Unsigned,
+    self, Addressing, Bucket, PayloadSigning, Scope, Service, Unsigned,
 };
 use borink_object_storage_proto::sigv4::Credentials;
 use borink_object_storage_proto::{
@@ -30,9 +30,9 @@ fn credentials() -> Credentials<'static> {
 // template and the request are written into buffers of exactly the size
 // that an empty buffer reports.
 type Signed = (String, Vec<(String, String)>, String);
-type Prepare<'p> = dyn Fn(&mut [u8]) -> borink_object_storage_proto::Result<Template> + 'p;
+type Prepare<'p> = dyn Fn(&mut [u8]) -> borink_object_storage_proto::Result<usize> + 'p;
 type Encode<'e> =
-    dyn Fn(&Template, &[u8], &mut [u8]) -> borink_object_storage_proto::Result<Unsigned> + 'e;
+    dyn Fn(&s3::Template, &mut [u8]) -> borink_object_storage_proto::Result<Unsigned> + 'e;
 
 fn signed(
     scope: &Scope,
@@ -46,8 +46,8 @@ fn signed(
             panic!("an empty buffer is refused with its size");
         };
         let mut buf = vec![0; capacity.required];
-        encode(&mut buf).unwrap();
         assert!(encode(&mut buf[..capacity.required - 1]).is_err());
+        encode(&mut buf).unwrap();
         buf
     }
     fn one<S: Sha256>(
@@ -57,12 +57,12 @@ fn signed(
         prepare: &Prepare<'_>,
         encode: &Encode<'_>,
     ) -> Signed {
-        let bytes = exact(prepare);
-        let template = prepare(&mut bytes.clone()).unwrap();
+        let template_bytes = exact(prepare);
+        let template = s3::Template::from_bytes(&template_bytes);
         let key = sigv4::signing_key::<S>(scope, credentials, now).unwrap();
         let stamp = sigv4::stamp(&key, scope, now);
-        let mut buf = exact(|buf| encode(&template, &bytes, buf));
-        let unsigned = encode(&template, &bytes, &mut buf).unwrap();
+        let mut buf = exact(|buf| encode(template, buf));
+        let unsigned = encode(template, &mut buf).unwrap();
         let request = sigv4::sign(&stamp, &unsigned, &mut buf);
         let mut headers: Vec<_> = request
             .headers(&buf)
@@ -107,7 +107,7 @@ fn signed_get(
         credentials,
         now,
         &|buf| s3::prepare_get(bucket, credentials, options, buf),
-        &|template, bytes, buf| s3::encode_get(template, bytes, item, now, buf),
+        &|bytes, buf| s3::encode_get(bytes, item, now, buf),
     )
 }
 
@@ -210,7 +210,7 @@ fn a_batch_is_signed_as_each_request_is() {
     let now = Timestamps::from_unix(1_787_400_061);
     let options = GetOptions::new().ranged();
     let mut bytes = vec![0; 1024];
-    let template = s3::prepare_get(&bucket, &credentials, &options, &mut bytes).unwrap();
+    let len = s3::prepare_get(&bucket, &credentials, &options, &mut bytes).unwrap();
     let scope = bucket.scope();
     let key = sigv4::signing_key::<S>(&scope, &credentials, &now).unwrap();
     let stamp = sigv4::stamp(&key, &scope, &now);
@@ -221,7 +221,7 @@ fn a_batch_is_signed_as_each_request_is() {
         .zip(bufs.iter_mut())
         .map(|(key, buf)| {
             let item = GetItem::new(key).with_range(RequestedRange::Bounded { start: 1, end: 9 });
-            s3::encode_get(&template, &bytes, &item, &now, buf).unwrap()
+            s3::encode_get(s3::Template::from_bytes(&bytes[..len]), &item, &now, buf).unwrap()
         })
         .collect();
     let canonicals: Vec<&[u8]> = unsigned
@@ -291,7 +291,7 @@ fn signs_a_virtual_hosted_conditional_removal() {
         &credentials,
         &now,
         &|buf| s3::prepare_delete(&bucket, &credentials, &options, buf),
-        &|template, bytes, buf| s3::encode_delete(template, bytes, &item, &now, buf),
+        &|bytes, buf| s3::encode_delete(bytes, &item, &now, buf),
     ) {
         // The default port is left out of the URL, and so of the host that
         // is signed.
@@ -364,7 +364,7 @@ fn signs_a_path_style_write_with_metadata_a_condition_and_a_session_token() {
         &credentials,
         &now,
         &|buf| s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Signed, buf),
-        &|template, bytes, buf| s3::encode_put(template, bytes, &item, Some(&digest), &now, buf),
+        &|bytes, buf| s3::encode_put(bytes, &item, Some(&digest), &now, buf),
     ) {
         assert_eq!(
             url,
@@ -412,7 +412,7 @@ fn signs_a_streamed_write_without_its_content() {
                 buf,
             )
         },
-        &|template, bytes, buf| s3::encode_put(template, bytes, &item, None, &now, buf),
+        &|bytes, buf| s3::encode_put(bytes, &item, None, &now, buf),
     ) {
         assert_eq!(headers, expected);
     }
@@ -448,7 +448,7 @@ fn an_md5_is_sent_beside_the_signature() {
                 buf,
             )
         },
-        &|template, bytes, buf| s3::encode_put(template, bytes, &item, None, &now, buf),
+        &|bytes, buf| s3::encode_put(bytes, &item, None, &now, buf),
     ) {
         assert!(headers.contains(&(
             "content-md5".to_owned(),

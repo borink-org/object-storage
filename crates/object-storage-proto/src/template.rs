@@ -11,11 +11,10 @@
 //
 // Each operation describes its request once, in a function generic over a
 // `Pass`. Run with the template's pass, it writes the fixed text and the
-// table. Run with a request's pass, it copies each run of fixed text from
-// the template and fills the hole after it, as straight-line code. With the
-// feature `compact`, a request walks the table instead, in one function for
-// every operation. Either way the request is written whole into its own
-// buffer, so it borrows nothing from the template.
+// step lengths. Run with a request's pass, it copies each run of fixed text
+// from the template and fills the hole after it, as straight-line code.
+// Either way the request is written whole into its own buffer, so it borrows
+// nothing from the template.
 //
 // The table has six sections, written in this order:
 //
@@ -126,50 +125,6 @@ pub(crate) enum Hole {
     ObjectSize = 34,
 }
 
-impl Hole {
-    const ALL: [Self; 34] = [
-        Self::Target,
-        Self::Path,
-        Self::Query,
-        Self::Signature,
-        Self::Key,
-        Self::Range,
-        Self::Condition,
-        Self::SignedCondition,
-        Self::Revision,
-        Self::IsoTime,
-        Self::HttpTime,
-        Self::Day,
-        Self::ContentLength,
-        Self::PayloadHash,
-        Self::Checksum,
-        Self::Separator,
-        Self::Prefix,
-        Self::Marker,
-        Self::StartAfter,
-        Self::VersionMarker,
-        Self::Body,
-        Self::BodyLength,
-        Self::BodyHash,
-        Self::BodyChecksum,
-        Self::BlockId,
-        Self::UploadId,
-        Self::PartNumber,
-        Self::SourceKey,
-        Self::SourceRevision,
-        Self::SourceCondition,
-        Self::SignedSourceCondition,
-        Self::SourceRange,
-        Self::CopyId,
-        Self::ObjectSize,
-    ];
-
-    // The holes are numbered from 1 in the order of `ALL`.
-    fn from_id(id: u8) -> Option<Self> {
-        Self::ALL.get((id as usize).wrapping_sub(1)).copied()
-    }
-}
-
 // The value of one query parameter of a template.
 #[derive(Clone, Copy)]
 pub(crate) enum ParamValue<'p> {
@@ -226,45 +181,40 @@ const SECTIONS: usize = 6;
 // parameter filled per request, needs about thirty.
 const MAX_STEPS: usize = 96;
 
-// A run of fixed text, which starts where the previous step's ended, and
-// the hole after it: `hole` is the number of a `Hole`, or `NO_HOLE`. The
-// name of an optional parameter follows the run in the text, `name` bytes
-// long, and is written only with a value. `ends` has a bit for each
-// section that ends after the step.
-#[derive(Debug, Clone, Copy, Default)]
-struct Step {
-    len: u32,
-    hole: u8,
-    name: u8,
-    ends: u8,
-}
+// The fixed header at the start of every template buffer: service metadata
+// first (starting with the 4-byte magic), then the table header.
+pub(crate) const META_LEN: usize = 40;
+pub(crate) const TABLE_HEADER_LEN: usize = 24;
+pub(crate) const HEADER_LEN: usize = META_LEN + TABLE_HEADER_LEN;
+// The trailing 8-byte fingerprint covering everything before it.
+pub(crate) const TRAILER_LEN: usize = 8;
 
-pub(crate) const NO_HOLE: u8 = 0;
-
-/// Where a template's table of steps is in its bytes, and how many steps
-/// each section has.
+/// Where a template's step lengths are in its bytes, and the fixed counts
+/// that encoding reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Table {
     start: u32,
-    counts: [u8; SECTIONS],
     // The steps of all sections.
     total: u8,
     // The query parameters that the template writes as text, before the
     // first that a request may leave out. A request counts on from here.
     params: u8,
-    // The bytes the template takes, the table included.
+    // The bytes the template takes, header, step lengths and fingerprint
+    // included.
     end: u32,
     // The length of the fixed text of the URL, without the values that each
     // request writes into it.
     url_fixed: u32,
+    // The length of the fixed text of the body section.
+    body_fixed: u32,
     // Where the head's field lines start, after the request line and
     // `host`: the step whose run they start in, and where in the run.
     fields: (u8, u32),
-    // Whether the request writes a body of its own: text or a hole in the
-    // body section, beside the step of text alone that ends it.
+    // Whether the request writes a body of its own: fixed text or a hole in
+    // the body section.
     body: bool,
-    // A hash of the template's bytes, by which it knows them again.
-    fingerprint: u64,
+    // Whether the body section holds a `Hole::Body` that each request fills.
+    body_hole: bool,
 }
 
 /// One run of a request's layout.
@@ -313,21 +263,23 @@ pub(crate) trait Pass {
     }
 }
 
-/// Writes a template: its fixed text, and the table of steps after it.
+/// Writes a template: its fixed text, and the step lengths after it.
 pub(crate) struct Builder<'t> {
     out: Writer<'t>,
-    steps: [Step; MAX_STEPS],
+    steps: [u32; MAX_STEPS],
     count: usize,
-    counts: [u8; SECTIONS],
     section: Section,
-    // Whether the last step takes more text: it is of this section, has no
-    // hole yet, and is no optional parameter's name.
+    // Whether the last step takes more text: it is of this section and has
+    // no hole yet.
     open: bool,
     // Where the text of the steps ends, and whether any of it was written
     // elsewhere, after text that no step holds.
     text_end: usize,
     scattered: bool,
     fields: (u8, u32),
+    url_fixed: u32,
+    body_fixed: u32,
+    body_hole: bool,
     // The query parameters written as text so far, and whether a parameter
     // that a request may leave out has come.
     params: u8,
@@ -336,16 +288,20 @@ pub(crate) struct Builder<'t> {
 
 impl<'t> Builder<'t> {
     pub(crate) fn new(buf: &'t mut [u8]) -> Self {
+        let mut out = Writer::new(buf);
+        out.push(&[0; HEADER_LEN]);
         Self {
-            out: Writer::new(buf),
-            steps: [Step::default(); MAX_STEPS],
+            out,
+            steps: [0; MAX_STEPS],
             count: 0,
-            counts: [0; SECTIONS],
             section: Section::Origin,
             open: false,
-            text_end: 0,
+            text_end: HEADER_LEN,
             scattered: false,
             fields: (u8::MAX, 0),
+            url_fixed: 0,
+            body_fixed: 0,
+            body_hole: false,
             params: 0,
             optional: false,
         }
@@ -358,10 +314,7 @@ impl<'t> Builder<'t> {
     fn end_sections(&mut self, until: usize) {
         for section in self.section as usize..until {
             if !(self.open && section == self.section as usize) {
-                self.push_in(section, Step::default());
-            }
-            if let Some(last) = self.steps.get_mut(self.count - 1) {
-                last.ends |= 1 << section;
+                self.push(0);
             }
         }
     }
@@ -385,25 +338,22 @@ impl<'t> Builder<'t> {
         }
     }
 
-    fn push(&mut self, step: Step) {
-        self.push_in(self.section as usize, step);
-    }
-
-    // Adds `step` to the section `section`.
-    fn push_in(&mut self, section: usize, step: Step) {
+    fn push(&mut self, len: u32) {
         // A template past the table's bound is a fault of this crate's own
         // operations, which `finish` reports.
         if let Some(slot) = self.steps.get_mut(self.count) {
-            *slot = step;
+            *slot = len;
         }
         self.count += 1;
-        let count = &mut self.counts[section];
-        *count = count.saturating_add(1);
     }
 
-    // Appends the table after the text, and returns where it is. A template
-    // that does not fit its buffer is refused with the room it needs.
-    pub(crate) fn finish(mut self) -> Result<Table> {
+    // Appends the step lengths, writes the header and trailing fingerprint,
+    // and returns the total bytes written. A template that does not fit its
+    // buffer is refused with the room it needs.
+    pub(crate) fn finish(
+        mut self,
+        write_meta: impl FnOnce(&mut StoredWriter<'_>),
+    ) -> Result<usize> {
         debug_assert!(self.count <= MAX_STEPS, "a template holds too many steps");
         debug_assert!(!self.scattered, "a template's text is written in order");
         if self.count > MAX_STEPS {
@@ -414,42 +364,37 @@ impl<'t> Builder<'t> {
             return Err(InvalidRequest::Template.into());
         }
         let start = self.out.position();
-        for step in &self.steps[..self.count] {
-            self.out.push(&step.len.to_le_bytes());
-            self.out.push(&[step.hole, step.name, step.ends, 0]);
+        for &len in &self.steps[..self.count] {
+            self.out.push(&len.to_le_bytes());
         }
+        self.out.push(&[0; TRAILER_LEN]);
         let end = self.out.position();
         if !self.out.fits() {
             return Err(capacity_error(CapacityError { required: end }));
         }
-        let fingerprint = fingerprint(self.out.written());
-        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
+        let (Ok(start), Ok(end_u32)) = (u32::try_from(start), u32::try_from(end)) else {
             return Err(InvalidRequest::RequestTooLarge.into());
         };
-        // The URL's sections come first, so their steps do too.
-        let url_steps: usize = self.counts[..Section::Head as usize]
-            .iter()
-            .map(|&count| count as usize)
-            .sum();
-        let url_fixed = self.steps[..url_steps]
-            .iter()
-            .map(|step| step.len + u32::from(step.name))
-            .sum();
-        let body = self.steps
-            [self.count - self.counts[Section::Body as usize] as usize..self.count]
-            .iter()
-            .any(|step| step.len > 0 || step.hole != NO_HOLE);
-        Ok(Table {
+        let table = Table {
             start,
-            counts: self.counts,
             total: self.count as u8,
             params: self.params,
-            end,
-            url_fixed,
+            end: end_u32,
+            url_fixed: self.url_fixed,
+            body_fixed: self.body_fixed,
             fields: self.fields,
-            body,
-            fingerprint,
-        })
+            body: self.body_fixed > 0 || self.body_hole,
+            body_hole: self.body_hole,
+        };
+        let written = self.out.into_written();
+        let (meta_bytes, rest) = written.split_at_mut(META_LEN);
+        write_meta(&mut StoredWriter::new(meta_bytes));
+        let (table_bytes, _) = rest.split_at_mut(TABLE_HEADER_LEN);
+        table.store(&mut StoredWriter::new(table_bytes));
+        let payload_len = end - TRAILER_LEN;
+        let hash = fingerprint(&written[..payload_len]);
+        written[payload_len..end].copy_from_slice(&hash.to_le_bytes());
+        Ok(end)
     }
 }
 
@@ -469,8 +414,8 @@ pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
     )
 }
 
-// Writes the values of a stored template one after another, as
-// `Template::to_bytes` of each service stores them.
+// Writes the header fields of a template one after another into its
+// buffer.
 pub(crate) struct StoredWriter<'s> {
     bytes: &'s mut [u8],
     at: usize,
@@ -493,99 +438,63 @@ impl<'s> StoredWriter<'s> {
     }
 }
 
-// Reads the values of a stored template back, in the order `StoredWriter` wrote
-// them. Past the end, it reads zeros. Every read is inlined, so that a
-// template read back reads each value at an offset the compiler knows.
-pub(crate) struct StoredReader<'s> {
-    bytes: &'s [u8],
-    at: usize,
-}
-
-impl<'s> StoredReader<'s> {
-    #[inline(always)]
-    pub(crate) fn new(bytes: &'s [u8]) -> Self {
-        Self { bytes, at: 0 }
-    }
-
-    #[inline(always)]
-    pub(crate) fn take<const N: usize>(&mut self) -> [u8; N] {
-        let part = self
-            .bytes
-            .get(self.at..self.at + N)
-            .and_then(|part| part.try_into().ok())
-            .unwrap_or([0; N]);
-        self.at += N;
-        part
-    }
-
-    #[inline(always)]
-    pub(crate) fn u8(&mut self) -> u8 {
-        let [byte] = self.take();
-        byte
-    }
-
-    #[inline(always)]
-    pub(crate) fn u32(&mut self) -> u32 {
-        u32::from_le_bytes(self.take())
-    }
+// Splits the fixed header at the start of a template buffer into its service
+// metadata and table header, or `None` if the buffer is shorter than a header.
+#[inline(always)]
+pub(crate) fn split_header(bytes: &[u8]) -> Option<(&[u8; META_LEN], &[u8; TABLE_HEADER_LEN])> {
+    let header = bytes.first_chunk::<HEADER_LEN>()?;
+    let (meta, table) = header.split_at(META_LEN);
+    Some((meta.try_into().ok()?, table.try_into().ok()?))
 }
 
 impl Table {
-    // The bytes that `store` writes.
-    pub(crate) const STORED_LEN: usize = 34;
-
-    // The length of the template's bytes, the table included.
-    pub(crate) const fn len(&self) -> usize {
-        self.end as usize
+    // Where the fixed text and stashed spans end, just before the step table.
+    pub(crate) const fn text_end(&self) -> usize {
+        self.start as usize
     }
 
-    pub(crate) fn store(&self, into: &mut StoredWriter<'_>) {
+    fn store(&self, into: &mut StoredWriter<'_>) {
+        let flags = u8::from(self.body) | (u8::from(self.body_hole) << 1);
         into.u32(self.start);
-        into.put(&self.counts);
-        into.put(&[self.total, self.params]);
         into.u32(self.end);
         into.u32(self.url_fixed);
-        into.put(&[self.fields.0]);
+        into.u32(self.body_fixed);
         into.u32(self.fields.1);
-        into.put(&[u8::from(self.body)]);
-        into.put(&self.fingerprint.to_le_bytes());
+        into.put(&[self.fields.0, self.total, self.params, flags]);
     }
 
-    // Reads a table that `store` wrote, or `None` for one that no template
-    // has: its steps are those of its sections, and fill its bytes from
-    // `start` to `end`.
+    // Reads a table from the header slice of a template buffer, or `None`
+    // if the bounds or flags are invalid for `bytes_len`.
     #[inline(always)]
-    pub(crate) fn load(from: &mut StoredReader<'_>) -> Option<Self> {
-        let start = from.u32();
-        let counts: [u8; SECTIONS] = from.take();
-        let [total, params] = from.take();
-        let end = from.u32();
-        let url_fixed = from.u32();
-        let fields = (from.u8(), from.u32());
-        let body = match from.u8() {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
-        let fingerprint = u64::from_le_bytes(from.take());
-        let steps: usize = counts.iter().map(|&count| usize::from(count)).sum();
-        if steps != usize::from(total)
-            || steps > MAX_STEPS
-            || end.checked_sub(start) != Some(u32::from(total) * 8)
-            || fields.0 > total
+    pub(crate) fn load(header: &[u8; TABLE_HEADER_LEN], bytes_len: usize) -> Option<Self> {
+        let u32_at =
+            |i: usize| u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]]);
+        let start = u32_at(0);
+        let end = u32_at(4);
+        let url_fixed = u32_at(8);
+        let body_fixed = u32_at(12);
+        let fields_offset = u32_at(16);
+        let [fields_step, total, params, flags] = [header[20], header[21], header[22], header[23]];
+        if flags & !0b11 != 0 || usize::from(total) > MAX_STEPS || fields_step > total {
+            return None;
+        }
+        let table_end = end.checked_sub(TRAILER_LEN as u32)?;
+        if (start as usize) < HEADER_LEN
+            || table_end.checked_sub(start) != Some(u32::from(total) * 4)
+            || bytes_len < end as usize
         {
             return None;
         }
         Some(Self {
             start,
-            counts,
             total,
             params,
             end,
             url_fixed,
-            fields,
-            body,
-            fingerprint,
+            body_fixed,
+            fields: (fields_step, fields_offset),
+            body: flags & 1 != 0,
+            body_hole: flags & 2 != 0,
         })
     }
 }
@@ -605,35 +514,35 @@ impl Pass for Builder<'_> {
         }
         self.scattered |= span.start != self.text_end;
         self.text_end = span.start + span.len;
+        if (self.section as usize) < Section::Head as usize {
+            self.url_fixed = self.url_fixed.saturating_add(span.len as u32);
+        } else if self.section == Section::Body {
+            self.body_fixed = self.body_fixed.saturating_add(span.len as u32);
+        }
         // Text right after text of the same step extends it.
         if self.open {
             if let Some(last) = self.steps.get_mut(self.count - 1) {
-                last.len += span.len as u32;
+                *last += span.len as u32;
             }
             return;
         }
-        self.push(Step {
-            len: span.len as u32,
-            ..Step::default()
-        });
+        self.push(span.len as u32);
         self.open = true;
     }
 
     fn hole(&mut self, hole: Hole) {
-        match self.steps.get_mut(self.count.wrapping_sub(1)) {
-            Some(last) if self.open => last.hole = hole as u8,
-            _ => self.push(Step {
-                len: 0,
-                hole: hole as u8,
-                ..Step::default()
-            }),
+        if self.section == Section::Body && hole == Hole::Body {
+            self.body_hole = true;
+        }
+        if !self.open {
+            self.push(0);
         }
         self.open = false;
     }
 
     fn fields(&mut self) {
         self.fields = match self.steps.get(self.count.wrapping_sub(1)) {
-            Some(last) if self.open => ((self.count - 1) as u8, last.len),
+            Some(&last) if self.open => ((self.count - 1) as u8, last),
             _ => (self.count as u8, 0),
         };
     }
@@ -656,17 +565,9 @@ impl Pass for Builder<'_> {
                 });
                 self.hole(hole);
             }
-            // The name follows the run of the hole's step, and a request
-            // writes it only with a value.
             ParamValue::Optional(hole) => {
                 self.optional = true;
                 self.hole(hole);
-                let span = self.out.part(|out| out.push(name.as_bytes()));
-                self.scattered |= span.start != self.text_end || span.len > 255;
-                self.text_end = span.start + span.len;
-                if let Some(last) = self.steps.get_mut(self.count - 1) {
-                    last.name = span.len as u8;
-                }
             }
         }
     }
@@ -678,13 +579,17 @@ impl Table {
         self.url_fixed as usize
     }
 
-    /// The steps of the template that this table describes, or the refusal
-    /// of bytes that cannot be its own.
-    fn steps<'t>(&self, template: &'t [u8]) -> Result<&'t [[u8; 8]]> {
-        let table = template
-            .get(self.start as usize..self.end as usize)
+    /// The step lengths of the template that this table describes, or the
+    /// refusal of bytes that cannot be its own.
+    #[inline(always)]
+    fn steps<'t>(&self, template: &'t [u8]) -> Result<&'t [[u8; 4]]> {
+        let table_end = (self.end as usize)
+            .checked_sub(TRAILER_LEN)
             .ok_or(InvalidRequest::Template)?;
-        let (steps, rest) = table.as_chunks::<8>();
+        let table = template
+            .get(self.start as usize..table_end)
+            .ok_or(InvalidRequest::Template)?;
+        let (steps, rest) = table.as_chunks::<4>();
         if !rest.is_empty() || steps.len() != self.total as usize {
             return Err(InvalidRequest::Template.into());
         }
@@ -693,104 +598,66 @@ impl Table {
 
     // The parts of `bytes`, or the refusal of bytes that cannot be the
     // template's.
+    #[inline(always)]
     fn parts<'t>(&self, bytes: &'t [u8]) -> Result<TemplateParts<'t>> {
         let steps = self.steps(bytes)?;
         let text = bytes
-            .get(..self.start as usize)
+            .get(HEADER_LEN..self.start as usize)
             .ok_or(InvalidRequest::Template)?;
-        Ok(TemplateParts { bytes, steps, text })
+        Ok(TemplateParts { steps, text })
     }
 
-    // Checks that `bytes` are the template's own: its text and its table
-    // are the ones it sealed. A request's pass checks neither.
+    // Checks the trailing fingerprint of `bytes` over its header, text and
+    // step lengths. A request's pass does not run this check.
     pub(crate) fn check(&self, bytes: &[u8]) -> Result<()> {
-        match bytes.get(..self.end as usize) {
-            Some(own) if fingerprint(own) == self.fingerprint => Ok(()),
-            _ => Err(InvalidRequest::Template.into()),
+        let end = self.end as usize;
+        let payload_len = end
+            .checked_sub(TRAILER_LEN)
+            .ok_or(InvalidRequest::Template)?;
+        let own = bytes.get(..end).ok_or(InvalidRequest::Template)?;
+        let (payload, hash) = own.split_at(payload_len);
+        let hash: [u8; 8] = hash.try_into().map_err(|_| InvalidRequest::Template)?;
+        if fingerprint(payload) == u64::from_le_bytes(hash) {
+            Ok(())
+        } else {
+            Err(InvalidRequest::Template.into())
         }
     }
 
-    // The steps of the sections before `section`.
-    fn steps_before(&self, section: usize) -> usize {
-        self.counts[..section]
-            .iter()
-            .map(|&count| count as usize)
-            .sum()
-    }
-
-    // The length of the body, from its fixed text and the length that
-    // `fill` knows of what it writes. A body that `fill` does not know the
-    // length of is counted by writing it into nothing. A fill that writes
-    // no body is not handed on, so that it stays where the compiler put it.
+    // The length of the body, from its fixed text and the length that `fill`
+    // knows of what it writes. A body that `fill` does not know the length of
+    // is counted by writing it into nothing.
     #[inline(always)]
-    fn body_len<F: Fill>(&self, parts: TemplateParts<'_>, fill: &F) -> Result<usize> {
-        match (self.body, F::BODY) {
-            (false, _) => Ok(0),
-            (true, false) => self.fixed_body_len(parts.steps),
-            (true, true) => self.filled_body_len(parts, fill),
-        }
-    }
-
-    // The length of a body that is the template's text alone.
-    fn fixed_body_len(&self, steps: &[[u8; 8]]) -> Result<usize> {
-        let mut len = 0;
-        for at in self.steps_before(Section::Body as usize)..steps.len() {
-            let step = read_step(steps, at)?;
-            if step.hole != NO_HOLE {
-                return Err(InvalidRequest::Template.into());
-            }
-            len += step.len as usize;
-        }
-        Ok(len)
-    }
-
-    // The length of a body that `fill` writes into the template's text.
-    fn filled_body_len(&self, parts: TemplateParts<'_>, fill: &impl Fill) -> Result<usize> {
-        let body = Section::Body as usize;
-        let steps = parts.steps;
-        let mut len = 0;
-        for at in self.steps_before(body)..steps.len() {
-            let step = read_step(steps, at)?;
-            len += step.len as usize + step.name as usize;
-            len += match step.hole {
-                NO_HOLE => 0,
-                hole if hole == Hole::Body as u8 => match fill.body_len() {
+    fn body_len<F: Fill>(&self, fill: &F) -> Result<usize> {
+        match (self.body_hole, F::BODY) {
+            (false, _) => Ok(self.body_fixed as usize),
+            (true, false) => Err(InvalidRequest::Template.into()),
+            (true, true) => {
+                let filled = match fill.body_len() {
                     Some(len) => len,
                     None => {
                         let mut counted = Writer::new(&mut []);
-                        walk_table(self, parts.bytes, fill, &mut counted, body..SECTIONS, 0)?;
-                        return Ok(counted.position());
+                        if !fill.write(Hole::Body, &mut counted) {
+                            return Err(InvalidRequest::Template.into());
+                        }
+                        counted.position()
                     }
-                },
-                _ => return Err(InvalidRequest::Template.into()),
-            };
+                };
+                Ok((self.body_fixed as usize).saturating_add(filled))
+            }
         }
-        Ok(len)
     }
 }
 
-// The step at `at` of `steps`.
-fn read_step(steps: &[[u8; 8]], at: usize) -> Result<Step> {
-    let [l0, l1, l2, l3, hole, name, ends, _] = *steps.get(at).ok_or(InvalidRequest::Template)?;
-    Ok(Step {
-        len: u32::from_le_bytes([l0, l1, l2, l3]),
-        hole,
-        name,
-        ends,
-    })
-}
-
-/// A template's bytes, and the table and the text in them.
+/// A template's bytes, as its step lengths and its text.
 #[derive(Debug, Clone, Copy)]
 struct TemplateParts<'t> {
-    bytes: &'t [u8],
-    steps: &'t [[u8; 8]],
+    steps: &'t [[u8; 4]],
     text: &'t [u8],
 }
 
 impl TemplateParts<'_> {
     const EMPTY: TemplateParts<'static> = TemplateParts {
-        bytes: &[],
         steps: &[],
         text: &[],
     };
@@ -863,16 +730,6 @@ impl WriteState {
             fields: 0,
             params: table.params as usize,
             body_len,
-        }
-    }
-
-    // Records that the sections whose bits `ends` has end at `position`.
-    #[inline(always)]
-    fn end(&mut self, ends: u8, position: usize) {
-        for (section, end) in self.ends.iter_mut().enumerate() {
-            if ends & 1 << section != 0 {
-                *end = position;
-            }
         }
     }
 
@@ -1000,170 +857,27 @@ fn write_hole(
     true
 }
 
-/// Writes a request by walking its template's table, one function for
-/// every operation. With the feature `compact`, an encoder calls this in
-/// place of its layout.
-#[cfg(feature = "compact")]
-pub(crate) fn walk_request(
-    table: &Table,
-    template: &[u8],
-    fill: &impl Fill,
-    out: &mut Writer<'_>,
-) -> Result<Written> {
-    let body_len = table.body_len(table.parts(template)?, fill)?;
-    walk_table(table, template, fill, out, 0..SECTIONS, body_len)
-}
-
 /// Returns where the parts of a request written into `out` are, or the
 /// refusal of one that did not fit, with the room it needs.
 #[inline(always)]
-pub(crate) fn check_fit(
-    table: &Table,
-    template: &[u8],
-    fill: &impl Fill,
-    out: &Writer<'_>,
-    written: Written,
-) -> Result<Written> {
+pub(crate) fn check_fit(out: &Writer<'_>, written: Written) -> Result<Written> {
     if !out.fits() {
         return Err(capacity_error(CapacityError {
             required: written.end,
         }));
     }
-    #[cfg(test)]
-    same_as_walked(table, template, fill, out, &written);
-    #[cfg(not(test))]
-    let _ = (table, template, fill);
     Ok(written)
-}
-
-// In tests, checks that walking the table writes what the layout wrote, for
-// bytes that are the template's own: from other bytes, both write a wrong
-// request, and not the same one.
-#[cfg(test)]
-fn same_as_walked(
-    table: &Table,
-    template: &[u8],
-    fill: &impl Fill,
-    out: &Writer<'_>,
-    written: &Written,
-) {
-    extern crate std;
-    if table.check(template).is_err() {
-        return;
-    }
-    let mut walked = std::vec![0u8; written.end];
-    let mut copy = Writer::new(&mut walked);
-    let body_len = table
-        .body_len(table.parts(template).expect("the template's own"), fill)
-        .expect("the body counts");
-    let again = walk_table(table, template, fill, &mut copy, 0..SECTIONS, body_len)
-        .expect("walking the table writes the request");
-    assert_eq!(
-        &walked[..again.end],
-        out.written(),
-        "the layout and the table write alike"
-    );
-    assert_eq!(
-        (
-            again.url,
-            again.head,
-            again.fields,
-            again.canonical,
-            again.body
-        ),
-        (
-            written.url,
-            written.head,
-            written.fields,
-            written.canonical,
-            written.body
-        ),
-        "the layout and the table place the parts alike",
-    );
-}
-
-/// Returns the length of the URL that a request from the template would
-/// have, without writing it.
-pub(crate) fn url_len(table: &Table, template: &[u8], fill: &impl Fill) -> Result<usize> {
-    let mut counted = Writer::new(&mut []);
-    walk_table(
-        table,
-        template,
-        fill,
-        &mut counted,
-        0..Section::Head as usize,
-        0,
-    )?;
-    Ok(counted.position())
-}
-
-// Writes the sections `sections` of a request by walking the template's
-// table: it copies each run of text and fills each hole after it.
-fn walk_table(
-    table: &Table,
-    template: &[u8],
-    fill: &impl Fill,
-    out: &mut Writer<'_>,
-    sections: core::ops::Range<usize>,
-    body_len: usize,
-) -> Result<Written> {
-    let steps = table.steps(template)?;
-    // The text of the steps, before the table, and a run of it.
-    let text = &template[..table.start as usize];
-    let run = |cursor: usize, len: usize| {
-        text.get(cursor..cursor.wrapping_add(len))
-            .ok_or(InvalidRequest::Template)
-    };
-    // The steps of the sections before the range are skipped, and their
-    // text with them.
-    let first = table.steps_before(sections.start);
-    let last = table.steps_before(sections.end);
-    let mut cursor = 0;
-    for at in 0..first {
-        let step = read_step(steps, at)?;
-        cursor += step.len as usize + step.name as usize;
-    }
-    let mut state = WriteState::new(table, out.position(), body_len);
-    let (fields_step, fields_offset) = table.fields;
-    for at in first..last {
-        let step = read_step(steps, at)?;
-        let fixed = run(cursor, step.len as usize)?;
-        if at == fields_step as usize {
-            state.fields = out.position() + fixed.len().min(fields_offset as usize);
-        }
-        out.push(fixed);
-        cursor += step.len as usize;
-        if step.hole != NO_HOLE {
-            let name = run(cursor, step.name as usize)?;
-            let hole = Hole::from_id(step.hole).ok_or(InvalidRequest::Template)?;
-            if !write_hole(&mut state, hole, name, fill, out) {
-                return Err(InvalidRequest::Template.into());
-            }
-        }
-        cursor += step.name as usize;
-        if step.ends != 0 {
-            state.end(step.ends, out.position());
-        }
-    }
-    // A section after the range ends where the request does.
-    let end = out.position();
-    for later in &mut state.ends[sections.end..] {
-        *later = end;
-    }
-    Ok(state.written(table, end))
 }
 
 /// A request's pass: it copies the template's text, run by run, and fills
 /// each hole as the layout names it. Each hole copies the run before it,
 /// and the end of each section copies the step of text alone that ends it.
 /// So where each step is follows from the layout alone, and the compiler
-/// writes each as straight-line code. The pass does not check that each
-/// step holds the hole that the layout names. Bytes that are not the
-/// template's write a wrong request, or fail where they run out. They cannot
-/// make the pass read outside them or panic.
-#[cfg_attr(feature = "compact", allow(dead_code))]
+/// writes each as straight-line code. Bytes that are not the template's
+/// write a wrong request, or fail where they run out. They cannot make the
+/// pass read outside them or panic.
 pub(crate) struct EncodePass<'e, 'o, F: Fill> {
-    steps: &'e [[u8; 8]],
+    steps: &'e [[u8; 4]],
     text: &'e [u8],
     table: &'e Table,
     fill: &'e F,
@@ -1178,7 +892,6 @@ pub(crate) struct EncodePass<'e, 'o, F: Fill> {
     failed: bool,
 }
 
-#[cfg_attr(feature = "compact", allow(dead_code))]
 impl<'e, 'o, F: Fill> EncodePass<'e, 'o, F> {
     // Starts a request's pass over the template `template`, whose table is
     // `table`, which writes into `out` with the values that `fill` writes,
@@ -1195,7 +908,7 @@ impl<'e, 'o, F: Fill> EncodePass<'e, 'o, F> {
         state: &'e mut WriteState,
     ) -> Self {
         let (parts, body_len, failed) = match table.parts(template) {
-            Ok(parts) => match table.body_len(parts, fill) {
+            Ok(parts) => match table.body_len(fill) {
                 Ok(body_len) => (parts, body_len, false),
                 Err(_) => (TemplateParts::EMPTY, 0, true),
             },
@@ -1217,21 +930,16 @@ impl<'e, 'o, F: Fill> EncodePass<'e, 'o, F> {
         }
     }
 
-    // Copies the run of the next step, and returns the length of the name
-    // it holds.
+    // Copies the run of the next step.
     #[inline(always)]
-    fn take(&mut self) -> usize {
-        // The step, read whole: its run's length, its hole, its name. The
-        // pass moves on whatever the step holds, so that where it is stays
-        // what the layout makes it.
+    fn take(&mut self) {
         let at = self.at;
         self.at += 1;
         let Some(&step) = self.steps.get(at) else {
             self.failed = true;
-            return 0;
+            return;
         };
-        let step = u64::from_le_bytes(step);
-        let len = step as u32 as usize;
+        let len = u32::from_le_bytes(step) as usize;
         match self.text.get(self.cursor..self.cursor.wrapping_add(len)) {
             // The step that ends a section often holds no text.
             Some(run) if !run.is_empty() => self.out.push(run),
@@ -1239,7 +947,6 @@ impl<'e, 'o, F: Fill> EncodePass<'e, 'o, F> {
             None => self.failed = true,
         }
         self.cursor = self.cursor.wrapping_add(len);
-        (step >> 40) as u8 as usize
     }
 
     // Ends the sections before `section`, each with its step of text
@@ -1285,9 +992,10 @@ impl<F: Fill> Pass for EncodePass<'_, '_, F> {
     fn fields(&mut self) {
         let (step, offset) = self.table.fields;
         self.failed |= step as usize != self.at;
-        let len = self.steps.get(self.at).map_or(0, |&[l0, l1, l2, l3, ..]| {
-            u32::from_le_bytes([l0, l1, l2, l3])
-        });
+        let len = self
+            .steps
+            .get(self.at)
+            .map_or(0, |&step| u32::from_le_bytes(step));
         self.state.fields = self.out.position() + len.min(offset) as usize;
     }
 
@@ -1304,9 +1012,8 @@ impl<F: Fill> Pass for EncodePass<'_, '_, F> {
             }
             ParamValue::Optional(hole) => {
                 self.optional = true;
-                let name_len = self.take();
+                self.take();
                 self.failed |= !write_hole(self.state, hole, name.as_bytes(), self.fill, self.out);
-                self.cursor = self.cursor.wrapping_add(name_len);
             }
         }
     }
@@ -1360,13 +1067,14 @@ fn record_placeholder(slots: &mut [Option<Span>], span: Span) {
 /// let container = Container::new("https://account.blob.core.windows.net", "container")?;
 /// let options = PutOptions::default();
 /// let namespace = AzureNamespace::Unknown;
-/// let mut bytes = vec![0; 1024];
-/// let template = azure::prepare_put(&container, "token", namespace, &options, &mut bytes)?;
+/// let mut template_buf = vec![0; 1024];
+/// let len = azure::prepare_put(&container, "token", namespace, &options, &mut template_buf)?;
+/// let template = azure::Template::from_bytes(&template_buf[..len]);
 /// let content = b"hello";
 /// let item = PutItem::new("greeting.txt", ContentLength::of(content));
 /// let now = Timestamps::from_unix(1_787_400_000);
 /// let mut buf = Vec::new();
-/// let request = write(&mut buf, |buf| azure::encode_put(&template, &bytes, &item, &now, buf))?;
+/// let request = write(&mut buf, |buf| azure::encode_put(template, &item, &now, buf))?;
 /// assert!(request.head(&buf).starts_with(b"PUT /container/greeting.txt HTTP/1.1\r\n"));
 /// assert_eq!(request.content_length(), 5);
 /// assert_eq!(request.body(&buf), None);
@@ -1687,22 +1395,5 @@ fn write_key(out: &mut Writer<'_>, key: &str) {
         for part in encode_object_key(key) {
             out.push(part);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Hole;
-
-    // `Hole::from_id` reads a hole by its number, so `ALL` lists the holes
-    // in the order of their numbers, from 1.
-    #[test]
-    fn the_holes_are_listed_in_the_order_of_their_numbers() {
-        for (index, hole) in Hole::ALL.iter().enumerate() {
-            assert_eq!(*hole as usize, index + 1);
-            assert_eq!(Hole::from_id(index as u8 + 1), Some(*hole));
-        }
-        assert_eq!(Hole::from_id(0), None);
-        assert_eq!(Hole::from_id(Hole::ALL.len() as u8 + 1), None);
     }
 }

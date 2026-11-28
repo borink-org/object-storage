@@ -49,8 +49,7 @@ extern "C" void board_cxx(void) {
     item.range = borink::bounded(2, 6);
     item.condition_value = borink::condition_tag("\"tag\"");
     item.condition_value = borink::condition_time(seconds);
-    const borink::WireRequest read = borink_encode_get(
-        &reads.template_, borink::template_bytes(template_room, reads), &item, &now,
+    const borink::WireRequest read = borink_encode_get(borink::template_bytes(template_room, reads), &item, &now,
         borink::into(writable));
     sink = static_cast<unsigned>(borink::part(writable, read.url).size());
     borink::Bytes fields = borink::fields_of(writable, read);

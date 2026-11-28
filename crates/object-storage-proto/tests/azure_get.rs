@@ -1,6 +1,6 @@
 //! Azure bearer GET integration tests.
 
-use borink_object_storage_proto::azure::{self, Template, metadata_name};
+use borink_object_storage_proto::azure::{self, metadata_name};
 use borink_object_storage_proto::azure::{AzureNamespace, Container, VERSION};
 use borink_object_storage_proto::{
     ConditionKind, ConditionValue, Error, GetHeadOutcome, GetItem, GetOptions, GetShape,
@@ -16,9 +16,9 @@ fn now() -> Timestamps {
 }
 
 // The template of reads with `options`, in a buffer of its own.
-fn template(options: GetOptions, namespace: AzureNamespace) -> (Template, Vec<u8>) {
+fn template(options: GetOptions, namespace: AzureNamespace) -> Vec<u8> {
     let mut bytes = vec![0; 512];
-    let template = azure::prepare_get(
+    let len = azure::prepare_get(
         &container(),
         "access-token",
         namespace,
@@ -26,13 +26,14 @@ fn template(options: GetOptions, namespace: AzureNamespace) -> (Template, Vec<u8
         &mut bytes,
     )
     .unwrap();
-    (template, bytes)
+    bytes.truncate(len);
+    bytes
 }
 
 // Writes `item` from a template of `options` into `buf`.
 fn encode(options: GetOptions, item: &GetItem<'_>, buf: &mut [u8]) -> Result<WireRequest, Error> {
-    let (template, bytes) = template(options, AzureNamespace::Unknown);
-    azure::encode_get(&template, &bytes, item, &now(), buf)
+    let template = template(options, AzureNamespace::Unknown);
+    azure::encode_get(azure::Template::from_bytes(&template), item, &now(), buf)
 }
 
 fn shape(range: RequestedRange) -> GetShape {
@@ -108,7 +109,7 @@ fn encodes_a_bearer_get_in_caller_memory() {
 #[test]
 fn the_request_borrows_nothing() {
     let mut buf = [0; 512];
-    let (template, bytes) = template(
+    let template = template(
         GetOptions {
             condition: ConditionKind::IfMatch,
             ..GetOptions::new()
@@ -118,8 +119,7 @@ fn the_request_borrows_nothing() {
     // The template's bytes, the key, the condition value and the timestamp
     // are all temporaries.
     let request = azure::encode_get(
-        &template,
-        &bytes.clone(),
+        azure::Template::from_bytes(&template.clone()),
         &GetItem {
             condition_value: Some(ConditionValue::ETag(String::from("\"etag\"").as_bytes())),
             ..GetItem::new(&String::from("object"))
@@ -305,12 +305,11 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
     // touched, whatever the account, and with a buffer too small as well.
     let over = format!(" {key}");
     for namespace in [AzureNamespace::Unknown, AzureNamespace::Hierarchical] {
-        let (template, bytes) = template(GetOptions::new(), namespace);
+        let template = template(GetOptions::new(), namespace);
         let mut untouched = [0xAA; 256];
         assert_eq!(
             azure::encode_get(
-                &template,
-                &bytes,
+                azure::Template::from_bytes(&template),
                 &GetItem::new(&over),
                 &now(),
                 &mut untouched
@@ -337,19 +336,18 @@ fn a_url_longer_than_azure_reads_is_refused_before_any_byte_is_written() {
 /// name the caller did not write.
 #[test]
 fn a_key_that_would_not_survive_the_journey_is_refused() {
-    let (flat, flat_bytes) = template(GetOptions::new(), AzureNamespace::Flat);
-    let (unknown, unknown_bytes) = template(GetOptions::new(), AzureNamespace::Unknown);
-    let refused_by = |template: &Template, bytes: &[u8], key: &str| {
+    let flat = template(GetOptions::new(), AzureNamespace::Flat);
+    let unknown = template(GetOptions::new(), AzureNamespace::Unknown);
+    let refused_by = |template: &[u8], key: &str| {
         azure::encode_get(
-            template,
-            bytes,
+            azure::Template::from_bytes(template),
             &GetItem::new(key),
             &now(),
             &mut vec![0; 40_000],
         )
         .map(drop)
     };
-    let refused = |key: &str| refused_by(&flat, &flat_bytes, key);
+    let refused = |key: &str| refused_by(&flat, key);
 
     // A flat account counts a name in UTF-16 code units, so a character
     // outside the basic plane counts twice. 512 of them is the limit, and 1024
@@ -365,7 +363,7 @@ fn a_key_that_would_not_survive_the_journey_is_refused() {
             "{} UTF-16 code units",
             over.encode_utf16().count()
         );
-        assert!(refused_by(&unknown, &unknown_bytes, &over).is_ok());
+        assert!(refused_by(&unknown, &over).is_ok());
     }
 
     // Azure drops a dot from the end of every segment, so a key with one

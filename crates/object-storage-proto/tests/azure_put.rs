@@ -24,8 +24,13 @@ fn encode_on(
     buf: &mut [u8],
 ) -> Result<WireRequest, Error> {
     let mut bytes = vec![0; 2048];
-    let template = azure::prepare_put(&container(), "token", namespace, options, &mut bytes)?;
-    azure::encode_put(&template, &bytes, item, &now(), buf)
+    let len = azure::prepare_put(&container(), "token", namespace, options, &mut bytes)?;
+    azure::encode_put(
+        azure::Template::from_bytes(&bytes[..len]),
+        item,
+        &now(),
+        buf,
+    )
 }
 
 fn encode(

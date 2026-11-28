@@ -9,7 +9,9 @@ use crate::checksum::ChecksumKind;
 use crate::head::read_decimal_header;
 use crate::outcome::finish_with_body;
 use crate::request::{ByteSink, Writer};
-use crate::s3::template::{self, Describe, Detail, Operation, Template, Unsigned, encode_template};
+use crate::s3::template::{
+    self, Describe, Detail, Header, Operation, Template, Unsigned, encode_template,
+};
 use crate::s3::{
     Bucket, S3Values, kind_in_body, read_failure_head, refuse_error_document, validate_key,
 };
@@ -114,7 +116,7 @@ pub fn prepare_delete_many(
     credentials: &Credentials<'_>,
     checksum: Option<ChecksumKind>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if bucket.service.is_aws() && checksum.is_none() {
         return Err(InvalidRequest::Option.into());
     }
@@ -151,12 +153,13 @@ fn describe_delete_many(checksum: Option<ChecksumKind>) -> Describe<'static, 4> 
 /// needs.
 pub fn encode_delete_many(
     template: &Template,
-    bytes: &[u8],
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    let Detail::DeleteMany(checksum) = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::DeleteMany(checksum) = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
     if objects.is_empty() || objects.len() > MAX_DELETE_KEYS {
@@ -182,8 +185,8 @@ pub fn encode_delete_many(
         objects,
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &fill,
         0,
         buf,

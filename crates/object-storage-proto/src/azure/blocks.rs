@@ -9,7 +9,7 @@
 #[cfg(doc)]
 use crate::Error;
 use crate::azure::template::{
-    Describe, Detail, Field, FieldList, Holes, Operation, Template, encode_template,
+    Describe, Detail, Field, FieldList, Header, Holes, Operation, Template, encode_template,
     prepare_template,
 };
 use crate::azure::{
@@ -316,7 +316,7 @@ pub fn prepare_stage_block(
     namespace: AzureNamespace,
     options: &StageOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if options.checksum.is_some_and(|kind| !kind.azure_takes()) {
         return Err(InvalidRequest::Option.into());
     }
@@ -328,7 +328,7 @@ pub fn prepare_stage_block(
         Operation::StageBlock,
         Detail::Stage(options.checksum),
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -370,15 +370,16 @@ fn describe_stage(checksum: Option<ChecksumKind>) -> Describe<'static, 2> {
 /// needs.
 pub fn encode_stage_block(
     template: &Template,
-    bytes: &[u8],
     item: &StageBlockItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    let Detail::Stage(checksum) = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Stage(checksum) = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_block_id(item.id)?;
     if item.content_length.as_u64() > MAX_STAGE_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
@@ -394,8 +395,8 @@ pub fn encode_stage_block(
         ..HoleValues::default()
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
         item.content_length.as_u64(),
         buf,
@@ -441,7 +442,7 @@ pub fn prepare_commit_blocks(
     namespace: AzureNamespace,
     options: &CommitOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata)?;
     validate_properties(&options.options, utf8_properties(namespace))?;
     validate_tags(options.options.tags, azure_tag_char, Some((10, 128, 256)))?;
@@ -463,7 +464,7 @@ pub fn prepare_commit_blocks(
             content_md5: options.content_md5,
         },
         buf,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -552,7 +553,6 @@ where
 /// needs.
 pub fn encode_commit_blocks<'b, B>(
     template: &Template,
-    bytes: &[u8],
     item: &CommitItem<'_, B>,
     now: &Timestamps,
     buf: &mut [u8],
@@ -560,14 +560,16 @@ pub fn encode_commit_blocks<'b, B>(
 where
     B: IntoIterator<Item: Into<BlockRef<'b>>> + Clone,
 {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
     let Detail::Commit {
         condition,
         content_md5,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_condition(condition, item.condition_value)?;
     match (content_md5, item.content_md5) {
         (false, None) => {}
@@ -591,8 +593,8 @@ where
         blocks: item.blocks.clone(),
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &fill,
         0,
         buf,
@@ -660,7 +662,7 @@ pub fn prepare_list_blocks(
     kind: BlockListKind,
     revision: RevisionKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let kind = match kind {
         BlockListKind::Committed => "committed",
         BlockListKind::Staged => "uncommitted",
@@ -699,12 +701,12 @@ pub fn prepare_list_blocks(
 /// needs.
 pub fn encode_list_blocks(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::ListBlocks, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::ListBlocks, item, now, buf)
 }
 
 /// Reads the response head of a Get Block List and reports what to do

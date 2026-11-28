@@ -10,7 +10,7 @@ use crate::head::read_decimal_header;
 use crate::outcome::{container_failure_outcome, finish_with_body};
 use crate::request::{ByteSink, U64Decimal, Writer};
 use crate::s3::template::{
-    self, Describe, Detail, Field, FieldList, FieldValue, Operation, Template, Unsigned,
+    self, Describe, Detail, Field, FieldList, FieldValue, Header, Operation, Template, Unsigned,
     encode_template,
 };
 use crate::s3::{
@@ -333,7 +333,7 @@ pub fn prepare_create_upload(
     credentials: &Credentials<'_>,
     options: &CreateUploadOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata, bucket.service)?;
     validate_stored_properties(&options.options, bucket.service)?;
     let mut signed = FieldList::new();
@@ -370,12 +370,12 @@ pub fn prepare_create_upload(
 /// needs.
 pub fn encode_create_upload(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_object(template, bytes, Operation::CreateUpload, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::CreateUpload, item, now, buf)
 }
 
 /// Reads the response head of a CreateMultipartUpload and reports what to
@@ -431,7 +431,7 @@ pub fn prepare_stage_part(
     options: &StageOptions,
     signing: PayloadSigning,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     template::prepare_template(
         bucket,
         credentials,
@@ -479,18 +479,19 @@ fn describe_stage(checksum: Option<ChecksumKind>, signing: PayloadSigning) -> De
 /// needs.
 pub fn encode_stage_part(
     template: &Template,
-    bytes: &[u8],
     item: &StagePartItem<'_>,
     content_sha256: Option<&[u8; 32]>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    let Detail::Stage { checksum, signing } = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Stage { checksum, signing } = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_upload_id(item.upload_id)?;
-    validate_part_number(item.number, template.service)?;
+    validate_part_number(item.number, header.service)?;
     if item.content_length.as_u64() > MAX_PART_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
@@ -512,8 +513,8 @@ pub fn encode_stage_part(
         ..HoleValues::default()
     });
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
         item.content_length.as_u64(),
         buf,
@@ -563,7 +564,7 @@ pub fn prepare_commit_parts(
     credentials: &Credentials<'_>,
     options: &CommitOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if bucket.service.is_aws() && options.condition.is_date() {
         return Err(InvalidRequest::Condition.into());
     }
@@ -641,25 +642,26 @@ impl Fill for CommitFill<'_> {
 /// needs.
 pub fn encode_commit_parts(
     template: &Template,
-    bytes: &[u8],
     item: &CommitItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
     let Detail::Commit {
         condition,
         checksum,
         sized,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_upload_id(item.upload_id)?;
-    validate_write_condition(condition, item.condition_value, template.service)?;
+    validate_write_condition(condition, item.condition_value, header.service)?;
     validate_parts(
         item.parts.iter().map(|part| (part.number, part.e_tag)),
-        template.service,
+        header.service,
     )?;
     if sized != item.size.is_some() {
         return Err(InvalidRequest::Option.into());
@@ -677,8 +679,8 @@ pub fn encode_commit_parts(
         parts: item.parts,
     };
     encode_template(
+        &header,
         template,
-        bytes,
         &fill,
         0,
         buf,
@@ -769,7 +771,7 @@ pub fn prepare_abort_upload(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     template::prepare_template(bucket, credentials, &describe_abort_upload(), buf)
 }
 
@@ -794,15 +796,16 @@ fn describe_abort_upload() -> Describe<'static, 4> {
 /// needs.
 pub fn encode_abort_upload(
     template: &Template,
-    bytes: &[u8],
     item: &UploadItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    if template.operation != Operation::AbortUpload {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    if header.operation != Operation::AbortUpload {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_upload_id(item.upload_id)?;
     let values = S3Values(HoleValues {
         now: Some(now),
@@ -811,8 +814,8 @@ pub fn encode_abort_upload(
         ..HoleValues::default()
     });
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -862,7 +865,7 @@ pub fn prepare_list_parts(
     credentials: &Credentials<'_>,
     max_parts: Option<u32>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     template::prepare_template(bucket, credentials, &describe_list_parts(max_parts), buf)
 }
 
@@ -894,15 +897,16 @@ fn describe_list_parts(max_parts: Option<u32>) -> Describe<'static, 4> {
 /// needs.
 pub fn encode_list_parts(
     template: &Template,
-    bytes: &[u8],
     item: &ListPartsItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    if template.operation != Operation::ListParts {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    if header.operation != Operation::ListParts {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_upload_id(item.upload_id)?;
     if item.marker.is_some_and(str::is_empty) {
         return Err(InvalidRequest::Marker.into());
@@ -915,8 +919,8 @@ pub fn encode_list_parts(
         ..HoleValues::default()
     });
     encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,

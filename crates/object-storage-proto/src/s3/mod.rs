@@ -7,7 +7,7 @@
 //!    [`Credentials::new`] takes to wipe its copy of the secret.
 //! 2. Describe what every request shares, as [`GetOptions`] or
 //!    [`PutOptions`], and call [`prepare_get`] or [`prepare_put`] to write
-//!    a [`Template`] into a buffer that you own.
+//!    the template into a buffer that you own.
 //! 3. Describe each request, as a [`GetItem`] or a [`PutItem`], and call
 //!    [`encode_get`] or [`encode_put`] to write it into a second buffer.
 //!    The request is [`Unsigned`]: sign it, as [Signing](#signing)
@@ -44,13 +44,14 @@
 //! let now = Timestamps::from_unix(1_787_400_000);
 //!
 //! let options = PutOptions::default();
-//! let mut template = vec![0; 1024];
-//! let writes =
-//!     s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Unsigned, &mut template)?;
+//! let mut writes = vec![0; 1024];
+//! let len =
+//!     s3::prepare_put(&bucket, &credentials, &options, PayloadSigning::Unsigned, &mut writes)?;
+//! let writes = s3::Template::from_bytes(&writes[..len]);
 //!
 //! let put = PutItem::new("directory/object.txt", ContentLength(8));
 //! let mut buffer = vec![0; 2048];
-//! let unsigned = s3::encode_put(&writes, &template, &put, None, &now, &mut buffer)?;
+//! let unsigned = s3::encode_put(writes, &put, None, &now, &mut buffer)?;
 //! // `borink_object_storage_crypto::sigv4::sign` computes the HMAC and finishes.
 //! let mac = hmac_of_string_to_sign(unsigned.canonical(&buffer));
 //! let request = s3::set_signature(&unsigned, &mut buffer, &mac);
@@ -66,15 +67,16 @@
 //! ));
 //!
 //! let options = GetOptions::new();
-//! let mut template = vec![0; 1024];
-//! let reads = s3::prepare_get(&bucket, &credentials, &options, &mut template)?;
+//! let mut reads = vec![0; 1024];
+//! let len = s3::prepare_get(&bucket, &credentials, &options, &mut reads)?;
+//! let reads = s3::Template::from_bytes(&reads[..len]);
 //! let get = GetItem::new("directory/object.txt");
 //! let mut buffer = vec![0; 2048];
-//! let unsigned = s3::encode_get(&reads, &template, &get, &now, &mut buffer)?;
+//! let unsigned = s3::encode_get(reads, &get, &now, &mut buffer)?;
 //! # let _ = unsigned;
 //! let head = ResponseHead::from_headers(404, [("x-amz-request-id", b"4442587FB7D0A2F9".as_slice())]);
 //! let GetHeadOutcome::NeedErrorBody(failure) =
-//!     s3::accept_get_head(reads.service(), get.shape(&options), head)?
+//!     s3::accept_get_head(reads.service()?, get.shape(&options), head)?
 //! else {
 //!     panic!("S3 names the error in the body");
 //! };
@@ -152,10 +154,11 @@
 //!     delimiter: Some("/"),
 //!     ..ListOptions::default()
 //! };
-//! let mut template = vec![0; 1024];
-//! let pages = s3::prepare_list(&bucket, &credentials, &options, &mut template)?;
+//! let mut pages = vec![0; 1024];
+//! let len = s3::prepare_list(&bucket, &credentials, &options, &mut pages)?;
+//! let pages = s3::Template::from_bytes(&pages[..len]);
 //! let mut buffer = vec![0; 2048];
-//! let unsigned = s3::encode_list(&pages, &template, &ListItem::new("photos/"), &now, &mut buffer)?;
+//! let unsigned = s3::encode_list(pages, &ListItem::new("photos/"), &now, &mut buffer)?;
 //! let request = s3::set_signature(&unsigned, &mut buffer, &[0; 32]);
 //! assert_eq!(
 //!     request.url(&buffer),
@@ -216,13 +219,14 @@
 //! # let credentials = Credentials::new("AKIAIOSFODNN7EXAMPLE", "secret", wipe_best_effort)?;
 //! # let now = Timestamps::from_unix(1_787_400_000);
 //! let options = CommitOptions::default();
-//! let mut template = vec![0; 1024];
-//! let commits = s3::prepare_commit_parts(&bucket, &credentials, &options, &mut template)?;
+//! let mut commits = vec![0; 1024];
+//! let len = s3::prepare_commit_parts(&bucket, &credentials, &options, &mut commits)?;
+//! let commits = s3::Template::from_bytes(&commits[..len]);
 //!
 //! let parts = [PartRef { number: 1, e_tag: b"\"e1\"" }];
 //! let commit = CommitItem::new("large.bin", "VXBsb2FkSUQ", &parts);
 //! let mut buffer = vec![0; 2048];
-//! let unsigned = s3::encode_commit_parts(&commits, &template, &commit, &now, &mut buffer)?;
+//! let unsigned = s3::encode_commit_parts(commits, &commit, &now, &mut buffer)?;
 //! assert_eq!(
 //!     unsigned.body(&buffer),
 //!     Some(
@@ -343,7 +347,7 @@ use crate::{
     Listing, MetadataPair, Method, ObjectItem, ObjectMeta, PutHeadOutcome, PutItem, PutOptions,
     PutShape, Ranging, RequestedRange, ResponseFault, ResponseHead, Result, RevisionKind, ServiceErrorKind, Timestamps, WriteOptions,
 };
-use template::{Describe, Detail, Field, FieldList, FieldValue, S3Values};
+use template::{Describe, Detail, Field, FieldList, FieldValue, Header, S3Values};
 
 mod batch;
 mod copy;
@@ -1060,7 +1064,7 @@ pub fn prepare_get(
     credentials: &Credentials<'_>,
     options: &GetOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_get_options(options, false)?;
     template::prepare_template(bucket, credentials, &describe_get(options), buf)
 }
@@ -1090,7 +1094,7 @@ const fn version_param(revision: RevisionKind) -> Param<'static> {
 /// Writes the read `item` at `now` from `template` into `buf`, ready to
 /// sign.
 ///
-/// `bytes` are the template's own, as [`prepare_get`] wrote them.
+/// `template` holds the bytes that [`prepare_get`] wrote.
 ///
 /// # Errors
 ///
@@ -1102,15 +1106,16 @@ const fn version_param(revision: RevisionKind) -> Param<'static> {
 /// needs.
 pub fn encode_get(
     template: &Template,
-    bytes: &[u8],
     item: &GetItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    let Detail::Get(options) = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Get(options) = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_get_item(&options, item)?;
     let values = S3Values(HoleValues {
         now: Some(now),
@@ -1121,8 +1126,8 @@ pub fn encode_get(
         ..HoleValues::default()
     });
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -1180,7 +1185,7 @@ pub fn prepare_put(
     options: &PutOptions<'_>,
     signing: PayloadSigning,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let service = bucket.service;
     validate_metadata(options.metadata, service)?;
     validate_stored_properties(&options.options, service)?;
@@ -1229,9 +1234,9 @@ fn describe_put(
 /// Writes the whole-object write `item` at `now` from `template` into
 /// `buf`, ready to sign.
 ///
-/// `bytes` are the template's own, as [`prepare_put`] wrote them. Pass the
-/// SHA-256 of the content as `content_sha256` for a template that signs it,
-/// and [`None`] for one that does not.
+/// `template` holds the bytes that [`prepare_put`] wrote. Pass the SHA-256 of
+/// the content as `content_sha256` for a template that signs it, and [`None`]
+/// for one that does not.
 ///
 /// # Errors
 ///
@@ -1247,25 +1252,26 @@ fn describe_put(
 /// needs.
 pub fn encode_put(
     template: &Template,
-    bytes: &[u8],
     item: &PutItem<'_>,
     content_sha256: Option<&[u8; 32]>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
     let Detail::Put {
         condition,
         checksum,
         signing,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     if item.content_length.as_u64() > MAX_PUT_LEN {
         return Err(InvalidRequest::PayloadTooLarge.into());
     }
-    validate_write_condition(condition, item.condition_value, template.service)?;
+    validate_write_condition(condition, item.condition_value, header.service)?;
     validate_checksum_item(checksum, item.checksum)?;
     let hex = match (signing, content_sha256) {
         (PayloadSigning::Signed, Some(digest)) => Some(encoding::hex_digest(digest)),
@@ -1283,8 +1289,8 @@ pub fn encode_put(
         ..HoleValues::default()
     });
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         item.content_length.as_u64(),
         buf,
@@ -1356,7 +1362,7 @@ pub fn prepare_delete(
     credentials: &Credentials<'_>,
     options: &DeleteOptions,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if options.kind != DeleteKind::Object {
         return Err(InvalidRequest::Option.into());
     }
@@ -1383,8 +1389,8 @@ pub fn prepare_delete(
 /// Writes the removal `item` at `now` from `template` into `buf`, ready
 /// to sign.
 ///
-/// `bytes` are the template's own, as [`prepare_delete`] wrote them. The
-/// request has no content.
+/// `template` holds the bytes that [`prepare_delete`] wrote. The request has
+/// no content.
 ///
 /// S3 answers the removal of a key that holds no object as it answers any
 /// other removal. The outcome therefore does not say whether an object was
@@ -1401,12 +1407,12 @@ pub fn prepare_delete(
 /// needs.
 pub fn encode_delete(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    encode_object(template, bytes, Operation::Delete, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::Delete, item, now, buf)
 }
 /// Reads the response head of a removal and reports what S3 did.
 ///
@@ -1479,7 +1485,7 @@ pub fn prepare_list(
     credentials: &Credentials<'_>,
     options: &ListOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     // A general purpose bucket groups keys at any text. A directory bucket
     // groups them at `/` alone, and answers anything else with 400
     // `InvalidRequest`.
@@ -1573,8 +1579,8 @@ fn describe_list<'p>(detail: Detail, options: Option<&ListOptions<'p>>) -> Descr
 /// Writes the page `item` at `now` from `template` into `buf`, ready to
 /// sign.
 ///
-/// `bytes` are the template's own, as [`prepare_list`] wrote them. Read
-/// the whole response body and pass it to [`fill_listing`].
+/// `template` holds the bytes that [`prepare_list`] wrote. Read the whole
+/// response body and pass it to [`fill_listing`].
 ///
 /// # Errors
 ///
@@ -1592,12 +1598,13 @@ fn describe_list<'p>(detail: Detail, options: Option<&ListOptions<'p>>) -> Descr
 /// needs.
 pub fn encode_list(
     template: &Template,
-    bytes: &[u8],
     item: &ListItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    let detail @ Detail::List { include, .. } = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let detail @ Detail::List { include, .. } = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
     // A listing continues from the kind of marker that its pages hand out,
@@ -1614,7 +1621,7 @@ pub fn encode_list(
         Some(_) => return Err(InvalidRequest::Marker.into()),
     };
     // A directory bucket lists only at a prefix that ends in `/`.
-    if template.service == Service::AwsDirectory
+    if header.service == Service::AwsDirectory
         && !item.prefix.is_empty()
         && !item.prefix.ends_with('/')
     {
@@ -1632,8 +1639,8 @@ pub fn encode_list(
         ..HoleValues::default()
     });
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -2068,7 +2075,7 @@ fn prepare_object(
     checksum: Option<ChecksumKind>,
     text: &ObjectText<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_revision_kind(revision, false)?;
     let describe = Describe {
         signed: text.signed,
@@ -2136,25 +2143,25 @@ fn push_stored_fields<'d>(fields: &mut FieldList<'d>, options: &WriteOptions<'d>
 // Writes the request of `operation` that names the one object `item`, from
 // a template of that operation.
 fn encode_object(
-    template: &Template,
-    bytes: &[u8],
+    template: &[u8],
     operation: Operation,
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
+    let header = Header::load(template)?;
     let Detail::Object {
         condition,
         revision,
         checksum,
-    } = template.detail
+    } = header.detail
     else {
         return Err(InvalidRequest::Template.into());
     };
-    if template.operation != operation {
+    if header.operation != operation {
         return Err(InvalidRequest::Template.into());
     }
-    let key = template.request_key(bytes, item.key)?;
+    let key = header.request_key(template, item.key)?;
     validate_revision_item(revision, item.revision)?;
     validate_condition(condition, item.condition_value)?;
     let values = S3Values(HoleValues {
@@ -2166,8 +2173,8 @@ fn encode_object(
         ..HoleValues::default()
     });
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,
@@ -2190,7 +2197,7 @@ pub fn prepare_create_session(
     bucket: &Bucket<'_>,
     credentials: &Credentials<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if bucket.service != Service::AwsDirectory {
         return Err(InvalidRequest::Option.into());
     }
@@ -2224,11 +2231,12 @@ fn describe_session() -> Describe<'static, 4> {
 /// needs.
 pub fn encode_create_session(
     template: &Template,
-    bytes: &[u8],
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<Unsigned> {
-    if template.operation != Operation::CreateSession {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    if header.operation != Operation::CreateSession {
         return Err(InvalidRequest::Template.into());
     }
     let values = S3Values(HoleValues {
@@ -2236,8 +2244,8 @@ pub fn encode_create_session(
         ..HoleValues::default()
     });
     template::encode_template(
+        &header,
         template,
-        bytes,
         &values,
         0,
         buf,

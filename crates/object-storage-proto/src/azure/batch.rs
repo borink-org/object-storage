@@ -11,7 +11,7 @@
 // is answered once. Anything else is a fault.
 
 use crate::azure::template::{
-    Describe, Detail, Field, FieldValue, Holes, Operation, Template, encode_template,
+    Describe, Detail, Field, FieldValue, Header, Holes, Operation, Template, encode_template,
     prepare_template,
 };
 use crate::azure::{
@@ -29,8 +29,7 @@ use crate::url::QueryValue;
 use crate::validate::validate_revision;
 use crate::{
     CapacityError, DeleteHeadOutcome, DeleteManyHeadOutcome, DeleteShape, DeleteTarget, Error,
-    Failure, InvalidRequest, Method, ResponseFault, ResponseHead, Result, Span,
-    Timestamps, url,
+    Failure, InvalidRequest, Method, ResponseFault, ResponseHead, Result, Span, Timestamps, url,
 };
 
 /// The most blobs that one Blob Batch removes.
@@ -180,10 +179,9 @@ pub fn prepare_delete_many(
     token: &str,
     namespace: AzureNamespace,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     // The template holds the text that each part repeats, outside its
     // sections, for each request to read.
-    let mut stash = [Span::default(); 2];
     let content_type = MixedContentType(BOUNDARY);
     let mut type_text = [0u8; 80];
     let mut writer = Writer::new(&mut type_text);
@@ -193,7 +191,7 @@ pub fn prepare_delete_many(
         "content-type",
         FieldValue::Bytes(&type_text[..type_len]),
     )];
-    let mut template = prepare_template(
+    prepare_template(
         container,
         token,
         namespace,
@@ -204,20 +202,16 @@ pub fn prepare_delete_many(
             tail: Span::default(),
         },
         buf,
-        |b| {
-            stash[0] = b.stash(|out| {
+        |b, detail| {
+            let path = b.stash(|out| {
                 out.push(b"/");
                 out.push(container.name.as_bytes());
                 out.push(b"/");
             });
-            stash[1] = b.stash(|out| write_part_tail(out, token));
+            let tail = b.stash(|out| write_part_tail(out, token));
+            *detail = Detail::Batch { path, tail };
         },
-    )?;
-    template.detail = Detail::Batch {
-        path: stash[0],
-        tail: stash[1],
-    };
-    Ok(template)
+    )
 }
 
 // The request of a Blob Batch of Delete Blobs, which sends `fields`. Its
@@ -258,24 +252,25 @@ fn describe_batch<'p>(fields: &'p [Field<'p>]) -> Describe<'p, 2> {
 /// needs.
 pub fn encode_delete_many(
     template: &Template,
-    bytes: &[u8],
     objects: &[DeleteTarget<'_>],
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    let Detail::Batch { path, tail } = template.detail else {
+    let template = template.as_bytes();
+    let header = Header::load(template)?;
+    let Detail::Batch { path, tail } = header.detail else {
         return Err(InvalidRequest::Template.into());
     };
     if objects.is_empty() || objects.len() > MAX_BATCH_KEYS {
         return Err(InvalidRequest::Keys.into());
     }
     for object in objects {
-        validate_key(object.key, template.namespace)?;
+        validate_key(object.key, header.namespace)?;
         validate_revision(object.revision, true)?;
     }
     let (Some(path), Some(tail)) = (
-        bytes.get(path.start..path.start + path.len),
-        bytes.get(tail.start..tail.start + tail.len),
+        template.get(path.start..path.start + path.len),
+        template.get(tail.start..tail.start + tail.len),
     ) else {
         return Err(InvalidRequest::Template.into());
     };
@@ -289,14 +284,7 @@ pub fn encode_delete_many(
         tail,
         now,
     };
-    encode_template(
-        template,
-        bytes,
-        &fill,
-        0,
-        buf,
-        &describe_batch(&[]),
-    )
+    encode_template(&header, template, &fill, 0, buf, &describe_batch(&[]))
 }
 
 /// Reads the response head of a Blob Batch and reports what to do next.

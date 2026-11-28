@@ -243,7 +243,7 @@ fn a_template_states_the_shape_of_its_responses() {
         ..DeleteOptions::new()
     };
     let mut bytes = [0; 1024];
-    let removals = azure::prepare_delete(
+    let len = azure::prepare_delete(
         &container,
         "token",
         AzureNamespace::Unknown,
@@ -251,8 +251,8 @@ fn a_template_states_the_shape_of_its_responses() {
         &mut bytes,
     )
     .unwrap();
-    // The shape outlives storing the template.
-    let stored = azure::Template::from_bytes(&removals.to_bytes()).unwrap();
+    let stored = azure::Template::from_bytes(&bytes[..len]);
+    assert!(stored.check().is_ok());
     assert_eq!(stored.delete_shape(), Ok(options.shape()));
     assert_eq!(
         stored.get_shape(&GetItem::new("key")),

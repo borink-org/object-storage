@@ -30,9 +30,14 @@ fn now() -> Timestamps {
 // with a signature of zeros.
 fn encode(bucket: &Bucket<'_>, options: GetOptions, item: &GetItem<'_>) -> Result<String, Error> {
     let mut bytes = vec![0; 1024];
-    let template = s3::prepare_get(bucket, &credentials(), &options, &mut bytes)?;
+    let len = s3::prepare_get(bucket, &credentials(), &options, &mut bytes)?;
     let mut buf = vec![0; 3 * MAX_KEY_LEN + 2048];
-    let unsigned = s3::encode_get(&template, &bytes, item, &now(), &mut buf)?;
+    let unsigned = s3::encode_get(
+        s3::Template::from_bytes(&bytes[..len]),
+        item,
+        &now(),
+        &mut buf,
+    )?;
     Ok(s3::set_signature(&unsigned, &mut buf, &[0; 32])
         .url(&buf)
         .to_owned())

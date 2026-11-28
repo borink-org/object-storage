@@ -38,11 +38,17 @@ fn encode(
         other => panic!("expected an invalid request, got {other:?}"),
     };
     let mut bytes = vec![0; 2048];
-    let template = s3::prepare_put(&bucket(), &credentials(), options, signing, &mut bytes)
+    let len = s3::prepare_put(&bucket(), &credentials(), options, signing, &mut bytes)
         .map_err(refusal)?;
     let mut buf = vec![0; 4096];
-    let unsigned = s3::encode_put(&template, &bytes, item, content_sha256, &now(), &mut buf)
-        .map_err(refusal)?;
+    let unsigned = s3::encode_put(
+        s3::Template::from_bytes(&bytes[..len]),
+        item,
+        content_sha256,
+        &now(),
+        &mut buf,
+    )
+    .map_err(refusal)?;
     let request = s3::set_signature(&unsigned, &mut buf, &[0; 32]);
     Ok(request
         .headers(&buf)

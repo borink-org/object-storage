@@ -1,6 +1,6 @@
 //! Every byte of a request head is in the caller's buffer, at a known offset.
 
-use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
     ConditionKind, ConditionValue, ContentLength, DeleteKind, DeleteOptions, GetItem, GetOptions,
@@ -15,9 +15,11 @@ fn now() -> Timestamps {
     Timestamps::from_unix(1_787_400_000)
 }
 
-fn template(prepare: impl Fn(&mut [u8]) -> Result<Template>) -> (Template, Vec<u8>) {
-    let mut bytes = vec![0; 512];
-    (prepare(&mut bytes).unwrap(), bytes)
+fn template(prepare: impl Fn(&mut [u8]) -> Result<usize>) -> Vec<u8> {
+    let mut bytes = vec![0; 1024];
+    let len = prepare(&mut bytes).unwrap();
+    bytes.truncate(len);
+    bytes
 }
 
 // The parts of a request, kept after the request read from the buffer is
@@ -67,7 +69,7 @@ fn a_request_names_every_part_of_it_by_offset() {
         ),
         (GetOptions::head(), GetItem::new("object.bin")),
     ] {
-        let (template, bytes) = template(|buf| {
+        let template = template(|buf| {
             azure::prepare_get(
                 &container(),
                 "access-token",
@@ -77,7 +79,13 @@ fn a_request_names_every_part_of_it_by_offset() {
             )
         });
         let mut buf = vec![0; 512];
-        let request = azure::encode_get(&template, &bytes, &get, &now(), &mut buf).unwrap();
+        let request = azure::encode_get(
+            azure::Template::from_bytes(&template),
+            &get,
+            &now(),
+            &mut buf,
+        )
+        .unwrap();
         let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }
@@ -99,7 +107,7 @@ fn a_request_names_every_part_of_it_by_offset() {
             },
         ),
     ] {
-        let (template, bytes) = template(|buf| {
+        let template = template(|buf| {
             azure::prepare_put(
                 &container(),
                 "access-token",
@@ -109,7 +117,13 @@ fn a_request_names_every_part_of_it_by_offset() {
             )
         });
         let mut buf = vec![0; 512];
-        let request = azure::encode_put(&template, &bytes, &put, &now(), &mut buf).unwrap();
+        let request = azure::encode_put(
+            azure::Template::from_bytes(&template),
+            &put,
+            &now(),
+            &mut buf,
+        )
+        .unwrap();
         let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }
@@ -129,7 +143,7 @@ fn a_request_names_every_part_of_it_by_offset() {
             },
         ),
     ] {
-        let (template, bytes) = template(|buf| {
+        let template = template(|buf| {
             azure::prepare_delete(
                 &container(),
                 "access-token",
@@ -139,7 +153,13 @@ fn a_request_names_every_part_of_it_by_offset() {
             )
         });
         let mut buf = vec![0; 512];
-        let request = azure::encode_delete(&template, &bytes, &delete, &now(), &mut buf).unwrap();
+        let request = azure::encode_delete(
+            azure::Template::from_bytes(&template),
+            &delete,
+            &now(),
+            &mut buf,
+        )
+        .unwrap();
         let parts = parts(&request, &buf);
         check_offsets(&parts, &buf);
     }

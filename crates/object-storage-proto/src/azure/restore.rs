@@ -39,7 +39,7 @@ pub fn prepare_restore(
     namespace: AzureNamespace,
     options: &RestoreOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let priority = match options.priority {
         RestorePriority::Standard => "Standard",
         RestorePriority::High => "High",
@@ -91,12 +91,12 @@ pub fn prepare_restore(
 /// needs.
 pub fn encode_restore(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::Restore, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::Restore, item, now, buf)
 }
 
 /// Reads the response head of a rehydration and reports what Azure did:

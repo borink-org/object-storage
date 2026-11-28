@@ -101,7 +101,7 @@ pub fn prepare_set_tier(
     namespace: AzureNamespace,
     tier: &str,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     if !is_header_value(tier.as_bytes()) || tier.trim_ascii() != tier {
         return Err(InvalidRequest::ContentProperty.into());
     }
@@ -138,12 +138,12 @@ pub fn prepare_set_tier(
 /// needs.
 pub fn encode_set_tier(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::SetTier, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::SetTier, item, now, buf)
 }
 
 /// Reads the response head of a Set Blob Tier and reports what Azure did.
@@ -171,7 +171,7 @@ pub fn prepare_set_metadata(
     namespace: AzureNamespace,
     options: &SetMetadataOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_metadata(options.metadata)?;
     prepare_object(
         container,
@@ -198,12 +198,12 @@ pub fn prepare_set_metadata(
 /// condition needs.
 pub fn encode_set_metadata(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::SetMetadata, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::SetMetadata, item, now, buf)
 }
 
 /// Reads the response head of a Set Blob Metadata and reports what Azure
@@ -239,7 +239,7 @@ pub fn prepare_set_properties(
     namespace: AzureNamespace,
     options: &SetPropertiesOptions<'_>,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     let stored = WriteOptions {
         properties: options.properties,
         ..WriteOptions::new()
@@ -271,12 +271,12 @@ pub fn prepare_set_properties(
 /// As [`encode_set_metadata`].
 pub fn encode_set_properties(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::SetProperties, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::SetProperties, item, now, buf)
 }
 
 /// Reads the response head of a Set Blob Properties and reports what Azure
@@ -318,7 +318,7 @@ pub fn prepare_set_tags(
     tags: &[Tag<'_>],
     revision: RevisionKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     validate_tags(tags, azure_tag_char, Some((10, 128, 256)))?;
     let write = |out: &mut dyn ByteSink| write_tags_document(out, tags);
     prepare_object(
@@ -348,12 +348,12 @@ pub fn prepare_set_tags(
 /// As [`encode_set_tier`], with the revision that the template names.
 pub fn encode_set_tags(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::SetTags, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::SetTags, item, now, buf)
 }
 
 /// Reads the response head of a Set Blob Tags and reports what Azure did.
@@ -381,7 +381,7 @@ pub fn prepare_get_tags(
     namespace: AzureNamespace,
     revision: RevisionKind,
     buf: &mut [u8],
-) -> Result<Template> {
+) -> Result<usize> {
     prepare_object(
         container,
         token,
@@ -402,12 +402,12 @@ pub fn prepare_get_tags(
 /// As [`encode_set_tags`].
 pub fn encode_get_tags(
     template: &Template,
-    bytes: &[u8],
     item: &ObjectItem<'_>,
     now: &Timestamps,
     buf: &mut [u8],
 ) -> Result<WireRequest> {
-    encode_object(template, bytes, Operation::GetTags, item, now, buf)
+    let template = template.as_bytes();
+    encode_object(template, Operation::GetTags, item, now, buf)
 }
 
 /// Reads the response head of a Get Blob Tags and reports what to do next.

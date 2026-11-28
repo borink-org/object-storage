@@ -67,22 +67,28 @@ struct Account<'a> {
     namespace: AzureNamespace,
 }
 
+struct TemplateBuf(Vec<u8>);
+
+impl std::ops::Deref for TemplateBuf {
+    type Target = azure::Template;
+
+    fn deref(&self) -> &Self::Target {
+        azure::Template::from_bytes(&self.0)
+    }
+}
+
 impl Account<'_> {
     /// Writes the template that `prepare` writes, into a buffer of the size
     /// it needs.
     fn template(
         &self,
-        prepare: impl Fn(
-            &Container<'_>,
-            &str,
-            AzureNamespace,
-            &mut [u8],
-        ) -> Result<azure::Template, CrateError>,
-    ) -> Result<(azure::Template, Vec<u8>), CrateError> {
+        prepare: impl Fn(&Container<'_>, &str, AzureNamespace, &mut [u8]) -> Result<usize, CrateError>,
+    ) -> Result<TemplateBuf, CrateError> {
         let write = |buf: &mut [u8]| prepare(&self.container, self.token, self.namespace, buf);
         let mut bytes = vec![0; CapacityError::required_by(write)?];
-        let template = write(&mut bytes)?;
-        Ok((template, bytes))
+        let len = write(&mut bytes)?;
+        bytes.truncate(len);
+        Ok(TemplateBuf(bytes))
     }
 
     /// Writes the template that `prepare` writes and the request that
@@ -91,20 +97,15 @@ impl Account<'_> {
     fn send(
         &self,
         context: &AdapterContext,
-        prepare: impl Fn(
-            &Container<'_>,
-            &str,
-            AzureNamespace,
-            &mut [u8],
-        ) -> Result<azure::Template, CrateError>,
-        encode: impl Fn(&azure::Template, &[u8], &mut [u8]) -> Result<WireRequest, CrateError>,
+        prepare: impl Fn(&Container<'_>, &str, AzureNamespace, &mut [u8]) -> Result<usize, CrateError>,
+        encode: impl Fn(&azure::Template, &mut [u8]) -> Result<WireRequest, CrateError>,
         body: Option<&CallBody>,
         read: BodyRead<'_>,
     ) -> Result<Result<HttpExchange, Value>, AdapterError> {
-        let written = self.template(prepare).and_then(|(template, bytes)| {
+        let written = self.template(prepare).and_then(|template| {
             let mut buf =
-                vec![0; CapacityError::required_by(|buf| encode(&template, &bytes, buf))?];
-            let request = encode(&template, &bytes, &mut buf)?;
+                vec![0; CapacityError::required_by(|buf| encode(&template, buf))?];
+            let request = encode(&template, &mut buf)?;
             Ok(send_request_with(
                 context,
                 &(request, buf.as_slice()),
@@ -141,10 +142,10 @@ fn read_object(
         return Ok(unsupported_by_crate("a read carries one precondition"));
     };
     let now = current_timestamps();
-    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+    let template = crate_step!(account.template(|container, token, namespace, buf| {
         azure::prepare_get(container, token, namespace, &options, buf)
     }));
-    let encode = |buf: &mut [u8]| azure::encode_get(&template, &bytes, &item, &now, buf);
+    let encode = |buf: &mut [u8]| azure::encode_get(&template, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
     let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
@@ -247,10 +248,10 @@ fn write_object(
     };
 
     let now = current_timestamps();
-    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+    let template = crate_step!(account.template(|container, token, namespace, buf| {
         azure::prepare_put(container, token, namespace, &options, buf)
     }));
-    let encode = |buf: &mut [u8]| azure::encode_put(&template, &bytes, &item, &now, buf);
+    let encode = |buf: &mut [u8]| azure::encode_put(&template, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
     let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
@@ -295,10 +296,10 @@ fn delete_object(
     };
 
     let now = current_timestamps();
-    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+    let template = crate_step!(account.template(|container, token, namespace, buf| {
         azure::prepare_delete(container, token, namespace, &options, buf)
     }));
-    let encode = |buf: &mut [u8]| azure::encode_delete(&template, &bytes, &item, &now, buf);
+    let encode = |buf: &mut [u8]| azure::encode_delete(&template, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
     let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request(context, &(request, buf.as_slice())));
@@ -377,11 +378,11 @@ struct BlobPages<'a> {
 impl PageSource for BlobPages<'_> {
     fn read_page(&self, options: &ListOptions<'_>, item: &ListItem<'_>) -> PageRead {
         let now = current_timestamps();
-        let (template, bytes) =
+        let template =
             page_step!(self.account.template(|container, token, namespace, buf| {
                 azure::prepare_list(container, token, namespace, options, buf)
             }));
-        let encode = |buf: &mut [u8]| azure::encode_list(&template, &bytes, item, &now, buf);
+        let encode = |buf: &mut [u8]| azure::encode_list(&template, item, &now, buf);
         let mut buf = vec![0; page_step!(CapacityError::required_by(encode))];
         let request = page_step!(encode(&mut buf));
         let mut exchange = match send_request(self.context, &(request, buf.as_slice())) {
@@ -452,7 +453,7 @@ fn stage_block(
         ContentLength(body.len()),
     );
     let now = current_timestamps();
-    let (template, bytes) = crate_step!(account.template(|container, token, namespace, buf| {
+    let template = crate_step!(account.template(|container, token, namespace, buf| {
         azure::prepare_stage_block(
             container,
             token,
@@ -461,7 +462,7 @@ fn stage_block(
             buf,
         )
     }));
-    let encode = |buf: &mut [u8]| azure::encode_stage_block(&template, &bytes, &item, &now, buf);
+    let encode = |buf: &mut [u8]| azure::encode_stage_block(&template, &item, &now, buf);
     let mut buf = vec![0; crate_step!(CapacityError::required_by(encode))];
     let request = crate_step!(encode(&mut buf));
     let exchange = transport_step!(send_request_with(
@@ -547,7 +548,7 @@ fn commit_blocks(
         |container, token, namespace, buf| {
             azure::prepare_commit_blocks(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_commit_blocks(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_commit_blocks(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -607,7 +608,7 @@ fn list_blocks(
                 buf,
             )
         },
-        |template, bytes, buf| azure::encode_list_blocks(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_list_blocks(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -966,7 +967,7 @@ fn set_tier(
         |container, token, namespace, buf| {
             azure::prepare_set_tier(container, token, namespace, tier, buf)
         },
-        |template, bytes, buf| azure::encode_set_tier(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_set_tier(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -987,7 +988,7 @@ fn snapshot(
         |container, token, namespace, buf| {
             azure::prepare_snapshot(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_snapshot(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_snapshot(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1042,10 +1043,10 @@ fn copy(
         } else {
             azure::prepare_copy(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| if sync {
-            azure::encode_copy_from_url(template, bytes, &item, &now, buf)
+        |template, buf| if sync {
+            azure::encode_copy_from_url(template, &item, &now, buf)
         } else {
-            azure::encode_copy(template, bytes, &item, &now, buf)
+            azure::encode_copy(template, &item, &now, buf)
         },
         None,
         BodyRead::Hold,
@@ -1098,7 +1099,7 @@ fn put_from_url(
         |container, token, namespace, buf| {
             azure::prepare_put_from_url(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_put_from_url(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_put_from_url(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1148,8 +1149,8 @@ fn stage_block_from_url(
         |container, token, namespace, buf| {
             azure::prepare_stage_block_from_url(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| {
-            azure::encode_stage_block_from_url(template, bytes, &item, &now, buf)
+        |template, buf| {
+            azure::encode_stage_block_from_url(template, &item, &now, buf)
         },
         None,
         BodyRead::Hold,
@@ -1185,7 +1186,7 @@ fn abort_copy(
         |container, token, namespace, buf| {
             azure::prepare_abort_copy(container, token, namespace, buf)
         },
-        |template, bytes, buf| azure::encode_abort_copy(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_abort_copy(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1207,7 +1208,7 @@ fn restore(
         |container, token, namespace, buf| {
             azure::prepare_restore(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_restore(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_restore(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1250,7 +1251,7 @@ fn set_metadata(
         |container, token, namespace, buf| {
             azure::prepare_set_metadata(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_set_metadata(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_set_metadata(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1281,7 +1282,7 @@ fn set_properties(
         |container, token, namespace, buf| {
             azure::prepare_set_properties(container, token, namespace, &options, buf)
         },
-        |template, bytes, buf| azure::encode_set_properties(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_set_properties(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1307,7 +1308,7 @@ fn set_tags(
         |container, token, namespace, buf| {
             azure::prepare_set_tags(container, token, namespace, &tags, revision, buf)
         },
-        |template, bytes, buf| azure::encode_set_tags(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_set_tags(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1329,7 +1330,7 @@ fn get_tags(
         |container, token, namespace, buf| {
             azure::prepare_get_tags(container, token, namespace, revision, buf)
         },
-        |template, bytes, buf| azure::encode_get_tags(template, bytes, &item, &now, buf),
+        |template, buf| azure::encode_get_tags(template, &item, &now, buf),
         None,
         BodyRead::Hold,
     ));
@@ -1370,7 +1371,7 @@ fn delete_many(
         |container, token, namespace, buf| {
             azure::prepare_delete_many(container, token, namespace, buf)
         },
-        |template, bytes, buf| azure::encode_delete_many(template, bytes, &keys, &now, buf),
+        |template, buf| azure::encode_delete_many(template, &keys, &now, buf),
         None,
         BodyRead::Hold,
     ));

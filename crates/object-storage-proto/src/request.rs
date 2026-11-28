@@ -120,9 +120,10 @@ impl<'a> Writer<'a> {
         self.position <= self.bytes.len()
     }
 
-    // The bytes written so far that are in the buffer.
-    pub(crate) fn written(&self) -> &[u8] {
-        &self.bytes[..self.position.min(self.bytes.len())]
+    // The mutable slice of the bytes written so far that are in the buffer.
+    pub(crate) fn into_written(self) -> &'a mut [u8] {
+        let len = self.position.min(self.bytes.len());
+        &mut self.bytes[..len]
     }
 }
 

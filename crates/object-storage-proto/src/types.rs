@@ -628,6 +628,20 @@ impl ListInclude {
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    const ALL_BITS: u32 = Self::METADATA.0 | Self::OWNER.0 | Self::SNAPSHOTS.0 | Self::VERSIONS.0;
+
+    pub(crate) const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub(crate) const fn from_bits(bits: u32) -> Option<Self> {
+        if bits & !Self::ALL_BITS == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
 }
 
 impl core::ops::BitOr for ListInclude {

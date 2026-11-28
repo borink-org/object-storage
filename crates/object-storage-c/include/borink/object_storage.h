@@ -17,11 +17,6 @@
 #define BORINK_TIMESTAMPS_LEN 53
 
 /**
- * The length of a stored template, in bytes.
- */
-#define BORINK_TEMPLATE_LEN 80
-
-/**
  * The kind of storage account that the requests of a template go to.
  */
 enum borink_azure_namespace
@@ -958,33 +953,6 @@ typedef struct borink_azure_rejection {
 } borink_azure_rejection;
 
 /**
- * A template that a `borink_prepare_*` call wrote: the values that read the
- * bytes it wrote into your buffer.
- *
- * Those bytes are the part of every request of one operation that is the
- * same for each object. The template holds no pointer. Keep it beside the bytes it was written into, and
- * pass both to each `borink_encode_*` call of its operation. You may copy
- * it, and store it with those bytes, such as in flash, to write requests
- * again without preparing again. It ends in a hash of the rest. A template
- * that was changed since it was written is refused with `InvalidRequest`, and
- * so is one that another version of the library wrote.
- *
- * # Bytes
- *
- * Encoding trusts that the bytes passed with a template are its own, and
- * checks nothing of them that would cost each request time. Bytes that are
- * not write a wrong request or are refused, but never make a call read
- * outside them. Where bytes could be another template's, such as bytes read
- * back from storage, check them once with `borink_template_check`.
- */
-typedef struct borink_template {
-    /**
-     * The template, as this library stores it.
-     */
-    uint8_t stored[BORINK_TEMPLATE_LEN];
-} borink_template;
-
-/**
  * What a `borink_prepare_*` call wrote.
  */
 typedef struct borink_prepared {
@@ -1001,10 +969,6 @@ typedef struct borink_prepared {
      * Those are its bytes: pass them to each request of the template.
      */
     size_t required;
-    /**
-     * The template, when `status.code` is 0.
-     */
-    struct borink_template template_;
 } borink_prepared;
 
 /**
@@ -1888,14 +1852,10 @@ typedef struct borink_layout {
     size_t sizeof_timestamps;
     size_t alignof_timestamps;
     size_t offsetof_timestamps_stored;
-    size_t sizeof_template;
-    size_t alignof_template;
-    size_t offsetof_template_stored;
     size_t sizeof_prepared;
     size_t alignof_prepared;
     size_t offsetof_prepared_status;
     size_t offsetof_prepared_required;
-    size_t offsetof_prepared_template;
     size_t sizeof_condition_value;
     size_t alignof_condition_value;
     size_t offsetof_condition_value_form;
@@ -2190,25 +2150,24 @@ struct borink_prepared borink_prepare_list(const struct borink_container *contai
                                            struct borink_bytes_mut buf);
 
 /**
- * Checks that `bytes` are the bytes that `template` was written into.
+ * Checks that `template` holds an intact Azure template from this version of
+ * the library.
  *
- * Encoding trusts that they are, and checks nothing of them per request.
- * Check bytes once where they could be another template's, such as bytes
- * read back from storage. A `code` of 0 means that they are the template's
- * own, and `InvalidRequest` with `Template` that they are not.
+ * Encoding reads the template header without hashing the whole buffer. Check
+ * bytes once where they come from storage or another untrusted source. A
+ * `code` of 0 means the template is intact, and `InvalidRequest` with
+ * `Template` that it is not.
  *
  * # Safety
  *
- * `template` must be null or point at one readable value. `bytes` must
- * address its stated length.
+ * `template` must address its stated length.
  */
-struct borink_status borink_template_check(const struct borink_template *template_,
-                                           struct borink_bytes bytes);
+struct borink_status borink_template_check(struct borink_bytes template_);
 
 /**
  * Writes the read `item` at `now` from `template` into `buf`.
  *
- * `bytes` are the template's own, as `borink_prepare_get` wrote them. Pass
+ * `template` holds the bytes that `borink_prepare_get` wrote. Pass
  * an empty `buf` to learn the size that the request needs.
  *
  * A key that Azure refuses, a range that the template does not take and a
@@ -2217,14 +2176,13 @@ struct borink_status borink_template_check(const struct borink_template *templat
  *
  * # Safety
  *
- * `template`, `item` and `now` must each be null or point at one readable
- * value, and each value of `item` must address its stated length. `bytes` must
+ * `item` and `now` must each be null or point at one readable
+ * value, and each value of `item` must address its stated length. `template` must
  * address its stated length. `buf` must address its stated length and be
- * reached through nothing else during the call: not through `bytes`, nor
+ * reached through nothing else during the call: not through `template`, nor
  * through a value of `item`.
  */
-struct borink_wire_request borink_encode_get(const struct borink_template *template_,
-                                             struct borink_bytes bytes,
+struct borink_wire_request borink_encode_get(struct borink_bytes template_,
                                              const struct borink_get_item *item,
                                              const struct borink_timestamps *now,
                                              struct borink_bytes_mut buf);
@@ -2242,8 +2200,7 @@ struct borink_wire_request borink_encode_get(const struct borink_template *templ
  *
  * As `borink_encode_get`.
  */
-struct borink_wire_request borink_encode_put(const struct borink_template *template_,
-                                             struct borink_bytes bytes,
+struct borink_wire_request borink_encode_put(struct borink_bytes template_,
                                              const struct borink_put_item *item,
                                              const struct borink_timestamps *now,
                                              struct borink_bytes_mut buf);
@@ -2258,8 +2215,7 @@ struct borink_wire_request borink_encode_put(const struct borink_template *templ
  *
  * As `borink_encode_get`.
  */
-struct borink_wire_request borink_encode_stage_block(const struct borink_template *template_,
-                                                     struct borink_bytes bytes,
+struct borink_wire_request borink_encode_stage_block(struct borink_bytes template_,
                                                      const struct borink_stage_block_item *item,
                                                      const struct borink_timestamps *now,
                                                      struct borink_bytes_mut buf);
@@ -2277,8 +2233,7 @@ struct borink_wire_request borink_encode_stage_block(const struct borink_templat
  * `item->block_count` readable values whose IDs each address their stated
  * length.
  */
-struct borink_wire_request borink_encode_commit_blocks(const struct borink_template *template_,
-                                                       struct borink_bytes bytes,
+struct borink_wire_request borink_encode_commit_blocks(struct borink_bytes template_,
                                                        const struct borink_commit_item *item,
                                                        const struct borink_timestamps *now,
                                                        struct borink_bytes_mut buf);
@@ -2295,8 +2250,7 @@ struct borink_wire_request borink_encode_commit_blocks(const struct borink_templ
  *
  * As `borink_encode_get`.
  */
-struct borink_wire_request borink_encode_list(const struct borink_template *template_,
-                                              struct borink_bytes bytes,
+struct borink_wire_request borink_encode_list(struct borink_bytes template_,
                                               const struct borink_list_item *item,
                                               const struct borink_timestamps *now,
                                               struct borink_bytes_mut buf);

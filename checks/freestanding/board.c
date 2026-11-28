@@ -36,11 +36,11 @@ void board_cxx(void);
 
 // The templates live in RAM here. A board may keep them, and their bytes, in
 // flash instead: neither holds a pointer.
-static uint8_t read_template[256];
-static uint8_t write_template[256];
-static uint8_t stage_template[256];
-static uint8_t commit_template[256];
-static uint8_t list_template[256];
+static uint8_t read_template[384];
+static uint8_t write_template[384];
+static uint8_t stage_template[384];
+static uint8_t commit_template[384];
+static uint8_t list_template[384];
 
 // One of everything the board would call: a container, each template, a
 // request of each, the response heads, and a sentence. The clock is a
@@ -62,13 +62,13 @@ void board_main(void) {
         borink_prepare_get(&container, token, BORINK_AZURE_NAMESPACE_UNKNOWN, &get,
                            (borink_bytes_mut){read_template, sizeof read_template});
     const borink_bytes read_bytes = {read_template, reads.required};
-    sink = borink_template_check(&reads.template_, read_bytes).code;
+    sink = borink_template_check(read_bytes).code;
     const borink_get_item item = {as_bytes("object.bin"),
                                   {BORINK_RANGE_FORM_BOUNDED, 2, 6},
                                   {BORINK_CONDITION_FORM_NONE, {0, 0}, 0},
                                   {0, 0}};
     const borink_wire_request read =
-        borink_encode_get(&reads.template_, read_bytes, &item, &now, buffer);
+        borink_encode_get(read_bytes, &item, &now, buffer);
     sink = (unsigned)read.required;
     borink_bytes fields = {request + read.fields.start, read.fields.len};
     for (borink_header field = borink_next_header(&fields); field.present;
@@ -102,8 +102,7 @@ void board_main(void) {
                            (borink_bytes_mut){write_template, sizeof write_template});
     const borink_put_item content = {
         as_bytes("object.bin"), 4, {BORINK_CONDITION_FORM_E_TAG, as_bytes("*"), 0}, {0, 0}};
-    sink = (unsigned)borink_encode_put(&writes.template_,
-                                       (borink_bytes){write_template, writes.required}, &content,
+    sink = (unsigned)borink_encode_put((borink_bytes){write_template, writes.required}, &content,
                                        &now, buffer)
                .required;
     const borink_put_shape put_shape = borink_put_item_shape(&content, &put);
@@ -117,8 +116,7 @@ void board_main(void) {
                                    (borink_bytes_mut){stage_template, sizeof stage_template});
     const borink_stage_block_item block = {as_bytes("object.bin"), as_bytes("YmxvY2s="), 4,
                                            {0, 0}};
-    sink = (unsigned)borink_encode_stage_block(&stages.template_,
-                                               (borink_bytes){stage_template, stages.required},
+    sink = (unsigned)borink_encode_stage_block((borink_bytes){stage_template, stages.required},
                                                &block, &now, buffer)
                .required;
     const borink_outcome staged = borink_accept_stage_block_head(201, headers, count);
@@ -132,8 +130,7 @@ void board_main(void) {
     const borink_block_ref blocks[] = {{as_bytes("YmxvY2s="), BORINK_BLOCK_SOURCE_LATEST}};
     const borink_commit_item committing = {
         as_bytes("object.bin"), {BORINK_CONDITION_FORM_NONE, {0, 0}, 0}, blocks, 1, {0, 0}};
-    sink = (unsigned)borink_encode_commit_blocks(&commits.template_,
-                                                 (borink_bytes){commit_template, commits.required},
+    sink = (unsigned)borink_encode_commit_blocks((borink_bytes){commit_template, commits.required},
                                                  &committing, &now, buffer)
                .body.span.len;
     const borink_commit_shape commit_shape = borink_commit_item_shape(&committing, &commit);
@@ -149,8 +146,7 @@ void board_main(void) {
         borink_prepare_list(&container, token, BORINK_AZURE_NAMESPACE_UNKNOWN, &listing,
                             (borink_bytes_mut){list_template, sizeof list_template});
     const borink_list_item page_item = {as_bytes("directory/"), {0, 0}};
-    sink = (unsigned)borink_encode_list(&pages.template_,
-                                        (borink_bytes){list_template, pages.required}, &page_item,
+    sink = (unsigned)borink_encode_list((borink_bytes){list_template, pages.required}, &page_item,
                                         &now, buffer)
                .required;
     const borink_outcome listed = borink_accept_list_head(200, headers, count);

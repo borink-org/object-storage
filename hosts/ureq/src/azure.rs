@@ -1,6 +1,6 @@
 //! Azure requests, written from templates.
 
-use borink_object_storage_proto::azure::{self, Template};
+use borink_object_storage_proto::azure;
 use borink_object_storage_proto::azure::{AzureNamespace, Container};
 use borink_object_storage_proto::{
     ContentLength, DeleteHeadOutcome, DeleteOptions, Error, GetHeadOutcome, GetItem, GetOptions,
@@ -8,7 +8,16 @@ use borink_object_storage_proto::{
     PutItem, PutOptions,
 };
 
-use crate::Prepared;
+// An owned Azure template buffer that derefs to `&azure::Template`.
+struct TemplateBuf(Vec<u8>);
+
+impl std::ops::Deref for TemplateBuf {
+    type Target = azure::Template;
+
+    fn deref(&self) -> &Self::Target {
+        azure::Template::from_bytes(&self.0)
+    }
+}
 
 /// A client of one Azure container, with one bearer token.
 ///
@@ -17,10 +26,10 @@ use crate::Prepared;
 /// has grown to fit the longest request, each request is written once. It
 /// sends with one `ureq` agent, which keeps its connections.
 pub struct Blobs {
-    get: Prepared<Template>,
-    put: Prepared<Template>,
-    delete: Prepared<Template>,
-    list: Prepared<Template>,
+    get: TemplateBuf,
+    put: TemplateBuf,
+    delete: TemplateBuf,
+    list: TemplateBuf,
     buf: Vec<u8>,
     agent: ureq::Agent,
 }
@@ -39,16 +48,18 @@ impl Blobs {
     ) -> Result<Self, Error> {
         let namespace = AzureNamespace::Unknown;
         Ok(Self {
-            get: Prepared::new(|buf| {
+            get: TemplateBuf(crate::prepare(|buf| {
                 azure::prepare_get(container, token, namespace, &GetOptions::new(), buf)
-            })?,
-            put: Prepared::new(|buf| {
+            })?),
+            put: TemplateBuf(crate::prepare(|buf| {
                 azure::prepare_put(container, token, namespace, &PutOptions::default(), buf)
-            })?,
-            delete: Prepared::new(|buf| {
+            })?),
+            delete: TemplateBuf(crate::prepare(|buf| {
                 azure::prepare_delete(container, token, namespace, &DeleteOptions::new(), buf)
-            })?,
-            list: Prepared::new(|buf| azure::prepare_list(container, token, namespace, list, buf))?,
+            })?),
+            list: TemplateBuf(crate::prepare(|buf| {
+                azure::prepare_list(container, token, namespace, list, buf)
+            })?),
             buf: Vec::new(),
             agent: crate::new_agent(),
         })
@@ -63,9 +74,8 @@ impl Blobs {
     pub fn get(&mut self, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let now = crate::now()?;
         let item = GetItem::new(key);
-        let Prepared { template, bytes } = &self.get;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_get(template, bytes, &item, &now, buf)
+            azure::encode_get(&self.get, &item, &now, buf)
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
@@ -92,9 +102,8 @@ impl Blobs {
     pub fn put(&mut self, key: &str, content: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         let now = crate::now()?;
         let item = PutItem::new(key, ContentLength::of(content));
-        let Prepared { template, bytes } = &self.put;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_put(template, bytes, &item, &now, buf)
+            azure::encode_put(&self.put, &item, &now, buf)
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, Some(content))?;
@@ -121,9 +130,8 @@ impl Blobs {
     pub fn delete(&mut self, key: &str) -> Result<(), Box<dyn std::error::Error>> {
         let now = crate::now()?;
         let item = ObjectItem::new(key);
-        let Prepared { template, bytes } = &self.delete;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_delete(template, bytes, &item, &now, buf)
+            azure::encode_delete(&self.delete, &item, &now, buf)
         })?;
 
         let (parts, mut body) = crate::send(&self.agent, &request, &self.buf, None)?;
@@ -154,9 +162,8 @@ impl Blobs {
         into: &mut [ListEntry<'b>],
     ) -> Result<Listing<'b>, Box<dyn std::error::Error>> {
         let now = crate::now()?;
-        let Prepared { template, bytes } = &self.list;
         let request = crate::grown_to_fit(&mut self.buf, |buf| {
-            azure::encode_list(template, bytes, item, &now, buf)
+            azure::encode_list(&self.list, item, &now, buf)
         })?;
 
         let (parts, mut incoming) = crate::send(&self.agent, &request, &self.buf, None)?;

@@ -30,8 +30,8 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     };
     let now = Timestamps::from_unix(1_787_400_000);
     let options = GetOptions::new();
-    let mut bytes = [0; 256];
-    let Ok(template) = azure::prepare_get(
+    let mut bytes = [0; 384];
+    let Ok(len) = azure::prepare_get(
         &container,
         "token",
         AzureNamespace::Unknown,
@@ -42,7 +42,8 @@ pub extern "C" fn object_storage_without_an_allocator() -> usize {
     };
     let get = GetItem::new("object");
     let mut buf = [0; 512];
-    let Ok(request) = azure::encode_get(&template, &bytes, &get, &now, &mut buf) else {
+    let template = azure::Template::from_bytes(&bytes[..len]);
+    let Ok(request) = azure::encode_get(template, &get, &now, &mut buf) else {
         return 3;
     };
     let headers = [("content-length", b"4".as_slice())];
@@ -95,7 +96,7 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
 ) -> usize {
     let options = GetOptions::new();
     let mut bytes = [0; 768];
-    let Ok(template) = s3::prepare_get(bucket, credentials, &options, &mut bytes) else {
+    let Ok(len) = s3::prepare_get(bucket, credentials, &options, &mut bytes) else {
         return 15;
     };
     let scope = bucket.scope();
@@ -104,8 +105,8 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
     };
     let stamp = sigv4::stamp(&key, &scope, now);
     let mut buf = [0; 1024];
-    let Ok(unsigned) = s3::encode_get(&template, &bytes, &GetItem::new("object"), now, &mut buf)
-    else {
+    let template = s3::Template::from_bytes(&bytes[..len]);
+    let Ok(unsigned) = s3::encode_get(template, &GetItem::new("object"), now, &mut buf) else {
         return 12;
     };
     let mut written = sigv4::sign(&stamp, &unsigned, &mut buf).url(&buf).len();
@@ -120,7 +121,7 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
         ..PutOptions::default()
     };
     let mut bytes = [0; 1024];
-    let Ok(template) = s3::prepare_put(
+    let Ok(len) = s3::prepare_put(
         bucket,
         credentials,
         &options,
@@ -138,8 +139,8 @@ fn signed<S: borink_object_storage_crypto::Sha256>(
     };
     let sha256 = sigv4::sha256::<S>(content);
     let mut buf = [0; 1024];
-    let Ok(unsigned) = s3::encode_put(&template, &bytes, &item, Some(&sha256), now, &mut buf)
-    else {
+    let template = s3::Template::from_bytes(&bytes[..len]);
+    let Ok(unsigned) = s3::encode_put(template, &item, Some(&sha256), now, &mut buf) else {
         return 14;
     };
     written += sigv4::sign(&stamp, &unsigned, &mut buf).url(&buf).len();
@@ -174,8 +175,8 @@ fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
             checksum: Some(kind),
             ..PutOptions::default()
         };
-        let mut bytes = [0; 256];
-        let Ok(template) = azure::prepare_put(
+        let mut bytes = [0; 384];
+        let Ok(len) = azure::prepare_put(
             container,
             "token",
             AzureNamespace::Unknown,
@@ -189,7 +190,8 @@ fn computed_checksums(container: &Container<'_>, now: &Timestamps) -> usize {
             ..PutItem::new("object", ContentLength::of(content))
         };
         let mut buf = [0; 512];
-        let Ok(request) = azure::encode_put(&template, &bytes, &item, now, &mut buf) else {
+        let template = azure::Template::from_bytes(&bytes[..len]);
+        let Ok(request) = azure::encode_put(template, &item, now, &mut buf) else {
             return 9;
         };
         written += request.url(&buf).len();
@@ -205,8 +207,8 @@ fn listing(container: &Container<'_>, now: &Timestamps) -> usize {
         max_results: Some(2),
         ..ListOptions::default()
     };
-    let mut bytes = [0; 256];
-    let Ok(template) = azure::prepare_list(
+    let mut bytes = [0; 384];
+    let Ok(len) = azure::prepare_list(
         container,
         "token",
         AzureNamespace::Unknown,
@@ -217,7 +219,8 @@ fn listing(container: &Container<'_>, now: &Timestamps) -> usize {
     };
     let mut buf = [0; 512];
     let item = ListItem::new("directory/").after(ListMarker::Text("marker"));
-    let Ok(request) = azure::encode_list(&template, &bytes, &item, now, &mut buf) else {
+    let template = azure::Template::from_bytes(&bytes[..len]);
+    let Ok(request) = azure::encode_list(template, &item, now, &mut buf) else {
         return 5;
     };
     let url = request.url(&buf).len();

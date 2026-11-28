@@ -60,27 +60,17 @@ pub(crate) fn namespace(number: u16) -> proto::Result<proto::azure::AzureNamespa
     }
 }
 
-// The template that the caller stored, read back.
-pub(crate) fn stored_template(template: Option<&Template>) -> proto::Result<azure::Template> {
-    azure::Template::from_bytes(&template.ok_or(UNKNOWN)?.stored)
-}
-
-// The template that a prepare call wrote, stored for the caller, or why it
-// was refused. A capacity error carries the exact size, and no other error
-// has one.
-pub(crate) fn prepared_template(template: proto::Result<azure::Template>) -> Prepared {
+// The template that a prepare call wrote, or why it was refused. A capacity
+// error carries the exact size, and no other error has one.
+pub(crate) fn prepared_template(template: proto::Result<usize>) -> Prepared {
     match template {
-        Ok(template) => Prepared {
-            required: template.bytes_len(),
-            template: Template {
-                stored: template.to_bytes(),
-            },
-            ..Prepared::default()
+        Ok(required) => Prepared {
+            status: Status::default(),
+            required,
         },
         Err(error) => Prepared {
             status: status_of(&error),
             required: error.capacity().map_or(0, |capacity| capacity.required),
-            ..Prepared::default()
         },
     }
 }

@@ -10,8 +10,8 @@ use crate::azure::{
 use crate::checksum::ChecksumKind;
 use crate::request::{HeaderValue, Writer, write_tags_as_query};
 use crate::template::{
-    self, Builder, Fill, Hole, Param, ParamValue, Pass, Section, StoredReader, StoredWriter, Table,
-    TemplateBody,
+    self, Builder, Fill, HEADER_LEN, Hole, META_LEN, Param, ParamValue, Pass, Section,
+    StoredWriter, Table, TemplateBody, split_header,
 };
 use crate::url::{encode_object_key, write_query_value};
 use crate::validate::is_header_value;
@@ -67,21 +67,9 @@ pub enum Operation {
     List,
 }
 
-/// The part of every Azure request that is the same for each blob, written
-/// once into a buffer you own.
-///
-/// A template holds no borrow. Keep it beside the bytes it was written
-/// into, and pass both to each encoding function of its operation.
-///
-/// # Bytes
-///
-/// Encoding trusts that the bytes are the template's own, and checks
-/// nothing of them that would cost each request time. Bytes that are not
-/// write a wrong request or are refused, but never make an encoder read
-/// outside them or panic. Where bytes could be another template's, such as
-/// bytes read back from storage, check them once with [`Template::check`].
+// The decoded header of an Azure template buffer.
 #[derive(Debug, Clone, Copy)]
-pub struct Template {
+pub(super) struct Header {
     pub(super) table: Table,
     pub(super) operation: Operation,
     pub(super) method: Method,
@@ -129,57 +117,109 @@ pub(super) enum Detail {
     },
 }
 
+const MAGIC: [u8; 3] = *b"BTA";
+
+/// A prepared Azure request template.
+///
+/// Wraps the bytes that an `azure::prepare_*` function wrote as an
+/// unsized slice view (like [`core::ffi::CStr`] or `std::path::Path`), with
+/// no extra fields and no borrow of its own. Call [`Self::from_bytes`] to
+/// view a prepared byte slice as `&Template`, and [`Self::check`] once if
+/// those bytes came from storage or another untrusted source.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Template([u8]);
+
 impl Template {
-    /// Checks that `bytes` are the bytes that this template was written
-    /// into, as its `prepare_*` function wrote them. See [Bytes](Self#bytes).
+    /// Views `bytes` written by an `azure::prepare_*` function as a
+    /// template.
+    ///
+    /// Checks nothing of `bytes`; call [`Self::check`] once if they came from
+    /// storage or another untrusted source.
+    #[inline]
+    #[allow(unsafe_code)]
+    pub const fn from_bytes(bytes: &[u8]) -> &Self {
+        // SAFETY: `Self` is `#[repr(transparent)]` over `[u8]`, so a shared
+        // reference to `[u8]` has the exact layout and validity of `&Self`.
+        unsafe { &*(bytes as *const [u8] as *const Self) }
+    }
+
+    /// Returns the template's bytes.
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Checks that this template is an intact Azure template from this
+    /// version of the crate.
+    ///
+    /// Encoding reads the template header without hashing the whole buffer.
+    /// Call this once when the bytes came from storage or another untrusted
+    /// source.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] if they are not.
-    pub fn check(&self, bytes: &[u8]) -> Result<()> {
-        self.table.check(bytes)
+    /// Returns [`InvalidRequest::Template`] if the bytes are truncated,
+    /// changed, or not a valid Azure template.
+    pub fn check(&self) -> Result<()> {
+        let bytes = self.as_bytes();
+        Header::load(bytes)?.table.check(bytes)
     }
 
-    /// Returns the operation this template writes requests for.
-    pub const fn operation(&self) -> Operation {
-        self.operation
+    /// Returns the operation that this template writes requests for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequest::Template`] if this is not a valid
+    /// Azure template.
+    pub fn operation(&self) -> Result<Operation> {
+        Ok(Header::load(self.as_bytes())?.operation)
+    }
+
+    /// Returns the account namespace that this template was prepared for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequest::Template`] if this is not a valid Azure
+    /// template.
+    pub fn namespace(&self) -> Result<AzureNamespace> {
+        Ok(Header::load(self.as_bytes())?.namespace)
     }
 
     /// Returns the shape of the read `item` from this template, which
-    /// [`azure::accept_get_head`](crate::azure::accept_get_head) reads its response against.
+    /// [`azure::accept_get_head`](crate::azure::accept_get_head)
+    /// reads its response against.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a read template.
+    pub fn get_shape(&self, item: &GetItem<'_>) -> Result<GetShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Get(options) => Ok(item.shape(&options)),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every whole-object write of this template.
+    /// Returns the shape of every whole-object write from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn put_shape(&self) -> Result<PutShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a write template.
+    pub fn put_shape(&self) -> Result<PutShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Put { condition, .. } => Ok(PutShape { condition }),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every removal of this template.
+    /// Returns the shape of every removal from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn delete_shape(&self) -> Result<DeleteShape> {
-        match (self.operation, self.detail) {
+    /// Returns [`InvalidRequest::Template`] if this is not a delete template.
+    pub fn delete_shape(&self) -> Result<DeleteShape> {
+        let header = Header::load(self.as_bytes())?;
+        match (header.operation, header.detail) {
             (
                 Operation::Delete,
                 Detail::Object {
@@ -193,27 +233,25 @@ impl Template {
         }
     }
 
-    /// Returns the shape of every commit of this template.
+    /// Returns the shape of every commit from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn commit_shape(&self) -> Result<CommitShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a commit template.
+    pub fn commit_shape(&self) -> Result<CommitShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Commit { condition, .. } => Ok(CommitShape { condition }),
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
 
-    /// Returns the shape of every copy of this template.
+    /// Returns the shape of every copy from this template.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRequest::Template`] for a template of another
-    /// operation.
-    pub const fn copy_shape(&self) -> Result<CopyShape> {
-        match self.detail {
+    /// Returns [`InvalidRequest::Template`] if this is not a copy template.
+    pub fn copy_shape(&self) -> Result<CopyShape> {
+        match Header::load(self.as_bytes())?.detail {
             Detail::Copy {
                 condition,
                 source_condition,
@@ -225,109 +263,89 @@ impl Template {
             _ => Err(Error::InvalidRequest(InvalidRequest::Template)),
         }
     }
+}
 
-    /// Returns the kind of account the requests go to.
-    pub const fn namespace(&self) -> AzureNamespace {
-        self.namespace
+impl AsRef<[u8]> for Template {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
+}
 
-    /// Returns how many bytes at the start of its buffer the template
-    /// takes. Those are its bytes, which each request is written from.
-    pub const fn bytes_len(&self) -> usize {
-        self.table.len()
+impl AsRef<Template> for Template {
+    #[inline]
+    fn as_ref(&self) -> &Self {
+        self
     }
+}
 
-    /// The length of a template stored with [`Self::to_bytes`].
-    pub const STORED_LEN: usize = 80;
-
-    /// Returns the template as bytes, which [`Self::from_bytes`] reads back.
-    ///
-    /// Store them beside the template's own bytes, such as in a file or in
-    /// flash, to write requests again without writing the template again.
-    /// They hold no pointer, and end in a hash of the rest. Only this version
-    /// of the crate reads them.
-    pub fn to_bytes(&self) -> [u8; Self::STORED_LEN] {
-        let mut stored = [0; Self::STORED_LEN];
-        let mut into = StoredWriter::new(&mut stored);
-        self.table.store(&mut into);
-        into.put(&[
-            self.operation as u8,
-            self.method as u8,
-            self.namespace as u8,
-        ]);
-        let object = self.object.unwrap_or_default();
-        into.put(&[u8::from(self.object.is_some())]);
-        into.u32(object.start as u32);
-        into.u32(object.len as u32);
-        let detail = match self.detail {
-            Detail::Get(options) => [
-                0,
-                options.kind as u8,
-                options.ranging as u8,
-                options.condition as u8,
-                options.revision as u8,
-            ],
-            Detail::Put {
-                condition,
-                checksum,
-            } => [1, condition as u8, checksum_number(checksum), 0, 0],
-            Detail::Object {
-                condition,
-                revision,
-                delete,
-            } => [2, condition as u8, revision as u8, delete as u8, 0],
-            Detail::List => [3, 0, 0, 0, 0],
-            Detail::Stage(checksum) => [4, checksum_number(checksum), 0, 0, 0],
-            Detail::Commit {
-                condition,
-                content_md5,
-            } => [5, condition as u8, u8::from(content_md5), 0, 0],
-            Detail::Batch { .. } => [6, 0, 0, 0, 0],
-            Detail::Copy {
-                condition,
-                source_revision,
-                source_condition,
-                source_ranging,
-            } => [
-                7,
-                condition as u8,
-                source_revision as u8,
-                source_condition as u8,
-                source_ranging as u8,
-            ],
-        };
-        into.put(&detail);
-        let (path, tail) = match self.detail {
-            Detail::Batch { path, tail } => (path, tail),
-            _ => (Span::default(), Span::default()),
-        };
-        for span in [path, tail] {
-            into.u32(span.start as u32);
-            into.u32(span.len as u32);
-        }
-        if let Some((values, hash)) = stored.split_last_chunk_mut::<8>() {
-            *hash = template::fingerprint(values).to_le_bytes();
-        }
-        stored
+impl Header {
+    #[inline(always)]
+    pub(super) fn load(bytes: &[u8]) -> Result<Self> {
+        let (meta, table_bytes) = split_header(bytes).ok_or(InvalidRequest::Template)?;
+        let table = Table::load(table_bytes, bytes.len()).ok_or(InvalidRequest::Template)?;
+        load_meta(meta, table).ok_or_else(|| InvalidRequest::Template.into())
     }
+}
 
-    /// Reads a template that [`Self::to_bytes`] stored.
-    ///
-    /// This checks the stored bytes and not the template's own: where those
-    /// could be another template's, check them with [`Self::check`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidRequest::Template`] if `stored` was changed since it
-    /// was stored, or holds a value that no template holds.
-    pub fn from_bytes(stored: &[u8; Self::STORED_LEN]) -> Result<Self> {
-        let (values, hash) = stored
-            .split_last_chunk::<8>()
-            .ok_or(InvalidRequest::Template)?;
-        if template::fingerprint(values) != u64::from_le_bytes(*hash) {
-            return Err(InvalidRequest::Template.into());
-        }
-        load_stored(values).ok_or_else(|| InvalidRequest::Template.into())
+fn write_meta(
+    into: &mut StoredWriter<'_>,
+    operation: Operation,
+    method: Method,
+    namespace: AzureNamespace,
+    detail: Detail,
+    object: Option<Span>,
+) {
+    into.put(&[MAGIC[0], MAGIC[1], MAGIC[2], operation as u8]);
+    into.put(&[method as u8, namespace as u8, u8::from(object.is_some())]);
+    let object = object.unwrap_or_default();
+    into.u32(object.start as u32);
+    into.u32(object.len as u32);
+    let detail_bytes = match detail {
+        Detail::Get(options) => [
+            0,
+            options.kind as u8,
+            options.ranging as u8,
+            options.condition as u8,
+            options.revision as u8,
+        ],
+        Detail::Put {
+            condition,
+            checksum,
+        } => [1, condition as u8, checksum_number(checksum), 0, 0],
+        Detail::Object {
+            condition,
+            revision,
+            delete,
+        } => [2, condition as u8, revision as u8, delete as u8, 0],
+        Detail::List => [3, 0, 0, 0, 0],
+        Detail::Stage(checksum) => [4, checksum_number(checksum), 0, 0, 0],
+        Detail::Commit {
+            condition,
+            content_md5,
+        } => [5, condition as u8, u8::from(content_md5), 0, 0],
+        Detail::Batch { .. } => [6, 0, 0, 0, 0],
+        Detail::Copy {
+            condition,
+            source_revision,
+            source_condition,
+            source_ranging,
+        } => [
+            7,
+            condition as u8,
+            source_revision as u8,
+            source_condition as u8,
+            source_ranging as u8,
+        ],
+    };
+    into.put(&detail_bytes);
+    let (path, tail) = match detail {
+        Detail::Batch { path, tail } => (path, tail),
+        _ => (Span::default(), Span::default()),
+    };
+    for span in [path, tail] {
+        into.u32(span.start as u32);
+        into.u32(span.len as u32);
     }
 }
 
@@ -363,9 +381,8 @@ const _: () = {
     }
 };
 
-// What `Template::to_bytes` stores fits: the table, three numbers, the
-// object, the detail, two spans and the hash of them all.
-const _: () = assert!(Table::STORED_LEN + 3 + 9 + 5 + 16 + 8 <= Template::STORED_LEN);
+// What `write_meta` stores fits inside `META_LEN`.
+const _: () = assert!(4 + 3 + 8 + 5 + 16 <= META_LEN);
 
 // A checksum kind as one byte, and none as 0.
 fn checksum_number(kind: Option<ChecksumKind>) -> u8 {
@@ -379,15 +396,17 @@ fn checksum_kind(number: u8) -> Option<Option<ChecksumKind>> {
     }
 }
 
-// Reads what `Template::to_bytes` stored, or `None` for a value that no
-// template holds. A span must lie within the template's bytes.
+// Reads what `write_meta` wrote, or `None` for a value that no template
+// holds. A span must lie within the template's text region.
 #[inline(always)]
-fn load_stored(stored: &[u8]) -> Option<Template> {
-    let mut from = StoredReader::new(stored);
-    let table = Table::load(&mut from)?;
-    let [operation, method, namespace] = from.take();
-    let operation = *OPERATIONS.get(usize::from(operation))?;
-    let method = match method {
+fn load_meta(stored: &[u8; META_LEN], table: Table) -> Option<Header> {
+    let u32_at =
+        |i: usize| u32::from_le_bytes([stored[i], stored[i + 1], stored[i + 2], stored[i + 3]]);
+    if [stored[0], stored[1], stored[2]] != MAGIC {
+        return None;
+    }
+    let operation = *OPERATIONS.get(usize::from(stored[3]))?;
+    let method = match stored[4] {
         1 => Method::Get,
         2 => Method::Head,
         3 => Method::Put,
@@ -395,7 +414,7 @@ fn load_stored(stored: &[u8]) -> Option<Template> {
         5 => Method::Post,
         _ => return None,
     };
-    let namespace = match namespace {
+    let namespace = match stored[5] {
         0 => AzureNamespace::Unknown,
         1 => AzureNamespace::Flat,
         2 => AzureNamespace::Hierarchical,
@@ -403,20 +422,17 @@ fn load_stored(stored: &[u8]) -> Option<Template> {
     };
     let within = |start: u32, len: u32| {
         let end = start.checked_add(len)?;
-        (end as usize <= table.len()).then_some(Span {
+        ((start as usize) >= HEADER_LEN && (end as usize) <= table.text_end()).then_some(Span {
             start: start as usize,
             len: len as usize,
         })
     };
-    let object = match from.u8() {
-        0 => {
-            let _ = (from.u32(), from.u32());
-            None
-        }
-        1 => Some(within(from.u32(), from.u32())?),
+    let object = match stored[6] {
+        0 => None,
+        1 => Some(within(u32_at(7), u32_at(11))?),
         _ => return None,
     };
-    let [tag, a, b, c, d] = from.take();
+    let [tag, a, b, c, d] = [stored[15], stored[16], stored[17], stored[18], stored[19]];
     let condition = |number: u8| ConditionKind::from_discriminant(u16::from(number));
     let revision = |number: u8| RevisionKind::from_discriminant(u16::from(number));
     let ranging = |number: u8| Ranging::from_discriminant(u16::from(number));
@@ -447,8 +463,8 @@ fn load_stored(stored: &[u8]) -> Option<Template> {
             },
         },
         6 => Detail::Batch {
-            path: within(from.u32(), from.u32())?,
-            tail: within(from.u32(), from.u32())?,
+            path: within(u32_at(20), u32_at(24))?,
+            tail: within(u32_at(28), u32_at(32))?,
         },
         7 => Detail::Copy {
             condition: condition(a)?,
@@ -458,7 +474,7 @@ fn load_stored(stored: &[u8]) -> Option<Template> {
         },
         _ => return None,
     };
-    Some(Template {
+    Some(Header {
         table,
         operation,
         method,
@@ -767,10 +783,10 @@ pub(super) fn prepare_template<const Q: usize>(
     namespace: AzureNamespace,
     describe: &Describe<'_, Q>,
     operation: Operation,
-    detail: Detail,
+    mut detail: Detail,
     buf: &mut [u8],
-    stash: impl FnOnce(&mut Builder<'_>),
-) -> Result<Template> {
+    stash: impl FnOnce(&mut Builder<'_>, &mut Detail),
+) -> Result<usize> {
     if !is_header_value(token.as_bytes()) {
         return Err(Error::InvalidToken);
     }
@@ -794,17 +810,9 @@ pub(super) fn prepare_template<const Q: usize>(
     };
     let mut b = Builder::new(buf);
     layout(&mut b, describe, Some(fixed), object.is_some());
-    stash(&mut b);
+    stash(&mut b, &mut detail);
     let object = object.map(|key| b.stash(|out| out.push(key.as_bytes())));
-    let table = b.finish()?;
-    Ok(Template {
-        table,
-        operation,
-        method: describe.method,
-        namespace,
-        detail,
-        object,
-    })
+    b.finish(|into| write_meta(into, operation, describe.method, namespace, detail, object))
 }
 
 /// Writes a request from `template` into `buf`, with the values that `fill`
@@ -813,7 +821,7 @@ pub(super) fn prepare_template<const Q: usize>(
 /// Inlined into each operation's encoder, which so runs its own layout.
 #[inline(always)]
 pub(super) fn encode_template<F: Fill, const Q: usize>(
-    template: &Template,
+    template: &Header,
     bytes: &[u8],
     fill: &F,
     content_len: u64,
@@ -827,36 +835,38 @@ pub(super) fn encode_template<F: Fill, const Q: usize>(
         .url_fixed()
         .saturating_add(fill.values().url_bound())
         <= MAX_URL_LEN;
-    // It is measured on a copy of the values, so that the values a request
-    // is written from stay where the compiler put them.
-    if !surely_short {
-        let values = *fill.values();
-        if template::url_len(&template.table, bytes, &values)? > MAX_URL_LEN {
-            return Err(InvalidRequest::UrlTooLong.into());
-        }
+    if !surely_short && url_too_long(template, bytes, fill, describe)? {
+        return Err(InvalidRequest::UrlTooLong.into());
     }
     let mut out = Writer::new(buf);
-    #[cfg(not(feature = "compact"))]
-    let written = {
-        let mut state = template::WriteState::default();
-        let mut pass =
-            template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
-        layout(&mut pass, describe, None, template.object.is_some());
-        pass.finish()?
-    };
-    #[cfg(feature = "compact")]
-    let written = {
-        let _ = describe;
-        template::walk_request(&template.table, bytes, fill, &mut out)?
-    };
-    let written = template::check_fit(&template.table, bytes, fill, &out, written)?;
+    let mut state = template::WriteState::default();
+    let mut pass = template::EncodePass::new(&template.table, bytes, fill, &mut out, &mut state);
+    layout(&mut pass, describe, None, template.object.is_some());
+    let written = pass.finish()?;
+    let written = template::check_fit(&out, written)?;
     Ok(WireRequest::new(template.method, &written, content_len))
 }
 
-impl Template {
+#[inline(never)]
+fn url_too_long<F: Fill, const Q: usize>(
+    template: &Header,
+    bytes: &[u8],
+    fill: &F,
+    describe: &Describe<'_, Q>,
+) -> Result<bool> {
+    let mut counted = Writer::new(&mut []);
+    let mut state = template::WriteState::default();
+    let mut pass =
+        template::EncodePass::new(&template.table, bytes, fill, &mut counted, &mut state);
+    layout(&mut pass, describe, None, template.object.is_some());
+    Ok(pass.finish()?.url.len > MAX_URL_LEN)
+}
+
+impl Header {
     // The key that a request names: `key`, checked, or `None` for a
     // template of one object, which writes its own. A request of such a
     // template passes that key, or an empty one.
+    #[inline(always)]
     pub(super) fn request_key<'k>(&self, bytes: &[u8], key: &'k str) -> Result<Option<&'k str>> {
         match self.object {
             None => {
